@@ -25,6 +25,31 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '10mb' }));
 
+
+// ---- TZ helpers ----
+function ymdInTZ(date = new Date(), tz = 'America/Chicago') {
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+  const y = p.find(x=>x.type==='year').value;
+  const m = p.find(x=>x.type==='month').value;
+  const d = p.find(x=>x.type==='day').value;
+  return `${y}-${m}-${d}`; // YYYY-MM-DD in that tz
+}
+function weekdayInTZ(date = new Date(), tz = 'America/Chicago') {
+  // Build a Date from the Y-M-D label (as UTC) and read getUTCDay
+  const ymd = ymdInTZ(date, tz);
+  const dt = new Date(ymd + 'T00:00:00Z');
+  return dt.getUTCDay(); // 0=Sun..6=Sat representing that local date
+}
+function mondayISOInTZ(date = new Date(), tz = 'America/Chicago') {
+  const ymd = ymdInTZ(date, tz);
+  let dt = new Date(ymd + 'T00:00:00Z');
+  const dow = dt.getUTCDay();
+  const delta = (dow === 0 ? -6 : 1 - dow); // move to Monday
+  dt.setUTCDate(dt.getUTCDate() + delta);
+  return dt.toISOString().slice(0,10);
+}
+
+
 // --- Time helpers (America/Chicago) ---
 function chicagoISOFromDate(d = new Date()) {
   try {
@@ -62,10 +87,15 @@ CREATE INDEX IF NOT EXISTS idx_records_status ON records(status);
 CREATE INDEX IF NOT EXISTS idx_records_po ON records(po_number);
 CREATE INDEX IF NOT EXISTS idx_records_sku ON records(sku_code);
 
-CREATE INDEX IF NOT EXISTS idx_records_uid ON records(uid);
-CREATE INDEX IF NOT EXISTS idx_records_sku_uid ON records(sku_code, uid);
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_po_sku_uid ON records(po_number, sku_code, uid);
 
+-- New table for per-timezone plans (backward compatible)
+CREATE TABLE IF NOT EXISTS plans_by_tz (
+  tz TEXT NOT NULL,
+  week_start TEXT NOT NULL,
+  data TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (tz, week_start)
+);
 
 CREATE TABLE IF NOT EXISTS plans (
   week_start TEXT PRIMARY KEY,
@@ -74,15 +104,16 @@ CREATE TABLE IF NOT EXISTS plans (
 );
 `);
 
+
+// Plans by TZ
+const getPlanTZ = db.prepare('SELECT data FROM plans_by_tz WHERE tz = ? AND week_start = ?');
+const putPlanTZ = db.prepare('INSERT INTO plans_by_tz (tz, week_start, data, updated_at) VALUES (?, ?, ?, datetime(\'now\')) ON CONFLICT(tz, week_start) DO UPDATE SET data=excluded.data, updated_at=datetime(\'now\')');
+const listWeeksTZ = db.prepare('SELECT week_start FROM plans_by_tz WHERE tz = ? ORDER BY week_start DESC LIMIT 32');
 const selectRecordById = db.prepare('SELECT * FROM records WHERE id = ?');
 const insertRecordBase = db.prepare(
   `INSERT INTO records (id, date_local, status, sync_state)
    VALUES (?, ?, 'draft', 'pending')`
 );
-
-const deleteBySkuUid = db.prepare('DELETE FROM records WHERE uid = ? AND sku_code = ?');
-const selectByComposite = db.prepare('SELECT id FROM records WHERE po_number = ? AND sku_code = ? AND uid = ?');
-const deleteById = db.prepare('DELETE FROM records WHERE id = ?');
 const updateRecordFields = db.prepare(
   `UPDATE records SET
      date_local   = COALESCE(?, date_local),
@@ -140,11 +171,9 @@ app.patch('/records/:id', (req, res) => {
   if (!allowed.has(field)) return res.status(400).json({ error: `Invalid field: ${field}` });
 
   let row = selectRecordById.get(id);
-  let createdNow = false;
   if (!row) {
     insertRecordBase.run(id, todayChicagoISO());
     row = selectRecordById.get(id);
-    createdNow = true;
   }
 
   const next = { ...row };
@@ -164,20 +193,6 @@ app.patch('/records/:id', (req, res) => {
     status = 'complete';
     completed_at = new Date().toISOString();
     emitScan(new Date(completed_at));
-  }
-
-
-  // Duplicate prevention on composite keys
-  const pn = next.po_number ?? null;
-  const sk = next.sku_code ?? null;
-  const ud = next.uid ?? null;
-  if (pn && sk && ud) {
-    const ex = selectByComposite.get(pn, sk, ud);
-    if (ex && ex.id !== id) {
-      if (createdNow) { try { deleteById.run(id); } catch {} }
-      const existing = selectRecordById.get(ex.id);
-      return res.json({ ok: true, ignored: true, reason: 'duplicate po+sku+uid exists', record: existing });
-    }
   }
 
   updateRecordFields.run(
@@ -232,52 +247,6 @@ app.get('/export/xlsx', async (req, res) => {
   res.end();
 });
 
-// --- Bulk delete by SKU+UID ---
-// DELETE /records?uid=&sku_code=
-app.delete('/records', (req, res) => {
-  const uid = String(req.query.uid || '').trim();
-  const sku = String(req.query.sku_code || '').trim();
-  if (!uid || !sku) return res.status(400).json({ error: 'uid and sku_code required' });
-  const info = deleteBySkuUid.run(uid, sku);
-  return res.json({ ok: true, deleted: info.changes });
-});
-
-// DELETE /record?uid=&sku_code= (alias)
-app.delete('/record', (req, res) => {
-  const uid = String(req.query.uid || '').trim();
-  const sku = String(req.query.sku_code || '').trim();
-  if (!uid || !sku) return res.status(400).json({ error: 'uid and sku_code required' });
-  const info = deleteBySkuUid.run(uid, sku);
-  return res.json({ ok: true, deleted: info.changes });
-});
-
-// POST /records/delete accepts either {uid, sku_code} or [{uid, sku_code}, ...]
-app.post('/records/delete', (req, res) => {
-  const body = req.body;
-  const pairs = Array.isArray(body) ? body
-    : (body && typeof body === 'object' ? [body] : []);
-  if (!pairs.length) return res.status(400).json({ error: 'Body must be object or array of {uid, sku_code}' });
-
-  const results = [];
-  const trx = db.transaction((arr) => {
-    for (const p of arr) {
-      const uid = String(p?.uid || '').trim();
-      const sku = String(p?.sku_code || '').trim();
-      if (!uid || !sku) { results.push({ uid, sku_code: sku, deleted: 0, error: 'missing uid/sku_code' }); continue; }
-      const info = deleteBySkuUid.run(uid, sku);
-      results.push({ uid, sku_code: sku, deleted: info.changes });
-    }
-  });
-  try {
-    trx(pairs);
-  } catch (e) {
-    return res.status(500).json({ error: String(e?.message || e) });
-  }
-  const total = results.reduce((s, r) => s + (r.deleted || 0), 0);
-  return res.json({ ok: true, total_deleted: total, results });
-});
-
-
 // ---------- Weekly Plan API ----------
 function normalizePlanArray(body, fallbackStart) {
   if (!Array.isArray(body)) return [];
@@ -323,6 +292,13 @@ app.get('/plan/weeks', (req, res) => {
 });
 
 // ---- Start ----
+
+// Convenience: current active week start for a timezone
+app.get('/plan/active_monday', (req, res) => {
+  const tz = String(req.query.tz || 'America/Chicago');
+  return res.json({ ok: true, tz, week_start: mondayISOInTZ(new Date(), tz) });
+});
+
 app.listen(PORT, () => {
   console.log(`UID Ops backend listening on http://localhost:${PORT}`);
   console.log(`DB file: ${DB_FILE}`);
