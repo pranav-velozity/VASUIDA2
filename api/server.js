@@ -61,10 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_records_date ON records(date_local);
 CREATE INDEX IF NOT EXISTS idx_records_status ON records(status);
 CREATE INDEX IF NOT EXISTS idx_records_po ON records(po_number);
 CREATE INDEX IF NOT EXISTS idx_records_sku ON records(sku_code);
-
-CREATE INDEX IF NOT EXISTS idx_records_uid ON records(uid);
-CREATE INDEX IF NOT EXISTS idx_records_sku_uid ON records(sku_code, uid);
-
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_po_sku_uid ON records(po_number, sku_code, uid);
 
 CREATE TABLE IF NOT EXISTS plans (
   week_start TEXT PRIMARY KEY,
@@ -78,6 +75,9 @@ const insertRecordBase = db.prepare(
   `INSERT INTO records (id, date_local, status, sync_state)
    VALUES (?, ?, 'draft', 'pending')`
 );
+
+const selectByComposite = db.prepare('SELECT id FROM records WHERE po_number = ? AND sku_code = ? AND uid = ?');
+const deleteById = db.prepare('DELETE FROM records WHERE id = ?');
 const updateRecordFields = db.prepare(
   `UPDATE records SET
      date_local   = COALESCE(?, date_local),
@@ -91,10 +91,6 @@ const updateRecordFields = db.prepare(
      sync_state   = COALESCE(?, sync_state)
    WHERE id = ?`
 );
-
-
-const deleteBySkuUid = db.prepare('DELETE FROM records WHERE uid = ? AND sku_code = ?');
-
 
 function isComplete(row) {
   return Boolean(
@@ -214,52 +210,6 @@ app.get('/export/xlsx', async (req, res) => {
   await wb.xlsx.write(res);
   res.end();
 });
-
-// --- Bulk delete by SKU+UID ---
-// DELETE /records?uid=&sku_code=
-app.delete('/records', (req, res) => {
-  const uid = String(req.query.uid || '').trim();
-  const sku = String(req.query.sku_code || '').trim();
-  if (!uid || !sku) return res.status(400).json({ error: 'uid and sku_code required' });
-  const info = deleteBySkuUid.run(uid, sku);
-  return res.json({ ok: true, deleted: info.changes });
-});
-
-// DELETE /record?uid=&sku_code= (alias)
-app.delete('/record', (req, res) => {
-  const uid = String(req.query.uid || '').trim();
-  const sku = String(req.query.sku_code || '').trim();
-  if (!uid || !sku) return res.status(400).json({ error: 'uid and sku_code required' });
-  const info = deleteBySkuUid.run(uid, sku);
-  return res.json({ ok: true, deleted: info.changes });
-});
-
-// POST /records/delete accepts either {uid, sku_code} or [{uid, sku_code}, ...]
-app.post('/records/delete', (req, res) => {
-  const body = req.body;
-  const asArray = Array.isArray(body) ? body
-    : (body && typeof body === 'object' ? [body] : []);
-  if (!asArray.length) return res.status(400).json({ error: 'Body must be an object or array of {uid, sku_code}' });
-
-  const results = [];
-  const trx = db.transaction((pairs) => {
-    for (const p of pairs) {
-      const uid = String(p?.uid || '').trim();
-      const sku = String(p?.sku_code || '').trim();
-      if (!uid || !sku) { results.push({ uid, sku_code: sku, deleted: 0, error: 'missing uid/sku_code' }); continue; }
-      const info = deleteBySkuUid.run(uid, sku);
-      results.push({ uid, sku_code: sku, deleted: info.changes });
-    }
-  });
-  try {
-    trx(asArray);
-  } catch (e) {
-    return res.status(500).json({ error: String(e?.message || e) });
-  }
-  const total = results.reduce((s, r) => s + (r.deleted || 0), 0);
-  return res.json({ ok: true, total_deleted: total, results });
-});
-
 
 // ---------- Weekly Plan API ----------
 function normalizePlanArray(body, fallbackStart) {
