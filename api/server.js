@@ -25,75 +25,6 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '10mb' }));
 
-// --- Time helpers (America/Chicago) ---
-function chicagoISOFromDate(d = new Date()) {
-  try {
-    const fmt = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit'
-    });
-    const parts = fmt.formatToParts(d);
-    const y = parts.find(p => p.type === 'year')?.value;
-    const m = parts.find(p => p.type === 'month')?.value;
-    const dd = parts.find(p => p.type === 'day')?.value;
-    if (y && m && dd) return `${y}-${m}-${dd}`;
-  } catch {}
-  return d.toISOString().slice(0, 10);
-}
-const todayChicagoISO = () => chicagoISOFromDate(new Date());
-
-// --- DB setup ---
-const db = new Database(DB_FILE);
-db.pragma('journal_mode = WAL');
-db.exec(`
-CREATE TABLE IF NOT EXISTS records (
-  id TEXT PRIMARY KEY,
-  date_local TEXT,
-  mobile_bin TEXT,
-  sscc_label TEXT,
-  po_number TEXT,
-  sku_code TEXT,
-  uid TEXT,
-  status TEXT DEFAULT 'draft',
-  completed_at TEXT,
-  sync_state TEXT DEFAULT 'unknown'
-);
-CREATE INDEX IF NOT EXISTS idx_records_date ON records(date_local);
-CREATE INDEX IF NOT EXISTS idx_records_status ON records(status);
-CREATE INDEX IF NOT EXISTS idx_records_po ON records(po_number);
-CREATE INDEX IF NOT EXISTS idx_records_sku ON records(sku_code);
-
-CREATE INDEX IF NOT EXISTS idx_records_uid ON records(uid);
-CREATE INDEX IF NOT EXISTS idx_records_sku_uid ON records(sku_code, uid);
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_po_sku_uid ON records(po_number, sku_code, uid);
-
-
-// server.js — UID Ops Backend (Express + SQLite + SSE + Weekly Plan persistence)
-const fs = require('fs');
-const path = require('path');
-const express = require('express');
-const cors = require('cors');
-const ExcelJS = require('exceljs');
-const Database = require('better-sqlite3');
-
-// ---- Config ----
-const PORT = process.env.PORT || 4000;
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*'; // set to your Netlify domain in production
-const DB_DIR = process.env.DB_DIR || path.join(__dirname, 'data');
-fs.mkdirSync(DB_DIR, { recursive: true });
-const DB_FILE = process.env.DB_FILE || path.join(DB_DIR, 'uid_ops.sqlite');
-
-// ---- App ----
-const app = express();
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin || ALLOWED_ORIGIN === '*' || origin === ALLOWED_ORIGIN) return cb(null, true);
-    // allow common Netlify preview subdomains: set ALLOWED_ORIGIN like https://*.netlify.app to wildcard
-    if (ALLOWED_ORIGIN.endsWith('.netlify.app') && origin.endsWith('.netlify.app')) return cb(null, true);
-    return cb(new Error('CORS blocked: ' + origin));
-  }
-}));
-app.use(express.json({ limit: '10mb' }));
-
 
 // ---- TZ helpers ----
 function ymdInTZ(date = new Date(), tz = 'America/Chicago') {
@@ -101,19 +32,13 @@ function ymdInTZ(date = new Date(), tz = 'America/Chicago') {
   const y = p.find(x=>x.type==='year').value;
   const m = p.find(x=>x.type==='month').value;
   const d = p.find(x=>x.type==='day').value;
-  return `${y}-${m}-${d}`; // YYYY-MM-DD in that tz
-}
-function weekdayInTZ(date = new Date(), tz = 'America/Chicago') {
-  // Build a Date from the Y-M-D label (as UTC) and read getUTCDay
-  const ymd = ymdInTZ(date, tz);
-  const dt = new Date(ymd + 'T00:00:00Z');
-  return dt.getUTCDay(); // 0=Sun..6=Sat representing that local date
+  return `${y}-${m}-${d}`;
 }
 function mondayISOInTZ(date = new Date(), tz = 'America/Chicago') {
   const ymd = ymdInTZ(date, tz);
   let dt = new Date(ymd + 'T00:00:00Z');
   const dow = dt.getUTCDay();
-  const delta = (dow === 0 ? -6 : 1 - dow); // move to Monday
+  const delta = (dow === 0 ? -6 : 1 - dow);
   dt.setUTCDate(dt.getUTCDate() + delta);
   return dt.toISOString().slice(0,10);
 }
@@ -155,9 +80,10 @@ CREATE INDEX IF NOT EXISTS idx_records_date ON records(date_local);
 CREATE INDEX IF NOT EXISTS idx_records_status ON records(status);
 CREATE INDEX IF NOT EXISTS idx_records_po ON records(po_number);
 CREATE INDEX IF NOT EXISTS idx_records_sku ON records(sku_code);
+CREATE INDEX IF NOT EXISTS idx_records_uid ON records(uid);
+CREATE INDEX IF NOT EXISTS idx_records_sku_uid ON records(sku_code, uid);
 
 
--- New table for per-timezone plans (backward compatible)
 CREATE TABLE IF NOT EXISTS plans_by_tz (
   tz TEXT NOT NULL,
   week_start TEXT NOT NULL,
@@ -165,8 +91,6 @@ CREATE TABLE IF NOT EXISTS plans_by_tz (
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (tz, week_start)
 );
-
-
 CREATE TABLE IF NOT EXISTS plans (
   week_start TEXT PRIMARY KEY,
   data TEXT NOT NULL,
@@ -178,7 +102,8 @@ CREATE TABLE IF NOT EXISTS plans (
 // Plans by TZ
 const getPlanTZ = db.prepare('SELECT data FROM plans_by_tz WHERE tz = ? AND week_start = ?');
 const putPlanTZ = db.prepare('INSERT INTO plans_by_tz (tz, week_start, data, updated_at) VALUES (?, ?, ?, datetime(\'now\')) ON CONFLICT(tz, week_start) DO UPDATE SET data=excluded.data, updated_at=datetime(\'now\')');
-const listWeeksTZ = db.prepare('SELECT week_start FROM plans_by_tz WHERE tz = ? ORDER BY week_start DESC LIMIT 32');
+const listWeeksTZ = db.prepare('SELECT week_start FROM plans_by_tz WHERE tz = ? ORDER BY week_start DESC LIMIT 52');
+
 const selectRecordById = db.prepare('SELECT * FROM records WHERE id = ?');
 const insertRecordBase = db.prepare(
   `INSERT INTO records (id, date_local, status, sync_state)
@@ -188,6 +113,7 @@ const insertRecordBase = db.prepare(
 const deleteBySkuUid = db.prepare('DELETE FROM records WHERE uid = ? AND sku_code = ?');
 const selectByComposite = db.prepare('SELECT id FROM records WHERE po_number = ? AND sku_code = ? AND uid = ?');
 const deleteById = db.prepare('DELETE FROM records WHERE id = ?');
+
 const updateRecordFields = db.prepare(
   `UPDATE records SET
      date_local   = COALESCE(?, date_local),
@@ -338,7 +264,6 @@ app.get('/export/xlsx', async (req, res) => {
 });
 
 // --- Bulk delete by SKU+UID ---
-// DELETE /records?uid=&sku_code=
 app.delete('/records', (req, res) => {
   const uid = String(req.query.uid || '').trim();
   const sku = String(req.query.sku_code || '').trim();
@@ -347,7 +272,6 @@ app.delete('/records', (req, res) => {
   return res.json({ ok: true, deleted: info.changes });
 });
 
-// DELETE /record?uid=&sku_code= (alias)
 app.delete('/record', (req, res) => {
   const uid = String(req.query.uid || '').trim();
   const sku = String(req.query.sku_code || '').trim();
@@ -356,13 +280,10 @@ app.delete('/record', (req, res) => {
   return res.json({ ok: true, deleted: info.changes });
 });
 
-// POST /records/delete accepts either {uid, sku_code} or [{uid, sku_code}, ...]
 app.post('/records/delete', (req, res) => {
   const body = req.body;
-  const pairs = Array.isArray(body) ? body
-    : (body && typeof body === 'object' ? [body] : []);
-  if (!pairs.length) return res.status(400).json({ error: 'Body must be object or array of {uid, sku_code}' });
-
+  const pairs = Array.isArray(body) ? body : (body && typeof body === 'object' ? [body] : []);
+  if (!pairs.length) return res.status(400).json({ error: 'Body must be object or array of {uid, sku_code}'});
   const results = [];
   const trx = db.transaction((arr) => {
     for (const p of arr) {
@@ -373,11 +294,7 @@ app.post('/records/delete', (req, res) => {
       results.push({ uid, sku_code: sku, deleted: info.changes });
     }
   });
-  try {
-    trx(pairs);
-  } catch (e) {
-    return res.status(500).json({ error: String(e?.message || e) });
-  }
+  try { trx(pairs); } catch(e) { return res.status(500).json({ error: String(e?.message || e) }); }
   const total = results.reduce((s, r) => s + (r.deleted || 0), 0);
   return res.json({ ok: true, total_deleted: total, results });
 });
@@ -400,40 +317,47 @@ function normalizePlanArray(body, fallbackStart) {
 
 app.get('/plan/weeks/:mondayISO', (req, res) => {
   const monday = String(req.params.mondayISO);
-  const row = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(monday);
-  if (!row) return res.json([]);
-  try {
-    const data = JSON.parse(row.data);
-    return res.json(Array.isArray(data) ? data : []);
-  } catch {
-    return res.json([]);
+  const tz = String(req.query.tz || 'America/Chicago');
+  if (tz === 'America/Chicago') {
+    const row = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(monday);
+    if (!row) return res.json([]);
+    try { const data = JSON.parse(row.data); return res.json(Array.isArray(data) ? data : []); } catch { return res.json([]); }
+  } else {
+    const row = getPlanTZ.get(tz, monday);
+    if (!row) return res.json([]);
+    try { const data = JSON.parse(row.data); return res.json(Array.isArray(data) ? data : []); } catch { return res.json([]); }
   }
 });
 
 app.put('/plan/weeks/:mondayISO', (req, res) => {
   const monday = String(req.params.mondayISO);
+  const tz = String(req.query.tz || 'America/Chicago');
   const arr = normalizePlanArray(req.body, monday);
   const json = JSON.stringify(arr);
-  db.prepare(`
-    INSERT INTO plans(week_start, data, updated_at)
-    VALUES(?, ?, datetime('now'))
-    ON CONFLICT(week_start) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
-  `).run(monday, json);
+  if (tz === 'America/Chicago'){
+    db.prepare(`
+      INSERT INTO plans(week_start, data, updated_at)
+      VALUES(?, ?, datetime('now'))
+      ON CONFLICT(week_start) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
+    `).run(monday, json);
+  } else {
+    putPlanTZ.run(tz, monday, json);
+  }
   return res.json(arr);
 });
 
 app.get('/plan/weeks', (req, res) => {
-  const rows = db.prepare(`SELECT week_start, updated_at FROM plans ORDER BY week_start DESC LIMIT 52`).all();
-  res.json(rows);
-});
+  const tz = String(req.query.tz || 'America/Chicago');
+  if (tz === 'America/Chicago') {
+    const rows = db.prepare(`SELECT week_start, updated_at FROM plans ORDER BY week_start DESC LIMIT 52`).all();
+    res.json(rows);
+  } else {
+    const rows = listWeeksTZ.all(tz).map(w => ({ week_start: w.week_start, updated_at: null }));
+    res.json(rows);
+  }
+});app.get('/plan/active_monday', (req, res) => { const tz = String(req.query.tz || 'America/Chicago'); res.json({ ok:true, tz, week_start: mondayISOInTZ(new Date(), tz) }); });
 
 // ---- Start ----
-
-// Convenience: current active week start for a timezone
-app.get('/plan/active_monday', (req, res) => {
-  const tz = String(req.query.tz || 'America/Chicago');
-  return res.json({ ok: true, tz, week_start: mondayISOInTZ(new Date(), tz) });
-});
 app.listen(PORT, () => {
   console.log(`UID Ops backend listening on http://localhost:${PORT}`);
   console.log(`DB file: ${DB_FILE}`);
