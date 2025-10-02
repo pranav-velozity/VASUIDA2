@@ -1,242 +1,294 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8"/>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <!-- Set this to your Render API base if you want to override at build time -->
-    <meta name="api-base" content="https://vasuida1.onrender.com"/>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+    <!-- Optional: set this to your Render API base; if omitted, tile won’t fetch -->
+    <meta name="api-base" content="https://vasuida1.onrender.com" />
     <title>velOzity Ops</title>
 
-    <!-- (Optional) Tailwind for quick utility on the Ops tile; the React app can still use its own styles -->
-    <script src="https://cdn.tailwindcss.com"></script>
-
     <style>
-      :root { font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif; }
-      body { margin:0; }
-      header { display:flex; align-items:center; gap:.75rem; padding:12px 16px; border-bottom:1px solid #eee; }
-      header a { text-decoration:none; color:#222; padding:6px 10px; border-radius:8px; }
-      header a.active { background:#111; color:#fff; }
-      table { border-collapse:collapse; width:100%; }
-      th,td { border-bottom:1px solid #eee; padding:8px; text-align:left; }
-      input,select,button,textarea { font:inherit; padding:6px 8px; border:1px solid #ccc; border-radius:8px; }
-      button.primary { background:#111; color:#fff; border-color:#111; }
-      .container { max-width:none; width:min(96vw, 1920px); margin:0 auto; padding:16px 24px; }
+      /* ---------- Base ---------- */
+      :root {
+        --bg: #f6f7f9;
+        --card: #ffffff;
+        --border: #e5e7eb;
+        --muted: #6b7280;
+        --text: #111827;
+        --accent: #b91c1c;
+        --ok: #10b981;
+        --warn: #f59e0b;
+        --err: #ef4444;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.4 Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      }
 
-      /* --- Ops Tile --- */
-      .ops-fixed {
-        position: fixed; top: 88px; right: max(16px, calc((100vw - min(96vw, 1920px))/2 + 16px));
-        width: 320px; max-height: calc(100vh - 112px); overflow: auto;
+      /* near–full page width with a soft 1920px cap */
+      .container {
+        max-width: none;
+        width: min(96vw, 1920px);
+        margin: 0 auto;
+        padding: 16px 24px;
+      }
+
+      /* ---------- Ops Tile (standalone, no frameworks) ---------- */
+      .ops-tile {
+        position: fixed;
+        top: 88px;
+        /* keep aligned with right edge of the centered container */
+        right: max(16px, calc((100vw - min(96vw, 1920px)) / 2 + 16px));
+        width: 320px;
+        max-height: calc(100vh - 112px);
+        overflow: auto;
         z-index: 30;
+
+        background: color-mix(in oklab, var(--card) 95%, transparent);
+        backdrop-filter: saturate(1.1) blur(2px);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        box-shadow:
+          0 1px 2px rgba(16, 24, 40, 0.08),
+          0 8px 24px rgba(16, 24, 40, 0.06);
+        padding: 16px;
       }
-      .ops-hidden { display:none; }
-      /* prevent the tile from overlapping on tiny screens */
+      .ops-hidden { display: none; }
+
+      .ops-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .ops-kpis { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+      .ops-card { border: 1px solid var(--border); border-radius: 12px; padding: 12px; background: var(--card); }
+      .ops-label { font-size: 12px; color: var(--muted); }
+      .ops-value { font: 700 22px/1.2 Inter, system-ui, sans-serif; }
+
+      .ops-pulse { display: flex; align-items: center; gap: 10px; }
+      .ops-heart {
+        width: 20px; height: 20px;
+        display: inline-block;
+        background: var(--err);
+        -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12.76 3.64c-1.53-1.4-3.99-1.34-5.45.12-1.46 1.46-1.52 3.92-.12 5.45l5.81 5.96 5.81-5.96c1.4-1.53 1.34-3.99-.12-5.45-1.46-1.46-3.92-1.52-5.45-.12z"/></svg>') center/contain no-repeat;
+                mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12.76 3.64c-1.53-1.4-3.99-1.34-5.45.12-1.46 1.46-1.52 3.92-.12 5.45l5.81 5.96 5.81-5.96c1.4-1.53 1.34-3.99-.12-5.45-1.46-1.46-3.92-1.52-5.45-.12z"/></svg>') center/contain no-repeat;
+        transform-origin: center;
+        animation: beat 1.2s ease-in-out infinite;
+      }
+      @keyframes beat {
+        0% { transform: scale(1); }
+        25% { transform: scale(1.18); }
+        50% { transform: scale(1); }
+        75% { transform: scale(1.1); }
+        100% { transform: scale(1); }
+      }
+
+      .ops-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+      .ops-badge {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 3px 8px; border-radius: 999px; font-size: 11px;
+        border: 1px solid var(--border); background: #f9fafb; color: #374151;
+      }
+      .ops-badge.ok    { border-color: color-mix(in oklab, var(--ok) 40%, white);    color: #065f46; background: color-mix(in oklab, var(--ok) 10%, white); }
+      .ops-badge.warn  { border-color: color-mix(in oklab, var(--warn) 40%, white);  color: #92400e; background: color-mix(in oklab, var(--warn) 10%, white); }
+      .ops-badge.err   { border-color: color-mix(in oklab, var(--err) 40%, white);   color: #7f1d1d; background: color-mix(in oklab, var(--err) 10%, white); }
+
+      .ops-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+      .ops-header small { color: var(--muted); }
+      .ops-sse { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 11px; }
+      .ops-dot { width: 8px; height: 8px; border-radius: 999px; background: #d1d5db; }
+
+      .ops-section { border: 1px solid var(--border); background: var(--card); border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+      .ops-title { font-weight: 600; margin-bottom: 6px; }
+
       @media (max-width: 1024px) {
-        .ops-fixed { position: static; width: 100%; max-height: none; margin-top: 12px; }
+        .ops-tile { position: static; width: 100%; max-height: none; margin: 12px auto 0; }
       }
-      /* simple pulse dot */
-      @keyframes beat { 0% { transform: scale(1);} 25% { transform: scale(1.18);} 50% { transform: scale(1);} 75% { transform: scale(1.1);} 100% { transform: scale(1);} }
-      .beat { animation: beat 1.2s ease-in-out infinite; transform-origin:center; }
     </style>
   </head>
+
   <body>
-    <!-- React app mounts here (unchanged) -->
+    <!-- React mounts here. Vite will rewrite the script below to /assets/*.js on build -->
     <div id="root"></div>
 
-    <!-- Right-side OPS TILE (outside React so we can ship today with zero app changes) -->
-    <aside id="ops-tile" class="ops-fixed ops-hidden">
-      <div class="bg-white/95 backdrop-blur border rounded-2xl shadow p-4">
-        <div class="flex items-center justify-between mb-2">
-          <div class="text-base font-semibold text-gray-700">Intake • Ops</div>
-          <div class="flex items-center gap-2 text-xs text-gray-500">
-            <span id="ops-last-updated">—</span>
-            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px]" id="ops-conn">
-              <span class="w-2 h-2 rounded-full bg-gray-300" id="ops-dot"></span>SSE
-            </span>
-          </div>
+    <!-- Right-side Intake Ops Tile (outside React so you can deploy immediately) -->
+    <aside id="ops-tile" class="ops-tile ops-hidden" aria-live="polite">
+      <div class="ops-header">
+        <div class="ops-title">Intake • Ops</div>
+        <div>
+          <small id="ops-last-updated">—</small>
+          <span class="ops-sse" id="ops-conn">
+            <span class="ops-dot" id="ops-dot"></span> SSE
+          </span>
         </div>
+      </div>
 
-        <!-- Throughput -->
-        <div class="grid grid-cols-2 gap-2 mb-3">
-          <div class="border rounded-xl p-3">
-            <div class="text-xs text-gray-500">Scans Today</div>
-            <div class="text-2xl font-bold tabular-nums" id="ops-today">0</div>
-          </div>
-          <div class="border rounded-xl p-3">
-            <div class="text-xs text-gray-500">Last Hour</div>
-            <div class="text-2xl font-bold tabular-nums" id="ops-hour">0</div>
-          </div>
+      <div class="ops-kpis">
+        <div class="ops-card">
+          <div class="ops-label">Scans Today</div>
+          <div class="ops-value" id="ops-today">0</div>
         </div>
+        <div class="ops-card">
+          <div class="ops-label">Last Hour</div>
+          <div class="ops-value" id="ops-hour">0</div>
+        </div>
+      </div>
 
-        <!-- Pulse -->
-        <div class="flex items-center gap-3 border rounded-xl p-3 mb-3">
-          <svg width="20" height="20" viewBox="0 0 24 24" class="beat">
-            <path d="M12.76 3.64c-1.53-1.4-3.99-1.34-5.45.12-1.46 1.46-1.52 3.92-.12 5.45l5.81 5.96 5.81-5.96c1.4-1.53 1.34-3.99-.12-5.45-1.46-1.46-3.92-1.52-5.45-.12z" fill="#ef4444" />
-          </svg>
+      <div class="ops-section">
+        <div class="ops-pulse">
+          <span class="ops-heart"></span>
           <div>
-            <div class="text-xs text-gray-500">Throughput / hour (last 30m)</div>
-            <div class="text-xl font-bold tabular-nums" id="ops-rate">0</div>
+            <div class="ops-label">Throughput / hour (last 30m)</div>
+            <div class="ops-value" id="ops-rate">0</div>
           </div>
         </div>
+      </div>
 
-        <!-- Quality -->
-        <div class="border rounded-xl p-3 mb-3">
-          <div class="text-sm font-semibold text-gray-700 mb-2">Data Quality</div>
-          <div class="flex items-center justify-between text-sm mb-1">
-            <span class="text-gray-600">Drafts (missing fields)</span>
-            <span class="font-semibold" id="ops-drafts">0</span>
-          </div>
-          <div class="flex items-center justify-between text-sm mb-1">
-            <span class="text-gray-600">Duplicates (today)</span>
-            <span class="font-semibold" id="ops-dupes">0</span>
-          </div>
-          <div class="text-xs text-gray-500 mt-2">Sync states</div>
-          <div class="flex flex-wrap gap-2 mt-1" id="ops-sync-badges"></div>
-        </div>
+      <div class="ops-section">
+        <div class="ops-title">Data Quality</div>
+        <div class="ops-row"><span class="ops-label">Drafts (missing fields)</span><strong id="ops-drafts">0</strong></div>
+        <div class="ops-row"><span class="ops-label">Duplicates (today)</span><strong id="ops-dupes">0</strong></div>
+        <div style="margin-top:8px" class="ops-label">Sync states</div>
+        <div class="ops-badges" id="ops-sync-badges"></div>
+      </div>
 
-        <!-- Alerts -->
-        <div class="border rounded-xl p-3">
-          <div class="text-sm font-semibold text-gray-700 mb-2">Alerts</div>
-          <ul class="list-disc pl-5 text-sm text-gray-700 space-y-1" id="ops-alerts">
-            <li class="text-gray-400">No alerts.</li>
-          </ul>
-        </div>
+      <div class="ops-section">
+        <div class="ops-title">Alerts</div>
+        <ul id="ops-alerts" style="margin: 6px 0 0 16px; padding: 0;">
+          <li style="color:#9ca3af">No alerts.</li>
+        </ul>
       </div>
     </aside>
 
-    <!-- React boot -->
+    <!-- React boot (dev entry). In production, Vite swaps to hashed /assets/*.js -->
     <script type="module" src="/src/main.tsx"></script>
 
-    <!-- Tile wiring (vanilla JS; uses your existing backend endpoints) -->
+    <!-- Ops Tile wiring (vanilla JS, no external deps) -->
     <script>
-      // ---- Config ----
+      // -------- Config & helpers --------
       const API_BASE = (() => {
         const m = document.querySelector('meta[name="api-base"]');
-        return (m && m.content) ? m.content.replace(/\/+$/,'') : '';
+        return (m && m.content) ? m.content.replace(/\/+$/, '') : '';
       })();
-      const qs = (s, el=document)=>el.querySelector(s);
+      const $ = (s, el=document) => el.querySelector(s);
 
-      // Show/hide tile only on #/intake
+      // Show tile only on Intake route
       function toggleTileByRoute() {
         const onIntake = location.hash.startsWith('#/intake') || location.hash === '#intake';
-        qs('#ops-tile').classList.toggle('ops-hidden', !onIntake);
+        $('#ops-tile').classList.toggle('ops-hidden', !onIntake);
       }
       window.addEventListener('hashchange', toggleTileByRoute);
       toggleTileByRoute();
 
-      // ---- Helpers ----
-      const todayISO = () => {
-        const d = new Date(); d.setHours(0,0,0,0);
-        return d.toISOString().slice(0,10);
-      };
-      const isoToDate = s => s ? new Date(s) : null;
+      const todayISO = () => { const d = new Date(); d.setHours(0,0,0,0); return d.toISOString().slice(0,10); };
+      const isoToMillis = s => { const d = s ? new Date(s) : null; return d && !isNaN(d) ? d.getTime() : null; };
 
       function summarize(records) {
         const now = Date.now();
-        const oneHourAgo = now - 60*60*1000;
-        const halfHourAgo = now - 30*60*1000;
+        const oneHourAgo = now - 60 * 60 * 1000;
+        const halfHourAgo = now - 30 * 60 * 1000;
 
         let scansToday = 0, scansLastHour = 0, ratePerHour = 0, drafts = 0;
         const syncCounts = {};
-        const seen = new Map(); // key = sku#uid
-
-        // Determine duplicates for "today" by (sku_code, uid)
+        const seen = new Set();
         let dupesToday = 0;
 
-        for (const r of records) {
+        for (const r of records || []) {
           const isToday = r.date_local === todayISO();
           if (!isToday) continue;
 
           if (r.status === 'complete') {
             scansToday++;
-            // completed_at may be null for drafts; only count if present
-            const ct = isoToDate(r.completed_at)?.getTime();
+            const ct = isoToMillis(r.completed_at);
             if (ct && ct >= oneHourAgo) scansLastHour++;
-            if (ct && ct >= halfHourAgo) ratePerHour++; // rough: count last 30m; scale below
-            const key = (r.sku_code||'') + '|' + (r.uid||'');
+            if (ct && ct >= halfHourAgo) ratePerHour++;
             if (r.sku_code && r.uid) {
-              if (seen.has(key)) dupesToday++;
-              else seen.set(key, true);
+              const key = r.sku_code + '|' + r.uid;
+              if (seen.has(key)) dupesToday++; else seen.add(key);
             }
           } else {
             drafts++;
           }
-
-          const s = (r.sync_state||'unknown');
-          syncCounts[s] = (syncCounts[s]||0)+1;
+          const s = r.sync_state || 'unknown';
+          syncCounts[s] = (syncCounts[s] || 0) + 1;
         }
 
-        // Convert last-30m count to per-hour
-        ratePerHour = Math.round(ratePerHour * 2);
-
-        return { scansToday, scansLastHour, drafts, dupesToday, ratePerHour, syncCounts };
-      }
-
-      function badge(text, tone='gray') {
-        const tones = {
-          gray:  'border-gray-300 text-gray-700 bg-gray-50',
-          green: 'border-green-300 text-green-800 bg-green-50',
-          amber: 'border-amber-300 text-amber-900 bg-amber-50',
-          red:   'border-red-300 text-red-800 bg-red-50'
+        return {
+          scansToday,
+          scansLastHour,
+          ratePerHour: Math.round(ratePerHour * 2), // scale 30m → per-hour
+          drafts,
+          dupesToday,
+          syncCounts
         };
-        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] ${tones[tone]||tones.gray}">${text}</span>`;
       }
 
-      function toneFor(name){
-        if (name === 'synced') return 'green';
-        if (name === 'error' || name === 'failed') return 'red';
-        if (name === 'unknown') return 'amber';
-        return 'gray';
+      function badgeHTML(text, tone) {
+        let cls = 'ops-badge';
+        if (tone === 'ok') cls += ' ok';
+        else if (tone === 'warn') cls += ' warn';
+        else if (tone === 'err') cls += ' err';
+        return '<span class="' + cls + '">' + text + '</span>';
+      }
+      function toneForSync(name) {
+        if (name === 'synced') return 'ok';
+        if (name === 'error' || name === 'failed') return 'err';
+        if (name === 'unknown') return 'warn';
+        return '';
       }
 
       function renderMetrics(m) {
-        qs('#ops-today').textContent = (m.scansToday||0).toLocaleString();
-        qs('#ops-hour').textContent = (m.scansLastHour||0).toLocaleString();
-        qs('#ops-rate').textContent = (m.ratePerHour||0).toLocaleString();
+        $('#ops-today').textContent = (m.scansToday || 0).toLocaleString();
+        $('#ops-hour').textContent  = (m.scansLastHour || 0).toLocaleString();
+        $('#ops-rate').textContent  = (m.ratePerHour || 0).toLocaleString();
+        $('#ops-drafts').textContent= (m.drafts || 0).toLocaleString();
+        $('#ops-dupes').textContent = (m.dupesToday || 0).toLocaleString();
 
-        qs('#ops-drafts').textContent = (m.drafts||0).toLocaleString();
-        qs('#ops-dupes').textContent = (m.dupesToday||0).toLocaleString();
-
-        const syncEl = qs('#ops-sync-badges');
-        syncEl.innerHTML = '';
-        Object.entries(m.syncCounts||{}).sort((a,b)=>b[1]-a[1]).forEach(([name,count])=>{
-          syncEl.insertAdjacentHTML('beforeend', badge(`${name}: ${count}`, toneFor(name)));
+        const syncEl = $('#ops-sync-badges'); syncEl.innerHTML = '';
+        Object.entries(m.syncCounts || {}).sort((a,b)=>b[1]-a[1]).forEach(([name,count])=>{
+          syncEl.insertAdjacentHTML('beforeend', badgeHTML(name + ': ' + count, toneForSync(name)));
         });
 
-        // simple alerts
         const alerts = [];
         if (m.drafts > 0) alerts.push(`There ${m.drafts===1?'is':'are'} ${m.drafts} draft${m.drafts===1?'':'s'} to complete.`);
         if (m.dupesToday > 0) alerts.push(`${m.dupesToday} duplicate UID${m.dupesToday===1?'':'s'} detected today.`);
-        qs('#ops-alerts').innerHTML = alerts.length
+        $('#ops-alerts').innerHTML = alerts.length
           ? alerts.map(t=>`<li>${t}</li>`).join('')
-          : '<li class="text-gray-400">No alerts.</li>';
+          : '<li style="color:#9ca3af">No alerts.</li>';
 
-        qs('#ops-last-updated').textContent = new Date().toLocaleTimeString();
+        $('#ops-last-updated').textContent = new Date().toLocaleTimeString();
       }
 
       async function loadMetrics() {
+        if (!API_BASE) return;
         try {
           const from = todayISO(), to = todayISO();
           const url = `${API_BASE}/records?from=${from}&to=${to}&limit=2000`;
           const r = await fetch(url, { credentials: 'omit' });
+          if (!r.ok) throw new Error(await r.text());
           const data = await r.json();
           const recs = Array.isArray(data?.records) ? data.records : [];
           renderMetrics(summarize(recs));
         } catch (e) {
-          // fail silently; leave last values in place
-          console.error('Ops tile metrics load failed:', e);
+          console.warn('Ops tile metrics load failed:', e);
         }
       }
 
-      // SSE live updates (toggle status)
       let es;
       function openSSE() {
+        if (!API_BASE) return;
         try {
           es = new EventSource(`${API_BASE}/events/scan`);
-          qs('#ops-dot').style.background = '#10b981'; // green
-          qs('#ops-conn').className = qs('#ops-conn').className.replace('bg-gray-50','bg-green-50');
+          $('#ops-dot').style.background = 'var(--ok)'; // green
           es.onmessage = () => loadMetrics();
-          es.onerror = () => { try { es.close(); } catch{}; setTimeout(openSSE, 3000); qs('#ops-dot').style.background='#f59e0b'; };
-        } catch (_) {
+          es.onerror = () => {
+            try { es.close(); } catch {}
+            $('#ops-dot').style.background = 'var(--warn)'; // amber when disconnected
+            setTimeout(openSSE, 3000);
+          };
+        } catch {
           setTimeout(openSSE, 3000);
         }
       }
@@ -244,8 +296,7 @@
       // Kickoff
       loadMetrics();
       openSSE();
-      // periodic refresh as a safety net
-      setInterval(loadMetrics, 30000);
+      setInterval(loadMetrics, 30000); // periodic safety refresh
     </script>
   </body>
 </html>
