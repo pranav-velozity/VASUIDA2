@@ -206,9 +206,10 @@
           </div>
         </div>
         <div class="flex items-center gap-2">
-          <button id="btn-load-day" class="px-3 py-2 rounded-lg text-sm border">Load Today</button>
-          <button id="btn-export-day" class="px-3 py-2 rounded-lg text-sm border">Export XLSX</button>
-        </div>
+  <button id="btn-load-day" class="px-3 py-2 rounded-lg text-sm border">Load Today</button>
+  <button id="btn-export-day" class="px-3 py-2 rounded-lg text-sm border">Export XLSX</button>
+  <button id="btn-bulk-delete" class="px-3 py-2 rounded-lg text-sm border border-rose-700 text-rose-700">Bulk Delete</button>
+</div>
       </div>
 
       <!-- Ops Ribbon (horizontal, Intake only) -->
@@ -310,6 +311,65 @@
     const fmtInt = (n)=>Number(n||0).toLocaleString();
 
     $('#vo-today').textContent = new Date().toLocaleDateString();
+
+// ⬇️ Insert the bulk delete function right here
+  async function bulkDeleteBySkuUid() {
+    if (!API_BASE) return alert('API not configured');
+
+    const sku = (prompt('Enter SKU_Code to delete (exact match):') || '').trim();
+    if (!sku) return;
+
+    const uid = (prompt('Enter UID to delete (exact match):') || '').trim();
+    if (!uid) return;
+
+    const scope = (prompt('Scope: type "today" or "week" (default: today)') || 'today').toLowerCase().trim();
+    const baseMonday = iso(mondayOf(new Date()));
+    const from = scope === 'week' ? baseMonday : iso(new Date());
+    const to   = scope === 'week' ? endISO(baseMonday) : iso(new Date());
+
+    if (!confirm(`Delete ALL records where SKU=${sku} AND UID=${uid} between ${from} and ${to}? This cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      const url = `${API_BASE}/records?from=${from}&to=${to}&limit=50000`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(await resp.text());
+      const data = await resp.json();
+      const records = Array.isArray(data?.records) ? data.records : [];
+
+      const toDelete = records.filter(r =>
+        String(r?.sku_code || '').trim() === sku &&
+        String(r?.uid || '').trim() === uid
+      );
+
+      if (!toDelete.length) {
+        alert(`No records found for SKU=${sku} & UID=${uid} in ${from}..${to}.`);
+        return;
+      }
+
+      const results = await Promise.allSettled(
+        toDelete.map(r => fetch(`${API_BASE}/records/${r.id}`, { method: 'DELETE' }))
+      );
+
+      const ok = results.filter(x => x.status === 'fulfilled' && x.value.ok).length;
+      const fail = toDelete.length - ok;
+
+      alert(`Bulk Delete complete.\nDeleted: ${ok}\nFailed: ${fail}`);
+
+      try { renderIntake(); } catch {}
+      try { loadOpsMetrics(); } catch {}
+    } catch (e) {
+      console.error(e);
+      alert('Bulk delete failed: ' + (e?.message || e));
+    }
+  }
+
+  // wire up the button
+  document.addEventListener('DOMContentLoaded', () => {
+    const btn = document.getElementById('btn-bulk-delete');
+    if (btn) btn.addEventListener('click', bulkDeleteBySkuUid);
+  });
 
     /* ---------- Helpers ---------- */
     function createHeart(size=24, color=BRAND, bpm=40){
