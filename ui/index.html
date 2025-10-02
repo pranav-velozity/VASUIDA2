@@ -20,44 +20,8 @@
     .heartbeat{ animation: heartbeat 1.2s ease-in-out infinite; transform-origin:center }
     @keyframes heartbeat{0%{transform:scale(1)}15%{transform:scale(1.18)}30%{transform:scale(1)}45%{transform:scale(1.12)}60%{transform:scale(1)}100%{transform:scale(1)}}
 
-    /* ⬇️ Near–full width with a soft cap, as requested */
+    /* ⬇️ Near–full width with a soft 1920px cap, as requested */
     .container { max-width:none; width:min(96vw, 1920px); margin:0 auto; padding:16px 24px; }
-
-    /* ---------- Intake Ops Tile (right side) ---------- */
-    .ops-tile {
-      position: fixed;
-      top: 88px;
-      right: max(16px, calc((100vw - min(96vw, 1920px))/2 + 16px));
-      width: 320px;
-      max-height: calc(100vh - 112px);
-      overflow:auto;
-      z-index:30;
-      background: rgba(255,255,255,0.95);
-      backdrop-filter: saturate(1.1) blur(2px);
-      border:1px solid #e5e7eb; border-radius:16px;
-      box-shadow: 0 1px 2px rgba(16,24,40,0.08), 0 8px 24px rgba(16,24,40,0.06);
-      padding:16px;
-    }
-    .ops-hidden{ display:none; }
-    .ops-header{ display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
-    .ops-title{ font-weight:600; }
-    .ops-sse{ display:inline-flex; align-items:center; gap:6px; padding:2px 8px; border:1px solid #e5e7eb; border-radius:999px; font-size:11px; color:#6b7280 }
-    .ops-dot{ width:8px; height:8px; border-radius:999px; background:#d1d5db }
-    .ops-kpis{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px }
-    .ops-card{ border:1px solid #e5e7eb; border-radius:12px; padding:12px; background:#fff }
-    .ops-label{ font-size:12px; color:#6b7280 }
-    .ops-value{ font:700 22px/1.2 Inter, system-ui, sans-serif }
-    .ops-section{ border:1px solid #e5e7eb; background:#fff; border-radius:12px; padding:12px; margin-bottom:12px }
-    .ops-row{ display:flex; align-items:center; justify-content:space-between; gap:8px }
-    .ops-badges{ display:flex; flex-wrap:wrap; gap:6px; margin-top:6px }
-    .ops-badge{ display:inline-flex; align-items:center; gap:6px; padding:3px 8px; border-radius:999px; font-size:11px; border:1px solid #e5e7eb; background:#f9fafb; color:#374151 }
-    .ops-badge.ok{ border-color:#a7f3d0; color:#065f46; background:#ecfdf5 }
-    .ops-badge.warn{ border-color:#fde68a; color:#92400e; background:#fffbeb }
-    .ops-badge.err{ border-color:#fecaca; color:#7f1d1d; background:#fef2f2 }
-
-    @media (max-width: 1024px) {
-      .ops-tile { position: static; width:100%; max-height:none; margin:12px auto 0 }
-    }
   </style>
 </head>
 
@@ -225,6 +189,62 @@
         </div>
       </div>
 
+      <!-- Ops Ribbon (horizontal, Intake only) -->
+      <div id="ops-ribbon" class="hidden mt-3 bg-white border rounded-xl shadow p-3">
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-3 items-stretch">
+          <!-- KPIs -->
+          <div class="flex gap-3">
+            <div class="flex-1 border rounded-lg p-3">
+              <div class="text-xs text-gray-500">Scans Today</div>
+              <div class="text-2xl font-bold tabular-nums" id="ops-today">0</div>
+            </div>
+            <div class="flex-1 border rounded-lg p-3">
+              <div class="text-xs text-gray-500">Last Hour</div>
+              <div class="text-2xl font-bold tabular-nums" id="ops-hour">0</div>
+            </div>
+          </div>
+
+          <!-- Throughput -->
+          <div class="flex items-center gap-3 border rounded-lg p-3">
+            <span class="inline-block w-5 h-5 rounded-full bg-rose-600 heartbeat"></span>
+            <div>
+              <div class="text-xs text-gray-500">Throughput / hr (last 30m)</div>
+              <div class="text-2xl font-bold tabular-nums" id="ops-rate">0</div>
+            </div>
+          </div>
+
+          <!-- Data Quality -->
+          <div class="border rounded-lg p-3">
+            <div class="text-sm font-semibold mb-1">Data Quality</div>
+            <div class="flex items-center justify-between text-sm">
+              <span class="text-gray-500">Drafts</span><strong id="ops-drafts">0</strong>
+            </div>
+            <div class="flex items-center justify-between text-sm">
+              <span class="text-gray-500">Duplicates</span><strong id="ops-dupes">0</strong>
+            </div>
+            <div class="text-xs text-gray-500 mt-2">Sync states</div>
+            <div class="flex flex-wrap gap-2 mt-1" id="ops-sync-badges"></div>
+          </div>
+
+          <!-- Alerts + SSE status -->
+          <div class="border rounded-lg p-3">
+            <div class="flex items-center justify-between">
+              <div class="text-sm font-semibold">Alerts</div>
+              <small class="text-gray-500">
+                <span id="ops-last-updated">—</span>
+                <span class="inline-flex items-center gap-1 border rounded-full px-2 py-0.5 text-[11px] text-gray-500">
+                  <span id="ops-dot" class="w-2 h-2 rounded-full bg-gray-300"></span>SSE
+                </span>
+              </small>
+            </div>
+            <ul class="list-disc ml-4 mt-1 text-sm" id="ops-alerts">
+              <li class="text-gray-400">No alerts.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- Intake Table -->
       <div class="mt-3 overflow-auto">
         <table class="w-full min-w-[1050px] border-collapse border">
           <thead class="bg-gray-100">
@@ -249,53 +269,6 @@
     </section>
   </main>
 
-  <!-- Right-side OPS TILE (shows only on Intake) -->
-  <aside id="ops-tile" class="ops-tile ops-hidden" aria-live="polite">
-    <div class="ops-header">
-      <div class="ops-title">Intake • Ops</div>
-      <div>
-        <small id="ops-last-updated">—</small>
-        <span class="ops-sse" id="ops-conn"><span class="ops-dot" id="ops-dot"></span> SSE</span>
-      </div>
-    </div>
-
-    <div class="ops-kpis">
-      <div class="ops-card">
-        <div class="ops-label">Scans Today</div>
-        <div class="ops-value" id="ops-today">0</div>
-      </div>
-      <div class="ops-card">
-        <div class="ops-label">Last Hour</div>
-        <div class="ops-value" id="ops-hour">0</div>
-      </div>
-    </div>
-
-    <div class="ops-section">
-      <div class="flex items-center gap-3">
-        <span class="inline-block w-5 h-5 rounded-full bg-rose-600 heartbeat"></span>
-        <div>
-          <div class="ops-label">Throughput / hour (last 30m)</div>
-          <div class="ops-value" id="ops-rate">0</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="ops-section">
-      <div class="ops-title">Data Quality</div>
-      <div class="ops-row"><span class="ops-label">Drafts (missing fields)</span><strong id="ops-drafts">0</strong></div>
-      <div class="ops-row"><span class="ops-label">Duplicates (today)</span><strong id="ops-dupes">0</strong></div>
-      <div class="ops-label" style="margin-top:8px">Sync states</div>
-      <div class="ops-badges" id="ops-sync-badges"></div>
-    </div>
-
-    <div class="ops-section">
-      <div class="ops-title">Alerts</div>
-      <ul id="ops-alerts" style="margin: 6px 0 0 16px; padding: 0;">
-        <li style="color:#9ca3af">No alerts.</li>
-      </ul>
-    </div>
-  </aside>
-
   <!-- Footer health bar -->
   <div id="vo-footer">
     <span class="vo-pill border border-amber-300 bg-amber-100 text-amber-900" id="health-pill">
@@ -304,7 +277,7 @@
     <span id="vo-footer-text">Planned total is 0. Week —</span>
   </div>
 
-  <!-- ===== App Logic + Ops Tile Wiring (vanilla JS) ===== -->
+  <!-- ===== App Logic + Ops Ribbon Wiring (vanilla JS) ===== -->
   <script>
     const BRAND = '#990033';
     const API_BASE = (() => {
@@ -605,9 +578,9 @@
       $('#page-intake').classList.add('hidden');
       if(hash==='#intake'){ $('#page-intake').classList.remove('hidden'); }
       else { $('#page-dashboard').classList.remove('hidden'); }
-      // Toggle Ops tile visibility on Intake
+      // Toggle Ops ribbon visibility on Intake
       const onIntake = hash==='#intake' || hash.startsWith('#/intake');
-      $('#ops-tile').classList.toggle('ops-hidden', !onIntake);
+      $('#ops-ribbon')?.classList.toggle('hidden', !onIntake);
     }
     window.addEventListener('hashchange',()=>show(location.hash||'#dashboard'));
 
@@ -675,7 +648,7 @@
       });
     })();
 
-    /* ---------- Intake Ops Tile wiring ---------- */
+    /* ---------- Intake Ops Ribbon wiring ---------- */
     function todayISO(){ const d=new Date(); d.setHours(0,0,0,0); return d.toISOString().slice(0,10); }
     function isoToMs(s){ const d=s?new Date(s):null; return d && !isNaN(d) ? d.getTime() : null; }
     function summarize(records){
@@ -699,8 +672,12 @@
       return { scansToday, scansLastHour, ratePerHour: Math.round(ratePerHour*2), drafts, dupesToday, syncCounts };
     }
     function badgeHTML(text, tone){
-      let cls='ops-badge'; if(tone==='ok') cls+=' ok'; else if(tone==='warn') cls+=' warn'; else if(tone==='err') cls+=' err';
-      return `<span class="${cls}">${text}</span>`;
+      let cls='ops-badge inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px]';
+      let colors='border-gray-200 bg-gray-50 text-gray-700';
+      if(tone==='ok')   colors='border-green-200 bg-green-50 text-green-700';
+      if(tone==='warn') colors='border-amber-200 bg-amber-50 text-amber-700';
+      if(tone==='err')  colors='border-rose-200 bg-rose-50 text-rose-700';
+      return `<span class="${cls} ${colors}">${text}</span>`;
     }
     function toneForSync(name){ if(name==='synced') return 'ok'; if(name==='error'||name==='failed') return 'err'; if(name==='unknown') return 'warn'; return ''; }
     function renderOpsMetrics(m){
@@ -718,7 +695,7 @@
       const alerts=[];
       if(m.drafts>0) alerts.push(`There ${m.drafts===1?'is':'are'} ${m.drafts} draft${m.drafts===1?'':'s'} to complete.`);
       if(m.dupesToday>0) alerts.push(`${m.dupesToday} duplicate UID${m.dupesToday===1?'':'s'} detected today.`);
-      $('#ops-alerts').innerHTML = alerts.length ? alerts.map(t=>`<li>${t}</li>`).join('') : '<li style="color:#9ca3af">No alerts.</li>';
+      $('#ops-alerts').innerHTML = alerts.length ? alerts.map(t=>`<li>${t}</li>`).join('') : '<li class="text-gray-400">No alerts.</li>';
 
       $('#ops-last-updated').textContent = new Date().toLocaleTimeString();
     }
@@ -730,7 +707,7 @@
         if(!r.ok) throw new Error(await r.text());
         const data = await r.json();
         renderOpsMetrics(summarize(Array.isArray(data?.records)?data.records:[]));
-      }catch(e){ console.warn('Ops tile metrics load failed:', e); }
+      }catch(e){ console.warn('Ops ribbon metrics load failed:', e); }
     }
     let es;
     function openSSE(){
@@ -755,11 +732,7 @@
       renderIntake();
       renderOpsPulse(40,0);
 
-      // Ops tile route toggle + live updates
-      window.addEventListener('hashchange',()=> {
-        const onIntake = location.hash==='#intake' || location.hash.startsWith('#/intake');
-        $('#ops-tile').classList.toggle('ops-hidden', !onIntake);
-      });
+      // Ops ribbon: live updates
       loadOpsMetrics(); openSSE(); setInterval(loadOpsMetrics, 30000);
     })();
   </script>
