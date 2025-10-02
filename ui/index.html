@@ -57,7 +57,17 @@
         </div>
       </div>
 
-      <div id="capsules" class="hidden sm:flex items-center gap-3 mb-3"></div>
+     <!-- Capsules + Actions toolbar -->
+<div class="mb-3 flex items-center justify-between gap-3">
+  <div id="capsules" class="hidden sm:flex items-center gap-3"></div>
+
+  <!-- Actions on the right -->
+  <div class="flex flex-wrap gap-2">
+    <button id="btn-dl-posku" class="px-3 py-2 rounded-lg border text-sm">PO+SKU Discrepancy</button>
+    <button id="btn-dl-po"    class="px-3 py-2 rounded-lg border text-sm">PO Discrepancy</button>
+    <button id="btn-exec"     class="px-3 py-2 rounded-lg border text-sm bg-rose-700 text-white">Executive Summary</button>
+  </div>
+</div>
 
       <!-- KPI tiles -->
       <div class="grid grid-cols-1 sm:grid-cols-5 gap-3 mb-3">
@@ -163,13 +173,7 @@
         </div>
       </div>
 
-      <!-- Downloads -->
-      <div class="flex flex-wrap gap-2 justify-end">
-        <button id="btn-dl-posku" class="px-3 py-2 rounded-lg border text-sm">Download PO+SKU Discrepancy (CSV)</button>
-        <button id="btn-dl-po"    class="px-3 py-2 rounded-lg border text-sm">Download PO Discrepancy (CSV)</button>
-        <button id="btn-exec"     class="px-3 py-2 rounded-lg border text-sm bg-rose-700 text-white">Build Executive Summary (DOC)</button>
-      </div>
-    </section>
+          </section>
 
     <!-- INTAKE -->
     <section id="page-intake" class="hidden">
