@@ -1,352 +1,767 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<meta name="api-base" content="https://vasuida1.onrender.com" />
-<title>VelOzity Pinpoint</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<style>
-  @keyframes heartbeat {0%{transform:scale(1)}15%{transform:scale(1.18)}30%{transform:scale(1)}45%{transform:scale(1.12)}60%{transform:scale(1)}100%{transform:scale(1)}}
-  .heartbeat { animation: heartbeat 1.2s ease-in-out infinite; transform-origin:center; }
-  .vo-pill { border-radius: 9999px; padding: .35rem .8rem; display:inline-flex; align-items:center; gap:.5rem }
-  .vo-dot { width:.5rem; height:.5rem; border-radius:9999px; display:inline-block }
-  #vo-footer { position:fixed; left:0; right:0; bottom:0; z-index:50; font-size:12px; border-top:1px solid #e5e7eb; padding:.5rem .75rem; display:flex; gap:.75rem; align-items:center; background:#f8fafc; color:#334155 }
-  .vo-nav { position:sticky; top:0; z-index:40; background:#fff; border-bottom:1px solid #eee }
-</style>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <!-- ⬇️ Set to your Render API base (no trailing slash) -->
+  <meta name="api-base" content="https://vasuida1.onrender.com"/>
+  <title>VelOzity Pinpoint</title>
+
+  <!-- Tailwind utilities for the existing UI look & feel -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    /* ---------- Global & Layout ---------- */
+    body { background:#f8fafc; color:#111827; }
+    .vo-nav { position:sticky; top:0; z-index:40; background:#fff; border-bottom:1px solid #eee }
+    #vo-footer { position:fixed; left:0; right:0; bottom:0; z-index:50; font-size:12px; border-top:1px solid #e5e7eb; padding:.5rem .75rem; display:flex; gap:.75rem; align-items:center; background:#f8fafc; color:#334155 }
+    .vo-pill { border-radius:9999px; padding:.35rem .8rem; display:inline-flex; align-items:center; gap:.5rem }
+    .vo-dot  { width:.5rem; height:.5rem; border-radius:9999px; display:inline-block }
+    .heartbeat{ animation: heartbeat 1.2s ease-in-out infinite; transform-origin:center }
+    @keyframes heartbeat{0%{transform:scale(1)}15%{transform:scale(1.18)}30%{transform:scale(1)}45%{transform:scale(1.12)}60%{transform:scale(1)}100%{transform:scale(1)}}
+
+    /* ⬇️ Near–full width with a soft cap, as requested */
+    .container { max-width:none; width:min(96vw, 1920px); margin:0 auto; padding:16px 24px; }
+
+    /* ---------- Intake Ops Tile (right side) ---------- */
+    .ops-tile {
+      position: fixed;
+      top: 88px;
+      right: max(16px, calc((100vw - min(96vw, 1920px))/2 + 16px));
+      width: 320px;
+      max-height: calc(100vh - 112px);
+      overflow:auto;
+      z-index:30;
+      background: rgba(255,255,255,0.95);
+      backdrop-filter: saturate(1.1) blur(2px);
+      border:1px solid #e5e7eb; border-radius:16px;
+      box-shadow: 0 1px 2px rgba(16,24,40,0.08), 0 8px 24px rgba(16,24,40,0.06);
+      padding:16px;
+    }
+    .ops-hidden{ display:none; }
+    .ops-header{ display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+    .ops-title{ font-weight:600; }
+    .ops-sse{ display:inline-flex; align-items:center; gap:6px; padding:2px 8px; border:1px solid #e5e7eb; border-radius:999px; font-size:11px; color:#6b7280 }
+    .ops-dot{ width:8px; height:8px; border-radius:999px; background:#d1d5db }
+    .ops-kpis{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px }
+    .ops-card{ border:1px solid #e5e7eb; border-radius:12px; padding:12px; background:#fff }
+    .ops-label{ font-size:12px; color:#6b7280 }
+    .ops-value{ font:700 22px/1.2 Inter, system-ui, sans-serif }
+    .ops-section{ border:1px solid #e5e7eb; background:#fff; border-radius:12px; padding:12px; margin-bottom:12px }
+    .ops-row{ display:flex; align-items:center; justify-content:space-between; gap:8px }
+    .ops-badges{ display:flex; flex-wrap:wrap; gap:6px; margin-top:6px }
+    .ops-badge{ display:inline-flex; align-items:center; gap:6px; padding:3px 8px; border-radius:999px; font-size:11px; border:1px solid #e5e7eb; background:#f9fafb; color:#374151 }
+    .ops-badge.ok{ border-color:#a7f3d0; color:#065f46; background:#ecfdf5 }
+    .ops-badge.warn{ border-color:#fde68a; color:#92400e; background:#fffbeb }
+    .ops-badge.err{ border-color:#fecaca; color:#7f1d1d; background:#fef2f2 }
+
+    @media (max-width: 1024px) {
+      .ops-tile { position: static; width:100%; max-height:none; margin:12px auto 0 }
+    }
+  </style>
 </head>
+
 <body class="bg-gray-50 min-h-screen">
 
-<!-- Top Nav -->
-<header class="vo-nav">
-  <div class="max-w-7xl mx-auto px-5 py-3 flex items-center justify-between">
-    <div class="flex items-center gap-3">
-      <div class="text-xl font-semibold">VelOzity Pinpoint</div>
-      <div class="text-gray-500 text-sm" id="vo-today"></div>
+  <!-- Top Nav -->
+  <header class="vo-nav">
+    <div class="container py-3 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="text-xl font-semibold">VelOzity Pinpoint</div>
+        <div class="text-gray-500 text-sm" id="vo-today"></div>
+      </div>
+      <nav class="flex items-center gap-2">
+        <a href="#dashboard" id="nav-dash"   class="px-3 py-2 rounded-lg text-sm font-medium border border-rose-700 text-rose-700">Active Plan</a>
+        <a href="#intake"    id="nav-intake" class="px-3 py-2 rounded-lg text-sm font-medium border border-rose-700 text-rose-700/80">Intake</a>
+      </nav>
     </div>
-    <nav class="flex items-center gap-2">
-      <a href="#dashboard" id="nav-dash" class="px-3 py-2 rounded-lg text-sm font-medium border border-rose-700 text-rose-700">Active Plan</a>
-      <a href="#intake"    id="nav-intake" class="px-3 py-2 rounded-lg text-sm font-medium border border-rose-700 text-rose-700/80">Intake</a>
-    </nav>
-  </div>
-</header>
+  </header>
 
-<main class="max-w-7xl mx-auto px-5 py-4">
-  <!-- DASHBOARD -->
-  <section id="page-dashboard" class="hidden">
-    <div class="flex items-center justify-between mb-2">
-      <div class="text-2xl font-semibold">Active Plan</div>
-      <div class="flex items-center gap-2">
-        <label class="text-sm text-gray-600">Week start</label>
-        <input id="week-start" type="date" class="px-2 py-1 border rounded-md text-sm" />
-        <!-- Restored: Upload Plan & Zero Plan -->
-        <input id="file-plan" type="file" accept=".csv" class="hidden" />
-        <button id="btn-upload-plan" class="px-3 py-2 rounded-lg text-sm border">Upload Plan</button>
-        <button id="btn-zero-plan" class="px-3 py-2 rounded-lg text-sm border">Zero Plan</button>
+  <!-- Main -->
+  <main class="container py-4">
+    <!-- DASHBOARD / PLAN -->
+    <section id="page-dashboard" class="hidden">
+      <div class="flex items-center justify-between mb-2">
+        <div class="text-2xl font-semibold">Active Plan</div>
+        <div class="flex items-center gap-2">
+          <label class="text-sm text-gray-600">Week start</label>
+          <input id="week-start" type="date" class="px-2 py-1 border rounded-md text-sm" />
+          <!-- Upload/Zero -->
+          <input id="file-plan" type="file" accept=".csv" class="hidden" />
+          <button id="btn-upload-plan" class="px-3 py-2 rounded-lg text-sm border">Upload Plan</button>
+          <button id="btn-zero-plan" class="px-3 py-2 rounded-lg text-sm border">Zero Plan</button>
+        </div>
+      </div>
+
+      <div id="capsules" class="hidden sm:flex items-center gap-3 mb-3"></div>
+
+      <!-- KPI tiles -->
+      <div class="grid grid-cols-1 sm:grid-cols-5 gap-3 mb-3">
+        <div class="bg-white rounded-2xl border shadow p-4">
+          <div class="text-base font-semibold text-gray-600">Planned</div>
+          <div class="text-xs text-gray-500" id="planned-range"></div>
+          <div class="text-2xl font-bold tabular-nums" id="planned-total">0</div>
+        </div>
+        <div class="bg-white rounded-2xl border shadow p-4">
+          <div class="text-base font-semibold text-gray-600">Applied</div>
+          <div class="text-xs text-gray-500" id="applied-range"></div>
+          <div class="text-2xl font-bold tabular-nums" id="applied-total">0</div>
+        </div>
+        <div class="bg-white rounded-2xl border shadow p-4">
+          <div class="text-base font-semibold text-gray-600">Completion</div>
+          <div class="text-xs text-gray-500">&nbsp;</div>
+          <div class="text-2xl font-bold tabular-nums" id="pct-week">0%</div>
+        </div>
+        <div class="bg-white rounded-2xl border shadow p-4 flex items-center gap-4">
+          <div id="ops-heart"></div>
+          <div>
+            <div class="text-base font-semibold text-gray-600">Ops Pulse</div>
+            <div class="text-xl font-bold tabular-nums" id="ops-bpm">40</div>
+            <div class="text-[11px] text-gray-500" id="ops-extra">+0 over 40</div>
+          </div>
+        </div>
+        <div class="bg-white rounded-2xl border shadow p-4">
+          <div class="text-base font-semibold text-gray-600">Applied averages</div>
+          <div class="text-xs text-gray-500 mb-1">&nbsp;</div>
+          <div class="text-2xl font-bold tabular-nums" id="avg-day">0</div>
+          <div class="text-xs text-gray-500 mt-1">Avg/day • <span id="avg-week">0</span></div>
+        </div>
+      </div>
+
+      <!-- Search -->
+      <div class="bg-white rounded-2xl border shadow p-4 mb-3">
+        <div class="text-base font-semibold mb-2">Search by PO or SKU</div>
+        <input id="search-input" type="search" placeholder="Type a PO # or SKU Code and pause…" class="w-full border rounded-md px-3 py-2 text-sm outline-none focus:ring-2">
+        <div id="search-results" class="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3 hidden"></div>
+      </div>
+
+      <!-- Top Insights -->
+      <div class="bg-white rounded-2xl border shadow p-4 mb-3">
+        <div class="text-base font-semibold mb-2">Top Insights for Ops</div>
+        <ul id="insights" class="text-sm text-gray-800 list-disc pl-5 space-y-1">
+          <li>Loading…</li>
+        </ul>
+        <div id="insights-mini" class="mt-2 text-xs text-gray-500"></div>
+      </div>
+
+      <!-- PO Progress -->
+      <div class="bg-white rounded-2xl border shadow p-4 mb-3">
+        <div class="text-base font-semibold mb-2">PO Progress (This Week)</div>
+        <div class="overflow-auto max-h-[480px]">
+          <table class="w-full text-sm" id="po-progress">
+            <thead>
+              <tr class="text-gray-500">
+                <th class="text-left py-1 pr-2">PO #</th>
+                <th class="text-left py-1 pr-2">Due</th>
+                <th class="text-right py-1 pr-2">Planned</th>
+                <th class="text-right py-1 pr-2">Applied</th>
+                <th class="text-right py-1">%</th>
+              </tr>
+            </thead>
+            <tbody id="po-progress-body"><tr><td colspan="5" class="text-center text-xs text-gray-400 py-3">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Risks -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+        <div class="bg-white rounded-2xl border shadow p-4">
+          <div class="text-base font-semibold mb-2">Top PO's at Risk</div>
+          <table class="w-full text-sm" id="risk-po">
+            <thead>
+              <tr class="text-gray-500">
+                <th class="text-left py-1 pr-2">PO #</th>
+                <th class="text-left py-1 pr-2">Due</th>
+                <th class="text-right py-1 pr-2">Planned</th>
+                <th class="text-right py-1 pr-2">Applied</th>
+                <th class="text-right py-1 pr-2">Rem</th>
+                <th class="text-right py-1">%</th>
+              </tr>
+            </thead>
+            <tbody id="risk-po-body"><tr><td colspan="6" class="text-center text-xs text-gray-400 py-3">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="bg-white rounded-2xl border shadow p-4">
+          <div class="text-base font-semibold mb-2">Top SKU's at Risk</div>
+          <table class="w-full text-sm" id="risk-sku">
+            <thead>
+              <tr class="text-gray-500">
+                <th class="text-left py-1 pr-2">SKU</th>
+                <th class="text-left py-1 pr-2">Due</th>
+                <th class="text-right py-1 pr-2">Planned</th>
+                <th class="text-right py-1 pr-2">Applied</th>
+                <th class="text-right py-1 pr-2">Rem</th>
+                <th class="text-right py-1">%</th>
+              </tr>
+            </thead>
+            <tbody id="risk-sku-body"><tr><td colspan="6" class="text-center text-xs text-gray-400 py-3">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Downloads -->
+      <div class="flex flex-wrap gap-2 justify-end">
+        <button id="btn-dl-posku" class="px-3 py-2 rounded-lg border text-sm">Download PO+SKU Discrepancy (CSV)</button>
+        <button id="btn-dl-po"    class="px-3 py-2 rounded-lg border text-sm">Download PO Discrepancy (CSV)</button>
+        <button id="btn-exec"     class="px-3 py-2 rounded-lg border text-sm bg-rose-700 text-white">Build Executive Summary (DOC)</button>
+      </div>
+    </section>
+
+    <!-- INTAKE -->
+    <section id="page-intake" class="hidden">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-5">
+          <div class="text-2xl font-semibold">UID Intake (Table Mode)</div>
+          <div class="flex items-center gap-2 bg-white border rounded-xl px-3 py-2">
+            <svg id="intake-heart" viewBox="0 0 24 24" width="18" height="18" class="heartbeat">
+              <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" fill="#990033"/>
+            </svg>
+            <div class="text-sm"><span class="font-semibold">Ops</span> • <span id="intake-bpm">40</span> bpm</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="btn-load-day" class="px-3 py-2 rounded-lg text-sm border">Load Today</button>
+          <button id="btn-export-day" class="px-3 py-2 rounded-lg text-sm border">Export XLSX</button>
+        </div>
+      </div>
+
+      <div class="mt-3 overflow-auto">
+        <table class="w-full min-w-[1050px] border-collapse border">
+          <thead class="bg-gray-100">
+            <tr>
+              <th class="border px-2 py-1 text-left text-xs font-semibold">Date</th>
+              <th class="border px-2 py-1 text-left text-xs font-semibold">Mobile Bin (BOX)</th>
+              <th class="border px-2 py-1 text-left text-xs font-semibold">SSCC Label (BOX)</th>
+              <th class="border px-2 py-1 text-left text-xs font-semibold">PO_Number</th>
+              <th class="border px-2 py-1 text-left text-xs font-semibold">SKU_Code</th>
+              <th class="border px-2 py-1 text-left text-xs font-semibold">UID</th>
+              <th class="border px-2 py-1 text-left text-xs font-semibold">Row</th>
+              <th class="border px-2 py-1 text-left text-xs font-semibold">Sync</th>
+            </tr>
+          </thead>
+          <tbody id="intake-body"></tbody>
+        </table>
+      </div>
+
+      <div class="mt-3">
+        <button id="btn-add-row" class="px-3 py-2 rounded-lg border text-sm">Add Row</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- Right-side OPS TILE (shows only on Intake) -->
+  <aside id="ops-tile" class="ops-tile ops-hidden" aria-live="polite">
+    <div class="ops-header">
+      <div class="ops-title">Intake • Ops</div>
+      <div>
+        <small id="ops-last-updated">—</small>
+        <span class="ops-sse" id="ops-conn"><span class="ops-dot" id="ops-dot"></span> SSE</span>
       </div>
     </div>
 
-    <div id="capsules" class="hidden sm:flex items-center gap-3 mb-3"></div>
+    <div class="ops-kpis">
+      <div class="ops-card">
+        <div class="ops-label">Scans Today</div>
+        <div class="ops-value" id="ops-today">0</div>
+      </div>
+      <div class="ops-card">
+        <div class="ops-label">Last Hour</div>
+        <div class="ops-value" id="ops-hour">0</div>
+      </div>
+    </div>
 
-    <!-- KPI tiles -->
-    <div class="grid grid-cols-1 sm:grid-cols-5 gap-3 mb-3">
-      <div class="bg-white rounded-2xl border shadow p-4">
-        <div class="text-base font-semibold text-gray-600">Planned</div>
-        <div class="text-xs text-gray-500" id="planned-range"></div>
-        <div class="text-2xl font-bold tabular-nums" id="planned-total">0</div>
-      </div>
-      <div class="bg-white rounded-2xl border shadow p-4">
-        <div class="text-base font-semibold text-gray-600">Applied</div>
-        <div class="text-xs text-gray-500" id="applied-range"></div>
-        <div class="text-2xl font-bold tabular-nums" id="applied-total">0</div>
-      </div>
-      <div class="bg-white rounded-2xl border shadow p-4">
-        <div class="text-base font-semibold text-gray-600">Completion</div>
-        <div class="text-xs text-gray-500">&nbsp;</div>
-        <div class="text-2xl font-bold tabular-nums" id="pct-week">0%</div>
-      </div>
-      <div class="bg-white rounded-2xl border shadow p-4 flex items-center gap-4">
-        <div id="ops-heart"></div>
+    <div class="ops-section">
+      <div class="flex items-center gap-3">
+        <span class="inline-block w-5 h-5 rounded-full bg-rose-600 heartbeat"></span>
         <div>
-          <div class="text-base font-semibold text-gray-600">Ops Pulse</div>
-          <div class="text-xl font-bold tabular-nums" id="ops-bpm">40</div>
-          <div class="text-[11px] text-gray-500" id="ops-extra">+0 over 40</div>
+          <div class="ops-label">Throughput / hour (last 30m)</div>
+          <div class="ops-value" id="ops-rate">0</div>
         </div>
       </div>
-      <div class="bg-white rounded-2xl border shadow p-4">
-        <div class="text-base font-semibold text-gray-600">Applied averages</div>
-        <div class="text-xs text-gray-500 mb-1">&nbsp;</div>
-        <div class="text-2xl font-bold tabular-nums" id="avg-day">0</div>
-        <div class="text-xs text-gray-500 mt-1">Avg/day • <span id="avg-week">0</span></div>
-      </div>
     </div>
 
-    <!-- Search -->
-    <div class="bg-white rounded-2xl border shadow p-4 mb-3">
-      <div class="text-base font-semibold mb-2">Search by PO or SKU</div>
-      <input id="search-input" type="search" placeholder="Type a PO # or SKU Code and pause…" class="w-full border rounded-md px-3 py-2 text-sm outline-none focus:ring-2">
-      <div id="search-results" class="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3 hidden"></div>
+    <div class="ops-section">
+      <div class="ops-title">Data Quality</div>
+      <div class="ops-row"><span class="ops-label">Drafts (missing fields)</span><strong id="ops-drafts">0</strong></div>
+      <div class="ops-row"><span class="ops-label">Duplicates (today)</span><strong id="ops-dupes">0</strong></div>
+      <div class="ops-label" style="margin-top:8px">Sync states</div>
+      <div class="ops-badges" id="ops-sync-badges"></div>
     </div>
 
-    <!-- Top Insights -->
-    <div class="bg-white rounded-2xl border shadow p-4 mb-3">
-      <div class="text-base font-semibold mb-2">Top Insights for Ops</div>
-      <ul id="insights" class="text-sm text-gray-800 list-disc pl-5 space-y-1">
-        <li>Loading…</li>
+    <div class="ops-section">
+      <div class="ops-title">Alerts</div>
+      <ul id="ops-alerts" style="margin: 6px 0 0 16px; padding: 0;">
+        <li style="color:#9ca3af">No alerts.</li>
       </ul>
-      <div id="insights-mini" class="mt-2 text-xs text-gray-500"></div>
     </div>
+  </aside>
 
-    <!-- PO Progress -->
-    <div class="bg-white rounded-2xl border shadow p-4 mb-3">
-      <div class="text-base font-semibold mb-2">PO Progress (This Week)</div>
-      <div class="overflow-auto max-h-[480px]">
-        <table class="w-full text-sm" id="po-progress">
-          <thead>
-            <tr class="text-gray-500">
-              <th class="text-left py-1 pr-2">PO #</th>
-              <th class="text-left py-1 pr-2">Due</th>
-              <th class="text-right py-1 pr-2">Planned</th>
-              <th class="text-right py-1 pr-2">Applied</th>
-              <th class="text-right py-1">%</th>
-            </tr>
-          </thead>
-          <tbody id="po-progress-body">
-            <tr><td colspan="5" class="text-center text-xs text-gray-400 py-3">Loading…</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
+  <!-- Footer health bar -->
+  <div id="vo-footer">
+    <span class="vo-pill border border-amber-300 bg-amber-100 text-amber-900" id="health-pill">
+      <span class="vo-dot bg-amber-500" id="health-dot"></span> Health: <span id="vo-health">n/a</span>
+    </span>
+    <span id="vo-footer-text">Planned total is 0. Week —</span>
+  </div>
 
-    <!-- Risk split -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-      <div class="bg-white rounded-2xl border shadow p-4">
-        <div class="text-base font-semibold mb-2">TOP PO's at Risk</div>
-        <table class="w-full text-sm" id="risk-po">
-          <thead>
-            <tr class="text-gray-500">
-              <th class="text-left py-1 pr-2">PO #</th>
-              <th class="text-left py-1 pr-2">Due</th>
-              <th class="text-right py-1 pr-2">Planned</th>
-              <th class="text-right py-1 pr-2">Applied</th>
-              <th class="text-right py-1 pr-2">Rem</th>
-              <th class="text-right py-1">%</th>
-            </tr>
-          </thead>
-          <tbody id="risk-po-body"><tr><td colspan="6" class="text-center text-xs text-gray-400 py-3">Loading…</td></tr></tbody>
-        </table>
-      </div>
-      <div class="bg-white rounded-2xl border shadow p-4">
-        <div class="text-base font-semibold mb-2">Top SKU's at Risk</div>
-        <table class="w-full text-sm" id="risk-sku">
-          <thead>
-            <tr class="text-gray-500">
-              <th class="text-left py-1 pr-2">SKU</th>
-              <th class="text-left py-1 pr-2">Due</th>
-              <th class="text-right py-1 pr-2">Planned</th>
-              <th class="text-right py-1 pr-2">Applied</th>
-              <th class="text-right py-1 pr-2">Rem</th>
-              <th class="text-right py-1">%</th>
-            </tr>
-          </thead>
-          <tbody id="risk-sku-body"><tr><td colspan="6" class="text-center text-xs text-gray-400 py-3">Loading…</td></tr></tbody>
-        </table>
-      </div>
-    </div>
+  <!-- ===== App Logic + Ops Tile Wiring (vanilla JS) ===== -->
+  <script>
+    const BRAND = '#990033';
+    const API_BASE = (() => {
+      const m = document.querySelector('meta[name="api-base"]');
+      return (m && m.content) ? m.content.replace(/\/+$/,'') : '';
+    })();
+    const $  = (s)=>document.querySelector(s);
+    const fmtInt = (n)=>Number(n||0).toLocaleString();
 
-    <!-- Download action row -->
-    <div class="flex flex-wrap gap-2 justify-end">
-      <button id="btn-dl-posku" class="px-3 py-2 rounded-lg border text-sm">Download PO+SKU Discrepancy (CSV)</button>
-      <button id="btn-dl-po"    class="px-3 py-2 rounded-lg border text-sm">Download PO Discrepancy (CSV)</button>
-      <button id="btn-exec"     class="px-3 py-2 rounded-lg border text-sm bg-rose-700 text-white">Build Executive Summary (DOC)</button>
-    </div>
-  </section>
+    $('#vo-today').textContent = new Date().toLocaleDateString();
 
-  <!-- INTAKE -->
-  <section id="page-intake" class="hidden">
-    <div class="flex items-center justify-between">
-      <div class="flex items-center gap-5">
-        <div class="text-2xl font-semibold">UID Intake (Table Mode)</div>
-        <!-- Live Ops mini tile -->
-        <div class="flex items-center gap-2 bg-white border rounded-xl px-3 py-2">
-          <svg id="intake-heart" viewBox="0 0 24 24" width="18" height="18" class="heartbeat"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" fill="#990033"/></svg>
-          <div class="text-sm"><span class="font-semibold">Ops Pulse</span> <span id="intake-bpm" class="font-semibold">40</span></div>
-        </div>
-      </div>
-      <!-- Intake upload controls -->
-      <div class="flex items-center gap-2">
-        <input id="file-intake" type="file" accept=".csv" class="hidden" />
-        <button id="btn-upload-intake" class="px-3 py-2 rounded-lg border text-sm">Upload Intake (CSV)</button>
-        <button id="btn-bulk-del" class="px-3 py-2 rounded-lg border text-sm">Bulk Delete by SKU+UID (CSV)</button>
-        <input id="file-del" type="file" accept=".csv" class="hidden" />
-      </div>
-    </div>
+    /* ---------- Helpers ---------- */
+    function createHeart(size=24, color=BRAND, bpm=40){
+      const s='http://www.w3.org/2000/svg', svg=document.createElementNS(s,'svg');
+      svg.setAttribute('viewBox','0 0 24 24'); svg.setAttribute('width',size); svg.setAttribute('height',size);
+      const p=document.createElementNS(s,'path'); p.setAttribute('d','M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z'); p.setAttribute('fill',color);
+      svg.appendChild(p); svg.classList.add('heartbeat'); svg.style.animationDuration=`${(60/Math.max(40,bpm)).toFixed(2)}s`; return svg;
+    }
+    function mondayOf(d=new Date()){const dd=new Date(d);const day=dd.getDay();const diff=(day===0?-6:1)-day;dd.setDate(dd.getDate()+diff);dd.setHours(0,0,0,0);return dd;}
+    const iso=(d)=>d.toISOString().slice(0,10);
+    function endISO(mondayISO){const [y,m,d]=mondayISO.split('-').map(Number);const base=new Date(y,m-1,d);base.setDate(base.getDate()+6);return iso(base);}
+    function addDaysISO(s,days){const [y,m,d]=s.split('-').map(Number);const b=new Date(y,m-1,d);b.setDate(b.getDate()+days);return iso(b);}
 
-    <!-- Intake table -->
-    <div class="mt-4 overflow-x-auto">
-      <table class="w-full min-w-[1050px] border-collapse border">
-        <thead class="bg-gray-100">
+    const state={weekStart:iso(mondayOf()), plan:[], records:[]};
+    async function api(path,opts={}){const r=await fetch(`${API_BASE}${path}`,{method:opts.method||'GET',headers:{'Content-Type':'application/json'},body:opts.body?JSON.stringify(opts.body):undefined});if(!r.ok)throw new Error(await r.text());const ct=r.headers.get('content-type')||'';return ct.includes('json')?r.json():r.text();}
+    async function fetchPlan(w){return API_BASE?api(`/plan/weeks/${w}`).catch(()=>[]):[];}
+    async function fetchActuals(f,t){if(!API_BASE) return []; const d=await api(`/records?from=${f}&to=${t}&status=complete&limit=50000`).catch(()=>({records:[]}));return d?.records||d||[];}
+
+    function aggregate(records){
+      const byPO=new Map(), bySKU=new Map();
+      for(const r of records||[]){ if(r.status!=='complete') continue;
+        const po=String(r.po_number||'').trim(), sku=String(r.sku_code||'').trim();
+        if(po) byPO.set(po,(byPO.get(po)||0)+1);
+        if(sku) bySKU.set(sku,(bySKU.get(sku)||0)+1);
+      }
+      return {byPO,bySKU};
+    }
+    function joinPOProgress(plan, byPO){
+      const map=new Map();
+      for(const p of plan||[]){
+        const po=String(p.po_number||'').trim(); if(!po) continue;
+        const rec=map.get(po)||{due:p.due_date,planned:0,applied:0};
+        rec.planned+=Number(p.target_qty||0);
+        if(rec.due!==p.due_date) rec.due = rec.due < p.due_date ? rec.due : p.due_date;
+        map.set(po,rec);
+      }
+      for(const [po,ap] of byPO.entries()){
+        const rec=map.get(po)||{due:'',planned:0,applied:0}; rec.applied+=ap; map.set(po,rec);
+      }
+      const list=[]; for(const [po,rec] of map.entries()){
+        list.push({po,due:rec.due,planned:rec.planned,applied:rec.applied,pct:rec.planned>0?Math.round((rec.applied/rec.planned)*100):100});
+      }
+      list.sort((a,b)=>String(a.due).localeCompare(String(b.due)));
+      return list;
+    }
+    function computeRisk(rows, weekEndISO){
+      const end=new Date(weekEndISO+'T00:00:00'); const out=[];
+      for(const r of rows||[]){
+        const remaining=Math.max(0,(r.planned||0)-(r.applied||0));
+        const due=new Date((r.due||r.due_date||'')+'T00:00:00');
+        if(remaining>0 && (r.due||r.due_date) && due<=end){
+          out.push({key:r.po||r.sku||r.key,due_date:(r.due||r.due_date),planned:r.planned||0,applied:r.applied||0,remaining,pct:r.planned>0?Math.round((r.applied/r.planned)*100):0});
+        }
+      }
+      out.sort((a,b)=> b.remaining - a.remaining || (new Date(a.due_date)) - (new Date(b.due_date)) );
+      return out.slice(0,5);
+    }
+    function toCSV(header,rows){
+      function esc(v){v=String(v??''); if(/[",\n]/.test(v)) v='"'+v.replace(/"/g,'""')+'"'; return v;}
+      const head=header.map(esc).join(','); const body=rows.map(r=>header.map(h=>esc(r[h])).join(',')).join('\r\n');
+      return '\ufeff'+head+'\r\n'+body+'\r\n';
+    }
+    function download(name,content,type='text/plain'){const b=new Blob([content],{type}); const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(a.href); a.remove();},250);}
+    function downloadDoc(filename, innerHTML){const html='<!doctype html><html><head><meta charset="utf-8"></head><body>'+innerHTML+'</body></html>'; download(filename, html, 'text/html;charset=utf-8');}
+
+    function renderCapsules(baseISO){
+      const r=$('#capsules'); r.innerHTML=''; r.classList.remove('hidden');
+      const base=new Date(baseISO+'T00:00:00'); const list=[];
+      const prev=new Date(base); prev.setDate(base.getDate()-7); list.push(prev); list.push(base);
+      for(let i=1;i<=3;i++){const d=new Date(base); d.setDate(d.getDate()+i*7); list.push(d);}
+      list.forEach(d=>{
+        const id=iso(d); const day=String(d.getDate()).padStart(2,'0'); const mon=d.toLocaleString('en-US',{month:'short'}).toUpperCase().slice(0,3);
+        const btn=document.createElement('button');
+        btn.className='group rounded-xl border px-3 py-2 w-[96px] text-left bg-white hover:scale-[1.02] transition';
+        btn.style.borderColor=id===state.weekStart?BRAND:'rgba(0,0,0,.12)';
+        btn.innerHTML=`<div class="text-[10px]" style="color:${id===state.weekStart?BRAND:'#6b7280'}">${mon}</div>
+                       <div class="text-lg font-semibold leading-5">${day}</div>
+                       <div class="text-[11px] mt-0.5" style="color:${BRAND}" id="cap-total-${id}">0</div>
+                       <div class="mt-1 h-1.5 rounded-full bg-gray-200 overflow-hidden">
+                         <div id="cap-bar-${id}" class="h-1.5 rounded-full" style="width:0%;background:${BRAND}"></div>
+                       </div>`;
+        btn.onclick=()=>{$('#week-start').value=id; setWeek(id);};
+        r.appendChild(btn);
+      });
+    }
+    function renderOpsPulse(bpm=40, extra=0){
+      const wrap=$('#ops-heart'); if(wrap){ wrap.innerHTML=''; wrap.appendChild(createHeart(24,BRAND,bpm)); $('#ops-bpm').textContent=bpm; $('#ops-extra').textContent=`+${Math.max(0,extra)} over 40`; }
+      const mini=$('#intake-bpm'); if(mini) mini.textContent=bpm;
+    }
+    function renderPOProgress(rows){
+      const b=$('#po-progress-body'); b.innerHTML='';
+      if(!rows.length){b.innerHTML='<tr><td colspan="5" class="text-center text-xs text-gray-400 py-3">No data</td></tr>'; return;}
+      rows.forEach(r=>{
+        const tr=document.createElement('tr'); tr.className='odd:bg-gray-50';
+        tr.innerHTML=`<td class="py-1 pr-2">${r.po}</td>
+                      <td class="py-1 pr-2">${r.due?r.due.split('-').reverse().join('-'):''}</td>
+                      <td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.planned)}</td>
+                      <td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.applied)}</td>
+                      <td class="py-1 text-right tabular-nums">${r.pct}%</td>`;
+        b.appendChild(tr);
+      });
+    }
+    function renderRisk(list, id){
+      const b=$(id); b.innerHTML='';
+      if(!list.length){b.innerHTML='<tr><td colspan="6" class="text-center text-xs text-gray-400 py-3">No items at risk this week.</td></tr>'; return;}
+      list.forEach(r=>{
+        const tr=document.createElement('tr'); tr.className='odd:bg-gray-50';
+        tr.innerHTML=`<td class="py-1 pr-2 truncate" title="${r.key}">${r.key}</td>
+                      <td class="py-1 pr-2">${r.due_date?r.due_date.split('-').reverse().join('-'):''}</td>
+                      <td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.planned)}</td>
+                      <td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.applied)}</td>
+                      <td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.remaining)}</td>
+                      <td class="py-1 text-right tabular-nums">${r.pct}%</td>`;
+        b.appendChild(tr);
+      });
+    }
+    function renderInsights(records){
+      const ul=$('#insights'); const mini=$('#insights-mini');
+      if(ul) ul.innerHTML=`<li>Cartonization (mobile bin): <span class="text-rose-700 font-semibold">0% coverage</span> — <span class="text-rose-700 font-semibold">0</span> unique cartons</li>
+                           <li>Applied labels (24h): <span class="font-semibold">${fmtInt(0)}</span></li>`;
+      if(mini) mini.textContent='On plan · pace: — · missing UID: 0% · sync: 0%';
+    }
+
+    function buildDiscrepancyPOSKU(plan, records){
+      const byPS=new Map();
+      for(const r of records||[]){ if(r.status!=='complete') continue;
+        const po=String(r.po_number||'').trim(), sku=String(r.sku_code||'').trim();
+        if(!po||!sku) continue; const k=`${po}|||${sku}`; byPS.set(k,(byPS.get(k)||0)+1);
+      }
+      const seen=new Set(); const rows=[];
+      for(const p of plan||[]){
+        const po=String(p.po_number||'').trim(), sku=String(p.sku_code||'').trim();
+        if(!po||!sku) continue; const k=`${po}|||${sku}`; if(seen.has(k)) continue; seen.add(k);
+        const planned=Number(p.target_qty||0), applied=byPS.get(k)||0;
+        rows.push({'PO':po,'SKU':sku,'Planned':planned,'Applied':applied,'Discrepancy (Applied - Planned)':applied-planned});
+      }
+      return rows;
+    }
+    function buildDiscrepancyPO(joined){
+      return (joined||[]).map(r=>({'PO':r.po,'Planned':r.planned||0,'Applied':r.applied||0,'Discrepancy (Applied - Planned)':(r.applied||0)-(r.planned||0)}));
+    }
+    function buildExecHTML(ws,we,pt,at,pct,topPO,topSKU){
+      const pretty=s=> (s||'').split('-').reverse().join('-');
+      const rowsPO=topPO.map(x=>`<tr><td>${x.key}</td><td style="text-align:right">${fmtInt(x.planned)}</td><td style="text-align:right">${fmtInt(x.applied)}</td><td style="text-align:right">${fmtInt(x.remaining)}</td><td style="text-align:right">${x.pct}%</td></tr>`).join('');
+      const rowsSKU=topSKU.map(x=>`<tr><td>${x.key}</td><td style="text-align:right">${fmtInt(x.planned)}</td><td style="text-align:right">${fmtInt(x.applied)}</td><td style="text-align:right">${fmtInt(x.remaining)}</td><td style="text-align:right">${x.pct}%</td></tr>`).join('');
+      return `<div style="font-family:Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#111">
+        <h1 style="margin:0 0 8px;font-size:22px;color:${BRAND}">VAS Weekly Executive Summary</h1>
+        <div style="color:#555;font-size:12px;margin-bottom:16px">Week: ${pretty(ws)} – ${pretty(we)}</div>
+        <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
           <tr>
-            <th class="border px-2 py-1 text-left text-xs font-semibold">Date</th>
-            <th class="border px-2 py-1 text-left text-xs font-semibold">Mobile Bin (BOX)</th>
-            <th class="border px-2 py-1 text-left text-xs font-semibold">SSCC Label (BOX)</th>
-            <th class="border px-2 py-1 text-left text-xs font-semibold">PO_Number</th>
-            <th class="border px-2 py-1 text-left text-xs font-semibold">SKU_Code</th>
-            <th class="border px-2 py-1 text-left text-xs font-semibold">UID</th>
-            <th class="border px-2 py-1 text-left text-xs font-semibold">Row</th>
-            <th class="border px-2 py-1 text-left text-xs font-semibold">Sync</th>
+            <td style="padding:10px;border:1px solid #eee"><div style="font-size:12px;color:#666;margin-bottom:4px">Planned</div><div style="font-size:20px;font-weight:700">${fmtInt(pt)}</div></td>
+            <td style="padding:10px;border:1px solid #eee"><div style="font-size:12px;color:#666;margin-bottom:4px">Applied</div><div style="font-size:20px;font-weight:700">${fmtInt(at)}</div></td>
+            <td style="padding:10px;border:1px solid #eee"><div style="font-size:12px;color:#666;margin-bottom:4px">Completion</div><div style="font-size:20px;font-weight:700">${pct}%</div></td>
           </tr>
-        </thead>
-        <tbody id="intake-body"></tbody>
-      </table>
-    </div>
+        </table>
+        <h2 style="font-size:16px;margin:16px 0 8px">PO Discrepancy Focus</h2>
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr><th style="text-align:left;border-bottom:1px solid #eee;padding:6px 4px">PO #</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Planned</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Applied</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Rem</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">%</th></tr></thead>
+          <tbody>${rowsPO||`<tr><td colspan="5" style="color:#888;padding:10px 4px">No POs at risk this week.</td></tr>`}</tbody>
+        </table>
+        <h2 style="font-size:16px;margin:20px 0 8px">SKU Discrepancy Focus</h2>
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr><th style="text-align:left;border-bottom:1px solid #eee;padding:6px 4px">SKU</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Planned</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Applied</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Rem</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">%</th></tr></thead>
+          <tbody>${rowsSKU||`<tr><td colspan="5" style="color:#888;padding:10px 4px">No SKUs at risk this week.</td></tr>`}</tbody>
+        </table>
+      </div>`;
+    }
+    function setFooterHealth(pct){
+      const pill=$('#health-pill'), dot=$('#health-dot'); let cls='bg-amber-100 text-amber-900', d='bg-amber-500', bar='#f8fafc', text='#334155', label='plan';
+      if(pct>=100){cls='bg-green-100 text-green-900'; d='bg-green-500'; bar='#ecfdf5'; text='#065f46'; label='ahead';}
+      else if(pct<80){cls='bg-rose-100 text-rose-900'; d='bg-rose-500'; bar='#fef2f2'; text='#7f1d1d'; label='risk';}
+      $('#vo-footer').style.background=bar; $('#vo-footer').style.color=text; pill.className='vo-pill border '+cls; dot.className='vo-dot '+d; $('#vo-health').textContent=label;
+    }
 
-    <!-- Add row -->
-    <div class="mt-3">
-      <button id="btn-add-row" class="px-3 py-2 rounded-lg border text-sm">Add Row</button>
-    </div>
-  </section>
-</main>
+    /* ---------- PLAN: load + render ---------- */
+    async function setWeek(ws){
+      try{
+        state.weekStart=ws; $('#week-start').value=ws; renderCapsules(ws);
+        const we=endISO(ws);
+        const [plan, recs] = await Promise.all([fetchPlan(ws), fetchActuals(ws,we)]);
+        state.plan=Array.isArray(plan)?plan:[]; state.records=Array.isArray(recs)?recs:[];
+        const agg=aggregate(state.records);
 
-<!-- Footer health bar -->
-<div id="vo-footer">
-  <span class="vo-pill border border-amber-300 bg-amber-100 text-amber-900" id="health-pill">
-    <span class="vo-dot bg-amber-500" id="health-dot"></span> Health: <span id="vo-health">n/a</span>
-  </span>
-  <span id="vo-footer-text">Planned total is 0. Week —</span>
-</div>
+        const plannedTotal = state.plan.reduce((s,p)=> s + Number(p.target_qty||0), 0);
+        const appliedTotal = Array.from(agg.byPO.values()).reduce((s,v)=> s+v, 0);
+        const pct = plannedTotal>0? Math.round((appliedTotal/plannedTotal)*100) : (state.plan.length?0:100);
 
-<script>
-  const BRAND = '#990033';
-  const API_BASE = (() => {
-    const m = document.querySelector('meta[name="api-base"]');
-    return (m && m.content) ? m.content.replace(/\/+$/,'') : 'https://vasuida1.onrender.com';
-  })();
-  const $  = (s)=>document.querySelector(s);
-  const fmtInt = (n)=>Number(n||0).toLocaleString();
-  $('#vo-today').textContent = new Date().toLocaleDateString();
+        $('#planned-range').textContent = `${ws} – ${we}`;
+        $('#applied-range').textContent = `${ws} – ${we}`;
+        $('#planned-total').textContent = fmtInt(plannedTotal);
+        $('#applied-total').textContent = fmtInt(appliedTotal);
+        $('#pct-week').textContent = `${pct}%`;
+        $('#avg-week').textContent = fmtInt(appliedTotal);
+        $('#avg-day').textContent = fmtInt(Math.round((appliedTotal||0)/7));
+        setFooterHealth(pct);
+        $('#vo-footer-text').textContent = `Planned total is ${fmtInt(plannedTotal)}. Week ${ws}–${we}`;
 
-  function createHeart(size=24, color=BRAND, bpm=40){
-    const s='http://www.w3.org/2000/svg', svg=document.createElementNS(s,'svg');
-    svg.setAttribute('viewBox','0 0 24 24'); svg.setAttribute('width',size); svg.setAttribute('height',size);
-    const p=document.createElementNS(s,'path'); p.setAttribute('d','M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z'); p.setAttribute('fill',color);
-    svg.appendChild(p); svg.classList.add('heartbeat'); svg.style.animationDuration=`${(60/Math.max(40,bpm)).toFixed(2)}s`; return svg;
-  }
-  function mondayOf(d=new Date()){const dd=new Date(d);const day=dd.getDay();const diff=(day===0?-6:1)-day;dd.setDate(dd.getDate()+diff);dd.setHours(0,0,0,0);return dd;}
-  const iso=(d)=>d.toISOString().slice(0,10);
-  function endISO(mondayISO){const [y,m,d]=mondayISO.split('-').map(Number);const base=new Date(y,m-1,d);base.setDate(base.getDate()+6);return iso(base);}
-  function addDaysISO(s,days){const [y,m,d]=s.split('-').map(Number);const b=new Date(y,m-1,d);b.setDate(b.getDate()+days);return iso(b);}
+        ['-7', '0', '7', '14', '21'].map(n=>addDaysISO(ws, Number(n))).forEach(id=>{
+          const t=document.getElementById(`cap-total-${id}`); const b=document.getElementById(`cap-bar-${id}`);
+          const total = id===ws?plannedTotal:0, applied=id===ws?appliedTotal:0; const p = total>0?Math.min(100,Math.round((applied/total)*100)):0;
+          if(t) t.textContent = fmtInt(total); if(b) b.style.width = `${p}%`;
+        });
 
-  const state={weekStart:iso(mondayOf()), plan:[], records:[]};
-  async function api(path,opts={}){const r=await fetch(`${API_BASE}${path}`,{method:opts.method||'GET',headers:{'Content-Type':'application/json'},body:opts.body?JSON.stringify(opts.body):undefined});if(!r.ok)throw new Error(await r.text());const ct=r.headers.get('content-type')||'';return ct.includes('json')?r.json():r.text();}
-  async function fetchPlan(w){return api(`/plan/weeks/${w}`).catch(()=>[]);}
-  async function fetchActuals(f,t){const d=await api(`/records?from=${f}&to=${t}&status=complete&limit=50000`).catch(()=>({records:[]}));return d?.records||d||[];}
+        const poRows = joinPOProgress(state.plan, agg.byPO);
+        renderPOProgress(poRows);
+        const riskPO = computeRisk(poRows.map(r=>({po:r.po,due:r.due,planned:r.planned,applied:r.applied})), we);
 
-  function aggregate(records){
-    const byPO=new Map(), bySKU=new Map(); for(const r of records||[]){if(r.status!=='complete') continue;
-      const po=String(r.po_number||'').trim(), sku=String(r.sku_code||'').trim(); if(po) byPO.set(po,(byPO.get(po)||0)+1); if(sku) bySKU.set(sku,(bySKU.get(sku)||0)+1);}
-    return {byPO,bySKU};
-  }
-  function joinPOProgress(plan, byPO){
-    const map=new Map();
-    for(const p of plan||[]){const po=String(p.po_number||'').trim(); if(!po) continue; const rec=map.get(po)||{due:p.due_date,planned:0,applied:0}; rec.planned+=Number(p.target_qty||0); if(rec.due!==p.due_date) rec.due = rec.due < p.due_date ? rec.due : p.due_date; map.set(po,rec);}
-    for(const [po,ap] of byPO.entries()){const rec=map.get(po)||{due:'',planned:0,applied:0}; rec.applied+=ap; map.set(po,rec);}
-    const list=[]; for(const [po,rec] of map.entries()){list.push({po,due:rec.due,planned:rec.planned,applied:rec.applied,pct:rec.planned>0?Math.round((rec.applied/rec.planned)*100):100});}
-    list.sort((a,b)=>String(a.due).localeCompare(String(b.due))); return list;
-  }
-  function computeRisk(rows, weekEndISO){
-    const end=new Date(weekEndISO+'T00:00:00'); const out=[];
-    for(const r of rows||[]){const remaining=Math.max(0,(r.planned||0)-(r.applied||0)); const due=new Date((r.due||'')+'T00:00:00'); if(remaining>0 && r.due && due<=end){ out.push({key:r.po||r.sku||r.key,due_date:r.due,planned:r.planned||0,applied:r.applied||0,remaining,pct:r.planned>0?Math.round((r.applied/r.planned)*100):0});}}
-    out.sort((a,b)=> b.remaining - a.remaining || (new Date(a.due_date)) - (new Date(b.due_date)) ); return out.slice(0,5);
-  }
-  function toCSV(header,rows){function esc(v){v=String(v??''); if(/[",\n]/.test(v)) v='"'+v.replace(/"/g,'""')+'"'; return v;} const head=header.map(esc).join(','); const body=rows.map(r=>header.map(h=>esc(r[h])).join(',')).join('\r\n'); return '\ufeff'+head+'\r\n'+body+'\r\n';}
-  function download(name,content,type='text/plain'){const b=new Blob([content],{type}); const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(a.href); a.remove();},250);}
-  function downloadDoc(filename, innerHTML){const html='<!doctype html><html><head><meta charset="utf-8"></head><body>'+innerHTML+'</body></html>'; download(filename, html, 'text/html;charset=utf-8');}
-  function renderCapsules(baseISO){const r=$('#capsules'); r.innerHTML=''; r.classList.remove('hidden'); const base=new Date(baseISO+'T00:00:00'); const list=[]; const prev=new Date(base); prev.setDate(base.getDate()-7); list.push(prev); list.push(base); for(let i=1;i<=3;i++){const d=new Date(base); d.setDate(d.getDate()+i*7); list.push(d);} list.forEach(d=>{const id=iso(d); const day=String(d.getDate()).padStart(2,'0'); const mon=d.toLocaleString('en-US',{month:'short'}).toUpperCase().slice(0,3); const btn=document.createElement('button'); btn.className='group rounded-xl border px-3 py-2 w-[96px] text-left bg-white hover:scale-[1.02] transition'; btn.style.borderColor=id===state.weekStart?BRAND:'rgba(0,0,0,.12)'; btn.innerHTML=`<div class="text-[10px]" style="color:${id===state.weekStart?BRAND:'#6b7280'}">${mon}</div><div class="text-lg font-semibold leading-5">${day}</div><div class="text-[11px] mt-0.5" style="color:${BRAND}" id="cap-total-${id}">0</div><div class="mt-1 h-1.5 rounded-full bg-gray-200 overflow-hidden"><div id="cap-bar-${id}" class="h-1.5 rounded-full" style="width:0%;background:${BRAND}"></div></div>`; btn.onclick=()=>{$('#week-start').value=id; setWeek(id);}; r.appendChild(btn);});}
-  function renderOpsPulse(bpm=40, extra=0){const wrap=$('#ops-heart'); wrap.innerHTML=''; wrap.appendChild(createHeart(24,BRAND,bpm)); $('#ops-bpm').textContent=bpm; $('#ops-extra').textContent=`+${Math.max(0,extra)} over 40`; $('#intake-bpm').textContent=bpm; }
-  function renderPOProgress(rows){const b=$('#po-progress-body'); b.innerHTML=''; if(!rows.length){b.innerHTML='<tr><td colspan="5" class="text-center text-xs text-gray-400 py-3">No data</td></tr>'; return;} rows.forEach(r=>{const tr=document.createElement('tr'); tr.className='odd:bg-gray-50'; tr.innerHTML=`<td class="py-1 pr-2">${r.po}</td><td class="py-1 pr-2">${r.due?r.due.split('-').reverse().join('-'):''}</td><td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.planned)}</td><td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.applied)}</td><td class="py-1 text-right tabular-nums">${r.pct}%</td>`; b.appendChild(tr);});}
-  function renderRisk(list, id){const b=$(id); b.innerHTML=''; if(!list.length){b.innerHTML='<tr><td colspan="6" class="text-center text-xs text-gray-400 py-3">No items at risk this week.</td></tr>'; return;} list.forEach(r=>{const tr=document.createElement('tr'); tr.className='odd:bg-gray-50'; tr.innerHTML=`<td class="py-1 pr-2 truncate" title="${r.key}">${r.key}</td><td class="py-1 pr-2">${r.due_date?r.due_date.split('-').reverse().join('-'):''}</td><td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.planned)}</td><td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.applied)}</td><td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.remaining)}</td><td class="py-1 text-right tabular-nums">${r.pct}%</td>`; b.appendChild(tr);});}
-  function renderInsights(records){const ul=$('#insights'); const mini=$('#insights-mini'); ul.innerHTML=`<li>Cartonization (mobile bin): <span class="text-rose-700 font-semibold">0% coverage</span> — <span class="text-rose-700 font-semibold">0</span> unique cartons</li><li>Applied labels (24h): <span class="font-semibold">${fmtInt(0)}</span></li>`; mini.textContent='On plan · pace: — · missing UID: 0% · sync: 0%';}
+        const perSKU=new Map();
+        for(const p of state.plan){
+          const sku=String(p.sku_code||'').trim(); if(!sku) continue;
+          const r=perSKU.get(sku)||{due:p.due_date,planned:0,applied:0};
+          r.planned+=Number(p.target_qty||0);
+          if(r.due!==p.due_date) r.due = r.due < p.due_date ? r.due : p.due_date;
+          perSKU.set(sku,r);
+        }
+        const aggSKU = aggregate(state.records).bySKU;
+        for(const [sku,v] of aggSKU.entries()){const r=perSKU.get(sku)||{due:'',planned:0,applied:0}; r.applied+=v; perSKU.set(sku,r);}
+        const skuRows=Array.from(perSKU.entries()).map(([sku,r])=>({sku,due:r.due,planned:r.planned,applied:r.applied}));
+        const riskSKU = computeRisk(skuRows.map(r=>({key:r.sku,due:r.due,planned:r.planned,applied:r.applied})), we);
 
-  function buildDiscrepancyPOSKU(plan, records){const byPS=new Map(); for(const r of records||[]){if(r.status!=='complete') continue; const po=String(r.po_number||'').trim(), sku=String(r.sku_code||'').trim(); if(!po||!sku) continue; const k=`${po}|||${sku}`; byPS.set(k,(byPS.get(k)||0)+1);} const seen=new Set(); const rows=[]; for(const p of plan||[]){const po=String(p.po_number||'').trim(), sku=String(p.sku_code||'').trim(); if(!po||!sku) continue; const k=`${po}|||${sku}`; if(seen.has(k)) continue; seen.add(k); const planned=Number(p.target_qty||0), applied=byPS.get(k)||0; rows.push({'PO':po,'SKU':sku,'Planned':planned,'Applied':applied,'Discrepancy (Applied - Planned)':applied-planned});} return rows;}
-  function buildDiscrepancyPO(joined){return (joined||[]).map(r=>({'PO':r.po,'Planned':r.planned||0,'Applied':r.applied||0,'Discrepancy (Applied - Planned)':(r.applied||0)-(r.planned||0)}));}
-  function buildExecHTML(ws,we,pt,at,pct,topPO,topSKU){const pretty=s=> (s||'').split('-').reverse().join('-'); const rowsPO=topPO.map(x=>`<tr><td>${x.key}</td><td style="text-align:right">${fmtInt(x.planned)}</td><td style="text-align:right">${fmtInt(x.applied)}</td><td style="text-align:right">${fmtInt(x.remaining)}</td><td style="text-align:right">${x.pct}%</td></tr>`).join(''); const rowsSKU=topSKU.map(x=>`<tr><td>${x.key}</td><td style="text-align:right">${fmtInt(x.planned)}</td><td style="text-align:right">${fmtInt(x.applied)}</td><td style="text-align:right">${fmtInt(x.remaining)}</td><td style="text-align:right">${x.pct}%</td></tr>`).join(''); return `<div style="font-family:Segoe UI, Roboto, Helvetica, Arial, sans-serif;color:#111"><h1 style="margin:0 0 8px;font-size:22px;color:${BRAND}">VAS Weekly Executive Summary</h1><div style="color:#555;font-size:12px;margin-bottom:16px">Week: ${pretty(ws)} – ${pretty(we)}</div><table style="width:100%;border-collapse:collapse;margin-bottom:16px"><tr><td style="padding:10px;border:1px solid #eee"><div style="font-size:12px;color:#666;margin-bottom:4px">Planned</div><div style="font-size:20px;font-weight:700">${fmtInt(pt)}</div></td><td style="padding:10px;border:1px solid #eee"><div style="font-size:12px;color:#666;margin-bottom:4px">Applied</div><div style="font-size:20px;font-weight:700">${fmtInt(at)}</div></td><td style="padding:10px;border:1px solid #eee"><div style="font-size:12px;color:#666;margin-bottom:4px">Completion</div><div style="font-size:20px;font-weight:700">${pct}%</div></td></tr></table><h2 style="font-size:16px;margin:16px 0 8px">PO Discrepancy Focus</h2><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr><th style="text-align:left;border-bottom:1px solid #eee;padding:6px 4px">PO #</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Planned</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Applied</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Rem</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">%</th></tr></thead><tbody>${rowsPO||`<tr><td colspan="5" style="color:#888;padding:10px 4px">No POs at risk this week.</td></tr>`}</tbody></table><h2 style="font-size:16px;margin:20px 0 8px">SKU Discrepancy Focus</h2><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr><th style="text-align:left;border-bottom:1px solid #eee;padding:6px 4px">SKU</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Planned</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Applied</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Rem</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">%</th></tr></thead><tbody>${rowsSKU||`<tr><td colspan="5" style="color:#888;padding:10px 4px">No SKUs at risk this week.</td></tr>`}</tbody></table></div>`;}
-  function setFooterHealth(pct){const pill=$('#health-pill'), dot=$('#health-dot'); let cls='bg-amber-100 text-amber-900', d='bg-amber-500', bar='#f8fafc', text='#334155'; let label='plan'; if(pct>=100){cls='bg-green-100 text-green-900'; d='bg-green-500'; bar='#ecfdf5'; text='#065f46'; label='ahead';} else if(pct<80){cls='bg-rose-100 text-rose-900'; d='bg-rose-500'; bar='#fef2f2'; text='#7f1d1d'; label='risk';} $('#vo-footer').style.background=bar; $('#vo-footer').style.color=text; pill.className='vo-pill border '+cls; dot.className='vo-dot '+d; $('#vo-health').textContent=label;}
+        renderRisk(riskPO,'#risk-po-body');
+        renderRisk(riskSKU,'#risk-sku-body');
+        renderInsights(state.records);
+        renderOpsPulse(40,0);
 
-  async function setWeek(ws){
-    try{
-      state.weekStart=ws; $('#week-start').value=ws; renderCapsules(ws);
-      const we=endISO(ws);
-      const [plan, recs] = await Promise.all([fetchPlan(ws), fetchActuals(ws,we)]);
-      state.plan=Array.isArray(plan)?plan:[]; state.records=Array.isArray(recs)?recs:[];
-      const agg=aggregate(state.records);
+        // downloads
+        $('#btn-dl-posku').onclick=()=>{
+          const rows=buildDiscrepancyPOSKU(state.plan, state.records);
+          const csv=toCSV(['PO','SKU','Planned','Applied','Discrepancy (Applied - Planned)'], rows);
+          download(`po_sku_discrepancy_${ws}.csv`, csv, 'text/csv;charset=utf-8');
+        };
+        $('#btn-dl-po').onclick=()=>{
+          const rows=buildDiscrepancyPO(poRows);
+          const csv=toCSV(['PO','Planned','Applied','Discrepancy (Applied - Planned)'], rows);
+          download(`po_discrepancy_${ws}.csv`, csv, 'text/csv;charset=utf-8');
+        };
+        $('#btn-exec').onclick=()=>{
+          const html=buildExecHTML(ws,we,plannedTotal,appliedTotal,pct,riskPO,riskSKU);
+          downloadDoc(`VAS_Executive_Summary_${ws}.doc`, html);
+        };
 
-      const plannedTotal = state.plan.reduce((s,p)=> s + Number(p.target_qty||0), 0);
-      const appliedTotal = Array.from(agg.byPO.values()).reduce((s,v)=> s+v, 0);
-      const pct = plannedTotal>0? Math.round((appliedTotal/plannedTotal)*100) : (state.plan.length?0:100);
+      }catch(e){ console.error(e); alert('Load failed: '+(e?.message||e)); }
+    }
 
-      $('#planned-range').textContent = `${ws} – ${we}`; $('#applied-range').textContent = `${ws} – ${we}`;
-      $('#planned-total').textContent = fmtInt(plannedTotal); $('#applied-total').textContent = fmtInt(appliedTotal);
-      $('#pct-week').textContent = `${pct}%`; $('#avg-week').textContent = fmtInt(appliedTotal); $('#avg-day').textContent = fmtInt(Math.round((appliedTotal||0)/7));
-      setFooterHealth(pct); $('#vo-footer-text').textContent = `Planned total is ${fmtInt(plannedTotal)}. Week ${ws}–${we}`;
+    /* ---------- INTAKE table (client-side) ---------- */
+    function newRow(){return {id:crypto?.randomUUID?.()||Math.random().toString(36).slice(2),date_local:iso(new Date()),mobile_bin:'',sscc_label:'',po_number:'',sku_code:'',uid:'',status:'draft',_pending:{},sync:'unknown'};}
+    const intakeRows=[];
+    function isComplete(r){return !!(r.date_local && r.mobile_bin && r.po_number && r.sku_code && r.uid);}
+    function syncClass(s){return s==='synced'?'bg-green-500':(s==='pending'?'bg-amber-500':'bg-gray-400');}
+    async function saveCell(id,f,v){try{ if(!API_BASE) return; await api(`/records/${id}`,{method:'PATCH',body:{field:f,value:v}});}catch{} finally{markSynced(id,f);}}
+    function markSynced(id,f){const i=intakeRows.findIndex(x=>x.id===id); if(i<0)return; delete intakeRows[i]._pending[f]; intakeRows[i].sync = Object.keys(intakeRows[i]._pending).length? 'pending':'synced'; renderIntake();}
+    function renderIntake(){
+      const tb=$('#intake-body'); tb.innerHTML='';
+      if(!intakeRows.length) intakeRows.push(newRow());
+      intakeRows.forEach((r,i)=>{
+        const tr=document.createElement('tr');
+        tr.className=(r.status==='draft'?'bg-yellow-50':(i%2?'bg-gray-50':'bg-white'));
+        const rowSyn=`<span class="inline-block w-2.5 h-2.5 rounded-full ${syncClass(r.sync)}" title="${r.sync}"></span>`;
+        const rowStatus=isComplete(r)?'<span class="text-green-600 text-base">✓</span>':'<span class="text-gray-400 text-base">…</span>';
+        tr.innerHTML=`<td class="border px-2 py-2"><input class="w-full p-1 text-sm border-0 focus:ring-2 focus:ring-blue-300" value="${r.date_local}" data-id="${r.id}" data-f="date_local" /></td>
+                      <td class="border px-2 py-2"><input class="w-full p-1 text-sm border-0 focus:ring-2 focus:ring-blue-300" value="${r.mobile_bin}" data-id="${r.id}" data-f="mobile_bin" /></td>
+                      <td class="border px-2 py-2"><input class="w-full p-1 text-sm border-0 focus:ring-2 focus:ring-blue-300" value="${r.sscc_label}" data-id="${r.id}" data-f="sscc_label" /></td>
+                      <td class="border px-2 py-2"><input class="w-full p-1 text-sm border-0 focus:ring-2 focus:ring-blue-300" value="${r.po_number}" data-id="${r.id}" data-f="po_number" /></td>
+                      <td class="border px-2 py-2"><input class="w-full p-1 text-sm border-0 focus:ring-2 focus:ring-blue-300" value="${r.sku_code}" data-id="${r.id}" data-f="sku_code" /></td>
+                      <td class="border px-2 py-2"><input class="w-full p-1 text-sm border-0 focus:ring-2 focus:ring-blue-300" value="${r.uid}" data-id="${r.id}" data-f="uid" /></td>
+                      <td class="border px-2 py-2 text-center">${rowStatus}</td>
+                      <td class="border px-2 py-2 text-center">${rowSyn}</td>`;
+        tb.appendChild(tr);
+      });
+      tb.querySelectorAll('input').forEach(inp=>{
+        inp.addEventListener('change',e=>{
+          const id=e.target.dataset.id, f=e.target.dataset.f, v=e.target.value;
+          const i=intakeRows.findIndex(x=>x.id===id); if(i<0)return;
+          intakeRows[i][f]=v; intakeRows[i]._pending[f]=true;
+          intakeRows[i].status=isComplete(intakeRows[i])?'complete':'draft'; intakeRows[i].sync='pending';
+          saveCell(id,f,v);
+          if(intakeRows[i].status==='complete' && !intakeRows[i]._addedNext){
+            intakeRows[i]._addedNext=true; intakeRows.splice(i+1,0,newRow());
+          }
+          renderIntake();
+        });
+      });
+    }
 
-      // fill capsules
-      [addDaysISO(ws,-7), ws, addDaysISO(ws,7), addDaysISO(ws,14), addDaysISO(ws,21)].forEach(id=>{
-        const t=document.getElementById(`cap-total-${id}`); const b=document.getElementById(`cap-bar-${id}`);
-        const total = id===ws?plannedTotal:0, applied=id===ws?appliedTotal:0; const p = total>0?Math.min(100,Math.round((applied/total)*100)):0;
-        if(t) t.textContent = fmtInt(total); if(b) b.style.width = `${p}%`;
+    /* ---------- Routing & UI ---------- */
+    function show(hash){
+      $('#page-dashboard').classList.add('hidden');
+      $('#page-intake').classList.add('hidden');
+      if(hash==='#intake'){ $('#page-intake').classList.remove('hidden'); }
+      else { $('#page-dashboard').classList.remove('hidden'); }
+      // Toggle Ops tile visibility on Intake
+      const onIntake = hash==='#intake' || hash.startsWith('#/intake');
+      $('#ops-tile').classList.toggle('ops-hidden', !onIntake);
+    }
+    window.addEventListener('hashchange',()=>show(location.hash||'#dashboard'));
+
+    // Buttons & uploads
+    $('#btn-upload-plan').onclick=()=>$('#file-plan').click();
+    $('#file-plan').addEventListener('change', async (e)=>{
+      const f=e.target.files?.[0]; if(!f || !API_BASE) return;
+      try{
+        const fd=new FormData(); fd.append('file', f, f.name);
+        const r=await fetch(`${API_BASE}/plan/upload`,{method:'POST', body:fd});
+        if(!r.ok) throw new Error(await r.text());
+        alert('Plan uploaded'); setWeek($('#week-start').value);
+      }catch(err){ alert('Upload failed: '+(err?.message||err)); }
+      finally{ e.target.value=''; }
+    });
+    $('#btn-zero-plan').onclick=async()=>{
+      if(!API_BASE) return alert('API not configured');
+      if(!confirm('Zero out the current week plan?'))return;
+      try{
+        const ws=$('#week-start').value;
+        const r=await fetch(`${API_BASE}/plan/weeks/${ws}/zero`,{method:'POST'});
+        if(!r.ok) throw new Error(await r.text());
+        alert('Plan zeroed'); setWeek(ws);
+      }catch(err){ alert('Zero failed: '+(err?.message||err)); }
+    };
+
+    // Intake add row & export
+    $('#btn-add-row').onclick=()=>{intakeRows.push(newRow()); renderIntake();};
+    $('#btn-load-day')?.addEventListener('click', async ()=>{
+      if(!API_BASE) return alert('API not configured');
+      const t=iso(new Date());
+      const data=await api(`/records?from=${t}&to=${t}&limit=2000`).catch(()=>({records:[]}));
+      console.log('Loaded records today:', data);
+      alert('Fetched today\'s records (see console).');
+    });
+    $('#btn-export-day')?.addEventListener('click', ()=>{
+      if(!API_BASE) return alert('Use server export on backend');
+      const t=iso(new Date());
+      window.location.href = `${API_BASE}/export/xlsx?date=${t}`;
+    });
+
+    // Search on plan page
+    (function attachSearch(){
+      const el=$('#search-input'); if(!el) return;
+      let t=null; el.addEventListener('input',(e)=>{
+        clearTimeout(t);
+        t=setTimeout(()=>{
+          const term=String(e.target.value||'').trim();
+          const wrap=$('#search-results');
+          if(!term){ wrap.classList.add('hidden'); wrap.innerHTML=''; return; }
+          const plan=state.plan, agg=aggregate(state.records); const rows=[];
+          const plannedPO=plan.filter(p=>String(p.po_number).trim()===term).reduce((s,p)=>s+Number(p.target_qty||0),0);
+          let appliedPO=0; for(const [k,v] of agg.byPO.entries()){ if(k===term) appliedPO+=v; }
+          if(plannedPO||appliedPO) rows.push({scope:'PO',planned:plannedPO,applied:appliedPO,pct:plannedPO>0?Math.round((appliedPO/plannedPO)*100):0});
+          const plannedSKU=plan.filter(p=>String(p.sku_code).trim()===term).reduce((s,p)=>s+Number(p.target_qty||0),0);
+          let appliedSKU=0; for(const [k,v] of agg.bySKU.entries()){ if(k===term) appliedSKU+=v; }
+          if(plannedSKU||appliedSKU) rows.push({scope:'SKU',planned:plannedSKU,applied:appliedSKU,pct:plannedSKU>0?Math.round((appliedSKU/plannedSKU)*100):0});
+          if(!rows.length){ wrap.classList.remove('hidden'); wrap.innerHTML='<div class="text-xs text-gray-500">No matches in this week.</div>'; return; }
+          wrap.classList.remove('hidden');
+          wrap.innerHTML = rows.map(r=>`<div class="bg-gray-50 rounded-xl p-3 border">
+                                           <div class="text-xs text-gray-500">${r.scope}</div>
+                                           <div class="text-sm mt-1">Planned: ${fmtInt(r.planned)} · Applied: ${fmtInt(r.applied)} · ${r.pct}%</div>
+                                         </div>`).join('');
+        },300);
+      });
+    })();
+
+    /* ---------- Intake Ops Tile wiring ---------- */
+    function todayISO(){ const d=new Date(); d.setHours(0,0,0,0); return d.toISOString().slice(0,10); }
+    function isoToMs(s){ const d=s?new Date(s):null; return d && !isNaN(d) ? d.getTime() : null; }
+    function summarize(records){
+      const now = Date.now(), oneHourAgo = now - 3600000, halfHourAgo = now - 1800000;
+      let scansToday=0, scansLastHour=0, ratePerHour=0, drafts=0, dupesToday=0;
+      const syncCounts = {}, seen = new Set();
+      for(const r of records || []){
+        const isToday = r.date_local === todayISO(); if(!isToday) continue;
+        if(r.status === 'complete'){
+          scansToday++;
+          const ct=isoToMs(r.completed_at);
+          if(ct && ct>=oneHourAgo) scansLastHour++;
+          if(ct && ct>=halfHourAgo) ratePerHour++;
+          if(r.sku_code && r.uid){
+            const k=r.sku_code+'|'+r.uid;
+            if(seen.has(k)) dupesToday++; else seen.add(k);
+          }
+        }else{ drafts++; }
+        const s=r.sync_state || 'unknown'; syncCounts[s] = (syncCounts[s]||0)+1;
+      }
+      return { scansToday, scansLastHour, ratePerHour: Math.round(ratePerHour*2), drafts, dupesToday, syncCounts };
+    }
+    function badgeHTML(text, tone){
+      let cls='ops-badge'; if(tone==='ok') cls+=' ok'; else if(tone==='warn') cls+=' warn'; else if(tone==='err') cls+=' err';
+      return `<span class="${cls}">${text}</span>`;
+    }
+    function toneForSync(name){ if(name==='synced') return 'ok'; if(name==='error'||name==='failed') return 'err'; if(name==='unknown') return 'warn'; return ''; }
+    function renderOpsMetrics(m){
+      $('#ops-today').textContent = (m.scansToday||0).toLocaleString();
+      $('#ops-hour').textContent  = (m.scansLastHour||0).toLocaleString();
+      $('#ops-rate').textContent  = (m.ratePerHour||0).toLocaleString();
+      $('#ops-drafts').textContent= (m.drafts||0).toLocaleString();
+      $('#ops-dupes').textContent = (m.dupesToday||0).toLocaleString();
+
+      const syncEl=$('#ops-sync-badges'); syncEl.innerHTML='';
+      Object.entries(m.syncCounts||{}).sort((a,b)=>b[1]-a[1]).forEach(([name,count])=>{
+        syncEl.insertAdjacentHTML('beforeend', badgeHTML(`${name}: ${count}`, toneForSync(name)));
       });
 
-      // tables
-      const poRows = joinPOProgress(state.plan, agg.byPO); renderPOProgress(poRows);
-      const riskPO = computeRisk(poRows.map(r=>({po:r.po,due:r.due,planned:r.planned,applied:r.applied})), we);
-      const perSKU=new Map(); for(const p of state.plan){const sku=String(p.sku_code||'').trim(); if(!sku) continue; const r=perSKU.get(sku)||{due:p.due_date,planned:0,applied:0}; r.planned+=Number(p.target_qty||0); if(r.due!==p.due_date) r.due = r.due < p.due_date ? r.due : p.due_date; perSKU.set(sku,r);}
-      for(const [sku,v] of agg.bySKU.entries()){const r=perSKU.get(sku)||{due:'',planned:0,applied:0}; r.applied+=v; perSKU.set(sku,r);}
-      const skuRows=Array.from(perSKU.entries()).map(([sku,r])=>({sku,due:r.due,planned:r.planned,applied:r.applied})); const riskSKU = computeRisk(skuRows.map(r=>({key:r.sku,due:r.due,planned:r.planned,applied:r.applied})), we);
-      renderRisk(riskPO,'#risk-po-body'); renderRisk(riskSKU,'#risk-sku-body');
-      renderInsights(state.records); renderOpsPulse(40,0);
+      const alerts=[];
+      if(m.drafts>0) alerts.push(`There ${m.drafts===1?'is':'are'} ${m.drafts} draft${m.drafts===1?'':'s'} to complete.`);
+      if(m.dupesToday>0) alerts.push(`${m.dupesToday} duplicate UID${m.dupesToday===1?'':'s'} detected today.`);
+      $('#ops-alerts').innerHTML = alerts.length ? alerts.map(t=>`<li>${t}</li>`).join('') : '<li style="color:#9ca3af">No alerts.</li>';
 
-      // downloads
-      $('#btn-dl-posku').onclick=()=>{const rows=buildDiscrepancyPOSKU(state.plan, state.records); const csv=toCSV(['PO','SKU','Planned','Applied','Discrepancy (Applied - Planned)'], rows); download(`po_sku_discrepancy_${ws}.csv`, csv, 'text/csv;charset=utf-8');};
-      $('#btn-dl-po').onclick=()=>{const rows=buildDiscrepancyPO(poRows); const csv=toCSV(['PO','Planned','Applied','Discrepancy (Applied - Planned)'], rows); download(`po_discrepancy_${ws}.csv`, csv, 'text/csv;charset=utf-8');};
-      $('#btn-exec').onclick=()=>{const html=buildExecHTML(ws,we,plannedTotal,appliedTotal,pct,riskPO,riskSKU); downloadDoc(`VAS_Executive_Summary_${ws}.doc`, html);};
+      $('#ops-last-updated').textContent = new Date().toLocaleTimeString();
+    }
+    async function loadOpsMetrics(){
+      if(!API_BASE) return;
+      try{
+        const url = `${API_BASE}/records?from=${todayISO()}&to=${todayISO()}&limit=2000`;
+        const r = await fetch(url, { credentials:'omit' });
+        if(!r.ok) throw new Error(await r.text());
+        const data = await r.json();
+        renderOpsMetrics(summarize(Array.isArray(data?.records)?data.records:[]));
+      }catch(e){ console.warn('Ops tile metrics load failed:', e); }
+    }
+    let es;
+    function openSSE(){
+      if(!API_BASE) return;
+      try{
+        es = new EventSource(`${API_BASE}/events/scan`);
+        $('#ops-dot').style.background = '#10b981'; // green
+        es.onmessage = () => loadOpsMetrics();
+        es.onerror = () => {
+          try{ es.close(); }catch{}
+          $('#ops-dot').style.background = '#f59e0b'; // amber
+          setTimeout(openSSE, 3000);
+        };
+      }catch{ setTimeout(openSSE, 3000); }
+    }
 
-    }catch(e){console.error(e); alert('Load failed: '+(e?.message||e));}
-  }
+    /* ---------- INIT ---------- */
+    (function init(){
+      const ws=iso(mondayOf()); $('#week-start').value=ws;
+      setWeek(ws);
+      show(location.hash||'#dashboard');
+      renderIntake();
+      renderOpsPulse(40,0);
 
-  // Intake mini system (unchanged core behavior)
-  function newRow(){return {id:crypto?.randomUUID?.()||Math.random().toString(36).slice(2),date_local:iso(new Date()),mobile_bin:'',sscc_label:'',po_number:'',sku_code:'',uid:'',status:'draft',_pending:{},sync:'unknown'};}
-  const intakeRows=[];
-  function isComplete(r){return !!(r.date_local && r.mobile_bin && r.po_number && r.sku_code && r.uid);}
-  function syncClass(s){return s==='synced'?'bg-green-500':(s==='pending'?'bg-amber-500':'bg-gray-400');}
-  async function saveCell(id,f,v){try{await api(`/records/${id}`,{method:'PATCH',body:{field:f,value:v}});}catch{} finally{markSynced(id,f);}}
-  function markSynced(id,f){const i=intakeRows.findIndex(x=>x.id===id); if(i<0)return; delete intakeRows[i]._pending[f]; intakeRows[i].sync = Object.keys(intakeRows[i]._pending).length? 'pending':'synced'; renderIntake();}
-  function renderIntake(){const tb=$('#intake-body'); tb.innerHTML=''; if(!intakeRows.length) intakeRows.push(newRow()); intakeRows.forEach((r,i)=>{const tr=document.createElement('tr'); tr.className=(r.status==='draft'?'bg-yellow-50':(i%2?'bg-gray-50':'bg-white')); const rowSyn=`<span class="inline-block w-2.5 h-2.5 rounded-full ${syncClass(r.sync)}" title="${r.sync}"></span>`; const rowStatus=isComplete(r)?'<span class="text-green-600 text-base">✓</span>':'<span class="text-gray-400 text-base">…</span>'; tr.innerHTML=`<td class="border px-2 py-2"><input class="w-full p-1 text-sm border-0 focus:ring-2 focus:ring-blue-300" value="${r.date_local}" data-id="${r.id}" data-f="date_local" /></td><td class="border px-2 py-2"><input class="w-full p-1 text-sm border-0 focus:ring-2 focus:ring-blue-300" value="${r.mobile_bin}" data-id="${r.id}" data-f="mobile_bin" /></td><td class="border px-2 py-2"><input class="w-full p-1 text-sm border-0 focus:ring-2 focus:ring-blue-300" value="${r.sscc_label}" data-id="${r.id}" data-f="sscc_label" /></td><td class="border px-2 py-2"><input class="w-full p-1 text-sm border-0 focus:ring-2 focus:ring-blue-300" value="${r.po_number}" data-id="${r.id}" data-f="po_number" /></td><td class="border px-2 py-2"><input class="w-full p-1 text-sm border-0 focus:ring-2 focus:ring-blue-300" value="${r.sku_code}" data-id="${r.id}" data-f="sku_code" /></td><td class="border px-2 py-2"><input class="w-full p-1 text-sm border-0 focus:ring-2 focus:ring-blue-300" value="${r.uid}" data-id="${r.id}" data-f="uid" /></td><td class="border px-2 py-2 text-center">${rowStatus}</td><td class="border px-2 py-2 text-center">${rowSyn}</td>`; tb.appendChild(tr);}); tb.querySelectorAll('input').forEach(inp=>{inp.addEventListener('change',e=>{const id=e.target.dataset.id, f=e.target.dataset.f, v=e.target.value; const i=intakeRows.findIndex(x=>x.id===id); if(i<0)return; intakeRows[i][f]=v; intakeRows[i]._pending[f]=true; intakeRows[i].status=isComplete(intakeRows[i])?'complete':'draft'; intakeRows[i].sync='pending'; saveCell(id,f,v); if(intakeRows[i].status==='complete' && !intakeRows[i]._addedNext){intakeRows[i]._addedNext=true; intakeRows.splice(i+1,0,newRow());} renderIntake();});});}
-
-  // Routing
-  function show(hash){$('#page-dashboard').classList.add('hidden'); $('#page-intake').classList.add('hidden'); if(hash==='#intake') $('#page-intake').classList.remove('hidden'); else $('#page-dashboard').classList.remove('hidden');}
-  window.addEventListener('hashchange',()=>show(location.hash||'#dashboard'));
-
-  // Upload/Zero hooks (client-side stubs that call your backend)
-  $('#btn-upload-plan').onclick=()=>$('#file-plan').click();
-  $('#file-plan').addEventListener('change', async (e)=>{const f=e.target.files?.[0]; if(!f) return; try{const fd=new FormData(); fd.append('file', f, f.name); const r=await fetch(`${API_BASE}/plan/upload`,{method:'POST', body:fd}); if(!r.ok) throw new Error(await r.text()); alert('Plan uploaded'); setWeek($('#week-start').value);}catch(err){alert('Upload failed: '+(err?.message||err));} finally{e.target.value='';}});
-  $('#btn-zero-plan').onclick=async()=>{if(!confirm('Zero out the current week plan?'))return; try{const ws=$('#week-start').value; const r=await fetch(`${API_BASE}/plan/weeks/${ws}/zero`,{method:'POST'}); if(!r.ok) throw new Error(await r.text()); alert('Plan zeroed'); setWeek(ws);}catch(err){alert('Zero failed: '+(err?.message||err));}};
-
-  // Intake Upload & Bulk Delete
-  $('#btn-upload-intake').onclick=()=>$('#file-intake').click();
-  $('#file-intake').addEventListener('change', async (e)=>{const f=e.target.files?.[0]; if(!f) return; try{const fd=new FormData(); fd.append('file', f, f.name); const r=await fetch(`${API_BASE}/intake/upload`,{method:'POST', body:fd}); if(!r.ok) throw new Error(await r.text()); alert('Intake uploaded');}catch(err){alert('Upload failed: '+(err?.message||err));} finally{e.target.value='';}});
-  $('#btn-bulk-del').onclick=()=>$('#file-del').click();
-  $('#file-del').addEventListener('change', async (e)=>{const f=e.target.files?.[0]; if(!f) return; const txt=await f.text(); const lines=txt.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n').filter(x=>x.trim()); if(!lines.length){alert('Empty CSV'); e.target.value=''; return;} const head=lines[0].split(',').map(s=>s.trim().toLowerCase()); let idxSku=head.indexOf('sku_code'); if(idxSku<0) idxSku=head.indexOf('sku'); const idxUid=head.indexOf('uid'); if(idxSku<0||idxUid<0){alert('CSV must have headers: uid, sku/sku_code'); e.target.value=''; return;} const pairs=lines.slice(1).map(l=>l.split(',')).map(r=>({uid:r[idxUid], sku_code:r[idxSku]})).filter(x=>x.uid&&x.sku_code); if(!pairs.length){alert('No UID+SKU rows found.'); e.target.value=''; return;} if(!confirm(`Delete ${pairs.length} record(s) by UID+SKU? This cannot be undone.`)){e.target.value=''; return;} let ok=0, fail=0; for(const p of pairs){let res=await fetch(`${API_BASE}/records?uid=${encodeURIComponent(p.uid)}&sku_code=${encodeURIComponent(p.sku_code)}`,{method:'DELETE'}); if(!res.ok){res=await fetch(`${API_BASE}/records/delete`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});} res.ok?ok++:fail++;} alert(`Delete finished: ${ok} ok, ${fail} failed`); e.target.value='';});
-
-  // Intake add row
-  $('#btn-add-row').onclick=()=>{intakeRows.push(newRow()); renderIntake();};
-
-  // INIT
-  (function(){
-    const ws=iso(mondayOf()); $('#week-start').value=ws; setWeek(ws); show(location.hash||'#dashboard'); renderIntake(); renderOpsPulse(40,0);
-    // search
-    let t=null; $('#search-input').addEventListener('input',(e)=>{clearTimeout(t); t=setTimeout(()=>{const term=String(e.target.value||'').trim(); const wrap=$('#search-results'); if(!term){wrap.classList.add('hidden'); wrap.innerHTML=''; return;} const plan=state.plan, agg=aggregate(state.records); const rows=[]; const plannedPO=plan.filter(p=>String(p.po_number).trim()===term).reduce((s,p)=>s+Number(p.target_qty||0),0); let appliedPO=0; for(const [k,v] of agg.byPO.entries()){if(k===term) appliedPO+=v;} if(plannedPO||appliedPO) rows.push({scope:'PO',planned:plannedPO,applied:appliedPO,pct:plannedPO>0?Math.round((appliedPO/plannedPO)*100):0}); const plannedSKU=plan.filter(p=>String(p.sku_code).trim()===term).reduce((s,p)=>s+Number(p.target_qty||0),0); let appliedSKU=0; for(const [k,v] of agg.bySKU.entries()){if(k===term) appliedSKU+=v;} if(plannedSKU||appliedSKU) rows.push({scope:'SKU',planned:plannedSKU,applied:appliedSKU,pct:plannedSKU>0?Math.round((appliedSKU/plannedSKU)*100):0}); if(!rows.length){wrap.classList.remove('hidden'); wrap.innerHTML='<div class="text-xs text-gray-500">No matches in this week.</div>'; return;} wrap.classList.remove('hidden'); wrap.innerHTML=rows.map(r=>`<div class="bg-gray-50 rounded-xl p-3 border"><div class="text-xs text-gray-500">${r.scope}</div><div class="text-sm mt-1">Planned: ${fmtInt(r.planned)} · Applied: ${fmtInt(r.applied)} · ${r.pct}%</div></div>`).join('');},300);});
-  })();
-</script>
+      // Ops tile route toggle + live updates
+      window.addEventListener('hashchange',()=> {
+        const onIntake = location.hash==='#intake' || location.hash.startsWith('#/intake');
+        $('#ops-tile').classList.toggle('ops-hidden', !onIntake);
+      });
+      loadOpsMetrics(); openSSE(); setInterval(loadOpsMetrics, 30000);
+    })();
+  </script>
 </body>
 </html>
