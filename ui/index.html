@@ -883,16 +883,45 @@ $('#file-plan').addEventListener('change', async (e) => {
     alert('Upload failed: ' + (err?.message || err));
   }
 });
-    $('#btn-zero-plan').onclick=async()=>{
-      if(!API_BASE) return alert('API not configured');
-      if(!confirm('Zero out the current week plan?'))return;
-      try{
-        const ws=$('#week-start').value;
-        const r=await fetch(`${API_BASE}/plan/weeks/${ws}/zero`,{method:'POST'});
-        if(!r.ok) throw new Error(await r.text());
-        alert('Plan zeroed'); setWeek(ws);
-      }catch(err){ alert('Zero failed: '+(err?.message||err)); }
-    };
+    $('#btn-zero-plan').onclick = async () => {
+  if (!API_BASE) return alert('API not configured');
+  const ws = $('#week-start').value; // e.g. "2025-09-29"
+
+  // 1) Preferred: explicit zero endpoint
+  try {
+    let r = await fetch(`${API_BASE}/plan/weeks/${ws}/zero`, { method: 'POST' });
+    if (r.ok) {
+      alert('Plan zeroed'); 
+      setWeek(ws);
+      return;
+    }
+    // if endpoint not found, fall through to fallback
+    if (r.status !== 404) {
+      const txt = await r.text().catch(()=>'');
+      throw new Error(txt || `Zero failed with status ${r.status}`);
+    }
+  } catch (e) {
+    // continue to fallback
+  }
+
+  // 2) Fallback: overwrite week with empty plan
+  try {
+    const r2 = await fetch(`${API_BASE}/plan/weeks/${ws}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify([]),
+    });
+    if (!r2.ok) {
+      const txt = await r2.text().catch(()=>'');
+      throw new Error(txt || `PUT empty plan failed with status ${r2.status}`);
+    }
+    alert('Plan zeroed'); 
+    setWeek(ws);
+  } catch (err) {
+    console.error(err);
+    alert('Zero failed: ' + (err?.message || err));
+  }
+};
 
     // Intake add row & export
     $('#btn-add-row').onclick=()=>{intakeRows.push(newRow()); renderIntake();};
