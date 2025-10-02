@@ -307,120 +307,93 @@
 
     $('#vo-today').textContent = new Date().toLocaleDateString();
 
-    /* ==== BULK DELETE from CSV (SKU_Code + UID) ==== */
-    try {
-      // Minimal CSV parser (handles quotes)
-      function parseCSV(text) {
-        const rows = [];
-        let i = 0, cell = '', cur = [], inQ = false;
-        while (i < text.length) {
-          const c = text[i++];
-          if (inQ) {
-            if (c === '"') { if (text[i] === '"') { cell += '"'; i++; } else { inQ = false; } }
-            else cell += c;
-          } else {
-            if (c === '"') inQ = true;
-            else if (c === ',') { cur.push(cell); cell = ''; }
-            else if (c === '\n') { cur.push(cell); rows.push(cur); cur = []; cell = ''; }
-            else if (c === '\r') { /* ignore */ }
-            else cell += c;
-          }
-        }
-        cur.push(cell); rows.push(cur);
-        if (rows.length && rows[0].length) rows[0][0] = (rows[0][0] || '').replace(/^\uFEFF/, '');
-        return rows.filter(r => r.join('').trim() !== '');
+/* ==== BULK DELETE from CSV (via /records/delete) ==== */
+try {
+  // CSV parser (kept so quoted commas work)
+  function parseCSV(text) {
+    const rows = [];
+    let i = 0, cell = '', cur = [], inQ = false;
+    while (i < text.length) {
+      const c = text[i++];
+      if (inQ) {
+        if (c === '"') { if (text[i] === '"') { cell += '"'; i++; } else { inQ = false; } }
+        else cell += c;
+      } else {
+        if (c === '"') inQ = true;
+        else if (c === ',') { cur.push(cell); cell = ''; }
+        else if (c === '\n') { cur.push(cell); rows.push(cur); cur = []; cell = ''; }
+        else if (c === '\r') { /* ignore */ }
+        else cell += c;
       }
-
-      function normalizeHeader(h) {
-        h = String(h || '').trim().toLowerCase();
-        if (h === 'sku' || h === 'sku code' || h === 'sku_code') return 'sku_code';
-        if (h === 'uid' || h === 'u_id') return 'uid';
-        return h;
-      }
-
-      async function bulkDeleteFromCSV(file) {
-        if (!API_BASE) return alert('API not configured');
-        if (!file) return;
-
-        // Read + parse CSV
-        const text = await file.text();
-        const rows = parseCSV(text);
-        if (rows.length < 2) return alert('CSV appears empty');
-
-        const header = rows[0].map(normalizeHeader);
-        const iSKU = header.findIndex(h => h === 'sku_code');
-        const iUID = header.findIndex(h => h === 'uid');
-        if (iSKU < 0 || iUID < 0) {
-          return alert('CSV must include headers for SKU_Code and UID (case-insensitive)');
-        }
-
-        // Collect unique pairs
-        const pairs = new Set();
-        for (let r = 1; r < rows.length; r++) {
-          const sku = String(rows[r][iSKU] || '').trim();
-          const uid = String(rows[r][iUID] || '').trim();
-          if (sku && uid) pairs.add(`${sku}|||${uid}`);
-        }
-        if (!pairs.size) return alert('No valid SKU+UID pairs found in CSV');
-
-        // Scope (today | week)
-        const scope = (prompt('Scope: type "today" or "week" (default: today)') || 'today').toLowerCase().trim();
-        const baseMonday = mondayOf(new Date());
-        const from = iso(scope === 'week' ? baseMonday : new Date());
-        const to   = scope === 'week' ? endISO(iso(baseMonday)) : iso(new Date());
-
-        if (!confirm(`Delete ALL records matching ${pairs.size} pairs between ${from} and ${to}? This cannot be undone.`)) {
-          return;
-        }
-
-        // Fetch records in scope
-        const listURL = `${API_BASE}/records?from=${from}&to=${to}&limit=50000`;
-        const listResp = await fetch(listURL);
-        if (!listResp.ok) throw new Error(await listResp.text());
-        const listData = await listResp.json();
-        const records = Array.isArray(listData?.records) ? listData.records : [];
-
-        // Filter matches to delete
-        const toDelete = records.filter(r => {
-          const sku = String(r?.sku_code || '').trim();
-          const uid = String(r?.uid || '').trim();
-          return sku && uid && pairs.has(`${sku}|||${uid}`);
-        });
-        if (!toDelete.length) return alert(`No matching records found for ${pairs.size} pairs.`);
-
-        // Delete in small batches (assumes DELETE /records/:id)
-        let ok = 0, fail = 0;
-        const batch = 50;
-        for (let i = 0; i < toDelete.length; i += batch) {
-          const slice = toDelete.slice(i, i + batch);
-          const res = await Promise.allSettled(
-            slice.map(r => fetch(`${API_BASE}/records/${r.id}`, { method: 'DELETE' }))
-          );
-          res.forEach(x => (x.status === 'fulfilled' && x.value.ok) ? ok++ : fail++);
-        }
-
-        alert(`Bulk Delete complete.\nPairs in CSV: ${pairs.size}\nDeleted records: ${ok}\nFailed: ${fail}`);
-
-        // Refresh UI (best-effort)
-        try { renderIntake(); } catch {}
-        try { loadOpsMetrics(); } catch {}
-      }
-
-      // Wire the UI: button → hidden file input
-      (function wireBulkDelete() {
-        const btn  = document.getElementById('btn-bulk-delete');
-        const file = document.getElementById('file-bulk-delete');
-        if (!btn || !file) return; // not on Intake yet? fine.
-        btn.addEventListener('click', () => file.click());
-        file.addEventListener('change', (e) => {
-          const f = e.target.files?.[0];
-          e.target.value = '';  // allow re-selecting same file later
-          bulkDeleteFromCSV(f);
-        });
-      })();
-    } catch (e) {
-      console.warn('Bulk delete temporarily disabled due to an error:', e);
     }
+    cur.push(cell); rows.push(cur);
+    if (rows.length && rows[0].length) rows[0][0] = (rows[0][0] || '').replace(/^\uFEFF/, '');
+    return rows.filter(r => r.join('').trim() !== '');
+  }
+
+  function normalizeHeader(h) {
+    h = String(h || '').trim().toLowerCase();
+    if (h === 'sku' || h === 'sku code' || h === 'sku_code') return 'sku_code';
+    if (h === 'uid' || h === 'u_id') return 'uid';
+    return h;
+  }
+
+  // NEW: send pairs directly to your backend bulk route
+  async function bulkDeleteFromCSV(file) {
+    if (!API_BASE) return alert('API not configured');
+    if (!file) return;
+
+    const text = await file.text();
+    const rows = parseCSV(text);
+    if (rows.length < 2) return alert('CSV appears empty');
+
+    const header = rows[0].map(normalizeHeader);
+    const iSKU = header.findIndex(h => h === 'sku_code');
+    const iUID = header.findIndex(h => h === 'uid');
+    if (iSKU < 0 || iUID < 0) {
+      return alert('CSV must include headers for sku_code and uid');
+    }
+
+    const pairs = rows.slice(1).map(r => ({
+      sku_code: String(r[iSKU] || '').trim(),
+      uid: String(r[iUID] || '').trim()
+    })).filter(p => p.sku_code && p.uid);
+
+    if (!pairs.length) return alert('No valid pairs found');
+    if (!confirm(`Delete ${pairs.length} records? This cannot be undone.`)) return;
+
+    const resp = await fetch(`${API_BASE}/records/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pairs)
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+
+    const data = await resp.json().catch(() => ({}));
+    const total = data.total_deleted ?? data.deleted ?? 0;
+    const errors = Array.isArray(data.results) ? data.results.filter(x => x && x.error).length : 0;
+
+    alert(`Bulk delete finished.\nDeleted: ${total}\nErrors: ${errors}`);
+
+    try { renderIntake(); } catch {}
+    try { loadOpsMetrics(); } catch {}
+  }
+
+  // Wire the button → hidden file input
+  (function wireBulkDelete() {
+    const btn  = document.getElementById('btn-bulk-delete');
+    const file = document.getElementById('file-bulk-delete');
+    if (!btn || !file) return;
+    btn.addEventListener('click', () => file.click());
+    file.addEventListener('change', (e) => {
+      const f = e.target.files?.[0];
+      e.target.value = ''; // allow re-selecting the same file
+      bulkDeleteFromCSV(f);
+    });
+  })();
+} catch (e) {
+  console.warn('Bulk delete temporarily disabled due to an error:', e);
+} 
 
     /* ---------- Helpers ---------- */
     function createHeart(size=24, color=BRAND, bpm=40){
