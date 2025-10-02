@@ -16,15 +16,18 @@ export default function App() {
   return (
     <>
       <header>
-        <strong>velOzity Ops</strong>
-        <a href="#/intake" onClick={(e) => { e.preventDefault(); nav('#/intake'); }}
-           className={current.startsWith('#/intake') ? 'active' : ''}>Intake</a>
-        <a href="#/plan" onClick={(e) => { e.preventDefault(); nav('#/plan'); }}
-           className={current.startsWith('#/plan') ? 'active' : ''}>Plan</a>
-        <span className="right muted badge">
-          ENV: {(import.meta as any).env?.VITE_API_BASE ? 'Remote' : 'Local'}
-        </span>
+        <div className="container">{/* align header with body */}
+          <strong>velOzity Ops</strong>
+          <a href="#/intake" onClick={(e) => { e.preventDefault(); nav('#/intake'); }}
+             className={current.startsWith('#/intake') ? 'active' : ''}>Intake</a>
+          <a href="#/plan" onClick={(e) => { e.preventDefault(); nav('#/plan'); }}
+             className={current.startsWith('#/plan') ? 'active' : ''}>Plan</a>
+          <span className="right muted badge">
+            ENV: {(import.meta as any).env?.VITE_API_BASE ? 'Remote' : 'Local'}
+          </span>
+        </div>
       </header>
+
       <div className="container"><Page /></div>
     </>
   );
