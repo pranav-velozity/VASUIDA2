@@ -228,12 +228,12 @@
 
           <!-- Throughput -->
           <div class="flex items-center gap-3 border rounded-lg p-3">
-            <span class="inline-block w-5 h-5 rounded-full bg-rose-600 heartbeat"></span>
-            <div>
-              <div class="text-xs text-gray-500">Throughput / hr (last 30m)</div>
-              <div class="text-2xl font-bold tabular-nums" id="ops-rate">0</div>
-            </div>
-          </div>
+  <span id="ops-heart-small"></span>
+  <div>
+    <div class="text-xs text-gray-500">Throughput / hr (last 30m)</div>
+    <div class="text-2xl font-bold tabular-nums" id="ops-rate">0</div>
+  </div>
+</div>
 
           <!-- Data Quality -->
           <div class="border rounded-lg p-3">
@@ -395,9 +395,26 @@
         r.appendChild(btn);
       });
     }
-    function renderOpsPulse(bpm=40, extra=0){
-      const wrap=$('#ops-heart'); if(wrap){ wrap.innerHTML=''; wrap.appendChild(createHeart(24,BRAND,bpm)); $('#ops-bpm').textContent=bpm; $('#ops-extra').textContent=`+${Math.max(0,extra)} over 40`; }
-      const mini=$('#intake-bpm'); if(mini) mini.textContent=bpm;
+    function renderOpsPulse(bpm = 40, extra = 0) {
+  // Main Ops Pulse (dashboard KPI)
+  const wrap = $('#ops-heart');
+  if (wrap) {
+    wrap.innerHTML = '';
+    wrap.appendChild(createHeart(24, BRAND, bpm));
+    $('#ops-bpm').textContent = bpm;
+    $('#ops-extra').textContent = `+${Math.max(0, extra)} over 40`;
+  }
+
+  // Mini heart in Intake ribbon "Throughput / hr" tile
+  const miniWrap = $('#ops-heart-small');   // <span id="ops-heart-small"></span>
+  if (miniWrap) {
+    miniWrap.innerHTML = '';
+    miniWrap.appendChild(createHeart(16, BRAND, bpm)); // #990033 via BRAND
+  }
+
+  // Small bpm label in Intake header
+  const mini = $('#intake-bpm');
+  if (mini) mini.textContent = bpm;
     }
     function renderPOProgress(rows){
       const b=$('#po-progress-body'); b.innerHTML='';
