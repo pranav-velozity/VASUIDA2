@@ -787,17 +787,102 @@ try {
     window.addEventListener('hashchange',()=>show(location.hash||'#dashboard'));
 
     // Buttons & uploads
-    $('#btn-upload-plan').onclick=()=>$('#file-plan').click();
-    $('#file-plan').addEventListener('change', async (e)=>{
-      const f=e.target.files?.[0]; if(!f || !API_BASE) return;
-      try{
-        const fd=new FormData(); fd.append('file', f, f.name);
-        const r=await fetch(`${API_BASE}/plan/upload`,{method:'POST', body:fd});
-        if(!r.ok) throw new Error(await r.text());
-        alert('Plan uploaded'); setWeek($('#week-start').value);
-      }catch(err){ alert('Upload failed: '+(err?.message||err)); }
-      finally{ e.target.value=''; }
+   // Upload Plan => parse CSV => PUT /plan/weeks/:mondayISO
+$('#btn-upload-plan').onclick = () => $('#file-plan').click();
+$('#file-plan').addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = ''; // allow selecting the same file again later
+  if (!file) return;
+  if (!API_BASE) return alert('API not configured');
+
+  try {
+    const text = await file.text();
+    const rows = parseCSV(text); // uses the CSV parser already in your file
+    if (!rows.length) return alert('CSV appears empty');
+
+    // ---- Map headers (case-insensitive) ----
+    const norm = (s) => String(s || '').trim().toLowerCase();
+    const header = rows[0].map(norm);
+
+    // Accept common aliases
+    const idx = {
+      po_number:  header.findIndex(h => ['po', 'po_number', 'po#', 'po no', 'po number'].includes(h)),
+      sku_code:   header.findIndex(h => ['sku', 'sku_code', 'sku code'].includes(h)),
+      start_date: header.findIndex(h => ['start', 'start_date', 'start date', 'week_start', 'week start'].includes(h)),
+      due_date:   header.findIndex(h => ['due', 'due_date', 'due date', 'end', 'end_date'].includes(h)),
+      target_qty: header.findIndex(h => ['target', 'target_qty', 'target qty', 'qty', 'quantity', 'plan', 'planned'].includes(h)),
+      priority:   header.findIndex(h => ['priority', 'prio'].includes(h)),
+      notes:      header.findIndex(h => ['notes', 'note', 'comments', 'comment'].includes(h)),
+    };
+
+    // require minimum fields
+    if (idx.po_number < 0 || idx.sku_code < 0 || idx.due_date < 0) {
+      return alert('CSV must include columns for PO, SKU and Due Date (case-insensitive).');
+    }
+
+    // helper to normalize date strings to YYYY-MM-DD
+    const toISO = (v) => {
+      v = String(v || '').trim();
+      if (!v) return '';
+      // try to parse dd/mm/yyyy, mm/dd/yyyy, yyyy-mm-dd
+      // if it already looks like yyyy-mm-dd, keep it
+      if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+      const d = new Date(v);
+      if (!isNaN(d)) return d.toISOString().slice(0,10);
+      // try dd-mm-yyyy
+      const m = v.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+      if (m) {
+        const [ , a, b, c ] = m;
+        const yyyy = c.length === 2 ? '20' + c : c;
+        // assume input is dd-mm-yyyy; swap if needed for US imports
+        const iso = new Date(`${yyyy}-${b.padStart(2,'0')}-${a.padStart(2,'0')}`);
+        if (!isNaN(iso)) return iso.toISOString().slice(0,10);
+      }
+      return ''; // fallback empty
+    };
+
+    const weekStart = $('#week-start').value || toISO(rows[1]?.[idx.start_date] || '') || iso(mondayOf(new Date()));
+    const payload = [];
+
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r || r.every(x => String(x||'').trim()==='')) continue;
+
+      const rec = {
+        po_number:  String(r[idx.po_number]  || '').trim(),
+        sku_code:   String(r[idx.sku_code]   || '').trim(),
+        start_date: idx.start_date >= 0 ? toISO(r[idx.start_date]) : weekStart,
+        due_date:   toISO(r[idx.due_date]),
+        target_qty: Number(String(r[idx.target_qty] || '0').replace(/,/g,'').trim()) || 0,
+      };
+      if (idx.priority >= 0) rec.priority = String(r[idx.priority] || '').trim() || undefined;
+      if (idx.notes    >= 0) rec.notes    = String(r[idx.notes]    || '').trim() || undefined;
+
+      // minimal validation
+      if (rec.po_number && rec.sku_code && rec.due_date) {
+        payload.push(rec);
+      }
+    }
+
+    if (!payload.length) return alert('No valid plan rows found in CSV.');
+
+    // PUT to weekly plan API
+    const url = `${API_BASE}/plan/weeks/${weekStart}`;
+    const resp = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     });
+    if (!resp.ok) throw new Error(await resp.text());
+    const saved = await resp.json();
+
+    alert(`Plan uploaded: ${saved.length} rows → Week ${weekStart}`);
+    setWeek(weekStart); // refresh dashboard
+  } catch (err) {
+    console.error(err);
+    alert('Upload failed: ' + (err?.message || err));
+  }
+});
     $('#btn-zero-plan').onclick=async()=>{
       if(!API_BASE) return alert('API not configured');
       if(!confirm('Zero out the current week plan?'))return;
