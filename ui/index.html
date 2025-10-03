@@ -203,7 +203,7 @@
         <div class="flex items-center gap-2">
           <button id="btn-load-day" class="px-3 py-2 rounded-lg text-sm border">Load Today</button>
           <button id="btn-export-day" class="px-3 py-2 rounded-lg text-sm border">Export XLSX</button>
-<button id="btn-upload-applied" class="px-3 py-2 rounded-lg text-sm border">Upload Applied</button>
+<button id="btn-upload-applied" class="px-3 py-2 rounded-lg text-sm border">Upload UIDs</button>
 <input id="file-upload-applied" type="file" accept=".xlsx,.csv" class="hidden" />
           <!-- Bulk Delete trigger + hidden CSV input -->
           <button id="btn-bulk-delete" class="px-3 py-2 rounded-lg text-sm border border-rose-700 text-rose-700">Bulk Delete</button>
@@ -309,6 +309,27 @@
     const $  = (s)=>document.querySelector(s);
     const fmtInt = (n)=>Number(n||0).toLocaleString();
 
+function parseCSV(text) {
+  const rows = [];
+  let i = 0, cell = '', cur = [], inQ = false;
+  while (i < text.length) {
+    const c = text[i++];
+    if (inQ) {
+      if (c === '"') { if (text[i] === '"') { cell += '"'; i++; } else { inQ = false; } }
+      else cell += c;
+    } else {
+      if (c === '"') inQ = true;
+      else if (c === ',') { cur.push(cell); cell = ''; }
+      else if (c === '\n') { cur.push(cell); rows.push(cur); cur = []; cell = ''; }
+      else if (c === '\r') { /* ignore */ }
+      else cell += c;
+    }
+  }
+  cur.push(cell); rows.push(cur);
+  if (rows.length && rows[0].length) rows[0][0] = (rows[0][0] || '').replace(/^\uFEFF/, '');
+  return rows.filter(r => r.join('').trim() !== '');
+}
+
 // === Helpers for "Upload UIDs" ===
 
 // Convert a CSV string to [{Col1:val,...}]
@@ -347,27 +368,6 @@ function normalizeAppliedRow(r){
 
 /* ==== BULK DELETE from CSV (via /records/delete) ==== */
 try {
-  // CSV parser (kept so quoted commas work)
-  function parseCSV(text) {
-    const rows = [];
-    let i = 0, cell = '', cur = [], inQ = false;
-    while (i < text.length) {
-      const c = text[i++];
-      if (inQ) {
-        if (c === '"') { if (text[i] === '"') { cell += '"'; i++; } else { inQ = false; } }
-        else cell += c;
-      } else {
-        if (c === '"') inQ = true;
-        else if (c === ',') { cur.push(cell); cell = ''; }
-        else if (c === '\n') { cur.push(cell); rows.push(cur); cur = []; cell = ''; }
-        else if (c === '\r') { /* ignore */ }
-        else cell += c;
-      }
-    }
-    cur.push(cell); rows.push(cur);
-    if (rows.length && rows[0].length) rows[0][0] = (rows[0][0] || '').replace(/^\uFEFF/, '');
-    return rows.filter(r => r.join('').trim() !== '');
-  }
 
   function normalizeHeader(h) {
     h = String(h || '').trim().toLowerCase();
@@ -961,20 +961,6 @@ $('#file-plan').addEventListener('change', async (e) => {
   }
 };
 
-    // Intake add row & export
-    $('#btn-add-row').onclick=()=>{intakeRows.push(newRow()); renderIntake();};
-    $('#btn-load-day')?.addEventListener('click', async ()=>{
-      if(!API_BASE) return alert('API not configured');
-      const t=iso(new Date());
-      const data=await api(`/records?from=${t}&to=${t}&limit=2000`).catch(()=>({records:[]}));
-      console.log('Loaded records today:', data);
-      alert('Fetched today\'s records (see console).');
-    });
-    $('#btn-export-day')?.addEventListener('click', ()=>{
-      if(!API_BASE) return alert('Use server export on backend');
-      const t=iso(new Date());
-      window.location.href = `${API_BASE}/export/xlsx?date=${t}`;
-    });
 
 // Intake add row & export
 $('#btn-add-row').onclick=()=>{intakeRows.push(newRow()); renderIntake();};
