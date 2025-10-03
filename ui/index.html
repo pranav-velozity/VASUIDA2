@@ -346,21 +346,32 @@ function rowsFromCSV(text){
 }
 
 // Map one spreadsheet row to backend record shape
-function normalizeAppliedRow(r){
-  const pick = (k, ...alts) => {
-    for (const key of [k, ...alts]) {
-      if (r[key] != null && String(r[key]).trim() !== '') return String(r[key]).trim();
+function normalizeUploadRow(row) {
+  // Build a case/space-normalized lookup for the row once
+  const norm = {};
+  for (const k in row) {
+    if (!Object.prototype.hasOwnProperty.call(row, k)) continue;
+    norm[String(k).toLowerCase().trim()] = row[k];
+  }
+  const pick = (...names) => {
+    for (const name of names) {
+      const v = norm[String(name).toLowerCase().trim()];
+      if (v != null && String(v).trim() !== '') return String(v).trim();
     }
     return '';
   };
+
   return {
-    date_local: pick('date','Date','DATE'),
+    id: randomUUID(),
+    date_local: pick('date_local','date','Date','DATE') || todayChicagoISO(),
     mobile_bin: pick('mobile_bin','Mobile Bin (BOX)','MOBILE_BIN'),
     sscc_label: pick('sscc_label','SSCC Label (BOX)','SSCC','SSCC_LABEL'),
     po_number:  pick('po_number','PO_Number','PO','PO#','PO Number'),
     sku_code:   pick('sku_code','SKU_Code','SKU','SKU Code'),
-    uid:        pick('uid','UID'),
+    uid:        pick('uid','UID','u_id','u id'),  // ← tolerant here too
     status: 'complete',
+    completed_at: new Date().toISOString(),
+    sync_state: 'synced'
   };
 }
 
