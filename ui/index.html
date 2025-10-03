@@ -754,26 +754,6 @@ function toIntakeRow(r){
       });
     }
 
-  // Rebuild local intakeRows from server state
-  intakeRows.length = 0;
-  for (const r of rows) {
-    intakeRows.push({
-      id:         r.id,
-      date_local: r.date_local || t,
-      mobile_bin: r.mobile_bin || '',
-      sscc_label: r.sscc_label || '',
-      po_number:  r.po_number  || '',
-      sku_code:   r.sku_code   || '',
-      uid:        r.uid        || '',
-      status:     r.status     || 'draft',
-      _pending:   {},
-      // treat completed/synced rows as synced in the UI
-      sync: (r.sync_state === 'synced' || r.status === 'complete') ? 'synced' : 'pending'
-    });
-  }
-  if (!intakeRows.length) intakeRows.push(newRow());  // keep one empty line if nothing yet
-  renderIntake();
-}
 
     /* ---------- Intake Ops Ribbon wiring ---------- */
     function todayISO(){ const d=new Date(); d.setHours(0,0,0,0); return d.toISOString().slice(0,10); }
