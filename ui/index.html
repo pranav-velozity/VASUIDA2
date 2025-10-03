@@ -9,7 +9,7 @@
 
   <!-- Tailwind -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- SheetJS for XLSX parsing -->
+  <!-- SheetJS -->
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
 
   <style>
@@ -22,6 +22,13 @@
     .cell{width:100%;padding:.4rem .5rem;border:0;outline:none}
     .cell:focus{box-shadow:0 0 0 3px rgba(59,130,246,.25)}
     .th{font-size:.75rem;font-weight:600;color:#374151}
+    /* Shorter week capsule */
+    .wkcap{border-radius:12px;border:1px solid rgba(0,0,0,.12);padding:.55rem .75rem;width:86px}
+    .wkcap .m{font-size:10px}
+    .wkcap .d{font-size:16px;font-weight:700;line-height:1.1}
+    .wkcap .t{font-size:11px;margin-top:2px;color:#990033}
+    .wkcap .bar{height:6px;border-radius:9999px;background:#e5e7eb;overflow:hidden;margin-top:4px}
+    .wkcap .bar>div{height:6px;border-radius:9999px;background:#990033;width:0%}
   </style>
 </head>
 <body class="bg-gray-50 min-h-screen">
@@ -53,8 +60,15 @@
         </div>
       </div>
 
-      <!-- Capsules -->
-      <div id="capsules" class="hidden sm:flex items-center gap-3 mb-3"></div>
+      <!-- Capsules + Actions -->
+      <div class="mb-3 flex items-center justify-between gap-3">
+        <div id="capsules" class="hidden sm:flex items-center gap-3"></div>
+        <div class="flex flex-wrap gap-2">
+          <button id="btn-dl-posku" class="px-3 py-2 rounded-lg border text-sm">PO + SKU Discrepancy</button>
+          <button id="btn-dl-po"    class="px-3 py-2 rounded-lg border text-sm">PO Discrepancy</button>
+          <button id="btn-exec"     class="px-3 py-2 rounded-lg border text-sm bg-rose-700 text-white">Executive Summary</button>
+        </div>
+      </div>
 
       <!-- KPI tiles -->
       <div class="grid grid-cols-1 sm:grid-cols-5 gap-3 mb-3">
@@ -243,13 +257,13 @@
     </section>
   </main>
 
-  <!-- Footer health pill -->
+  <!-- Footer health pill (shows Applied this week) -->
   <div id="vo-footer" style="position:fixed;left:0;right:0;bottom:0;z-index:50;font-size:12px;background:transparent;padding:.5rem .75rem;display:flex;gap:.75rem;align-items:center;">
     <span id="health-pill" class="inline-flex items-center gap-2 px-3 py-1 rounded-full border bg-amber-100 text-amber-900 border-amber-300">
       <span id="health-dot" class="inline-block w-2 h-2 rounded-full bg-amber-500"></span>
       Health: <span id="vo-health" class="ml-1">n/a</span>
     </span>
-    <span id="vo-footer-text">Planned total is 0.</span>
+    <span id="vo-footer-text">Applied this week: 0</span>
   </div>
 
   <script>
@@ -257,109 +271,200 @@
   const apiBase = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/,'');
   const $ = (s)=>document.querySelector(s);
   $('#vo-today').textContent = new Date().toLocaleDateString();
-
-  // ---------- helpers ----------
   const iso=(d)=>d.toISOString().slice(0,10);
   const mondayOf=(d=new Date())=>{const x=new Date(d);const day=x.getDay();const diff=(day===0?-6:1)-day;x.setDate(x.getDate()+diff);x.setHours(0,0,0,0);return x;}
   const fmtInt=(n)=>Number(n||0).toLocaleString();
   function createHeart(size=24,color=BRAND,bpm=40){const s='http://www.w3.org/2000/svg',svg=document.createElementNS(s,'svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('width',size);svg.setAttribute('height',size);const p=document.createElementNS(s,'path');p.setAttribute('d','M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z');p.setAttribute('fill',color);svg.appendChild(p);svg.classList.add('heartbeat');svg.style.animationDuration=`${(60/Math.max(40,bpm)).toFixed(2)}s`;return svg;}
 
-  // ---------- API ----------
+  // API helpers
   const state={weekStart:iso(mondayOf()), plan:[], records:[]};
   async function api(path,opts={}){const r=await fetch(`${apiBase}${path}`,{method:opts.method||'GET',headers:{'Content-Type':'application/json'},body:opts.body?JSON.stringify(opts.body):undefined}); if(!r.ok) throw new Error(await r.text()); const ct=r.headers.get('content-type')||''; return ct.includes('json')?r.json():r.text();}
   async function fetchPlan(w){ if(!apiBase) return []; try{return await api(`/plan/weeks/${w}`);}catch{return [];} }
   async function fetchActuals(f,t){ if(!apiBase) return []; try{const d=await api(`/records?from=${f}&to=${t}&status=complete&limit=50000`); return d.records||[];}catch{return [];} }
 
-  // ---------- capsules ----------
-  function addDaysISO(s,days){const [y,m,d]=s.split('-').map(Number);const b=new Date(y,m-1,d);b.setDate(b.getDate()+days);return b.toISOString().slice(0,10)}
-  function renderCapsules(baseISO){
-    const r=$('#capsules'); if(!r) return;
-    r.classList.remove('hidden'); r.innerHTML='';
+  // ---------- Capsules ----------
+  function addDaysISO(s,days){const [y,m,d]=s.split('-').map(Number);const b=new Date(y,m-1,d);b.setDate(b.getDate()+days);return iso(b)}
+  function renderCapsules(baseISO, plannedTotal=0, appliedTotal=0){
+    const r=$('#capsules'); if(!r) return; r.classList.remove('hidden'); r.innerHTML='';
     const list=[-7,0,7,14,21].map(n=>addDaysISO(baseISO,n));
     list.forEach(id=>{
       const d=new Date(id+'T00:00:00');
       const day=String(d.getDate()).padStart(2,'0');
       const mon=d.toLocaleString('en-US',{month:'short'}).toUpperCase().slice(0,3);
-      const btn=document.createElement('button');
-      btn.className='rounded-xl border px-3 py-2 w-[96px] text-left bg-white hover:scale-[1.02] transition';
-      btn.style.borderColor = (id===state.weekStart? BRAND : 'rgba(0,0,0,.12)');
-      btn.innerHTML=`<div class="text-[10px]" style="color:${id===state.weekStart?BRAND:'#6b7280'}">${mon}</div>
-                     <div class="text-lg font-semibold leading-5">${day}</div>
-                     <div id="cap-total-${id}" class="text-[11px] mt-0.5" style="color:${BRAND}">0</div>
-                     <div class="mt-1 h-1.5 rounded-full bg-gray-200 overflow-hidden">
-                       <div id="cap-bar-${id}" class="h-1.5 rounded-full" style="width:0%;background:${BRAND}"></div>
-                     </div>`;
-      btn.onclick=()=>{ $('#week-start').value=id; setWeek(id); };
-      r.appendChild(btn);
+      const el=document.createElement('button'); el.className='wkcap bg-white hover:scale-[1.02] transition';
+      el.style.borderColor=(id===state.weekStart?BRAND:'rgba(0,0,0,.12)');
+      el.innerHTML=`<div class="m" style="color:${id===state.weekStart?BRAND:'#6b7280'}">${mon}</div>
+                    <div class="d">${day}</div>
+                    <div class="t" id="cap-total-${id}">${fmtInt(id===state.weekStart?plannedTotal:0)}</div>
+                    <div class="bar"><div id="cap-bar-${id}"></div></div>`;
+      el.onclick=()=>{ $('#week-start').value=id; setWeek(id); };
+      r.appendChild(el);
+      const p = plannedTotal>0 && id===state.weekStart ? Math.min(100, Math.round(appliedTotal*100/plannedTotal)) : 0;
+      const bar = el.querySelector(`#cap-bar-${id}`); if(bar) bar.style.width = `${p}%`;
     });
   }
 
-  // ---------- dashboard metrics ----------
-  function aggregate(records){const byPO=new Map(), bySKU=new Map(); for(const r of records){ if(r.status!=='complete') continue; const po=String(r.po_number||'').trim(), sku=String(r.sku_code||'').trim(); if(po) byPO.set(po,(byPO.get(po)||0)+1); if(sku) bySKU.set(sku,(bySKU.get(sku)||0)+1);} return {byPO,bySKU};}
-  function setFooterTiles(ws,we,plan,records){
-    const agg=aggregate(records);
-    const plannedTotal=(plan||[]).reduce((s,p)=>s+Number(p.target_qty||0),0);
-    const appliedTotal=Array.from(agg.byPO.values()).reduce((s,v)=>s+v,0);
-    const pct=plannedTotal>0?Math.round(appliedTotal*100/plannedTotal):(plan.length?0:100);
-    $('#planned-range').textContent=`${ws} – ${we}`;
-    $('#applied-range').textContent=`${ws} – ${we}`;
-    $('#planned-total').textContent=plannedTotal.toLocaleString();
-    $('#applied-total').textContent=appliedTotal.toLocaleString();
-    $('#pct-week').textContent=pct+'%';
-    $('#avg-week').textContent=appliedTotal.toLocaleString();
-    $('#avg-day').textContent=Math.round((appliedTotal||0)/7).toLocaleString();
+  // ---------- Aggregations ----------
+  function aggregate(records){const byPO=new Map(),bySKU=new Map(); for(const r of records){ if(r.status!=='complete') continue; const po=String(r.po_number||'').trim(), sku=String(r.sku_code||'').trim(); if(po) byPO.set(po,(byPO.get(po)||0)+1); if(sku) bySKU.set(sku,(bySKU.get(sku)||0)+1);} return {byPO,bySKU};}
+  function joinPOProgress(plan, byPO){
+    const map=new Map();
+    for(const p of plan||[]){ const po=String(p.po_number||'').trim(); if(!po) continue; const rec=map.get(po)||{due:p.due_date,planned:0,applied:0}; rec.planned+=Number(p.target_qty||0); if(rec.due!==p.due_date) rec.due = rec.due < p.due_date ? rec.due : p.due_date; map.set(po,rec); }
+    for(const [po,ap] of byPO.entries()){ const rec=map.get(po)||{due:'',planned:0,applied:0}; rec.applied+=ap; map.set(po,rec);}
+    const list=[]; for(const [po,rec] of map.entries()){ list.push({po,due:rec.due,planned:rec.planned,applied:rec.applied,pct:rec.planned>0?Math.round(rec.applied*100/rec.planned):100}); }
+    list.sort((a,b)=>String(a.due).localeCompare(String(b.due))); return list;
+  }
+  function computeRisk(rows, weekEndISO){
+    const end=new Date(weekEndISO+'T00:00:00'); const out=[];
+    for(const r of rows||[]){ const remaining=Math.max(0,(r.planned||0)-(r.applied||0)); const due=new Date((r.due||'')+'T00:00:00'); if(remaining>0 && r.due && due<=end){ out.push({key:r.po||r.sku||r.key,due_date:r.due,planned:r.planned||0,applied:r.applied||0,remaining,pct:r.planned>0?Math.round(r.applied*100/r.planned):0});}}
+    out.sort((a,b)=> b.remaining - a.remaining || (new Date(a.due_date)) - (new Date(b.due_date)) ); return out.slice(0,5);
   }
 
-  async function refreshDashboardTotals(){
-    if(!apiBase) return;
-    const ws=state.weekStart;
-    const start=new Date(ws+'T00:00:00Z');
-    const end=new Date(start); end.setDate(end.getDate()+7);
-
-    const res=await fetch(`${apiBase}/records?limit=50000`);
-    if(!res.ok) return;
-    const all=(await res.json()).records||[];
-
-    const inWeek=all.filter(r=>{
-      if(r.status!=='complete'||!r.completed_at) return false;
-      const t=new Date(r.completed_at).getTime();
-      return t>=start.getTime() && t<end.getTime();
+  // ---------- Dashboard render ----------
+  function renderPOProgress(rows){
+    const b=$('#po-progress-body'); b.innerHTML='';
+    if(!rows.length){b.innerHTML='<tr><td colspan="5" class="text-center text-xs text-gray-400 py-3">No data</td></tr>'; return;}
+    rows.forEach(r=>{
+      const tr=document.createElement('tr'); tr.className='odd:bg-gray-50';
+      tr.innerHTML=`<td class="py-1 pr-2">${r.po}</td>
+                    <td class="py-1 pr-2">${r.due?r.due.split('-').reverse().join('-'):''}</td>
+                    <td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.planned)}</td>
+                    <td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.applied)}</td>
+                    <td class="py-1 text-right tabular-nums">${r.pct}%</td>`;
+      b.appendChild(tr);
     });
-
-    const plannedTotal=(state.plan||[]).reduce((s,p)=>s+Number(p.target_qty||0),0);
-    const appliedTotal=inWeek.length;
-
-    const we = new Date(end); we.setDate(we.getDate()-1);
-    $('#planned-range').textContent = `${ws} – ${we.toISOString().slice(0,10)}`;
-    $('#applied-range').textContent = `${ws} – ${we.toISOString().slice(0,10)}`;
-    $('#planned-total').textContent = plannedTotal.toLocaleString();
-    $('#applied-total').textContent = appliedTotal.toLocaleString();
-    const pct = plannedTotal>0?Math.round(appliedTotal*100/plannedTotal):(state.plan.length?0:100);
-    $('#pct-week').textContent = pct+'%';
-
-    // footer pill
+  }
+  function renderRisk(list, id){
+    const b=$(id); b.innerHTML='';
+    if(!list.length){b.innerHTML='<tr><td colspan="6" class="text-center text-xs text-gray-400 py-3">No items at risk this week.</td></tr>'; return;}
+    list.forEach(r=>{
+      const tr=document.createElement('tr'); tr.className='odd:bg-gray-50';
+      tr.innerHTML=`<td class="py-1 pr-2 truncate" title="${r.key}">${r.key}</td>
+                    <td class="py-1 pr-2">${r.due_date?r.due_date.split('-').reverse().join('-'):''}</td>
+                    <td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.planned)}</td>
+                    <td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.applied)}</td>
+                    <td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.remaining)}</td>
+                    <td class="py-1 text-right tabular-nums">${r.pct}%</td>`;
+      b.appendChild(tr);
+    });
+  }
+  function setFooterHealth(pct, appliedWeek){
     const pill=$('#health-pill'), dot=$('#health-dot');
-    if(pill && dot){
-      pill.className='inline-flex items-center gap-2 px-3 py-1 rounded-full border '+
-        (pct>=100?'bg-green-100 text-green-900 border-green-300':(pct<80?'bg-rose-100 text-rose-900 border-rose-300':'bg-amber-100 text-amber-900 border-amber-300'));
-      dot.className='inline-block w-2 h-2 rounded-full '+(pct>=100?'bg-green-500':(pct<80?'bg-rose-500':'bg-amber-500'));
-      $('#vo-health').textContent = pct>=100?'Ahead-of-Plan':(pct<80?'At-Risk':'On-Plan');
-      $('#vo-footer-text').textContent = `Planned total is ${plannedTotal.toLocaleString()}. Week ${ws}–${we.toISOString().slice(0,10)}`;
+    let cls='bg-amber-100 text-amber-900 border-amber-300', d='bg-amber-500', label='On-Plan';
+    if(pct>=100){cls='bg-green-100 text-green-900 border-green-300'; d='bg-green-500'; label='Ahead-of-Plan';}
+    else if(pct<80){cls='bg-rose-100 text-rose-900 border-rose-300'; d='bg-rose-500'; label='At-Risk';}
+    pill.className='inline-flex items-center gap-2 px-3 py-1 rounded-full border '+cls;
+    dot.className='inline-block w-2 h-2 rounded-full '+d;
+    $('#vo-health').textContent=label;
+    $('#vo-footer-text').textContent=`Applied this week: ${fmtInt(appliedWeek)}`;
+  }
+
+  // ---------- Downloads ----------
+  function toCSV(header,rows){
+    const esc=v=>{v=String(v??''); return /[",\n]/.test(v)?('"'+v.replace(/"/g,'""')+'"'):v;}
+    const head=header.map(esc).join(','), body=rows.map(r=>header.map(h=>esc(r[h])).join(',')).join('\r\n');
+    return '\ufeff'+head+'\r\n'+body+'\r\n';
+  }
+  function buildDiscrepancyPOSKU(plan, records){
+    const byPS=new Map();
+    for(const r of records||[]){ if(r.status!=='complete') continue; const po=String(r.po_number||'').trim(), sku=String(r.sku_code||'').trim(); if(!po||!sku) continue; const k=`${po}|||${sku}`; byPS.set(k,(byPS.get(k)||0)+1); }
+    const seen=new Set(); const rows=[];
+    for(const p of plan||[]){ const po=String(p.po_number||'').trim(), sku=String(p.sku_code||'').trim(); if(!po||!sku) continue; const k=`${po}|||${sku}`; if(seen.has(k)) continue; seen.add(k);
+      const planned=Number(p.target_qty||0), applied=byPS.get(k)||0;
+      rows.push({'PO':po,'SKU':sku,'Planned':planned,'Applied':applied,'Discrepancy (Applied - Planned)':applied-planned});
     }
+    return rows;
+  }
+  function buildDiscrepancyPO(joined){
+    return (joined||[]).map(r=>({'PO':r.po,'Planned':r.planned||0,'Applied':r.applied||0,'Discrepancy (Applied - Planned)':(r.applied||0)-(r.planned||0)}));
+  }
+  function buildExecHTML(ws,we,pt,at,pct,topPO,topSKU){
+    const pretty=s=> (s||'').split('-').reverse().join('-');
+    const rowsPO=topPO.map(x=>`<tr><td>${x.key}</td><td style="text-align:right">${fmtInt(x.planned)}</td><td style="text-align:right">${fmtInt(x.applied)}</td><td style="text-align:right">${fmtInt(x.remaining)}</td><td style="text-align:right">${x.pct}%</td></tr>`).join('');
+    const rowsSKU=topSKU.map(x=>`<tr><td>${x.key}</td><td style="text-align:right">${fmtInt(x.planned)}</td><td style="text-align:right">${fmtInt(x.applied)}</td><td style="text-align:right">${fmtInt(x.remaining)}</td><td style="text-align:right">${x.pct}%</td></tr>`).join('');
+    return `<div style="font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111">
+      <h1 style="margin:0 0 8px;font-size:22px;color:${BRAND}">VAS Weekly Executive Summary</h1>
+      <div style="color:#555;font-size:12px;margin-bottom:16px">Week: ${pretty(ws)} – ${pretty(we)}</div>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
+        <tr>
+          <td style="padding:10px;border:1px solid #eee"><div style="font-size:12px;color:#666;margin-bottom:4px">Planned</div><div style="font-size:20px;font-weight:700">${fmtInt(pt)}</div></td>
+          <td style="padding:10px;border:1px solid #eee"><div style="font-size:12px;color:#666;margin-bottom:4px">Applied</div><div style="font-size:20px;font-weight:700">${fmtInt(at)}</div></td>
+          <td style="padding:10px;border:1px solid #eee"><div style="font-size:12px;color:#666;margin-bottom:4px">Completion</div><div style="font-size:20px;font-weight:700">${pct}%</div></td>
+        </tr>
+      </table>
+      <h2 style="font-size:16px;margin:16px 0 8px">PO Discrepancy Focus</h2>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr><th style="text-align:left;border-bottom:1px solid #eee;padding:6px 4px">PO #</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Planned</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Applied</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Rem</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">%</th></tr></thead>
+        <tbody>${rowsPO||`<tr><td colspan="5" style="color:#888;padding:10px 4px">No POs at risk this week.</td></tr>`}</tbody>
+      </table>
+      <h2 style="font-size:16px;margin:20px 0 8px">SKU Discrepancy Focus</h2>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr><th style="text-align:left;border-bottom:1px solid #eee;padding:6px 4px">SKU</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Planned</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Applied</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Rem</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">%</th></tr></thead>
+        <tbody>${rowsSKU||`<tr><td colspan="5" style="color:#888;padding:10px 4px">No SKUs at risk this week.</td></tr>`}</tbody>
+      </table>
+    </div>`;
   }
 
   // ---------- setWeek ----------
   async function setWeek(ws){
-    state.weekStart=ws; $('#week-start').value=ws; renderCapsules(ws);
-    const end = new Date(ws); end.setDate(end.getDate()+6);
-    const weISO = iso(end);
-    const [plan, recs] = await Promise.all([fetchPlan(ws), fetchActuals(ws,weISO)]);
+    state.weekStart=ws; $('#week-start').value=ws;
+    const weDate=new Date(ws); weDate.setDate(weDate.getDate()+6); const we=iso(weDate);
+    const [plan, recs] = await Promise.all([fetchPlan(ws), fetchActuals(ws,we)]);
     state.plan = Array.isArray(plan)?plan:[]; state.records = Array.isArray(recs)?recs:[];
-    setFooterTiles(ws,weISO,state.plan,state.records);
-    await refreshDashboardTotals();
+    const agg=aggregate(state.records);
+    const plannedTotal = state.plan.reduce((s,p)=> s + Number(p.target_qty||0), 0);
+    const appliedTotal = Array.from(agg.byPO.values()).reduce((s,v)=> s+v, 0);
+    const pct = plannedTotal>0? Math.round(appliedTotal*100/plannedTotal) : (state.plan.length?0:100);
+    $('#planned-range').textContent = `${ws} – ${we}`;
+    $('#applied-range').textContent = `${ws} – ${we}`;
+    $('#planned-total').textContent = fmtInt(plannedTotal);
+    $('#applied-total').textContent = fmtInt(appliedTotal);
+    $('#pct-week').textContent = `${pct}%`;
+    $('#avg-week').textContent = fmtInt(appliedTotal);
+    $('#avg-day').textContent = fmtInt(Math.round((appliedTotal||0)/7));
+    renderCapsules(ws, plannedTotal, appliedTotal);
+    setFooterHealth(pct, appliedTotal);
+
+    const poRows = joinPOProgress(state.plan, agg.byPO);
+    renderPOProgress(poRows);
+
+    const riskPO = computeRisk(poRows.map(r=>({po:r.po,due:r.due,planned:r.planned,applied:r.applied})), we);
+    // build per SKU progress
+    const perSKU=new Map();
+    for(const p of state.plan){
+      const sku=String(p.sku_code||'').trim(); if(!sku) continue;
+      const r=perSKU.get(sku)||{due:p.due_date,planned:0,applied:0};
+      r.planned+=Number(p.target_qty||0);
+      if(r.due!==p.due_date) r.due = r.due < p.due_date ? r.due : p.due_date;
+      perSKU.set(sku,r);
+    }
+    for(const [sku,v] of agg.bySKU.entries()){const r=perSKU.get(sku)||{due:'',planned:0,applied:0}; r.applied+=v; perSKU.set(sku,r);}
+    const skuRows=Array.from(perSKU.entries()).map(([sku,r])=>({key:sku,due:r.due,planned:r.planned,applied:r.applied}));
+    const riskSKU = computeRisk(skuRows, we);
+    renderRisk(riskPO,'#risk-po-body');
+    renderRisk(riskSKU,'#risk-sku-body');
+
+    // download buttons
+    $('#btn-dl-posku').onclick=()=>{
+      const rows=buildDiscrepancyPOSKU(state.plan, state.records);
+      const csv=toCSV(['PO','SKU','Planned','Applied','Discrepancy (Applied - Planned)'], rows);
+      const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download=`po_sku_discrepancy_${ws}.csv`; a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),250);
+    };
+    $('#btn-dl-po').onclick=()=>{
+      const rows=buildDiscrepancyPO(poRows);
+      const csv=toCSV(['PO','Planned','Applied','Discrepancy (Applied - Planned)'], rows);
+      const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download=`po_discrepancy_${ws}.csv`; a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),250);
+    };
+    $('#btn-exec').onclick=()=>{
+      const html=buildExecHTML(ws,we,plannedTotal,appliedTotal,pct,riskPO,riskSKU);
+      const blob=new Blob(['<!doctype html><meta charset="utf-8">'+html],{type:'application/msword'});
+      const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`VAS_Executive_Summary_${ws}.doc`; a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),250);
+    };
   }
 
-  // ---------- Plan uploads / zero ----------
+  // ---------- Plan upload / zero (unchanged) ----------
   $('#btn-upload-plan').onclick=()=>$('#file-plan').click();
   $('#file-plan').addEventListener('change', async (e)=>{
     const f=e.target.files?.[0]; e.target.value=''; if(!f||!apiBase) return;
@@ -389,7 +494,7 @@
     }catch(e){alert('Zero failed: '+(e.message||e))}
   };
 
-  // ---------- Intake table ----------
+  // ===================== INTAKE (same features you validated) =====================
   const intakeRows=[];
   function newRow(){return {id:crypto.randomUUID(), selected:false, date_local:iso(new Date()), mobile_bin:'', sscc_label:'', po_number:'', sku_code:'', uid:'', status:'draft', sync:'pending', _pending:{}};}
   function requiredFilled(r){return r.date_local && r.mobile_bin && r.po_number && r.sku_code && r.uid;}
@@ -458,14 +563,13 @@
       });
     });
 
-    // ribbon quick counts
+    // ribbon quick badges
     $('#ops-drafts').textContent = drafts;
     $('#ops-sync-badges').innerHTML =
       `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] border-green-200 bg-green-50 text-green-700">synced: ${synced}</span>
        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] border-amber-200 bg-amber-50 text-amber-700">pending: ${drafts}</span>`;
   }
 
-  // Add row / Delete selected
   $('#btn-add-row').onclick=()=>{intakeRows.push(newRow()); renderIntake();};
   $('#btn-delete-selected').onclick=async()=>{
     const selected=intakeRows.filter(r=>r.selected);
@@ -483,11 +587,9 @@
     renderIntake();
     await loadOpsMetrics(); await refreshDashboardTotals();
   };
-
-  // Export
   $('#btn-export-day').onclick=()=>{ if(!apiBase) return; const d=iso(new Date()); window.location=`${apiBase}/export/xlsx?date=${d}`; };
 
-  // Upload UIDs → table first → auto-save rows
+  // Upload UIDs → table → sync (unchanged)
   (function wireUploadUIDs(){
     const btn=$('#btn-upload-applied'), file=$('#file-upload-applied');
     btn.onclick=()=>file.click();
@@ -496,18 +598,16 @@
       try{
         let rows=[];
         if(/\.xlsx?$/i.test(f.name)){
-          const buf=await f.arrayBuffer(); const wb=XLSX.read(buf,{type:'array'}); const ws=wb.Sheets[wb.SheetNames[0]];
-          rows=XLSX.utils.sheet_to_json(ws,{defval:''});
+          const buf=await f.arrayBuffer(); const wb=XLSX.read(buf,{type:'array'}); const ws=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''}); rows=ws;
         }else{
           const text=await f.text(); const lines=text.split(/\r?\n/).filter(Boolean);
           const hdr=lines.shift().split(',').map(s=>s.trim()); rows=lines.map(l=>l.split(',')).map(c=>{const o={};hdr.forEach((h,i)=>o[h]=c[i]??'');return o;});
         }
         const normRow=(r)=>{const n={}; for(const k in r){n[k.toLowerCase().replace(/\s+/g,'_')]=r[k];}
-          const pick=(...names)=>{for(const x of names){const v=n[x]; if(v!=null && String(v).trim()!=='') return String(v).trim();} return '';}
-          const pickRaw=(...names)=>{for(const x of names){ if(x in n) return String(n[x]??''); } return '';};
-          return {date_local:pick('date_local','date'), mobile_bin:pick('mobile_bin','mobile_bin_(box)','mobile_bin_box','mobile_bin (box)'),
-                  sscc_label:pick('sscc_label','sscc_label_(box)','sscc','sscc_label (box)'), po_number:pick('po_number','po','po#'),
-                  sku_code:pick('sku_code','sku'), uid:pickRaw('uid','u_id','u id')}; };
+          const pick=(...a)=>{for(const x of a){const v=n[x]; if(v!=null && String(v).trim()!=='') return String(v).trim();} return '';}
+          const pickRaw=(...a)=>{for(const x of a){ if(x in n) return String(n[x]??''); } return '';}
+          return {date_local:pick('date_local','date'), mobile_bin:pick('mobile_bin','mobile_bin_(box)','mobile_bin (box)'), sscc_label:pick('sscc_label','sscc','sscc_label (box)'),
+                  po_number:pick('po_number','po','po#'), sku_code:pick('sku_code','sku'), uid:pickRaw('uid','u_id','u id')}; };
         const items = rows.map(normRow).filter(r=>r.po_number && r.sku_code && (r.uid!==''));
         if(!items.length) return alert('No valid rows found (need PO_Number, SKU_Code, UID).');
 
@@ -537,9 +637,8 @@
     });
   })();
 
-  // ---------- Ops metrics (use completed_at) ----------
+  // ---------- Ops metrics & Ops Pulse ----------
   function todayISO(){const d=new Date(); d.setHours(0,0,0,0); return iso(d);}
-  function isoMs(s){const d=new Date(s); return isNaN(d)?null:d.getTime();}
   async function loadOpsMetrics(){
     if(!apiBase) return;
     try{
@@ -566,10 +665,13 @@
       $('#ops-drafts').textContent=drafts.toLocaleString();
       $('#ops-dupes').textContent=dupes.toLocaleString();
       $('#ops-last-updated').textContent=new Date().toLocaleTimeString();
-      const bpm=Math.max(40,Math.min(160,rate*2));
+
+      // Ops Pulse (dashboard + intake mini)
+      const bpm=Math.max(40,Math.min(200,rate*2));
       $('#intake-bpm').textContent=bpm;
       const small=$('#ops-heart-small'); if(small){small.innerHTML=''; small.appendChild(createHeart(18,BRAND,bpm));}
-      const big=$('#ops-heart'); if(big){big.innerHTML=''; big.appendChild(createHeart(24,BRAND,bpm));}
+      const big=$('#ops-heart'); if(big){big.innerHTML=''; big.appendChild(createHeart(24,BRAND,bpm)); $('#ops-bpm').textContent=bpm; $('#ops-extra').textContent='+0 over 40';}
+
       const wrap=$('#ops-sync-badges'); if(wrap){wrap.innerHTML=''; Object.entries(syncCounts).sort((a,b)=>b[1]-a[1]).forEach(([name,count])=>{
         const span=document.createElement('span');
         span.className='inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] '+(name==='synced'?'border-green-200 bg-green-50 text-green-700':(name==='pending'?'border-amber-200 bg-amber-50 text-amber-700':'border-gray-200 bg-gray-50 text-gray-700'));
@@ -579,7 +681,6 @@
       $('#ops-alerts').innerHTML = alerts.length ? alerts.map(t=>`<li>${t}</li>`).join('') : '<li class="text-gray-400">No alerts.</li>';
     }catch(e){ console.warn('Ops ribbon metrics load failed:',e); }
   }
-
   function startSSE(){
     if(!apiBase) return;
     try{
@@ -590,19 +691,49 @@
     }catch{}
   }
 
-  // ---------- simple search card ----------
+  // ---------- Dashboard weekly refresh from completion timestamps ----------
+  async function refreshDashboardTotals(){
+    if(!apiBase) return;
+    const ws=state.weekStart;
+    const start=new Date(ws+'T00:00:00Z');
+    const end=new Date(start); end.setDate(end.getDate()+7);
+
+    const res=await fetch(`${apiBase}/records?limit=50000`);
+    if(!res.ok) return;
+    const all=(await res.json()).records||[];
+
+    const inWeek=all.filter(r=>{
+      if(r.status!=='complete'||!r.completed_at) return false;
+      const t=new Date(r.completed_at).getTime();
+      return t>=start.getTime() && t<end.getTime();
+    });
+
+    const appliedTotal=inWeek.length;
+    const plannedTotal=(state.plan||[]).reduce((s,p)=>s+Number(p.target_qty||0),0);
+    const pct = plannedTotal>0?Math.round(appliedTotal*100/plannedTotal):(state.plan.length?0:100);
+
+    $('#planned-total').textContent = plannedTotal.toLocaleString();
+    $('#applied-total').textContent = appliedTotal.toLocaleString();
+    $('#pct-week').textContent = pct+'%';
+    $('#avg-week').textContent = appliedTotal.toLocaleString();
+    $('#avg-day').textContent = Math.round((appliedTotal||0)/7).toLocaleString();
+    setFooterHealth(pct, appliedTotal);
+    renderCapsules(ws, plannedTotal, appliedTotal);
+  }
+
+  // ---------- Simple Search ----------
   (function attachSearch(){
-    const el=$('#search-input'); if(!el) return;
-    let t=null; el.addEventListener('input',(e)=>{
+    const el=$('#search-input'); if(!el) return; let t=null;
+    el.addEventListener('input',(e)=>{
       clearTimeout(t);
       t=setTimeout(()=>{
         const term=String(e.target.value||'').trim();
         const wrap=$('#search-results'); if(!term){wrap.classList.add('hidden'); wrap.innerHTML=''; return;}
-        const plan=state.plan, agg=aggregate(state.records); const rows=[];
-        const plannedPO=plan.filter(p=>String(p.po_number).trim()===term).reduce((s,p)=>s+Number(p.target_qty||0),0);
+        const agg=aggregate(state.records); const rows=[];
+        const plannedPO=state.plan.filter(p=>String(p.po_number).trim()===term).reduce((s,p)=>s+Number(p.target_qty||0),0);
         let appliedPO=0; for(const [k,v] of agg.byPO.entries()){ if(k===term) appliedPO+=v; }
         if(plannedPO||appliedPO) rows.push({scope:'PO',planned:plannedPO,applied:appliedPO,pct:plannedPO>0?Math.round((appliedPO/plannedPO)*100):0});
-        const plannedSKU=plan.filter(p=>String(p.sku_code).trim()===term).reduce((s,p)=>s+Number(p.target_qty||0),0);
+        const plannedSKU=state.plan.filter(p=>String(p.sku_code).trim()===term).reduce((s,p)=>s+Number(p.target_qty||0),0);
         let appliedSKU=0; for(const [k,v] of agg.bySKU.entries()){ if(k===term) appliedSKU+=v; }
         if(plannedSKU||appliedSKU) rows.push({scope:'SKU',planned:plannedSKU,applied:appliedSKU,pct:plannedSKU>0?Math.round((appliedSKU/plannedSKU)*100):0});
         wrap.classList.remove('hidden');
@@ -611,13 +742,13 @@
     });
   })();
 
-  // ---------- init ----------
+  // ---------- Routing & Init ----------
   (function init(){
-    const ws=iso(mondayOf()); $('#week-start').value=ws; setWeek(ws);
-    // routing
+    const ws=iso(mondayOf()); $('#week-start').value=ws;
+    setWeek(ws);
     function show(hash){ $('#page-dashboard').classList.add('hidden'); $('#page-intake').classList.add('hidden'); (hash==='#intake'?$('#page-intake'):$('#page-dashboard')).classList.remove('hidden'); }
     window.addEventListener('hashchange',()=>show(location.hash||'#dashboard')); show(location.hash||'#dashboard');
-    // intake
+    // intake scaffold
     renderIntake();
     // hearts / metrics
     $('#ops-heart').appendChild(createHeart(24,BRAND,40));
