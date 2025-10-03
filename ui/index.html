@@ -703,6 +703,24 @@ try {
     function syncClass(s){return s==='synced'?'bg-green-500':(s==='pending'?'bg-amber-500':'bg-gray-400');}
     async function saveCell(id,f,v){try{ if(!API_BASE) return; await api(`/records/${id}`,{method:'PATCH',body:{field:f,value:v}});}catch{} finally{markSynced(id,f);}}
     function markSynced(id,f){const i=intakeRows.findIndex(x=>x.id===id); if(i<0)return; delete intakeRows[i]._pending[f]; intakeRows[i].sync = Object.keys(intakeRows[i]._pending).length? 'pending':'synced'; renderIntake();}
+
+// Turn a server record into an editable intake row
+function toIntakeRow(r){
+  return {
+    id: r.id,
+    date_local: r.date_local || iso(new Date()),
+    mobile_bin: r.mobile_bin || '',
+    sscc_label: r.sscc_label || '',
+    po_number:  r.po_number  || '',
+    sku_code:   r.sku_code   || '',
+    uid:        r.uid        || '',
+    status:     r.status || (isComplete(r) ? 'complete' : 'draft'),
+    _pending:   {},
+    // show a green dot for anything that already lives on the server
+    sync:       'synced'
+  };
+}
+
     function renderIntake(){
       const tb=$('#intake-body'); tb.innerHTML='';
       if(!intakeRows.length) intakeRows.push(newRow());
@@ -735,6 +753,35 @@ try {
         });
       });
     }
+
+<script>
+async function refreshIntakeFromServerToday(){
+  if (!API_BASE) return;
+  const t = iso(new Date());
+  const data = await api(`/records?from=${t}&to=${t}&limit=2000`).catch(()=>({records:[]}));
+  const rows = Array.isArray(data?.records) ? data.records : [];
+
+  // Rebuild local intakeRows from server state
+  intakeRows.length = 0;
+  for (const r of rows) {
+    intakeRows.push({
+      id:         r.id,
+      date_local: r.date_local || t,
+      mobile_bin: r.mobile_bin || '',
+      sscc_label: r.sscc_label || '',
+      po_number:  r.po_number  || '',
+      sku_code:   r.sku_code   || '',
+      uid:        r.uid        || '',
+      status:     r.status     || 'draft',
+      _pending:   {},
+      // treat completed/synced rows as synced in the UI
+      sync: (r.sync_state === 'synced' || r.status === 'complete') ? 'synced' : 'pending'
+    });
+  }
+  if (!intakeRows.length) intakeRows.push(newRow());  // keep one empty line if nothing yet
+  renderIntake();
+}
+</script>
 
     /* ---------- Intake Ops Ribbon wiring ---------- */
     function todayISO(){ const d=new Date(); d.setHours(0,0,0,0); return d.toISOString().slice(0,10); }
@@ -964,12 +1011,23 @@ $('#file-plan').addEventListener('change', async (e) => {
 
 // Intake add row & export
 $('#btn-add-row').onclick=()=>{intakeRows.push(newRow()); renderIntake();};
+async function refreshIntakeFromServerToday(){
+  if(!API_BASE) return;
+  const t = iso(new Date());
+  const data = await api(`/records?from=${t}&to=${t}&limit=2000`).catch(()=>({records:[]}));
+  const rows = Array.isArray(data?.records) ? data.records : [];
+  // Replace the client-side table with today's server rows
+  intakeRows.length = 0;
+  rows.forEach(r => intakeRows.push(toIntakeRow(r)));
+  if (intakeRows.length === 0) intakeRows.push(newRow());
+  renderIntake();
+  renderOpsMetrics(summarize(rows));
+}
+
 $('#btn-load-day')?.addEventListener('click', async ()=>{
   if(!API_BASE) return alert('API not configured');
-  const t=iso(new Date());
-  const data=await api(`/records?from=${t}&to=${t}&limit=2000`).catch(()=>({records:[]}));
-  console.log('Loaded records today:', data);
-  alert('Fetched today\'s records (see console).');
+  await refreshIntakeFromServerToday();
+  alert(`Loaded ${intakeRows.length} row(s) from server for today.`);
 });
 $('#btn-export-day')?.addEventListener('click', ()=>{
   if(!API_BASE) return alert('Use server export on backend');
@@ -1045,8 +1103,9 @@ $('#btn-export-day')?.addEventListener('click', ()=>{
         alert(`Upload complete. Rows sent: ${payload.length}`);
       }
 
+      // ⬇️ refresh Intake from server so the table shows saved rows (synced)
+      try { await refreshIntakeFromServerToday(); } catch {}
       try { loadOpsMetrics(); } catch {}
-      try { renderIntake();   } catch {}
     } catch (err) {
       console.error(err);
       alert('Upload failed: ' + (err?.message || err));
