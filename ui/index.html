@@ -35,6 +35,8 @@
       color: inherit;           /* inherit page color */
     }
   </style>
+<!-- SheetJS (needed for parsing .xlsx) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 </head>
 
 <body class="bg-gray-50 min-h-screen">
@@ -201,6 +203,8 @@
         <div class="flex items-center gap-2">
           <button id="btn-load-day" class="px-3 py-2 rounded-lg text-sm border">Load Today</button>
           <button id="btn-export-day" class="px-3 py-2 rounded-lg text-sm border">Export XLSX</button>
+<button id="btn-upload-applied" class="px-3 py-2 rounded-lg text-sm border">Upload Applied</button>
+<input id="file-upload-applied" type="file" accept=".xlsx,.csv" class="hidden" />
           <!-- Bulk Delete trigger + hidden CSV input -->
           <button id="btn-bulk-delete" class="px-3 py-2 rounded-lg text-sm border border-rose-700 text-rose-700">Bulk Delete</button>
           <input id="file-bulk-delete" type="file" accept=".csv" class="hidden" />
@@ -304,6 +308,40 @@
     })();
     const $  = (s)=>document.querySelector(s);
     const fmtInt = (n)=>Number(n||0).toLocaleString();
+
+// === Helpers for "Upload UIDs" ===
+
+// Convert a CSV string to [{Col1:val,...}]
+function rowsFromCSV(text){
+  const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
+  if (!lines.length) return [];
+  const header = lines[0].split(',').map(s => s.trim());
+  return lines.slice(1).map(line => {
+    const cells = line.split(','); // sufficient for our template
+    const obj = {};
+    header.forEach((h,i) => obj[h] = (cells[i] ?? '').trim());
+    return obj;
+  });
+}
+
+// Map one spreadsheet row to backend record shape
+function normalizeAppliedRow(r){
+  const pick = (k, ...alts) => {
+    for (const key of [k, ...alts]) {
+      if (r[key] != null && String(r[key]).trim() !== '') return String(r[key]).trim();
+    }
+    return '';
+  };
+  return {
+    date_local: pick('date','Date','DATE'),
+    mobile_bin: pick('mobile_bin','Mobile Bin (BOX)','MOBILE_BIN'),
+    sscc_label: pick('sscc_label','SSCC Label (BOX)','SSCC','SSCC_LABEL'),
+    po_number:  pick('po_number','PO_Number','PO','PO#','PO Number'),
+    sku_code:   pick('sku_code','SKU_Code','SKU','SKU Code'),
+    uid:        pick('uid','UID'),
+    status: 'complete',
+  };
+}
 
     $('#vo-today').textContent = new Date().toLocaleDateString();
 
@@ -580,9 +618,9 @@ try {
     }
     function setFooterHealth(pct){
       const pill=$('#health-pill'), dot=$('#health-dot');
-      let cls='bg-amber-100 text-amber-900', d='bg-amber-500', label='plan';
-      if(pct>=100){cls='bg-green-100 text-green-900'; d='bg-green-500'; label='ahead';}
-      else if(pct<80){cls='bg-rose-100 text-rose-900'; d='bg-rose-500'; label='risk';}
+      let cls='bg-amber-100 text-amber-900', d='bg-amber-500', label='On-Plan';
+      if(pct>=100){cls='bg-green-100 text-green-900'; d='bg-green-500'; label='Ahead-of-Plan';}
+      else if(pct<80){cls='bg-rose-100 text-rose-900'; d='bg-rose-500'; label='At-Risk';}
       pill.className='vo-pill border '+cls;
       dot.className='vo-dot '+d;
       $('#vo-health').textContent=label;
@@ -937,6 +975,98 @@ $('#file-plan').addEventListener('change', async (e) => {
       const t=iso(new Date());
       window.location.href = `${API_BASE}/export/xlsx?date=${t}`;
     });
+
+// Intake add row & export
+$('#btn-add-row').onclick=()=>{intakeRows.push(newRow()); renderIntake();};
+$('#btn-load-day')?.addEventListener('click', async ()=>{
+  if(!API_BASE) return alert('API not configured');
+  const t=iso(new Date());
+  const data=await api(`/records?from=${t}&to=${t}&limit=2000`).catch(()=>({records:[]}));
+  console.log('Loaded records today:', data);
+  alert('Fetched today\'s records (see console).');
+});
+$('#btn-export-day')?.addEventListener('click', ()=>{
+  if(!API_BASE) return alert('Use server export on backend');
+  const t=iso(new Date());
+  window.location.href = `${API_BASE}/export/xlsx?date=${t}`;
+});  // ⬇️ Paste the Upload UIDs wiring block right here
+
+// Upload UIDs (XLSX/CSV) → create records on backend
+(function wireUploadUIDs(){
+  const btn  = document.getElementById('btn-upload-applied');
+  const file = document.getElementById('file-upload-applied');
+  if (!btn || !file) return;
+
+  btn.addEventListener('click', () => file.click());
+
+  file.addEventListener('change', async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    if (!API_BASE) return alert('API not configured');
+
+    try {
+      // 1) Parse file to rows
+      let rows = [];
+      if (/\.xlsx?$/i.test(f.name)) {
+        const data = await f.arrayBuffer();
+        const wb = XLSX.read(data, { type: 'array' });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+      } else {
+        const text = await f.text();
+        rows = rowsFromCSV(text);
+      }
+
+      // 2) Normalize + keep complete rows
+      const payload = rows.map(normalizeAppliedRow)
+        .filter(r => r.po_number && r.sku_code && r.uid);
+      if (!payload.length) return alert('No valid rows found (need PO_Number, SKU_Code, UID).');
+
+      // 3) Try bulk endpoints; fallback to one-by-one
+      const tryPaths = [
+        `${API_BASE}/records/import`,
+        `${API_BASE}/records/bulk`,
+        `${API_BASE}/records`
+      ];
+      let ok = false;
+      for (const url of tryPaths) {
+        try {
+          const r = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          if (r.ok) { ok = true; break; }
+          if (r.status === 404) continue;
+        } catch {}
+      }
+
+      if (!ok) {
+        let inserted=0, failed=0;
+        for (const row of payload) {
+          try {
+            const r = await fetch(`${API_BASE}/records`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(row)
+            });
+            if (r.ok) inserted++; else failed++;
+          } catch { failed++; }
+        }
+        alert(`Upload complete.\nInserted: ${inserted}\nFailed: ${failed}`);
+      } else {
+        alert(`Upload complete. Rows sent: ${payload.length}`);
+      }
+
+      try { loadOpsMetrics(); } catch {}
+      try { renderIntake();   } catch {}
+    } catch (err) {
+      console.error(err);
+      alert('Upload failed: ' + (err?.message || err));
+    }
+  });
+})();
 
     // Search on plan page
     (function attachSearch(){
