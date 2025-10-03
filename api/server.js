@@ -270,27 +270,29 @@ app.post('/records', (req, res) => {
   }
 });
 
-function normalizeUploadRow(r) {
-  const pick = (...keys) => {
-    for (const k of keys) {
-      const v = r?.[k];
-      if (v != null && String(v).trim() !== '') return v;
+function normalizeUploadRow(row) {
+  // Build a case/space-normalized lookup for the row once
+  const norm = {};
+  for (const k in row) {
+    if (!Object.prototype.hasOwnProperty.call(row, k)) continue;
+    norm[String(k).toLowerCase().trim()] = row[k];
+  }
+  const pick = (...names) => {
+    for (const name of names) {
+      const v = norm[String(name).toLowerCase().trim()];
+      if (v != null && String(v).trim() !== '') return String(v).trim();
     }
     return '';
   };
 
-  // normalize to YYYY-MM-DD; default to today (Chicago) if missing/unparseable
-  const rawDate = pick('date_local','date','Date','DATE');
-  const normalized = toISODate(rawDate) || todayChicagoISO();
-
   return {
     id: randomUUID(),
-    date_local: normalized,
-    mobile_bin: String(pick('mobile_bin','Mobile Bin (BOX)','MOBILE_BIN') || ''),
-    sscc_label: String(pick('sscc_label','SSCC Label (BOX)','SSCC','SSCC_LABEL') || ''),
-    po_number:  String(pick('po_number','PO_Number','PO','PO#','PO Number') || ''),
-    sku_code:   String(pick('sku_code','SKU_Code','SKU','SKU Code') || ''),
-    uid:        String(pick('uid','UID') || ''),
+    date_local: pick('date_local','date','Date','DATE') || todayChicagoISO(),
+    mobile_bin: pick('mobile_bin','Mobile Bin (BOX)','MOBILE_BIN'),
+    sscc_label: pick('sscc_label','SSCC Label (BOX)','SSCC','SSCC_LABEL'),
+    po_number:  pick('po_number','PO_Number','PO','PO#','PO Number'),
+    sku_code:   pick('sku_code','SKU_Code','SKU','SKU Code'),
+    uid:        pick('uid','UID','u_id','u id'),  // ← tolerant here too
     status: 'complete',
     completed_at: new Date().toISOString(),
     sync_state: 'synced'
