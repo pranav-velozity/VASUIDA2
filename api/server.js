@@ -43,6 +43,35 @@ function chicagoISOFromDate(d = new Date()) {
 }
 const todayChicagoISO = () => chicagoISOFromDate(new Date());
 
+// --- Date normalization for uploads (normalize to YYYY-MM-DD) ---
+function toISODate(v) {
+  if (v == null) return '';
+  // Excel serial numbers (Windows epoch 1899-12-30)
+  if (typeof v === 'number' && isFinite(v)) {
+    const base = new Date(Date.UTC(1899, 11, 30));
+    const ms = Math.round(v * 86400000);
+    const d = new Date(base.getTime() + ms);
+    return d.toISOString().slice(0, 10);
+  }
+  const s = String(v).trim();
+  if (!s) return '';
+  // already ISO
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // try the built-in parser
+  const d1 = new Date(s);
+  if (!isNaN(d1)) return d1.toISOString().slice(0, 10);
+  // dd/mm/yyyy or dd-mm-yyyy (or mm/dd/yyyy depending on browser; we coerce)
+  const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (m) {
+    const dd = m[1].padStart(2, '0');
+    const mm = m[2].padStart(2, '0');
+    const yyyy = (m[3].length === 2 ? '20' + m[3] : m[3]);
+    const d2 = new Date(`${yyyy}-${mm}-${dd}T00:00:00Z`);
+    if (!isNaN(d2)) return d2.toISOString().slice(0, 10);
+  }
+  return '';
+}
+
 // --- DB setup ---
 const db = new Database(DB_FILE);
 db.pragma('journal_mode = WAL');
@@ -241,23 +270,27 @@ app.post('/records', (req, res) => {
   }
 });
 
-// Bulk import (array of records) — both endpoints supported
 function normalizeUploadRow(r) {
   const pick = (...keys) => {
     for (const k of keys) {
       const v = r?.[k];
-      if (v != null && String(v).trim() !== '') return String(v).trim();
+      if (v != null && String(v).trim() !== '') return v;
     }
     return '';
   };
+
+  // normalize to YYYY-MM-DD; default to today (Chicago) if missing/unparseable
+  const rawDate = pick('date_local','date','Date','DATE');
+  const normalized = toISODate(rawDate) || todayChicagoISO();
+
   return {
     id: randomUUID(),
-    date_local: pick('date_local','date','Date','DATE') || todayChicagoISO(),
-    mobile_bin: pick('mobile_bin','Mobile Bin (BOX)','MOBILE_BIN'),
-    sscc_label: pick('sscc_label','SSCC Label (BOX)','SSCC','SSCC_LABEL'),
-    po_number:  pick('po_number','PO_Number','PO','PO#','PO Number'),
-    sku_code:   pick('sku_code','SKU_Code','SKU','SKU Code'),
-    uid:        pick('uid','UID'),
+    date_local: normalized,
+    mobile_bin: String(pick('mobile_bin','Mobile Bin (BOX)','MOBILE_BIN') || ''),
+    sscc_label: String(pick('sscc_label','SSCC Label (BOX)','SSCC','SSCC_LABEL') || ''),
+    po_number:  String(pick('po_number','PO_Number','PO','PO#','PO Number') || ''),
+    sku_code:   String(pick('sku_code','SKU_Code','SKU','SKU Code') || ''),
+    uid:        String(pick('uid','UID') || ''),
     status: 'complete',
     completed_at: new Date().toISOString(),
     sync_state: 'synced'
