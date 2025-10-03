@@ -1,74 +1,596 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<!-- Set to your Render API base (no trailing slash) -->
-<meta name="api-base" content="https://vasuida1.onrender.com"/>
-<title>VelOzity Pinpoint</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
-<style>
-.dot { width:10px; height:10px; border-radius:9999px; display:inline-block; }
-.dot.gray{ background:#cbd5e1; }
-.dot.green{ background:#22c55e; }
-.input-cell { width:100%; outline:none; padding:6px 8px; border:1px solid #e5e7eb; border-radius:8px; }
-.input-cell:focus { border-color:#ef4444; box-shadow:0 0 0 3px rgba(239,68,68,0.15); }
-.th { font-weight:600; color:#374151; font-size:0.8rem; }
-</style>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <!-- Set to your Render API base (no trailing slash) -->
+  <meta name="api-base" content="https://vasuida1.onrender.com"/>
+  <title>VelOzity Pinpoint</title>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- SheetJS for XLSX parsing -->
+  <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+
+  <style>
+    body{background:#f8fafc;color:#111827}
+    .vo-nav{position:sticky;top:0;z-index:40;background:#fff;border-bottom:1px solid #eee}
+    .container{max-width:none;width:min(96vw,1920px);margin:0 auto;padding:16px 24px}
+    .dot{width:.6rem;height:.6rem;border-radius:9999px;display:inline-block}
+    .heartbeat{animation:heartbeat 1.2s ease-in-out infinite;transform-origin:center}
+    @keyframes heartbeat{0%{transform:scale(1)}15%{transform:scale(1.18)}30%{transform:scale(1)}45%{transform:scale(1.12)}60%{transform:scale(1)}100%{transform:scale(1)}}
+    .cell{width:100%;padding:.4rem .5rem;border:0;outline:none}
+    .cell:focus{box-shadow:0 0 0 3px rgba(59,130,246,.25)}
+    .th{font-size:.75rem;font-weight:600;color:#374151}
+  </style>
 </head>
-<body class="bg-gray-50 text-gray-900">
-<div class="max-w-7xl mx-auto p-4">
-<header class="flex items-center justify-between">
-<h1 class="text-2xl font-semibold">VelOzity Pinpoint</h1>
-<nav class="space-x-2">
-<button id="btnActive" class="px-3 py-1 rounded-lg bg-rose-100 text-rose-700">Active Plan</button>
-<button id="btnIntake" class="px-3 py-1 rounded-lg bg-gray-100">Intake</button>
-</nav>
+<body class="bg-gray-50 min-h-screen">
+<header class="vo-nav">
+  <div class="container py-3 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="text-xl font-semibold">VelOzity Pinpoint</div>
+      <div id="vo-today" class="text-gray-500 text-sm"></div>
+    </div>
+    <nav class="flex items-center gap-2">
+      <a href="#dashboard" id="nav-dash" class="px-3 py-2 rounded-lg text-sm font-medium border border-rose-700 text-rose-700">Active Plan</a>
+      <a href="#intake" id="nav-intake" class="px-3 py-2 rounded-lg text-sm font-medium border border-rose-700 text-rose-700/80">Intake</a>
+    </nav>
+  </div>
 </header>
 
+<main class="container py-4">
+  <!-- ===== Active Plan ===== -->
+  <section id="page-dashboard" class="hidden">
+    <div class="flex items-center justify-between mb-2">
+      <div class="text-2xl font-semibold">Active Plan</div>
+      <div class="flex items-center gap-2">
+        <label class="text-sm text-gray-600">Week start</label>
+        <input id="week-start" type="date" class="px-2 py-1 border rounded-md text-sm"/>
+        <input id="file-plan" type="file" accept=".csv" class="hidden"/>
+        <button id="btn-upload-plan" class="px-3 py-2 rounded-lg text-sm border">Upload Plan</button>
+        <button id="btn-zero-plan" class="px-3 py-2 rounded-lg text-sm border">Zero Plan</button>
+      </div>
+    </div>
 
-<main class="mt-4">
-<!-- Active Plan (kept minimal; endpoints unchanged) -->
-<section id="activePage" class="space-y-4">
-<div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-<div class="p-4 rounded-2xl bg-white shadow">
-<div class="text-sm text-gray-500">Planned (week)</div>
-<div id="plannedWeek" class="text-2xl font-semibold">0</div>
-</div>
-<div class="p-4 rounded-2xl bg-white shadow">
-<div class="text-sm text-gray-500">Applied</div>
-<div id="appliedWeek" class="text-2xl font-semibold">0</div>
-</div>
-<div class="p-4 rounded-2xl bg-white shadow flex items-center justify-between">
-<div>
-<div class="text-sm text-gray-500">Ops Pulse</div>
-<div id="opsPulse" class="text-2xl font-semibold">0 bpm</div>
-</div>
-<div class="dot gray" id="pulseDot"></div>
-</div>
-<div class="p-4 rounded-2xl bg-white shadow">
-<div class="text-sm text-gray-500">Completion</div>
-<div id="completionPct" class="text-2xl font-semibold">0%</div>
-</div>
-</div>
-<div class="p-4 rounded-2xl bg-white shadow">
-<div class="flex items-center justify-between">
-<h2 class="font-semibold">Executive Summary</h2>
-<button id="btnZeroPlan" class="px-3 py-1 rounded bg-gray-100">Zero Plan</button>
-</div>
-<p class="text-sm text-gray-500 mt-2">Active plan endpoints preserved. This card shows simple totals.
-</p>
-</div>
-</section>
+    <div class="mb-3 flex items-center justify-between gap-3">
+      <div id="capsules" class="hidden sm:flex items-center gap-3"></div>
+      <div class="flex flex-wrap gap-2">
+        <button id="btn-dl-posku" class="px-3 py-2 rounded-lg border text-sm">PO+SKU Discrepancy</button>
+        <button id="btn-dl-po" class="px-3 py-2 rounded-lg border text-sm">PO Discrepancy</button>
+        <button id="btn-exec" class="px-3 py-2 rounded-lg border text-sm bg-rose-700 text-white">Executive Summary</button>
+      </div>
+    </div>
 
+    <div class="grid grid-cols-1 sm:grid-cols-5 gap-3 mb-3">
+      <div class="bg-white rounded-2xl border shadow p-4">
+        <div class="text-base font-semibold text-gray-600">Planned</div>
+        <div class="text-xs text-gray-500" id="planned-range"></div>
+        <div class="text-2xl font-bold tabular-nums" id="planned-total">0</div>
+      </div>
+      <div class="bg-white rounded-2xl border shadow p-4">
+        <div class="text-base font-semibold text-gray-600">Applied</div>
+        <div class="text-xs text-gray-500" id="applied-range"></div>
+        <div class="text-2xl font-bold tabular-nums" id="applied-total">0</div>
+      </div>
+      <div class="bg-white rounded-2xl border shadow p-4">
+        <div class="text-base font-semibold text-gray-600">Completion</div>
+        <div class="text-xs text-gray-500">&nbsp;</div>
+        <div class="text-2xl font-bold tabular-nums" id="pct-week">0%</div>
+      </div>
+      <div class="bg-white rounded-2xl border shadow p-4 flex items-center gap-4">
+        <div id="ops-heart"></div>
+        <div>
+          <div class="text-base font-semibold text-gray-600">Ops Pulse</div>
+          <div class="text-xl font-bold tabular-nums" id="ops-bpm">0</div>
+          <div class="text-[11px] text-gray-500" id="ops-extra">+0 over 40</div>
+        </div>
+      </div>
+      <div class="bg-white rounded-2xl border shadow p-4">
+        <div class="text-base font-semibold text-gray-600">Applied averages</div>
+        <div class="text-xs text-gray-500 mb-1">&nbsp;</div>
+        <div class="text-2xl font-bold tabular-nums" id="avg-day">0</div>
+        <div class="text-xs text-gray-500 mt-1">Avg/day • <span id="avg-week">0</span></div>
+      </div>
+    </div>
 
-<!-- Intake Page -->
-<section id="intakePage" class="hidden space-y-4">
-<div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-<div class="p-4 rounded-2xl bg-white shadow">
-<div class="text-sm text-gray-500">Scans Today</div>
-<div id="scansToday" class="text-2xl font-semibold">0</div>
-</div>
-<div class="p-4 rounded-2xl bg-white shadow">
+    <div class="bg-white rounded-2xl border shadow p-4 mb-3">
+      <div class="text-base font-semibold mb-2">Search by PO or SKU</div>
+      <input id="search-input" type="search" placeholder="Type a PO # or SKU Code and pause…" class="w-full border rounded-md px-3 py-2 text-sm outline-none focus:ring-2">
+      <div id="search-results" class="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3 hidden"></div>
+    </div>
+
+    <div class="bg-white rounded-2xl border shadow p-4 mb-3">
+      <div class="text-base font-semibold mb-2">Top Insights for Ops</div>
+      <ul id="insights" class="text-sm text-gray-800 list-disc pl-5 space-y-1">
+        <li>Loading…</li>
+      </ul>
+      <div id="insights-mini" class="mt-2 text-xs text-gray-500"></div>
+    </div>
+
+    <div class="bg-white rounded-2xl border shadow p-4 mb-3">
+      <div class="text-base font-semibold mb-2">PO Progress (This Week)</div>
+      <div class="overflow-auto max-h-[480px]">
+        <table class="w-full text-sm" id="po-progress">
+          <thead>
+          <tr class="text-gray-500">
+            <th class="text-left py-1 pr-2">PO #</th>
+            <th class="text-left py-1 pr-2">Due</th>
+            <th class="text-right py-1 pr-2">Planned</th>
+            <th class="text-right py-1 pr-2">Applied</th>
+            <th class="text-right py-1">%</th>
+          </tr>
+          </thead>
+          <tbody id="po-progress-body"><tr><td colspan="5" class="text-center text-xs text-gray-400 py-3">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+      <div class="bg-white rounded-2xl border shadow p-4">
+        <div class="text-base font-semibold mb-2">Top PO's at Risk</div>
+        <table class="w-full text-sm" id="risk-po">
+          <thead>
+          <tr class="text-gray-500">
+            <th class="text-left py-1 pr-2">PO #</th>
+            <th class="text-left py-1 pr-2">Due</th>
+            <th class="text-right py-1 pr-2">Planned</th>
+            <th class="text-right py-1 pr-2">Applied</th>
+            <th class="text-right py-1 pr-2">Rem</th>
+            <th class="text-right py-1">%</th>
+          </tr>
+          </thead>
+          <tbody id="risk-po-body"><tr><td colspan="6" class="text-center text-xs text-gray-400 py-3">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="bg-white rounded-2xl border shadow p-4">
+        <div class="text-base font-semibold mb-2">Top SKU's at Risk</div>
+        <table class="w-full text-sm" id="risk-sku">
+          <thead>
+          <tr class="text-gray-500">
+            <th class="text-left py-1 pr-2">SKU</th>
+            <th class="text-left py-1 pr-2">Due</th>
+            <th class="text-right py-1 pr-2">Planned</th>
+            <th class="text-right py-1 pr-2">Applied</th>
+            <th class="text-right py-1 pr-2">Rem</th>
+            <th class="text-right py-1">%</th>
+          </tr>
+          </thead>
+          <tbody id="risk-sku-body"><tr><td colspan="6" class="text-center text-xs text-gray-400 py-3">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== UID Intake ===== -->
+  <section id="page-intake" class="hidden">
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-5">
+        <div class="text-2xl font-semibold">UID Intake (Table Mode)</div>
+        <div class="flex items-center gap-2 bg-white border rounded-xl px-3 py-2">
+          <svg viewBox="0 0 24 24" width="18" height="18" class="heartbeat">
+            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" fill="#990033"/>
+          </svg>
+          <div class="text-sm"><span class="font-semibold">Ops</span> • <span id="intake-bpm">0</span> bpm</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="btn-export-day" class="px-3 py-2 rounded-lg text-sm border">Export XLSX</button>
+        <button id="btn-upload-applied" class="px-3 py-2 rounded-lg text-sm border">Upload UIDs</button>
+        <input id="file-upload-applied" type="file" accept=".xlsx,.csv" class="hidden"/>
+        <button id="btn-delete-selected" class="px-3 py-2 rounded-lg text-sm border border-rose-700 text-rose-700">Delete Selected</button>
+      </div>
+    </div>
+
+    <!-- Ops ribbon -->
+    <div id="ops-ribbon" class="mt-3 bg-white border rounded-xl shadow p-3">
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-3 items-stretch">
+        <div class="flex gap-3">
+          <div class="flex-1 border rounded-lg p-3">
+            <div class="text-xs text-gray-500">Scans Today</div>
+            <div id="ops-today" class="text-2xl font-bold tabular-nums">0</div>
+          </div>
+          <div class="flex-1 border rounded-lg p-3">
+            <div class="text-xs text-gray-500">Last Hour</div>
+            <div id="ops-hour" class="text-2xl font-bold tabular-nums">0</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-4 border rounded-lg p-3">
+          <div id="ops-heart-small"></div>
+          <div>
+            <div class="text-xs text-gray-500">Throughput / hr (last 30m)</div>
+            <div id="ops-rate" class="text-2xl font-bold tabular-nums">0</div>
+          </div>
+        </div>
+        <div class="border rounded-lg p-3">
+          <div class="text-sm font-semibold mb-1">Data Quality</div>
+          <div class="flex items-center justify-between text-sm">
+            <span class="text-gray-500">Drafts</span><strong id="ops-drafts">0</strong>
+          </div>
+          <div class="flex items-center justify-between text-sm">
+            <span class="text-gray-500">Duplicates</span><strong id="ops-dupes">0</strong>
+          </div>
+          <div class="text-xs text-gray-500 mt-2">Sync states</div>
+          <div id="ops-sync-badges" class="flex flex-wrap gap-2 mt-1"></div>
+        </div>
+        <div class="border rounded-lg p-3">
+          <div class="flex items-center justify-between">
+            <div class="text-sm font-semibold">Alerts</div>
+            <small class="text-gray-500">
+              <span id="ops-last-updated">—</span>
+              <span class="inline-flex items-center gap-1 border rounded-full px-2 py-0.5 text-[11px] text-gray-500">
+                <span id="ops-dot" class="w-2 h-2 rounded-full bg-gray-300"></span>SSE
+              </span>
+            </small>
+          </div>
+          <ul id="ops-alerts" class="list-disc ml-4 mt-1 text-sm"><li class="text-gray-400">No alerts.</li></ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- Intake Table -->
+    <div class="mt-3 overflow-auto">
+      <table class="w-full min-w-[1100px] border-collapse border">
+        <thead class="bg-gray-100">
+        <tr>
+          <th class="th border px-2 py-1 text-left w-8"><input type="checkbox" id="chk-all"/></th>
+          <th class="th border px-2 py-1 text-left">Date</th>
+          <th class="th border px-2 py-1 text-left">Mobile Bin (BOX)</th>
+          <th class="th border px-2 py-1 text-left">SSCC Label (BOX)</th>
+          <th class="th border px-2 py-1 text-left">PO_Number</th>
+          <th class="th border px-2 py-1 text-left">SKU_Code</th>
+          <th class="th border px-2 py-1 text-left">UID</th>
+          <th class="th border px-2 py-1 text-center">Sync</th>
+        </tr>
+        </thead>
+        <tbody id="intake-body"></tbody>
+      </table>
+    </div>
+
+    <div class="mt-3">
+      <button id="btn-add-row" class="px-3 py-2 rounded-lg border text-sm">Add Row</button>
+    </div>
+  </section>
+</main>
+
+<script>
+const BRAND = '#990033';
+const apiBase = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/,'');
+const $ = (s)=>document.querySelector(s);
+$('#vo-today').textContent = new Date().toLocaleDateString();
+
+// ---------- helpers ----------
+const iso = (d)=>d.toISOString().slice(0,10);
+const mondayOf=(d=new Date())=>{const x=new Date(d);const day=x.getDay();const diff=(day===0?-6:1)-day;x.setDate(x.getDate()+diff);x.setHours(0,0,0,0);return x;}
+const fmtInt=(n)=>Number(n||0).toLocaleString();
+
+// ---------- Active Plan (minimal, preserved) ----------
+const state={weekStart:iso(mondayOf()), plan:[], records:[]};
+async function api(path,opts={}){const r=await fetch(`${apiBase}${path}`,{method:opts.method||'GET',headers:{'Content-Type':'application/json'},body:opts.body?JSON.stringify(opts.body):undefined}); if(!r.ok) throw new Error(await r.text()); const ct=r.headers.get('content-type')||''; return ct.includes('json')?r.json():r.text();}
+async function fetchPlan(w){ if(!apiBase) return []; try{return await api(`/plan/weeks/${w}`);}catch{return [];} }
+async function fetchActuals(f,t){ if(!apiBase) return []; try{const d=await api(`/records?from=${f}&to=${t}&status=complete&limit=50000`); return d.records||[];}catch{return [];} }
+
+function createHeart(size=24,color=BRAND,bpm=40){const s='http://www.w3.org/2000/svg',svg=document.createElementNS(s,'svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('width',size);svg.setAttribute('height',size);const p=document.createElementNS(s,'path');p.setAttribute('d','M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z');p.setAttribute('fill',color);svg.appendChild(p);svg.classList.add('heartbeat');svg.style.animationDuration=`${(60/Math.max(40,bpm)).toFixed(2)}s`;return svg;}
+function renderOpsPulse(bpm=0,extra=0){const wrap=$('#ops-heart');if(wrap){wrap.innerHTML='';wrap.appendChild(createHeart(24,BRAND,bpm));$('#ops-bpm').textContent=bpm;$('#ops-extra').textContent=`+${Math.max(0,extra)} over 40`;} const small=$('#ops-heart-small'); if(small){small.innerHTML=''; small.appendChild(createHeart(18,BRAND,bpm));} $('#intake-bpm').textContent=bpm;}
+
+function aggregate(records){const byPO=new Map(), bySKU=new Map(); for(const r of records){ if(r.status!=='complete') continue; const po=String(r.po_number||'').trim(), sku=String(r.sku_code||'').trim(); if(po) byPO.set(po,(byPO.get(po)||0)+1); if(sku) bySKU.set(sku,(bySKU.get(sku)||0)+1);} return {byPO,bySKU};}
+
+function setFooterTiles(ws,we,plan,records){
+  const agg=aggregate(records);
+  const plannedTotal = (plan||[]).reduce((s,p)=>s+Number(p.target_qty||0),0);
+  const appliedTotal = Array.from(agg.byPO.values()).reduce((s,v)=>s+v,0);
+  const pct = plannedTotal>0? Math.round((appliedTotal/plannedTotal)*100) : (plan.length?0:100);
+  $('#planned-range').textContent = `${ws} – ${we}`;
+  $('#applied-range').textContent = `${ws} – ${we}`;
+  $('#planned-total').textContent = fmtInt(plannedTotal);
+  $('#applied-total').textContent = fmtInt(appliedTotal);
+  $('#pct-week').textContent = `${pct}%`;
+  $('#avg-week').textContent = fmtInt(appliedTotal);
+  $('#avg-day').textContent = fmtInt(Math.round((appliedTotal||0)/7));
+}
+
+function toCSV(header,rows){const esc=v=>{v=String(v??'');return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v}; return '\ufeff'+header.map(esc).join(',')+'\r\n'+rows.map(r=>header.map(h=>esc(r[h])).join(',')).join('\r\n')+'\r\n';}
+function download(name,content,type='text/plain'){const b=new Blob([content],{type}); const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(a.href); a.remove();},250);}
+
+async function setWeek(ws){
+  state.weekStart=ws; $('#week-start').value=ws;
+  const we = new Date(ws); we.setDate(we.getDate()+6);
+  const weISO = iso(we);
+  const [plan, recs] = await Promise.all([fetchPlan(ws), fetchActuals(ws,weISO)]);
+  state.plan = Array.isArray(plan)?plan:[]; state.records = Array.isArray(recs)?recs:[];
+  setFooterTiles(ws,weISO,state.plan,state.records);
+}
+$('#btn-upload-plan').onclick=()=>$('#file-plan').click();
+$('#btn-zero-plan').onclick=async()=>{if(!apiBase) return alert('API not configured'); const ws=$('#week-start').value; try{let r=await fetch(`${apiBase}/plan/weeks/${ws}/zero`,{method:'POST'}); if(!r.ok&&r.status!==404){throw new Error(await r.text())} if(r.status===404){await fetch(`${apiBase}/plan/weeks/${ws}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:'[]'})} alert('Plan zeroed'); setWeek(ws);}catch(e){alert('Zero failed: '+(e.message||e))}};
+$('#file-plan').addEventListener('change', async (e)=>{
+  const f=e.target.files?.[0]; e.target.value=''; if(!f||!apiBase) return;
+  const text = await f.text();
+  // super-simple CSV: expects headers po_number, sku_code, due_date, target_qty (case/space tolerant)
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  const hdr = lines.shift().split(',').map(s=>s.trim().toLowerCase().replace(/\s+/g,'_'));
+  const idx = (name)=>hdr.indexOf(name);
+  const iPO=idx('po_number')>=0?idx('po_number'):idx('po');
+  const iSKU=idx('sku_code')>=0?idx('sku_code'):idx('sku');
+  const iDue=idx('due_date')>=0?idx('due_date'):idx('due');
+  const iQty=idx('target_qty')>=0?idx('target_qty'):idx('planned');
+  if(iPO<0||iSKU<0||iDue<0){alert('CSV must include PO, SKU, Due Date');return;}
+  const weekStart = $('#week-start').value;
+  const rows = lines.map(l=>l.split(',')).map(r=>({po_number:r[iPO]?.trim(), sku_code:r[iSKU]?.trim(), start_date:weekStart, due_date:r[iDue]?.trim(), target_qty:Number((r[iQty]||'0').replace(/,/g,''))||0})).filter(r=>r.po_number&&r.sku_code&&r.due_date);
+  await fetch(`${apiBase}/plan/weeks/${weekStart}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(rows)});
+  alert(`Plan uploaded: ${rows.length} rows`);
+  setWeek(weekStart);
+});
+
+// ---------- Intake ----------
+const intakeRows = [];
+function newRow(){return {id:crypto.randomUUID(), selected:false, date_local:iso(new Date()), mobile_bin:'', sscc_label:'', po_number:'', sku_code:'', uid:'', status:'draft', sync:'pending', _pending:{}};}
+function requiredFilled(r){return r.date_local && r.mobile_bin && r.po_number && r.sku_code && r.uid;}
+function syncClass(s){return s==='synced'?'bg-green-500':(s==='pending'?'bg-amber-500':'bg-gray-400');}
+
+function toIntakeRow(r){return {id:r.id, selected:false, date_local:r.date_local||iso(new Date()), mobile_bin:r.mobile_bin||'', sscc_label:r.sscc_label||'', po_number:r.po_number||'', sku_code:r.sku_code||'', uid:r.uid??'', status:r.status||'complete', sync:'synced', _pending:{}};}
+
+function renderIntake(){
+  const tb=$('#intake-body'); tb.innerHTML='';
+  if(!intakeRows.length) intakeRows.push(newRow());
+  let drafts=0, synced=0;
+  intakeRows.forEach((r,i)=>{
+    const tr=document.createElement('tr'); tr.className=i%2?'bg-gray-50':'bg-white';
+    if(r.status!=='complete') drafts++; else synced++;
+    tr.innerHTML = `
+      <td class="border px-2 py-2"><input type="checkbox" ${r.selected?'checked':''} data-id="${r.id}" data-role="sel"/></td>
+      <td class="border px-2 py-2"><input class="cell" value="${r.date_local}" data-id="${r.id}" data-f="date_local"/></td>
+      <td class="border px-2 py-2"><input class="cell" value="${r.mobile_bin}" data-id="${r.id}" data-f="mobile_bin"/></td>
+      <td class="border px-2 py-2"><input class="cell" value="${r.sscc_label}" data-id="${r.id}" data-f="sscc_label" placeholder="(optional)"/></td>
+      <td class="border px-2 py-2"><input class="cell" value="${r.po_number}" data-id="${r.id}" data-f="po_number"/></td>
+      <td class="border px-2 py-2"><input class="cell" value="${r.sku_code}" data-id="${r.id}" data-f="sku_code"/></td>
+      <td class="border px-2 py-2"><input class="cell" value="${r.uid}" data-id="${r.id}" data-f="uid" data-last="1"/></td>
+      <td class="border px-2 py-2 text-center"><span class="dot ${syncClass(r.sync)}"></span></td>
+    `;
+    tb.appendChild(tr);
+  });
+
+  // selection
+  tb.querySelectorAll('input[data-role="sel"]').forEach(chk=>{
+    chk.addEventListener('change',e=>{
+      const id=e.target.dataset.id; const row=intakeRows.find(x=>x.id===id); if(row){row.selected=e.target.checked;}
+      $('#chk-all').checked = intakeRows.length && intakeRows.every(r=>r.selected);
+    });
+  });
+
+  // edits
+  tb.querySelectorAll('input[data-f]').forEach(inp=>{
+    const id=inp.dataset.id, f=inp.dataset.f;
+    // uid Tab → add new row after save attempt
+    if (f==='uid') {
+      inp.addEventListener('keydown',(ev)=>{
+        if(ev.key==='Tab' && !ev.shiftKey){
+          const idx = intakeRows.findIndex(x=>x.id===id);
+          if(idx===intakeRows.length-1){ setTimeout(()=>{ intakeRows.push(newRow()); renderIntake(); }, 0); }
+        }
+      });
+    }
+    inp.addEventListener('input',e=>{
+      const row=intakeRows.find(x=>x.id===id); if(!row) return;
+      // IMPORTANT: UID is verbatim (no trim)
+      row[f] = (f==='uid') ? String(e.target.value ?? '') : String(e.target.value||'').trim();
+      row.status = requiredFilled(row) ? 'complete' : 'draft';
+      row.sync = 'pending';
+    });
+    inp.addEventListener('change', async e=>{
+      const row=intakeRows.find(x=>x.id===id); if(!row) return;
+      if (!apiBase) return;
+      if (!requiredFilled(row)) { renderIntake(); return; }
+      try{
+        const res = await fetch(`${apiBase}/records`, {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({
+            id: row.id,
+            date_local: row.date_local,
+            mobile_bin: row.mobile_bin,
+            sscc_label: row.sscc_label,           // optional
+            po_number: row.po_number,
+            sku_code: row.sku_code,
+            uid: row.uid                          // VERBATIM
+          })
+        });
+        const json = await res.json();
+        if(res.ok && json.ok){
+          row.status='complete';
+          row.sync='synced';
+        }else{
+          row.sync='pending';
+          console.warn('Save failed', json);
+        }
+      }catch(err){
+        row.sync='pending';
+        console.warn('Save error', err);
+      }
+      renderIntake();
+    });
+  });
+
+  // header master checkbox
+  $('#chk-all').onchange = (e)=>{
+    intakeRows.forEach(r=>r.selected=e.target.checked);
+    renderIntake();
+  };
+
+  // small ribbon counts
+  $('#ops-drafts').textContent = drafts;
+  $('#ops-sync-badges').innerHTML = `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] border-green-200 bg-green-50 text-green-700">synced: ${synced}</span>
+                                      <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] border-amber-200 bg-amber-50 text-amber-700">pending: ${drafts}</span>`;
+}
+
+// Upload UIDs → table first → auto-save each row
+(function wireUploadUIDs(){
+  const btn=$('#btn-upload-applied'), file=$('#file-upload-applied');
+  btn.onclick=()=>file.click();
+  file.addEventListener('change', async (e)=>{
+    const f=e.target.files?.[0]; e.target.value=''; if(!f) return;
+    try{
+      let rows=[];
+      if(/\.xlsx?$/i.test(f.name)){
+        const buf=await f.arrayBuffer();
+        const wb=XLSX.read(buf,{type:'array'});
+        const ws=wb.Sheets[wb.SheetNames[0]];
+        rows = XLSX.utils.sheet_to_json(ws, {defval:''});   // array of objects using header row
+      }else{
+        const text=await f.text();
+        const lines=text.split(/\r?\n/).filter(Boolean);
+        const hdr = lines.shift().split(',').map(s=>s.trim());
+        rows = lines.map(l=>l.split(',')).map(cells=>{
+          const o={}; hdr.forEach((h,i)=>o[h]=cells[i]??''); return o;
+        });
+      }
+      // normalize header names (case/space tolerant)
+      const normRow = (r)=>{
+        const norm={}; for(const k in r){ norm[k.toLowerCase().replace(/\s+/g,'_')]=r[k]; }
+        const pick=(...names)=>{ for(const n of names){ const v=norm[n]; if(v!=null && String(v).trim()!=='') return String(v).trim(); } return ''; };
+        const pickRaw=(...names)=>{ for(const n of names){ if(n in norm) return String(norm[n]??''); } return ''; }; // NO TRIM for UID
+        return {
+          date_local: pick('date_local','date'),
+          mobile_bin: pick('mobile_bin','mobile_bin_(box)','mobile_bin_box','mobile_bin (box)'),
+          sscc_label: pick('sscc_label','sscc_label_(box)','sscc','sscc_label (box)'),
+          po_number:  pick('po_number','po','po#','po_number_'),
+          sku_code:   pick('sku_code','sku','sku_code_'),
+          uid:        pickRaw('uid','u_id','u id') // VERBATIM
+        };
+      };
+
+      const items = rows.map(normRow).filter(r=>r.po_number && r.sku_code && (r.uid!=='')); // allow spaces in uid
+      if(!items.length) return alert('No valid rows found (need PO_Number, SKU_Code, UID).');
+
+      // push to table & auto-save
+      for(const r of items){
+        const ui = newRow();
+        ui.date_local = r.date_local || iso(new Date());
+        ui.mobile_bin = r.mobile_bin || '';
+        ui.sscc_label = r.sscc_label || '';
+        ui.po_number  = r.po_number;
+        ui.sku_code   = r.sku_code;
+        ui.uid        = r.uid; // verbatim
+        ui.status = requiredFilled(ui)?'complete':'draft';
+        ui.sync = 'pending';
+        intakeRows.push(ui);
+        // auto-save if complete
+        if (requiredFilled(ui) && apiBase) {
+          try{
+            const res = await fetch(`${apiBase}/records`,{
+              method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body: JSON.stringify({
+                id: ui.id,
+                date_local: ui.date_local,
+                mobile_bin: ui.mobile_bin,
+                sscc_label: ui.sscc_label,
+                po_number: ui.po_number,
+                sku_code: ui.sku_code,
+                uid: ui.uid
+              })
+            });
+            const j = await res.json();
+            if(res.ok && j.ok){ ui.sync='synced'; ui.status='complete'; }
+          }catch{}
+        }
+      }
+      renderIntake();
+    }catch(err){
+      console.error(err);
+      alert('Upload failed: '+(err?.message||err));
+    }
+  });
+})();
+
+// Delete Selected
+$('#btn-delete-selected').onclick = async ()=>{
+  const selected = intakeRows.filter(r=>r.selected);
+  if(!selected.length) return alert('Select at least one row.');
+  if(!confirm(`Delete ${selected.length} row(s)?`)) return;
+
+  if(apiBase){
+    // delete only those that have both uid & sku_code (server records)
+    const pairs = selected.filter(r=>r.uid && r.sku_code).map(r=>({uid:r.uid, sku_code:r.sku_code}));
+    if(pairs.length){
+      try{
+        await fetch(`${apiBase}/records/delete`,{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(pairs)
+        });
+      }catch(e){ console.warn('Server delete error', e); }
+    }
+  }
+  // remove locally
+  for(let i=intakeRows.length-1;i>=0;i--){
+    if(intakeRows[i].selected) intakeRows.splice(i,1);
+  }
+  if(!intakeRows.length) intakeRows.push(newRow());
+  renderIntake();
+};
+
+// Export
+$('#btn-export-day').onclick=()=>{ if(!apiBase) return; const d=iso(new Date()); window.location = `${apiBase}/export/xlsx?date=${d}`; };
+
+// Ops metrics (today)
+function todayISO(){const d=new Date(); d.setHours(0,0,0,0); return iso(d);}
+function isoMs(s){const d=new Date(s); return isNaN(d)?null:d.getTime();}
+function summarize(records){
+  const now=Date.now(), hourAgo=now-3600e3, halfAgo=now-1800e3;
+  let scansToday=0, lastHour=0, rate=0, drafts=0, dupes=0;
+  const syncCounts={}, seen=new Set();
+  for(const r of records){
+    if(r.date_local!==todayISO()) continue;
+    if(r.status==='complete'){
+      scansToday++;
+      const ct=isoMs(r.completed_at);
+      if(ct && ct>=hourAgo) lastHour++;
+      if(ct && ct>=halfAgo) rate++;
+      if(r.sku_code && r.uid){const k=r.sku_code+'|'+r.uid; if(seen.has(k)) dupes++; else seen.add(k);}
+    } else { drafts++; }
+    const s=r.sync_state||'unknown'; syncCounts[s]=(syncCounts[s]||0)+1;
+  }
+  return {scansToday,lastHour,ratePerHour:Math.round(rate*2),drafts,dupes,syncCounts};
+}
+async function loadOpsMetrics(){
+  if(!apiBase) return;
+  try{
+    const j = await api(`/records?from=${todayISO()}&to=${todayISO()}&limit=2000`);
+    const rows = j.records||[];
+    $('#ops-today').textContent = fmtInt(rows.filter(r=>r.status==='complete').length);
+    $('#ops-hour').textContent  = fmtInt(rows.filter(r=>r.completed_at && isoMs(r.completed_at)>=Date.now()-3600e3).length);
+    $('#ops-rate').textContent  = fmtInt(rows.filter(r=>r.completed_at && isoMs(r.completed_at)>=Date.now()-1800e3).length*2);
+    $('#ops-drafts').textContent= fmtInt(rows.filter(r=>r.status!=='complete').length);
+    $('#ops-dupes').textContent = fmtInt(0);
+    $('#ops-last-updated').textContent = new Date().toLocaleTimeString();
+  }catch(e){ console.warn('metrics failed', e); }
+}
+function startSSE(){
+  if(!apiBase) return;
+  try{
+    const ev = new EventSource(`${apiBase}/events/scan`);
+    $('#ops-dot').classList.replace('bg-gray-300','bg-green-500');
+    ev.onmessage = ()=>{ loadOpsMetrics(); renderOpsPulse(Math.max(0, Number($('#ops-rate').textContent)||0)); };
+    ev.onerror = ()=>{ try{ev.close();}catch{} $('#ops-dot').classList.replace('bg-green-500','bg-amber-500'); setTimeout(startSSE,3000); };
+  }catch{}
+}
+
+// Routing
+function show(hash){
+  $('#page-dashboard').classList.add('hidden');
+  $('#page-intake').classList.add('hidden');
+  if(hash==='#intake') $('#page-intake').classList.remove('hidden');
+  else $('#page-dashboard').classList.remove('hidden');
+}
+window.addEventListener('hashchange',()=>show(location.hash||'#dashboard'));
+
+// Init
+(function init(){
+  const ws=iso(mondayOf()); $('#week-start').value=ws; setWeek(ws);
+  show(location.hash||'#dashboard');
+  renderIntake();
+  renderOpsPulse(0,0);
+  loadOpsMetrics(); startSSE();
+})();
+</script>
+</body>
 </html>
