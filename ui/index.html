@@ -346,21 +346,14 @@ function rowsFromCSV(text){
 }
 
 // Map one spreadsheet row to backend record shape
-function normalizeUploadRow(row) {
-  // Build a case/space-normalized lookup for the row once
-  const norm = {};
-  for (const k in row) {
-    if (!Object.prototype.hasOwnProperty.call(row, k)) continue;
-    norm[String(k).toLowerCase().trim()] = row[k];
-  }
-  const pick = (...names) => {
-    for (const name of names) {
-      const v = norm[String(name).toLowerCase().trim()];
+function normalizeUploadRow(r) {
+  const pick = (...keys) => {
+    for (const k of keys) {
+      const v = r?.[k];
       if (v != null && String(v).trim() !== '') return String(v).trim();
     }
     return '';
   };
-
   return {
     id: randomUUID(),
     date_local: pick('date_local','date','Date','DATE') || todayChicagoISO(),
@@ -368,7 +361,7 @@ function normalizeUploadRow(row) {
     sscc_label: pick('sscc_label','SSCC Label (BOX)','SSCC','SSCC_LABEL'),
     po_number:  pick('po_number','PO_Number','PO','PO#','PO Number'),
     sku_code:   pick('sku_code','SKU_Code','SKU','SKU Code'),
-    uid:        pick('uid','UID','u_id','u id'),  // ← tolerant here too
+    uid:        pick('uid','UID'),
     status: 'complete',
     completed_at: new Date().toISOString(),
     sync_state: 'synced'
@@ -1019,10 +1012,36 @@ $('#btn-export-day')?.addEventListener('click', ()=>{
 });  // ⬇️ Paste the Upload UIDs wiring block right here
 
 // Upload UIDs (XLSX/CSV) → create records on backend
+// ===== Upload UIDs (XLSX/CSV) — REPLACE THE WHOLE OLD BLOCK WITH THIS =====
 (function wireUploadUIDs(){
   const btn  = document.getElementById('btn-upload-applied');
   const file = document.getElementById('file-upload-applied');
   if (!btn || !file) return;
+
+  // Case/space-insensitive header mapping (local to this IIFE so it always exists)
+  const normalizeAppliedRow = (row) => {
+    const norm = {};
+    for (const k in row) {
+      if (!Object.prototype.hasOwnProperty.call(row, k)) continue;
+      norm[String(k).toLowerCase().trim()] = row[k];
+    }
+    const pick = (...names) => {
+      for (const n of names) {
+        const v = norm[String(n).toLowerCase().trim()];
+        if (v != null && String(v).trim() !== '') return String(v).trim();
+      }
+      return '';
+    };
+    return {
+      date_local: pick('date_local','date','Date','DATE'),
+      mobile_bin: pick('mobile_bin','Mobile Bin (BOX)','MOBILE_BIN'),
+      sscc_label: pick('sscc_label','SSCC Label (BOX)','SSCC','SSCC_LABEL'),
+      po_number:  pick('po_number','PO_Number','PO','PO#','PO Number'),
+      sku_code:   pick('sku_code','SKU_Code','SKU','SKU Code'),
+      uid:        pick('uid','UID','u_id','u id'),   // tolerant to spaces/case
+      status: 'complete',
+    };
+  };
 
   btn.addEventListener('click', () => file.click());
 
@@ -1033,7 +1052,7 @@ $('#btn-export-day')?.addEventListener('click', ()=>{
     if (!API_BASE) return alert('API not configured');
 
     try {
-      // 1) Parse file to rows
+      // 1) Parse file
       let rows = [];
       if (/\.xlsx?$/i.test(f.name)) {
         const data = await f.arrayBuffer();
@@ -1042,15 +1061,22 @@ $('#btn-export-day')?.addEventListener('click', ()=>{
         rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
       } else {
         const text = await f.text();
-        rows = rowsFromCSV(text);
+        // reuse your existing rowsFromCSV if present; otherwise simple csv split:
+        rows = (typeof rowsFromCSV === 'function')
+          ? rowsFromCSV(text)
+          : text.split(/\r?\n/).filter(Boolean).map(l => l.split(','));
       }
 
-      // 2) Normalize + keep complete rows
+      // 2) Normalize rows and keep complete ones
       const payload = rows.map(normalizeAppliedRow)
         .filter(r => r.po_number && r.sku_code && r.uid);
+
       if (!payload.length) return alert('No valid rows found (need PO_Number, SKU_Code, UID).');
 
-      // 3) Try bulk endpoints; fallback to one-by-one
+      // quick sanity peek in DevTools if needed
+      // console.log('payload sample', payload[0]);
+
+      // 3) Bulk to backend (import -> bulk -> single fallback)
       const tryPaths = [
         `${API_BASE}/records/import`,
         `${API_BASE}/records/bulk`,
@@ -1086,7 +1112,7 @@ $('#btn-export-day')?.addEventListener('click', ()=>{
         alert(`Upload complete. Rows sent: ${payload.length}`);
       }
 
-      // ⬇️ refresh Intake from server so the table shows saved rows (synced)
+      // Refresh UI + metrics
       try { await refreshIntakeFromServerToday(); } catch {}
       try { loadOpsMetrics(); } catch {}
     } catch (err) {
