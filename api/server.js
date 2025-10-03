@@ -1,10 +1,12 @@
 // server.js — UID Ops Backend (Express + SQLite + SSE + Weekly Plan persistence)
+
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const ExcelJS = require('exceljs');
 const Database = require('better-sqlite3');
+const { randomUUID } = require('crypto');
 
 // ---- Config ----
 const PORT = process.env.PORT || 4000;
@@ -18,7 +20,7 @@ const app = express();
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin || ALLOWED_ORIGIN === '*' || origin === ALLOWED_ORIGIN) return cb(null, true);
-    // allow common Netlify preview subdomains: set ALLOWED_ORIGIN like https://*.netlify.app to wildcard
+    // allow common Netlify preview subdomains
     if (ALLOWED_ORIGIN.endsWith('.netlify.app') && origin.endsWith('.netlify.app')) return cb(null, true);
     return cb(new Error('CORS blocked: ' + origin));
   }
@@ -61,11 +63,9 @@ CREATE INDEX IF NOT EXISTS idx_records_date ON records(date_local);
 CREATE INDEX IF NOT EXISTS idx_records_status ON records(status);
 CREATE INDEX IF NOT EXISTS idx_records_po ON records(po_number);
 CREATE INDEX IF NOT EXISTS idx_records_sku ON records(sku_code);
-
 CREATE INDEX IF NOT EXISTS idx_records_uid ON records(uid);
 CREATE INDEX IF NOT EXISTS idx_records_sku_uid ON records(sku_code, uid);
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_po_sku_uid ON records(po_number, sku_code, uid);
-
 
 CREATE TABLE IF NOT EXISTS plans (
   week_start TEXT PRIMARY KEY,
@@ -83,6 +83,7 @@ const insertRecordBase = db.prepare(
 const deleteBySkuUid = db.prepare('DELETE FROM records WHERE uid = ? AND sku_code = ?');
 const selectByComposite = db.prepare('SELECT id FROM records WHERE po_number = ? AND sku_code = ? AND uid = ?');
 const deleteById = db.prepare('DELETE FROM records WHERE id = ?');
+
 const updateRecordFields = db.prepare(
   `UPDATE records SET
      date_local   = COALESCE(?, date_local),
@@ -96,6 +97,19 @@ const updateRecordFields = db.prepare(
      sync_state   = COALESCE(?, sync_state)
    WHERE id = ?`
 );
+
+// Upsert by composite (po_number, sku_code, uid)
+const upsertByComposite = db.prepare(`
+INSERT INTO records (id, date_local, mobile_bin, sscc_label, po_number, sku_code, uid, status, completed_at, sync_state)
+VALUES (@id, @date_local, @mobile_bin, @sscc_label, @po_number, @sku_code, @uid, @status, @completed_at, @sync_state)
+ON CONFLICT(po_number, sku_code, uid) DO UPDATE SET
+  date_local   = COALESCE(excluded.date_local, records.date_local),
+  mobile_bin   = COALESCE(excluded.mobile_bin, records.mobile_bin),
+  sscc_label   = COALESCE(excluded.sscc_label, records.sscc_label),
+  status       = CASE WHEN excluded.status='complete' THEN 'complete' ELSE records.status END,
+  completed_at = COALESCE(records.completed_at, excluded.completed_at),
+  sync_state   = 'synced'
+`);
 
 function isComplete(row) {
   return Boolean(
@@ -130,7 +144,7 @@ app.get('/events/scan', (req, res) => {
 // --- Health ---
 app.get('/health', (req, res) => res.json({ ok: true, now: new Date().toISOString() }));
 
-// --- Records API ---
+// --- Records API (inline cell update from Intake table) ---
 app.patch('/records/:id', (req, res) => {
   const id = String(req.params.id);
   const { field, value } = req.body || {};
@@ -166,7 +180,6 @@ app.patch('/records/:id', (req, res) => {
     emitScan(new Date(completed_at));
   }
 
-
   // Duplicate prevention on composite keys
   const pn = next.po_number ?? null;
   const sk = next.sku_code ?? null;
@@ -195,6 +208,96 @@ app.patch('/records/:id', (req, res) => {
 
   const after = selectRecordById.get(id);
   return res.json({ ok: true, record: after });
+});
+
+// Create a single record (used by Upload UIDs fallback)
+app.post('/records', (req, res) => {
+  const b = req.body || {};
+  const rec = {
+    id: b.id || randomUUID(),
+    date_local: String(b.date_local || todayChicagoISO()),
+    mobile_bin: String(b.mobile_bin || ''),
+    sscc_label: String(b.sscc_label || ''),
+    po_number:  String(b.po_number  || ''),
+    sku_code:   String(b.sku_code   || ''),
+    uid:        String(b.uid        || ''),
+    status:     'complete',
+    completed_at: new Date().toISOString(),
+    sync_state: 'synced'
+  };
+
+  if (!rec.po_number || !rec.sku_code || !rec.uid) {
+    return res.status(400).json({ error: 'po_number, sku_code, uid required' });
+  }
+
+  try {
+    upsertByComposite.run(rec);
+    emitScan(new Date(rec.completed_at));
+    const existing = selectByComposite.get(rec.po_number, rec.sku_code, rec.uid);
+    const saved = existing ? selectRecordById.get(existing.id) : selectRecordById.get(rec.id);
+    return res.json({ ok: true, record: saved });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+// Bulk import (array of records) — both endpoints supported
+function normalizeUploadRow(r) {
+  const pick = (...keys) => {
+    for (const k of keys) {
+      const v = r?.[k];
+      if (v != null && String(v).trim() !== '') return String(v).trim();
+    }
+    return '';
+  };
+  return {
+    id: randomUUID(),
+    date_local: pick('date_local','date','Date','DATE') || todayChicagoISO(),
+    mobile_bin: pick('mobile_bin','Mobile Bin (BOX)','MOBILE_BIN'),
+    sscc_label: pick('sscc_label','SSCC Label (BOX)','SSCC','SSCC_LABEL'),
+    po_number:  pick('po_number','PO_Number','PO','PO#','PO Number'),
+    sku_code:   pick('sku_code','SKU_Code','SKU','SKU Code'),
+    uid:        pick('uid','UID'),
+    status: 'complete',
+    completed_at: new Date().toISOString(),
+    sync_state: 'synced'
+  };
+}
+
+function bulkUpsert(payload) {
+  const trx = db.transaction((rows) => {
+    for (const r of rows) {
+      if (!r.po_number || !r.sku_code || !r.uid) continue;
+      upsertByComposite.run(r);
+    }
+  });
+  trx(payload);
+}
+
+app.post('/records/import', (req, res) => {
+  const arr = Array.isArray(req.body) ? req.body : [];
+  if (!arr.length) return res.status(400).json({ error: 'array of rows required' });
+  try {
+    const payload = arr.map(normalizeUploadRow).filter(r => r.po_number && r.sku_code && r.uid);
+    bulkUpsert(payload);
+    if (payload.length) emitScan(new Date(payload[payload.length - 1].completed_at));
+    return res.json({ ok: true, inserted: payload.length });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+app.post('/records/bulk', (req, res) => {
+  const arr = Array.isArray(req.body) ? req.body : [];
+  if (!arr.length) return res.status(400).json({ error: 'array of rows required' });
+  try {
+    const payload = arr.map(normalizeUploadRow).filter(r => r.po_number && r.sku_code && r.uid);
+    bulkUpsert(payload);
+    if (payload.length) emitScan(new Date(payload[payload.length - 1].completed_at));
+    return res.json({ ok: true, inserted: payload.length });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
 });
 
 app.get('/records', (req, res) => {
@@ -315,6 +418,17 @@ app.put('/plan/weeks/:mondayISO', (req, res) => {
     ON CONFLICT(week_start) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
   `).run(monday, json);
   return res.json(arr);
+});
+
+// Explicit zero endpoint (for your Zero Plan button)
+app.post('/plan/weeks/:mondayISO/zero', (req, res) => {
+  const monday = String(req.params.mondayISO);
+  db.prepare(`
+    INSERT INTO plans(week_start, data, updated_at)
+    VALUES(?, '[]', datetime('now'))
+    ON CONFLICT(week_start) DO UPDATE SET data='[]', updated_at=datetime('now')
+  `).run(monday);
+  return res.json({ ok: true, week_start: monday, rows: 0 });
 });
 
 app.get('/plan/weeks', (req, res) => {
