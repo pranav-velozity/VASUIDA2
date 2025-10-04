@@ -484,23 +484,195 @@ function renderRisk(list, selector){
   });
 }
 
-// ----- Insights tile (simple summary) -----
-function renderInsights(records){
-  const ul = document.getElementById('insights');
+// ---------- Actionable Top Insights (with Duplicates & Bin diversity) ----------
+function renderInsights(records, plan = [], weekStartISO = '') {
+  const ul   = document.getElementById('insights');
   const mini = document.getElementById('insights-mini');
   if (!ul) return;
 
-  const completed = (records||[]).filter(r => r.status === 'complete').length;
-  const drafts    = (records||[]).filter(r => r.status !== 'complete').length;
+  // --- dates & helpers ---
+  const today = todayISO();
+  const ws    = weekStartISO || (typeof mondayOf === 'function' ? iso(mondayOf(new Date())) : today);
+  const wsDate = new Date(ws + 'T00:00:00');
+  const weDate = new Date(ws + 'T00:00:00'); weDate.setDate(weDate.getDate() + 6);
+  const we = iso(weDate);
+  const dayDiff = (a,b)=> Math.round((new Date(a+'T00:00:00') - new Date(b+'T00:00:00'))/86400000);
+  const clamp01 = n => (n < 1 ? 1 : n);
 
-  ul.innerHTML = `
-    <li>Applied (this week): <strong>${completed.toLocaleString()}</strong></li>
-    <li>Drafts: <strong>${drafts.toLocaleString()}</strong></li>
-  `;
-  if (mini) mini.textContent = `On plan · drafts ${drafts.toLocaleString()}`;
+  // --- applied aggregates (this week window only) ---
+  const inWeek = r => r.status === 'complete' && r.date_local >= ws && r.date_local <= we;
+  const weekRecords = (records || []).filter(inWeek);
+
+  // per-PO & per-SKU counts in week
+  const appliedPO  = new Map();
+  const appliedSKU = new Map();
+  for (const r of weekRecords) {
+    const po  = String(r.po_number||'').trim();
+    const sku = String(r.sku_code||'').trim();
+    if (po)  appliedPO.set(po,  (appliedPO.get(po)||0)  + 1);
+    if (sku) appliedSKU.set(sku, (appliedSKU.get(sku)||0) + 1);
+  }
+
+  // --- plan aggregates (planned totals & earliest due) ---
+  const planPO = new Map();   // po -> { planned, due }
+  const planSKU = new Map();  // sku -> { planned, due }
+  let plannedTotal = 0;
+
+  for (const p of plan || []) {
+    const po  = String(p.po_number||'').trim();
+    const sku = String(p.sku_code||'').trim();
+    const due = String(p.due_date||'').trim();
+    const qty = Number(String(p.target_qty||0).toString().replace(/,/g,''));
+    plannedTotal += qty;
+
+    if (po) {
+      const cur = planPO.get(po) || { planned:0, due: due || '' };
+      cur.planned += qty;
+      if (!cur.due || (due && new Date(due) < new Date(cur.due))) cur.due = due;
+      planPO.set(po, cur);
+    }
+    if (sku) {
+      const cur = planSKU.get(sku) || { planned:0, due: due || '' };
+      cur.planned += qty;
+      if (!cur.due || (due && new Date(due) < new Date(cur.due))) cur.due = due;
+      planSKU.set(sku, cur);
+    }
+  }
+
+  // --- priority lists (highest remaining, earliest due first) ---
+  function buildPriority(listMap, appliedMap, keyName) {
+    const rows = [];
+    for (const [key, v] of listMap.entries()) {
+      const planned = v.planned || 0;
+      const applied = appliedMap.get(key) || 0;
+      const remaining = Math.max(0, planned - applied);
+      rows.push({ [keyName]: key, planned, applied, remaining, due: v.due || '' });
+    }
+    rows.sort((a, b) =>
+      (b.remaining - a.remaining) || (new Date(a.due||'9999-12-31') - new Date(b.due||'9999-12-31'))
+    );
+    return rows;
+  }
+  const priorityPO  = buildPriority(planPO, appliedPO, 'po');
+  const prioritySKU = buildPriority(planSKU, appliedSKU, 'sku');
+
+  // --- Mobile bins: unique today + top 5 by SKU diversity (this week) ---
+  const binsToday = new Set(
+    (records || [])
+      .filter(r => r.status === 'complete' && r.date_local === today)
+      .map(r => String(r.mobile_bin||'').trim())
+      .filter(Boolean)
+  );
+  // diversity across the week: bin -> set(sku)
+  const binSkuSet = new Map();
+  for (const r of weekRecords) {
+    const bin = String(r.mobile_bin||'').trim();
+    const sku = String(r.sku_code||'').trim();
+    if (!bin || !sku) continue;
+    if (!binSkuSet.has(bin)) binSkuSet.set(bin, new Set());
+    binSkuSet.get(bin).add(sku);
+  }
+  const binsByDiversity = Array.from(binSkuSet.entries())
+    .map(([bin, set]) => ({ bin, uniqueSkus: set.size }))
+    .sort((a,b) => b.uniqueSkus - a.uniqueSkus)
+    .slice(0, 5);
+
+  // --- Duplicate UID detection (this week) ---
+  // “Duplicate” is defined as the same (SKU, UID) appearing more than once
+  const pairCounts = new Map();
+  for (const r of weekRecords) {
+    const sku = String(r.sku_code||'').trim();
+    const uid = String(r.uid||'').trim();
+    if (!sku || !uid) continue;
+    const k = `${sku}||${uid}`;
+    pairCounts.set(k, (pairCounts.get(k)||0) + 1);
+  }
+  let dupScanCount = 0;
+  const dupPairs = [];
+  for (const [k, c] of pairCounts.entries()) {
+    if (c > 1) {
+      const [sku, uid] = k.split('||');
+      dupPairs.push({ sku, uid, count: c });
+      dupScanCount += c;
+    }
+  }
+  dupPairs.sort((a,b)=> b.count - a.count);
+  const dupExamples = dupPairs.slice(0,3).map(x => `${x.sku}×${x.uid}${x.count>2?`×${x.count}`:''}`);
+
+  // --- Pace calculations (week + due-in-3-days horizon) ---
+  const daysElapsed       = clamp01(7 - clamp01(dayDiff(ws, today) * -1));
+  const appliedSoFar      = weekRecords.length;
+  const avgPerDaySoFar    = Math.round(appliedSoFar / daysElapsed);
+  const daysLeftInWeek    = clamp01(dayDiff(we, today) + 1);
+  const remainingWeek     = Math.max(0, plannedTotal - appliedSoFar);
+  const needPerDayWeek    = Math.ceil(remainingWeek / daysLeftInWeek);
+
+  const due3Date = new Date(today + 'T00:00:00'); due3Date.setDate(due3Date.getDate() + 2);
+  const due3ISO  = iso(due3Date);
+  function sumPlannedDueBy(map) {
+    let sum = 0;
+    for (const v of map.values()) {
+      if (!v.due) continue;
+      if (v.due >= today && v.due <= due3ISO) sum += v.planned || 0;
+    }
+    return sum;
+  }
+  const plannedDue3 = sumPlannedDueBy(planPO);
+  let appliedAgainstDue3 = 0;
+  for (const [po, v] of planPO.entries()) {
+    if (v.due && v.due >= today && v.due <= due3ISO) {
+      appliedAgainstDue3 += appliedPO.get(po) || 0;
+    }
+  }
+  const remainingDue3   = Math.max(0, plannedDue3 - appliedAgainstDue3);
+  const daysLeftForDue3 = clamp01(Math.min(3, dayDiff(due3ISO, today) + 1));
+  const needPerDayDue3  = remainingDue3 ? Math.ceil(remainingDue3 / daysLeftForDue3) : 0;
+
+  // --- Build insight bullets (max 5) ---
+  const bullets = [];
+
+  // 1–2) Priority POs/SKUs to start
+  if (priorityPO.length && priorityPO[0].remaining > 0) {
+    const p = priorityPO[0];
+    bullets.push(`Start with PO ${p.po} (remaining ${p.remaining.toLocaleString()} • due ${p.due || 'n/a'})`);
+  }
+  if (prioritySKU.length && prioritySKU[0].remaining > 0) {
+    const s = prioritySKU[0];
+    bullets.push(`Focus SKU ${s.sku} (remaining ${s.remaining.toLocaleString()} • due ${s.due || 'n/a'})`);
+  }
+
+  // 3) Mobile bins: total unique (today) + top 5 by SKU diversity (this week)
+  if (binsByDiversity.length) {
+    const tops = binsByDiversity.map(b => `${b.bin} (${b.uniqueSkus})`).join(', ');
+    bullets.push(`Mobile bins today: ${binsToday.size.toLocaleString()} • Top bins by SKU diversity (wk): ${tops}`);
+  } else {
+    bullets.push(`Mobile bins today: ${binsToday.size.toLocaleString()}`);
+  }
+
+  // 4) Duplicate UID alert, if any
+  if (dupPairs.length) {
+    bullets.push(
+      `Duplicate UIDs detected: ${dupScanCount.toLocaleString()} scans across ${dupPairs.length} pairs ` +
+      `${dupExamples.length ? `(e.g., ${dupExamples.join(', ')})` : ''}`
+    );
+  } else {
+    bullets.push(`No duplicate UIDs detected this week.`);
+  }
+
+  // 5) Weekly pace vs target (and 3-day horizon if relevant)
+  const weekPace = `Weekly plan pace: need ~${needPerDayWeek.toLocaleString()}/day (current ${avgPerDaySoFar.toLocaleString()}/day)`;
+  if (remainingDue3 > 0) {
+    bullets.push(
+      `${weekPace} • Due≤3d: target ~${needPerDayDue3.toLocaleString()}/day (rem ${remainingDue3.toLocaleString()})`
+    );
+  } else {
+    bullets.push(weekPace);
+  }
+
+  // Render
+  ul.innerHTML = bullets.slice(0, 5).map(t => `<li>${t}</li>`).join('');
+  if (mini) mini.textContent = `Applied so far: ${appliedSoFar.toLocaleString()} • Remaining: ${remainingWeek.toLocaleString()}`;
 }
-
-
 
   // ---------- setWeek ----------
   async function setWeek(ws){
@@ -542,7 +714,7 @@ function renderInsights(records){
     renderRisk(riskSKU,'#risk-sku-body');
 
 // 👉 add/keep this:
-renderInsights(state.records);
+renderInsights(state.records, state.plan, state.weekStart);
 
     // download buttons
     $('#btn-dl-posku').onclick=()=>{
