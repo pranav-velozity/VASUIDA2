@@ -286,15 +286,28 @@
 
   <script>
   const BRAND = '#990033';
+const BASE_BPM = 40;
   const apiBase = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/,'');
   const $ = (s)=>document.querySelector(s);
   $('#vo-today').textContent = new Date().toLocaleDateString();
-  const iso=(d)=>d.toISOString().slice(0,10);
-  const mondayOf=(d=new Date())=>{const x=new Date(d);const day=x.getDay();const diff=(day===0?-6:1)-day;x.setDate(x.getDate()+diff);x.setHours(0,0,0,0);return x;}
-  const fmtInt=(n)=>Number(n||0).toLocaleString();
-const toNum = v => Number(String(v ?? 0).toString().replace(/,/g, '')) || 0;
-  function createHeart(size=24,color=BRAND,bpm=40){const s='http://www.w3.org/2000/svg',svg=document.createElementNS(s,'svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('width',size);svg.setAttribute('height',size);const p=document.createElementNS(s,'path');p.setAttribute('d','M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z');p.setAttribute('fill',color);svg.appendChild(p);svg.classList.add('heartbeat');svg.style.animationDuration=`${(60/Math.max(40,bpm)).toFixed(2)}s`;return svg;}
+const iso = (d) => d.toISOString().slice(0,10);
+const mondayOf = (d=new Date()) => { const x=new Date(d); const day=x.getDay(); const diff=(day===0?-6:1)-day; x.setDate(x.getDate()+diff); x.setHours(0,0,0,0); return x; };
+const fmtInt = (n) => Number(n||0).toLocaleString();
+const toNum = (v) => Number(String(v ?? 0).toString().replace(/,/g, '')) || 0;
+const toUI = (isoStr) =>
+  (isoStr && typeof isoStr === 'string' && isoStr.includes('-'))
+    ? isoStr.split('-').reverse().join('-')
+    : (isoStr || '');
 
+function createHeart(size=24, color=BRAND, bpm=40){
+  const s='http://www.w3.org/2000/svg', svg=document.createElementNS(s,'svg');
+  svg.setAttribute('viewBox','0 0 24 24'); svg.setAttribute('width',size); svg.setAttribute('height',size);
+  const p=document.createElementNS(s,'path');
+  p.setAttribute('d','M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z');
+  p.setAttribute('fill', color); svg.appendChild(p);
+  svg.classList.add('heartbeat'); svg.style.animationDuration = `${(60/Math.max(40,bpm)).toFixed(2)}s`;
+  return svg;
+}
   // API helpers
   const state={weekStart:iso(mondayOf()), plan:[], records:[]};
   async function api(path,opts={}){const r=await fetch(`${apiBase}${path}`,{method:opts.method||'GET',headers:{'Content-Type':'application/json'},body:opts.body?JSON.stringify(opts.body):undefined}); if(!r.ok) throw new Error(await r.text()); const ct=r.headers.get('content-type')||''; return ct.includes('json')?r.json():r.text();}
@@ -439,7 +452,7 @@ function renderPOProgress(rows){
     tr.className = 'odd:bg-gray-50';
     tr.innerHTML = `
       <td class="py-1 pr-2">${r.po}</td>
-      <td class="py-1 pr-2">${r.due ? r.due.split('-').reverse().join('-') : ''}</td>
+      <td class="py-1 pr-2">${r.due ? toUI(r.due) : ''}</td>
       <td class="py-1 pr-2 text-right tabular-nums">${(r.planned||0).toLocaleString()}</td>
       <td class="py-1 pr-2 text-right tabular-nums">${(r.applied||0).toLocaleString()}</td>
       <td class="py-1 text-right tabular-nums">${r.pct||0}%</td>
@@ -464,7 +477,7 @@ function renderRisk(list, selector){
     tr.className = 'odd:bg-gray-50';
     tr.innerHTML = `
       <td class="py-1 pr-2 truncate" title="${r.key||r.po||''}">${r.key||r.po||''}</td>
-      <td class="py-1 pr-2">${r.due_date ? r.due_date.split('-').reverse().join('-') : ''}</td>
+      <td class="py-1 pr-2">${r.due_date ? toUI(r.due_date) : ''}</td>
       <td class="py-1 pr-2 text-right tabular-nums">${(r.planned||0).toLocaleString()}</td>
       <td class="py-1 pr-2 text-right tabular-nums">${(r.applied||0).toLocaleString()}</td>
       <td class="py-1 pr-2 text-right tabular-nums">${(r.remaining||0).toLocaleString()}</td>
@@ -624,11 +637,11 @@ function renderInsights(records, plan = [], weekStartISO = '') {
   // 1–2) Priority POs/SKUs to start
   if (priorityPO.length && priorityPO[0].remaining > 0) {
     const p = priorityPO[0];
-    bullets.push(`Start with PO ${p.po} (remaining ${p.remaining.toLocaleString()} • due ${p.due || 'n/a'})`);
+    bullets.push(`Start with PO ${p.po} (remaining ${p.remaining.toLocaleString()} • due ${p.due ? toUI(p.due) : 'n/a'})`);
   }
   if (prioritySKU.length && prioritySKU[0].remaining > 0) {
     const s = prioritySKU[0];
-    bullets.push(`Focus SKU ${s.sku} (remaining ${s.remaining.toLocaleString()} • due ${s.due || 'n/a'})`);
+    bullets.push(`Focus SKU ${s.sku} (remaining ${s.remaining.toLocaleString()} • due ${s.due ? toUI(s.due) : 'n/a'})`);
   }
 
   // 3) Mobile bins: total unique (today) + top 5 by SKU diversity (this week)
@@ -766,17 +779,7 @@ $('#file-plan').addEventListener('change', async (e) => {
 
 
   // Convert Excel serials / Dates / strings -> YYYY-MM-DD
-  function toISODate(v) {
-    if (v == null || v === '') return '';
-    if (typeof v === 'number') {
-      // Excel serial (epoch 1899-12-30)
-      const d = new Date(Math.round((v - 25569) * 86400 * 1000));
-      return d.toISOString().slice(0, 10);
-    }
-    if (v instanceof Date) return v.toISOString().slice(0, 10);
-    const d = new Date(String(v));
-    return isNaN(d) ? '' : d.toISOString().slice(0, 10);
-  }
+
 
   const raw = rows.map(normalize);
   console.log('[plan-upload] parsed rows:', raw.length);
@@ -836,7 +839,7 @@ if (!putRes.ok) {
       if(r.status!=='complete') drafts++; else synced++;
       tr.innerHTML=`
         <td class="border px-2 py-2"><input type="checkbox" ${r.selected?'checked':''} data-id="${r.id}" data-role="sel"/></td>
-        <td class="border px-2 py-2"><input class="cell" value="${r.date_local}" data-id="${r.id}" data-f="date_local"/></td>
+        <td class="border px-2 py-2"><input class="cell" value="${toUI(r.date_local)}" data-id="${r.id}" data-f="date_local"/></td>
         <td class="border px-2 py-2"><input class="cell" value="${r.mobile_bin}" data-id="${r.id}" data-f="mobile_bin"/></td>
         <td class="border px-2 py-2"><input class="cell" value="${r.sscc_label}" data-id="${r.id}" data-f="sscc_label" placeholder="(optional)"/></td>
         <td class="border px-2 py-2"><input class="cell" value="${r.po_number}" data-id="${r.id}" data-f="po_number"/></td>
@@ -865,7 +868,13 @@ if (!putRes.ok) {
       }
       inp.addEventListener('input',e=>{
         const row=intakeRows.find(x=>x.id===id); if(!row) return;
-        row[f] = (f==='uid') ? String(e.target.value ?? '') : String(e.target.value||'').trim(); // UID verbatim
+        if (f === 'uid') {
+  row[f] = String(e.target.value ?? '');
+} else if (f === 'date_local') {
+  row[f] = toISODate(String(e.target.value || '').trim());
+} else {
+  row[f] = String(e.target.value || '').trim();
+} // UID verbatim
         row.status = requiredFilled(row) ? 'complete' : 'draft';
         row.sync = 'pending';
       });
@@ -915,6 +924,24 @@ if (!putRes.ok) {
   };
   $('#btn-export-day').onclick=()=>{ if(!apiBase) return; const d=iso(new Date()); window.location=`${apiBase}/export/xlsx?date=${d}`; };
 
+function toISODate(v) {
+  if (v == null || v === '') return '';
+  if (typeof v === 'number') {
+    const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+    return d.toISOString().slice(0, 10);
+  }
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  const str = String(v).trim();
+  const m = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (m) {
+    const [_, d, mth, y] = m;
+    const yyyy = y.length === 2 ? '20' + y : y;
+    return `${yyyy}-${mth.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+  const d2 = new Date(str);
+  return isNaN(d2) ? '' : d2.toISOString().slice(0, 10);
+}
+
   // Upload UIDs → table → sync (unchanged)
   (function wireUploadUIDs(){
     const btn=$('#btn-upload-applied'), file=$('#file-upload-applied');
@@ -932,14 +959,20 @@ if (!putRes.ok) {
         const normRow=(r)=>{const n={}; for(const k in r){n[k.toLowerCase().replace(/\s+/g,'_')]=r[k];}
           const pick=(...a)=>{for(const x of a){const v=n[x]; if(v!=null && String(v).trim()!=='') return String(v).trim();} return '';}
           const pickRaw=(...a)=>{for(const x of a){ if(x in n) return String(n[x]??''); } return '';}
-          return {date_local:pick('date_local','date'), mobile_bin:pick('mobile_bin','mobile_bin_(box)','mobile_bin (box)'), sscc_label:pick('sscc_label','sscc','sscc_label (box)'),
-                  po_number:pick('po_number','po','po#'), sku_code:pick('sku_code','sku'), uid:pickRaw('uid','u_id','u id')}; };
+          return {
+  date_local: toISODate(pick('date_local','date')),
+  mobile_bin: pick('mobile_bin','mobile_bin_(box)','mobile_bin (box)'),
+  sscc_label: pick('sscc_label','sscc','sscc_label (box)'),
+  po_number: pick('po_number','po','po#'),
+  sku_code:  pick('sku_code','sku'),
+  uid:       pickRaw('uid','u_id','u id')
+};
         const items = rows.map(normRow).filter(r=>r.po_number && r.sku_code && (r.uid!==''));
         if(!items.length) return alert('No valid rows found (need PO_Number, SKU_Code, UID).');
 
         for(const r of items){
           const ui=newRow();
-          ui.date_local=r.date_local || iso(new Date());
+          ui.date_local = r.date_local || iso(new Date()); // r.date_local is already YYYY-MM-DD
           ui.mobile_bin=r.mobile_bin||'';
           ui.sscc_label=r.sscc_label||'';
           ui.po_number=r.po_number;
@@ -996,7 +1029,14 @@ if (!putRes.ok) {
       const bpm=Math.max(40,Math.min(200,rate*2));
       $('#intake-bpm').textContent=bpm;
       const small=$('#ops-heart-small'); if(small){small.innerHTML=''; small.appendChild(createHeart(18,BRAND,bpm));}
-      const big=$('#ops-heart'); if(big){big.innerHTML=''; big.appendChild(createHeart(24,BRAND,bpm)); $('#ops-bpm').textContent=bpm; $('#ops-extra').textContent='+0 over 40';}
+      const big = $('#ops-heart');
+if (big) {
+  big.innerHTML = '';
+  big.appendChild(createHeart(24, BRAND, bpm));
+  $('#ops-bpm').textContent = bpm;
+  const delta = bpm - 40;
+  $('#ops-extra').textContent = `${delta >= 0 ? '+' : ''}${delta} over 40`;
+} 
 
       const wrap=$('#ops-sync-badges'); if(wrap){wrap.innerHTML=''; Object.entries(syncCounts).sort((a,b)=>b[1]-a[1]).forEach(([name,count])=>{
         const span=document.createElement('span');
@@ -1028,11 +1068,18 @@ if (!putRes.ok) {
     if(!res.ok) return;
     const all=(await res.json()).records||[];
 
-    const inWeek=all.filter(r=>{
-      if(r.status!=='complete'||!r.completed_at) return false;
-      const t=new Date(r.completed_at).getTime();
-      return t>=start.getTime() && t<end.getTime();
-    });
+const inWeek = all.filter(r => {
+if (r.status !== 'complete') return false;
+if (r.completed_at) {
+const t = new Date(r.completed_at).getTime();
+return t >= start.getTime() && t < end.getTime();
+}
+// Fallback: use date_local window if completed_at missing
+const ws = state.weekStart;           // YYYY-MM-DD
+const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
+const we = iso(weD);
+return r.date_local && r.date_local >= ws && r.date_local <= we;
+});
 
     const appliedTotal=inWeek.length;
     const plannedTotal=(state.plan||[]).reduce((s,p)=>s+toNum(p.target_qty),0);
@@ -1076,11 +1123,23 @@ if (!putRes.ok) {
     window.addEventListener('hashchange',()=>show(location.hash||'#dashboard')); show(location.hash||'#dashboard');
     // intake scaffold
     renderIntake();
+
+  // Select All checkbox (header)
+  document.getElementById('chk-all')?.addEventListener('change', (e) => {
+    const on = e.target.checked;
+    intakeRows.forEach(r => r.selected = on);
+    renderIntake();
+    // keep header checkbox visually in sync after re-render
+    document.getElementById('chk-all').checked = on;
+  });
+
     // hearts / metrics
     $('#ops-heart').appendChild(createHeart(24,BRAND,40));
     $('#ops-heart-small').appendChild(createHeart(18,BRAND,40));
     loadOpsMetrics(); startSSE();
   })();
+
+
   </script>
 </body>
 </html>
