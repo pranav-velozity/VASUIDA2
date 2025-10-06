@@ -967,6 +967,8 @@ function toISODate(v) {
   sku_code:  pick('sku_code','sku'),
   uid:       pickRaw('uid','u_id','u id')
 };
+
+};
         const items = rows.map(normRow).filter(r=>r.po_number && r.sku_code && (r.uid!==''));
         if(!items.length) return alert('No valid rows found (need PO_Number, SKU_Code, UID).');
 
