@@ -739,23 +739,63 @@ renderInsights(state.records, state.plan, state.weekStart);
 
   // ---------- Plan upload / zero (unchanged) ----------
   $('#btn-upload-plan').onclick=()=>$('#file-plan').click();
-  $('#file-plan').addEventListener('change', async (e)=>{
-    const f=e.target.files?.[0]; e.target.value=''; if(!f||!apiBase) return;
-    const text = await f.text();
-    const lines = text.split(/\r?\n/).filter(Boolean);
-    const hdr = lines.shift().split(',').map(s=>s.trim().toLowerCase().replace(/\s+/g,'_'));
-    const idx=(n)=>hdr.indexOf(n);
-    const iPO=idx('po_number')>=0?idx('po_number'):idx('po');
-    const iSKU=idx('sku_code')>=0?idx('sku_code'):idx('sku');
-    const iDue=idx('due_date')>=0?idx('due_date'):idx('due');
-    const iQty=idx('target_qty')>=0?idx('target_qty'):idx('planned');
-    if(iPO<0||iSKU<0||iDue<0){alert('CSV must include PO, SKU, Due Date');return;}
-    const weekStart = $('#week-start').value;
-    const rows = lines.map(l=>l.split(',')).map(r=>({po_number:r[iPO]?.trim(), sku_code:r[iSKU]?.trim(), start_date:weekStart, due_date:r[iDue]?.trim(), target_qty:Number((r[iQty]||'0').replace(/,/g,''))||0})).filter(r=>r.po_number&&r.sku_code&&r.due_date);
-    await fetch(`${apiBase}/plan/weeks/${weekStart}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(rows)});
-    alert(`Plan uploaded: ${rows.length} rows`);
-    setWeek(weekStart);
+$('#file-plan').addEventListener('change', async (e) => {
+  const f = e.target.files?.[0];
+  e.target.value = '';
+  if (!f || !apiBase) return;
+
+  const weekStart = $('#week-start').value;
+  let rows = [];
+
+  try {
+    if (/\.xlsx?$/i.test(f.name)) {
+      // Excel: read all rows using SheetJS
+      const buf = await f.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array' });
+      rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+    } else {
+      // CSV: use SheetJS for complete parsing (avoids truncation)
+      const buf = await f.arrayBuffer();
+      const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+      rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+    }
+  } catch (err) {
+    console.error('Parsing failed', err);
+    alert('Could not parse file');
+    return;
+  }
+
+  if (!rows.length) return alert('No rows found.');
+
+  // Normalize headers
+  const normalize = (r) => {
+    const n = {};
+    for (const k in r) n[k.toLowerCase().replace(/\s+/g, '_')] = r[k];
+    return n;
+  };
+
+  const items = rows
+    .map(normalize)
+    .map(r => ({
+      po_number: r.po_number || r.po || '',
+      sku_code: r.sku_code || r.sku || '',
+      start_date: weekStart,
+      due_date: r.due_date || r.due || '',
+      target_qty: Number((r.target_qty || r.planned || '0').toString().replace(/,/g, '')) || 0
+    }))
+    .filter(r => r.po_number && r.sku_code && r.due_date);
+
+  if (!items.length) return alert('No valid rows with PO, SKU, Due Date found.');
+
+  await fetch(`${apiBase}/plan/weeks/${weekStart}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(items)
   });
+
+  alert(`Plan uploaded: ${items.length} rows`);
+  setWeek(weekStart);
+});
   $('#btn-zero-plan').onclick=async()=>{
     if(!apiBase) return alert('API not configured');
     const ws=$('#week-start').value;
