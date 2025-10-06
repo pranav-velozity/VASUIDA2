@@ -292,6 +292,7 @@
   const iso=(d)=>d.toISOString().slice(0,10);
   const mondayOf=(d=new Date())=>{const x=new Date(d);const day=x.getDay();const diff=(day===0?-6:1)-day;x.setDate(x.getDate()+diff);x.setHours(0,0,0,0);return x;}
   const fmtInt=(n)=>Number(n||0).toLocaleString();
+const toNum = v => Number(String(v ?? 0).toString().replace(/,/g, '')) || 0;
   function createHeart(size=24,color=BRAND,bpm=40){const s='http://www.w3.org/2000/svg',svg=document.createElementNS(s,'svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('width',size);svg.setAttribute('height',size);const p=document.createElementNS(s,'path');p.setAttribute('d','M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z');p.setAttribute('fill',color);svg.appendChild(p);svg.classList.add('heartbeat');svg.style.animationDuration=`${(60/Math.max(40,bpm)).toFixed(2)}s`;return svg;}
 
   // API helpers
@@ -511,7 +512,7 @@ function renderInsights(records, plan = [], weekStartISO = '') {
     const po  = String(p.po_number||'').trim();
     const sku = String(p.sku_code||'').trim();
     const due = String(p.due_date||'').trim();
-    const qty = Number(String(p.target_qty||0).toString().replace(/,/g,''));
+    const qty = toNum(p.target_qty);
     plannedTotal += qty;
 
     if (po) {
@@ -786,7 +787,7 @@ po_number: String(r.po_number ?? r.po ?? '').trim(),
 sku_code:  String(r.sku_code  ?? r.sku  ?? '').trim(),
       start_date: weekStart,
       due_date: toISODate(r.due_date ?? r.due ?? ''),
-      target_qty: Number((r.target_qty ?? r.planned ?? '0').toString().replace(/,/g, '')) || 0
+      target_qty: toNum(r.target_qty ?? r.planned)
     }))
     // keep rows that at least have PO + SKU (server can validate due_date)
     .filter(r => r.po_number && r.sku_code);
