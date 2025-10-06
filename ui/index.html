@@ -503,7 +503,11 @@ function renderInsights(records, plan = [], weekStartISO = '') {
   const clamp01 = n => (n < 1 ? 1 : n);
 
   // --- applied aggregates (this week window only) ---
-  const inWeek = r => r.status === 'complete' && r.date_local >= ws && r.date_local <= we;
+  const inWeek = (r) => {
+  if (r.status !== 'complete') return false;
+  const dl = toISODate(r.date_local);   // normalize to YYYY-MM-DD
+  return dl && dl >= ws && dl <= we;
+};
   const weekRecords = (records || []).filter(inWeek);
 
   // per-PO & per-SKU counts in week
@@ -1063,8 +1067,9 @@ if (big) {
   async function refreshDashboardTotals(){
     if(!apiBase) return;
     const ws=state.weekStart;
-    const start=new Date(ws+'T00:00:00Z');
-    const end=new Date(start); end.setDate(end.getDate()+7);
+    const start = new Date(ws + 'T00:00:00');   // local midnight
+const end   = new Date(start); 
+end.setDate(end.getDate() + 7);
 
     const res=await fetch(`${apiBase}/records?limit=50000`);
     if(!res.ok) return;
@@ -1080,7 +1085,8 @@ return t >= start.getTime() && t < end.getTime();
 const ws = state.weekStart;           // YYYY-MM-DD
 const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
 const we = iso(weD);
-return r.date_local && r.date_local >= ws && r.date_local <= we;
+const dl = toISODate(r.date_local); // normalizes "06-10-2025", "6/10/25", Excel serials, etc.
+return dl && dl >= ws && dl <= we;
 });
 
     const appliedTotal=inWeek.length;
