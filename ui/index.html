@@ -297,7 +297,14 @@
   // API helpers
   const state={weekStart:iso(mondayOf()), plan:[], records:[]};
   async function api(path,opts={}){const r=await fetch(`${apiBase}${path}`,{method:opts.method||'GET',headers:{'Content-Type':'application/json'},body:opts.body?JSON.stringify(opts.body):undefined}); if(!r.ok) throw new Error(await r.text()); const ct=r.headers.get('content-type')||''; return ct.includes('json')?r.json():r.text();}
-  async function fetchPlan(w){ if(!apiBase) return []; try{return await api(`/plan/weeks/${w}`);}catch{return [];} }
+  async function fetchPlan(w){
+  if(!apiBase) return [];
+  try {
+    return await api(`/plan/weeks/${w}?limit=50000`);
+  } catch {
+    return [];
+  }
+}
   async function fetchActuals(f,t){ if(!apiBase) return []; try{const d=await api(`/records?from=${f}&to=${t}&status=complete&limit=50000`); return d.records||[];}catch{return [];} }
 
   // ---------- Capsules ----------
@@ -326,7 +333,7 @@
   function aggregate(records){const byPO=new Map(),bySKU=new Map(); for(const r of records){ if(r.status!=='complete') continue; const po=String(r.po_number||'').trim(), sku=String(r.sku_code||'').trim(); if(po) byPO.set(po,(byPO.get(po)||0)+1); if(sku) bySKU.set(sku,(bySKU.get(sku)||0)+1);} return {byPO,bySKU};}
   function joinPOProgress(plan, byPO){
     const map=new Map();
-    for(const p of plan||[]){ const po=String(p.po_number||'').trim(); if(!po) continue; const rec=map.get(po)||{due:p.due_date,planned:0,applied:0}; rec.planned+=Number(p.target_qty||0); if(rec.due!==p.due_date) rec.due = rec.due < p.due_date ? rec.due : p.due_date; map.set(po,rec); }
+    for(const p of plan||[]){ const po=String(p.po_number||'').trim(); if(!po) continue; const rec=map.get(po)||{due:p.due_date,planned:0,applied:0}; rec.planned+=toNum(p.target_qty); if(rec.due!==p.due_date) rec.due = rec.due < p.due_date ? rec.due : p.due_date; map.set(po,rec); }
     for(const [po,ap] of byPO.entries()){ const rec=map.get(po)||{due:'',planned:0,applied:0}; rec.applied+=ap; map.set(po,rec);}
     const list=[]; for(const [po,rec] of map.entries()){ list.push({po,due:rec.due,planned:rec.planned,applied:rec.applied,pct:rec.planned>0?Math.round(rec.applied*100/rec.planned):100}); }
     list.sort((a,b)=>String(a.due).localeCompare(String(b.due))); return list;
@@ -380,7 +387,7 @@
     for(const r of records||[]){ if(r.status!=='complete') continue; const po=String(r.po_number||'').trim(), sku=String(r.sku_code||'').trim(); if(!po||!sku) continue; const k=`${po}|||${sku}`; byPS.set(k,(byPS.get(k)||0)+1); }
     const seen=new Set(); const rows=[];
     for(const p of plan||[]){ const po=String(p.po_number||'').trim(), sku=String(p.sku_code||'').trim(); if(!po||!sku) continue; const k=`${po}|||${sku}`; if(seen.has(k)) continue; seen.add(k);
-      const planned=Number(p.target_qty||0), applied=byPS.get(k)||0;
+      const planned=toNum(p.target_qty), applied=byPS.get(k)||0;
       rows.push({'PO':po,'SKU':sku,'Planned':planned,'Applied':applied,'Discrepancy (Applied - Planned)':applied-planned});
     }
     return rows;
@@ -663,7 +670,7 @@ function renderInsights(records, plan = [], weekStartISO = '') {
     const [plan, recs] = await Promise.all([fetchPlan(ws), fetchActuals(ws,we)]);
     state.plan = Array.isArray(plan)?plan:[]; state.records = Array.isArray(recs)?recs:[];
     const agg=aggregate(state.records);
-    const plannedTotal = state.plan.reduce((s,p)=> s + Number(p.target_qty||0), 0);
+    const plannedTotal = state.plan.reduce((s,p)=> s + toNum(p.target_qty), 0);
     const appliedTotal = Array.from(agg.byPO.values()).reduce((s,v)=> s+v, 0);
     const pct = plannedTotal>0? Math.round(appliedTotal*100/plannedTotal) : (state.plan.length?0:100);
     $('#planned-range').textContent = `${ws} – ${we}`;
@@ -685,7 +692,7 @@ function renderInsights(records, plan = [], weekStartISO = '') {
     for(const p of state.plan){
       const sku=String(p.sku_code||'').trim(); if(!sku) continue;
       const r=perSKU.get(sku)||{due:p.due_date,planned:0,applied:0};
-      r.planned+=Number(p.target_qty||0);
+      r.planned+=toNum(p.target_qty);
       if(r.due!==p.due_date) r.due = r.due < p.due_date ? r.due : p.due_date;
       perSKU.set(sku,r);
     }
@@ -1027,7 +1034,7 @@ if (!putRes.ok) {
     });
 
     const appliedTotal=inWeek.length;
-    const plannedTotal=(state.plan||[]).reduce((s,p)=>s+Number(p.target_qty||0),0);
+    const plannedTotal=(state.plan||[]).reduce((s,p)=>s+toNum(p.target_qty),0);
     const pct = plannedTotal>0?Math.round(appliedTotal*100/plannedTotal):(state.plan.length?0:100);
 
     $('#planned-total').textContent = plannedTotal.toLocaleString();
@@ -1048,10 +1055,10 @@ if (!putRes.ok) {
         const term=String(e.target.value||'').trim();
         const wrap=$('#search-results'); if(!term){wrap.classList.add('hidden'); wrap.innerHTML=''; return;}
         const agg=aggregate(state.records); const rows=[];
-        const plannedPO=state.plan.filter(p=>String(p.po_number).trim()===term).reduce((s,p)=>s+Number(p.target_qty||0),0);
+        const plannedPO=state.plan.filter(p=>String(p.po_number).trim()===term).reduce((s,p)=>s+toNum(p.target_qty),0);
         let appliedPO=0; for(const [k,v] of agg.byPO.entries()){ if(k===term) appliedPO+=v; }
         if(plannedPO||appliedPO) rows.push({scope:'PO',planned:plannedPO,applied:appliedPO,pct:plannedPO>0?Math.round((appliedPO/plannedPO)*100):0});
-        const plannedSKU=state.plan.filter(p=>String(p.sku_code).trim()===term).reduce((s,p)=>s+Number(p.target_qty||0),0);
+        const plannedSKU=state.plan.filter(p=>String(p.sku_code).trim()===term).reduce((s,p)=>s+toNum(p.target_qty),0);
         let appliedSKU=0; for(const [k,v] of agg.bySKU.entries()){ if(k===term) appliedSKU+=v; }
         if(plannedSKU||appliedSKU) rows.push({scope:'SKU',planned:plannedSKU,applied:appliedSKU,pct:plannedSKU>0?Math.round((appliedSKU/plannedSKU)*100):0});
         wrap.classList.remove('hidden');
