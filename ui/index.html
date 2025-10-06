@@ -754,7 +754,7 @@ $('#file-plan').addEventListener('change', async (e) => {
       const wb = XLSX.read(buf, { type: 'array' });
       rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
     } else {
-      // CSV: use SheetJS for complete parsing (avoids truncation)
+      // CSV: parse with SheetJS to avoid truncation/edge cases
       const buf = await f.arrayBuffer();
       const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
       rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
@@ -767,25 +767,42 @@ $('#file-plan').addEventListener('change', async (e) => {
 
   if (!rows.length) return alert('No rows found.');
 
-  // Normalize headers
+  // ---- Point B helpers ----
   const normalize = (r) => {
     const n = {};
     for (const k in r) n[k.toLowerCase().replace(/\s+/g, '_')] = r[k];
     return n;
   };
 
-  const items = rows
-    .map(normalize)
-    .map(r => ({
-      po_number: r.po_number || r.po || '',
-      sku_code: r.sku_code || r.sku || '',
-      start_date: weekStart,
-      due_date: r.due_date || r.due || '',
-      target_qty: Number((r.target_qty || r.planned || '0').toString().replace(/,/g, '')) || 0
-    }))
-    .filter(r => r.po_number && r.sku_code && r.due_date);
+  // Convert Excel serials / Dates / strings -> YYYY-MM-DD
+  function toISODate(v) {
+    if (v == null || v === '') return '';
+    if (typeof v === 'number') {
+      // Excel serial (epoch 1899-12-30)
+      const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+      return d.toISOString().slice(0, 10);
+    }
+    if (v instanceof Date) return v.toISOString().slice(0, 10);
+    const d = new Date(String(v));
+    return isNaN(d) ? '' : d.toISOString().slice(0, 10);
+  }
 
-  if (!items.length) return alert('No valid rows with PO, SKU, Due Date found.');
+  const raw = rows.map(normalize);
+  console.log('[plan-upload] parsed rows:', raw.length);
+
+  const items = raw
+    .map(r => ({
+      po_number: (r.po_number || r.po || '').trim(),
+      sku_code: (r.sku_code || r.sku || '').trim(),
+      start_date: weekStart,
+      due_date: toISODate(r.due_date ?? r.due ?? ''),
+      target_qty: Number((r.target_qty ?? r.planned ?? '0').toString().replace(/,/g, '')) || 0
+    }))
+    // keep rows that at least have PO + SKU (server can validate due_date)
+    .filter(r => r.po_number && r.sku_code);
+
+  console.log('[plan-upload] valid rows (PO+SKU):', items.length);
+  console.log('[plan-upload] rows with due_date:', items.filter(r => r.due_date).length);
 
   await fetch(`${apiBase}/plan/weeks/${weekStart}`, {
     method: 'PUT',
