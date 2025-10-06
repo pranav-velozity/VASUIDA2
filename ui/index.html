@@ -54,7 +54,7 @@
         <div class="flex items-center gap-2">
           <label class="text-sm text-gray-600">Week start</label>
           <input id="week-start" type="date" class="px-2 py-1 border rounded-md text-sm"/>
-          <input id="file-plan" type="file" accept=".csv" class="hidden"/>
+          <input id="file-plan" type="file" accept=".xlsx,.csv" class="hidden"/>
           <button id="btn-upload-plan" class="px-3 py-2 rounded-lg text-sm border">Upload Plan</button>
           <button id="btn-zero-plan"   class="px-3 py-2 rounded-lg text-sm border">Zero Plan</button>
         </div>
@@ -331,11 +331,6 @@
     const list=[]; for(const [po,rec] of map.entries()){ list.push({po,due:rec.due,planned:rec.planned,applied:rec.applied,pct:rec.planned>0?Math.round(rec.applied*100/rec.planned):100}); }
     list.sort((a,b)=>String(a.due).localeCompare(String(b.due))); return list;
   }
-  function computeRisk(rows, weekEndISO){
-    const end=new Date(weekEndISO+'T00:00:00'); const out=[];
-    for(const r of rows||[]){ const remaining=Math.max(0,(r.planned||0)-(r.applied||0)); const due=new Date((r.due||'')+'T00:00:00'); if(remaining>0 && r.due && due<=end){ out.push({key:r.po||r.sku||r.key,due_date:r.due,planned:r.planned||0,applied:r.applied||0,remaining,pct:r.planned>0?Math.round(r.applied*100/r.planned):0});}}
-    out.sort((a,b)=> b.remaining - a.remaining || (new Date(a.due_date)) - (new Date(b.due_date)) ); return out.slice(0,5);
-  }
 
   // ---------- Dashboard render ----------
   function computeRisk(rows){
@@ -362,20 +357,7 @@
                      (new Date(b.due_date || '9999-12-31')));
   return out.slice(0, 5);
 }
-  function renderRisk(list, id){
-    const b=$(id); b.innerHTML='';
-    if(!list.length){b.innerHTML='<tr><td colspan="6" class="text-center text-xs text-gray-400 py-3">No items at risk this week.</td></tr>'; return;}
-    list.forEach(r=>{
-      const tr=document.createElement('tr'); tr.className='odd:bg-gray-50';
-      tr.innerHTML=`<td class="py-1 pr-2 truncate" title="${r.key}">${r.key}</td>
-                    <td class="py-1 pr-2">${r.due_date?r.due_date.split('-').reverse().join('-'):''}</td>
-                    <td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.planned)}</td>
-                    <td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.applied)}</td>
-                    <td class="py-1 pr-2 text-right tabular-nums">${fmtInt(r.remaining)}</td>
-                    <td class="py-1 text-right tabular-nums">${r.pct}%</td>`;
-      b.appendChild(tr);
-    });
-  }
+  
   function setFooterHealth(pct, appliedWeek){
     const pill=$('#health-pill'), dot=$('#health-dot');
     let cls='bg-amber-100 text-amber-900 border-amber-300', d='bg-amber-500', label='On-Plan';
@@ -697,7 +679,7 @@ function renderInsights(records, plan = [], weekStartISO = '') {
     const poRows = joinPOProgress(state.plan, agg.byPO);
     renderPOProgress(poRows);
 
-    const riskPO = computeRisk(poRows.map(r=>({po:r.po,due:r.due,planned:r.planned,applied:r.applied})), we);
+    const riskPO = computeRisk(poRows.map(r=>({po:r.po,due:r.due,planned:r.planned,applied:r.applied})));
     // build per SKU progress
     const perSKU=new Map();
     for(const p of state.plan){
@@ -709,7 +691,7 @@ function renderInsights(records, plan = [], weekStartISO = '') {
     }
     for(const [sku,v] of agg.bySKU.entries()){const r=perSKU.get(sku)||{due:'',planned:0,applied:0}; r.applied+=v; perSKU.set(sku,r);}
     const skuRows=Array.from(perSKU.entries()).map(([sku,r])=>({key:sku,due:r.due,planned:r.planned,applied:r.applied}));
-    const riskSKU = computeRisk(skuRows, we);
+    const riskSKU = computeRisk(skuRows);
     renderRisk(riskPO,'#risk-po-body');
     renderRisk(riskSKU,'#risk-sku-body');
 
@@ -774,6 +756,7 @@ $('#file-plan').addEventListener('change', async (e) => {
     return n;
   };
 
+
   // Convert Excel serials / Dates / strings -> YYYY-MM-DD
   function toISODate(v) {
     if (v == null || v === '') return '';
@@ -792,8 +775,8 @@ $('#file-plan').addEventListener('change', async (e) => {
 
   const items = raw
     .map(r => ({
-      po_number: (r.po_number || r.po || '').trim(),
-      sku_code: (r.sku_code || r.sku || '').trim(),
+po_number: String(r.po_number ?? r.po ?? '').trim(),
+sku_code:  String(r.sku_code  ?? r.sku  ?? '').trim(),
       start_date: weekStart,
       due_date: toISODate(r.due_date ?? r.due ?? ''),
       target_qty: Number((r.target_qty ?? r.planned ?? '0').toString().replace(/,/g, '')) || 0
@@ -804,11 +787,16 @@ $('#file-plan').addEventListener('change', async (e) => {
   console.log('[plan-upload] valid rows (PO+SKU):', items.length);
   console.log('[plan-upload] rows with due_date:', items.filter(r => r.due_date).length);
 
-  await fetch(`${apiBase}/plan/weeks/${weekStart}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(items)
-  });
+const putRes = await fetch(`${apiBase}/plan/weeks/${weekStart}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(items)
+});
+if (!putRes.ok) {
+  const msg = await putRes.text().catch(() => 'Upload failed');
+  alert(msg);
+  return;
+}
 
   alert(`Plan uploaded: ${items.length} rows`);
   setWeek(weekStart);
