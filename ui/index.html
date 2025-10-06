@@ -681,12 +681,39 @@ function renderInsights(records, plan = [], weekStartISO = '') {
   if (mini) mini.textContent = `Applied so far: ${appliedSoFar.toLocaleString()} • Remaining: ${remainingWeek.toLocaleString()}`;
 }
 
+function inWeekByCompletedAt(r, ws) {
+  if (r.status !== 'complete') return false;
+
+  const start = new Date(ws + 'T00:00:00Z');
+  const end   = new Date(start); end.setDate(end.getDate() + 7);
+
+  if (r.completed_at) {
+    const t = new Date(r.completed_at).getTime();
+    return t >= start.getTime() && t < end.getTime();
+  }
+  // fallback to date_local if completed_at missing
+  const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
+  const we  = iso(weD);
+  return r.date_local && r.date_local >= ws && r.date_local <= we;
+}
+
+async function fetchActualsAll(){
+  if (!apiBase) return [];
+  try {
+    const d = await api(`/records?status=complete&limit=50000`);
+    return d.records || [];
+  } catch {
+    return [];
+  }
+}
+
   // ---------- setWeek ----------
   async function setWeek(ws){
     state.weekStart=ws; $('#week-start').value=ws;
     const weDate=new Date(ws); weDate.setDate(weDate.getDate()+6); const we=iso(weDate);
-    const [plan, recs] = await Promise.all([fetchPlan(ws), fetchActuals(ws,we)]);
-    state.plan = Array.isArray(plan)?plan:[]; state.records = Array.isArray(recs)?recs:[];
+const [plan, allRecs] = await Promise.all([fetchPlan(ws), fetchActualsAll()]);
+state.plan = Array.isArray(plan) ? plan : [];
+state.records = Array.isArray(allRecs) ? allRecs.filter(r => inWeekByCompletedAt(r, ws)) : [];
     const agg=aggregate(state.records);
     const plannedTotal = state.plan.reduce((s,p)=> s + toNum(p.target_qty), 0);
     const appliedTotal = Array.from(agg.byPO.values()).reduce((s,v)=> s+v, 0);
