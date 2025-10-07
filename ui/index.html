@@ -1063,18 +1063,17 @@ function toISODate(v) {
 
   // ---------- Ops metrics & Ops Pulse ----------
   function todayISO(){const d=new Date(); d.setHours(0,0,0,0); return iso(d);}
-async function loadOpsMetrics(){
-  if(!apiBase) return;
-  try{
-    const today = todayISO(); // YYYY-MM-DD
-
-    // ✅ Fetch only today's complete records — up to 50,000 so no cap at 5000
-    const res = await fetch(`${apiBase}/records?from=${today}&to=${today}&status=complete&limit=50000`);
-    if(!res.ok) throw new Error(await res.text());
+async function loadOpsMetrics() {
+  if (!apiBase) return;
+  try {
+    // Fetch all recent completed records, up to 50k
+    const res = await fetch(`${apiBase}/records?status=complete&limit=50000`);
+    if (!res.ok) throw new Error(await res.text());
     const rows = (await res.json()).records || [];
 
     const now = Date.now();
-    const startToday = new Date(); startToday.setHours(0,0,0,0);
+    const startToday = new Date();
+    startToday.setHours(0, 0, 0, 0);
     const hourAgo = now - 3600e3;
     const halfAgo = now - 1800e3;
 
@@ -1091,11 +1090,10 @@ async function loadOpsMetrics(){
         if (ct && ct >= halfAgo) rate++;
         if (r.sku_code && r.uid) {
           const k = r.sku_code + '|' + r.uid;
-          if (seen.has(k)) dupes++; else seen.add(k);
+          if (seen.has(k)) dupes++;
+          else seen.add(k);
         }
-      } else {
-        drafts++;
-      }
+      } else drafts++;
 
       const s = r.sync_state || 'unknown';
       syncCounts[s] = (syncCounts[s] || 0) + 1;
@@ -1108,7 +1106,7 @@ async function loadOpsMetrics(){
     $('#ops-dupes').textContent = dupes.toLocaleString();
     $('#ops-last-updated').textContent = new Date().toLocaleTimeString();
 
-    // Ops Pulse (dashboard + intake mini)
+    // Pulse animation + hearts
     const bpm = Math.max(40, Math.min(200, rate * 2));
     $('#intake-bpm').textContent = bpm;
 
@@ -1131,14 +1129,16 @@ async function loadOpsMetrics(){
     if (wrap) {
       wrap.innerHTML = '';
       Object.entries(syncCounts)
-        .sort((a,b)=>b[1]-a[1])
-        .forEach(([name,count])=>{
+        .sort((a, b) => b[1] - a[1])
+        .forEach(([name, count]) => {
           const span = document.createElement('span');
           span.className =
             'inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] ' +
-            (name==='synced' ? 'border-green-200 bg-green-50 text-green-700' :
-            (name==='pending' ? 'border-amber-200 bg-amber-50 text-amber-700' :
-            'border-gray-200 bg-gray-50 text-gray-700'));
+            (name === 'synced'
+              ? 'border-green-200 bg-green-50 text-green-700'
+              : name === 'pending'
+              ? 'border-amber-200 bg-amber-50 text-amber-700'
+              : 'border-gray-200 bg-gray-50 text-gray-700');
           span.textContent = `${name}: ${count}`;
           wrap.appendChild(span);
         });
@@ -1146,17 +1146,21 @@ async function loadOpsMetrics(){
 
     const alerts = [];
     if (drafts > 0)
-      alerts.push(`There ${drafts===1?'is':'are'} ${drafts} draft${drafts===1?'':'s'} to complete.`);
+      alerts.push(
+        `There ${drafts === 1 ? 'is' : 'are'} ${drafts} draft${
+          drafts === 1 ? '' : 's'
+        } to complete.`
+      );
     if (dupes > 0)
-      alerts.push(`${dupes} duplicate UID${dupes===1?'':'s'} detected today.`);
+      alerts.push(`${dupes} duplicate UID${dupes === 1 ? '' : 's'} detected today.`);
     $('#ops-alerts').innerHTML = alerts.length
-      ? alerts.map(t=>`<li>${t}</li>`).join('')
+      ? alerts.map((t) => `<li>${t}</li>`).join('')
       : '<li class="text-gray-400">No alerts.</li>';
-
-  } catch(e) {
+  } catch (e) {
     console.warn('Ops ribbon metrics load failed:', e);
   }
 }
+
   function startSSE(){
     if(!apiBase) return;
     try{
