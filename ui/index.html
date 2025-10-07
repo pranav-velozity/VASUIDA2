@@ -1490,20 +1490,13 @@ return dl && dl >= ws && dl <= we;
 })();
 
   // Select All checkbox (header)
-  document.getElementById('chk-all')?.addEventListener('change', (e) => {F
+  document.getElementById('chk-all')?.addEventListener('change', (e) => {
     const on = e.target.checked;
     intakeRows.forEach(r => r.selected = on);
     renderIntake();
     // keep header checkbox visually in sync after re-render
     document.getElementById('chk-all').checked = on;
   });
-
-    // hearts / metrics
-    $('#ops-heart').appendChild(createHeart(24,BRAND,40));
-    $('#ops-heart-small').appendChild(createHeart(18,BRAND,40));
-    loadOpsMetrics(); startSSE();
-  })();
-
 
   </script>
 </body>
