@@ -333,25 +333,46 @@ async function fetchActualsAll(){
 
   // ---------- Capsules ----------
   function addDaysISO(s,days){const [y,m,d]=s.split('-').map(Number);const b=new Date(y,m-1,d);b.setDate(b.getDate()+days);return iso(b)}
-  function renderCapsules(baseISO, plannedTotal=0, appliedTotal=0){
-    const r=$('#capsules'); if(!r) return; r.classList.remove('hidden'); r.innerHTML='';
-    const list=[-7,0,7,14,21].map(n=>addDaysISO(baseISO,n));
-    list.forEach(id=>{
-      const d=new Date(id+'T00:00:00');
-      const day=String(d.getDate()).padStart(2,'0');
-      const mon=d.toLocaleString('en-US',{month:'short'}).toUpperCase().slice(0,3);
-      const el=document.createElement('button'); el.className='wkcap bg-white hover:scale-[1.02] transition';
-      el.style.borderColor=(id===state.weekStart?BRAND:'rgba(0,0,0,.12)');
-      el.innerHTML=`<div class="m" style="color:${id===state.weekStart?BRAND:'#6b7280'}">${mon}</div>
-                    <div class="d">${day}</div>
-                    <div class="t" id="cap-total-${id}">${fmtInt(id===state.weekStart?plannedTotal:0)}</div>
-                    <div class="bar"><div id="cap-bar-${id}"></div></div>`;
-      el.onclick=()=>{ $('#week-start').value=id; setWeek(id); };
-      r.appendChild(el);
-      const p = plannedTotal>0 && id===state.weekStart ? Math.min(100, Math.round(appliedTotal*100/plannedTotal)) : 0;
-      const bar = el.querySelector(`#cap-bar-${id}`); if(bar) bar.style.width = `${p}%`;
-    });
-  }
+  function renderCapsules(baseISO, plannedTotal = 0, appliedTotal = 0, totalsByWeek = null) {
+  const r = $('#capsules');
+  if (!r) return;
+  r.classList.remove('hidden');
+  r.innerHTML = '';
+
+  const list = [-7, 0, 7, 14, 21].map(n => addDaysISO(baseISO, n));
+
+  list.forEach(id => {
+    const d = new Date(id + 'T00:00:00');
+    const day = String(d.getDate()).padStart(2, '0');
+    const mon = d.toLocaleString('en-US', { month: 'short' }).toUpperCase().slice(0, 3);
+
+    // Use precomputed totals if provided, otherwise fall back to current week numbers for the selected pill only
+    const stats =
+      (totalsByWeek && totalsByWeek[id]) ||
+      (id === state.weekStart
+        ? { planned: plannedTotal, applied: appliedTotal }
+        : { planned: 0, applied: 0 });
+
+    const el = document.createElement('button');
+    el.className = 'wkcap bg-white hover:scale-[1.02] transition';
+    el.style.borderColor = (id === state.weekStart ? BRAND : 'rgba(0,0,0,.12)');
+    el.innerHTML = `
+      <div class="m" style="color:${id === state.weekStart ? BRAND : '#6b7280'}">${mon}</div>
+      <div class="d">${day}</div>
+      <div class="t" id="cap-total-${id}">${fmtInt(stats.planned || 0)}</div>
+      <div class="bar"><div id="cap-bar-${id}"></div></div>
+    `;
+    el.onclick = () => { $('#week-start').value = id; setWeek(id); };
+    r.appendChild(el);
+
+    const p = (stats.planned > 0)
+      ? Math.min(100, Math.round(((stats.applied || 0) * 100) / stats.planned))
+      : 0;
+
+    const bar = el.querySelector(`#cap-bar-${id}`);
+    if (bar) bar.style.width = `${p}%`;
+  });
+}
 
   // ---------- Aggregations ----------
   function aggregate(records){const byPO=new Map(),bySKU=new Map(); for(const r of records){ if(r.status!=='complete') continue; const po=String(r.po_number||'').trim(), sku=String(r.sku_code||'').trim(); if(po) byPO.set(po,(byPO.get(po)||0)+1); if(sku) bySKU.set(sku,(bySKU.get(sku)||0)+1);} return {byPO,bySKU};}
@@ -822,7 +843,31 @@ state.records = recs.filter(r =>
     $('#pct-week').textContent = `${pct}%`;
     $('#avg-week').textContent = fmtInt(appliedTotal);
     $('#avg-day').textContent = fmtInt(Math.round((appliedTotal||0)/7));
-    renderCapsules(ws, plannedTotal, appliedTotal);
+    // Build capsule totals for the visible week pills [-1, 0, +1, +2, +3] relative to ws
+const capsuleIds = [-7, 0, 7, 14, 21].map(n => addDaysISO(ws, n));
+
+let plansByWeek = {};
+try {
+  const planLists = await Promise.all(capsuleIds.map(id => fetchPlan(id)));
+  planLists.forEach((pl, i) => {
+    plansByWeek[capsuleIds[i]] = Array.isArray(pl) ? pl : [];
+  });
+} catch (e) {
+  plansByWeek = {};
+}
+
+const totalsByWeek = {};
+capsuleIds.forEach(id => {
+  const pTotal = (plansByWeek[id] || []).reduce((s, p) => s + toNum(p.target_qty), 0);
+  // applied: prefer date_local window; fall back to completed_at if missing (same rules as state.records)
+  const aTotal = (recs || []).filter(r =>
+    inWeekByDateLocal(r, id) || (!r.date_local && inWeekByCompletedAt(r, id))
+  ).length;
+  totalsByWeek[id] = { planned: pTotal, applied: aTotal };
+});
+
+// Render capsules with correct bars for ALL pills (not only the selected week)
+renderCapsules(ws, plannedTotal, appliedTotal, totalsByWeek);
     setFooterHealth(pct, appliedTotal);
 
     const poRows = joinPOProgress(state.plan, agg.byPO);
@@ -1397,7 +1442,7 @@ return dl && dl >= ws && dl <= we;
     renderIntake();
 
   // Select All checkbox (header)
-  document.getElementById('chk-all')?.addEventListener('change', (e) => {
+  document.getElementById('chk-all')?.addEventListener('change', (e) => {F
     const on = e.target.checked;
     intakeRows.forEach(r => r.selected = on);
     renderIntake();
