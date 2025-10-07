@@ -573,26 +573,28 @@ function renderInsights(records, plan = [], weekStartISO = '') {
   const priorityPO  = buildPriority(planPO, appliedPO, 'po');
   const prioritySKU = buildPriority(planSKU, appliedSKU, 'sku');
 
-  // --- Mobile bins: unique today + top 5 by SKU diversity (this week) ---
-  const binsToday = new Set(
-    (records || [])
-      .filter(r => r.status === 'complete' && r.date_local === today)
-      .map(r => String(r.mobile_bin||'').trim())
-      .filter(Boolean)
-  );
-  // diversity across the week: bin -> set(sku)
-  const binSkuSet = new Map();
-  for (const r of weekRecords) {
-    const bin = String(r.mobile_bin||'').trim();
-    const sku = String(r.sku_code||'').trim();
-    if (!bin || !sku) continue;
-    if (!binSkuSet.has(bin)) binSkuSet.set(bin, new Set());
-    binSkuSet.get(bin).add(sku);
-  }
-  const binsByDiversity = Array.from(binSkuSet.entries())
-    .map(([bin, set]) => ({ bin, uniqueSkus: set.size }))
-    .sort((a,b) => b.uniqueSkus - a.uniqueSkus)
-    .slice(0, 5);
+
+// --- Mobile bins: unique (this week) + top 5 by SKU diversity (this week) ---
+const binsWeek = new Set(
+  (weekRecords || [])
+    .map(r => String(r.mobile_bin || '').trim())
+    .filter(Boolean)
+);
+
+// diversity across the week: bin -> set(sku)
+const binSkuSet = new Map();
+for (const r of weekRecords) {
+  const bin = String(r.mobile_bin || '').trim();
+  const sku = String(r.sku_code  || '').trim();
+  if (!bin || !sku) continue;
+  if (!binSkuSet.has(bin)) binSkuSet.set(bin, new Set());
+  binSkuSet.get(bin).add(sku);
+}
+
+const binsByDiversity = Array.from(binSkuSet.entries())
+  .map(([bin, set]) => ({ bin, uniqueSkus: set.size }))
+  .sort((a,b) => b.uniqueSkus - a.uniqueSkus)
+  .slice(0, 5);
 
   // --- Duplicate UID detection (this week) ---
   // “Duplicate” is defined as the same (SKU, UID) appearing more than once
@@ -658,13 +660,13 @@ function renderInsights(records, plan = [], weekStartISO = '') {
     bullets.push(`Focus SKU ${s.sku} (remaining ${s.remaining.toLocaleString()} • due ${s.due ? toUI(s.due) : 'n/a'})`);
   }
 
-  // 3) Mobile bins: total unique (today) + top 5 by SKU diversity (this week)
-  if (binsByDiversity.length) {
-    const tops = binsByDiversity.map(b => `${b.bin} (${b.uniqueSkus})`).join(', ');
-    bullets.push(`Mobile bins today: ${binsToday.size.toLocaleString()} • Top bins by SKU diversity (wk): ${tops}`);
-  } else {
-    bullets.push(`Mobile bins today: ${binsToday.size.toLocaleString()}`);
-  }
+  // 3) Mobile bins: total unique (this week) + top 5 by SKU diversity (this week)
+if (binsByDiversity.length) {
+  const tops = binsByDiversity.map(b => `${b.bin} (${b.uniqueSkus})`).join(', ');
+  bullets.push(`Mobile bins (wk): ${binsWeek.size.toLocaleString()} • Top bins by SKU diversity (wk): ${tops}`);
+} else {
+  bullets.push(`Mobile bins (wk): ${binsWeek.size.toLocaleString()}`);
+}
 
   // 4) Duplicate UID alert, if any
   if (dupPairs.length) {
