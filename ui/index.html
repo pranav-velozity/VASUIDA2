@@ -319,6 +319,16 @@ function createHeart(size=24, color=BRAND, bpm=40){
     return [];
   }
 }
+
+async function fetchActualsAll(){
+  if (!apiBase) return [];
+  try {
+    const d = await api(`/records?limit=50000`);
+    return d.records || [];
+  } catch {
+    return [];
+  }
+}
   async function fetchActuals(f,t){ if(!apiBase) return []; try{const d=await api(`/records?from=${f}&to=${t}&status=complete&limit=50000`); return d.records||[];}catch{return [];} }
 
   // ---------- Capsules ----------
@@ -679,22 +689,6 @@ function renderInsights(records, plan = [], weekStartISO = '') {
   // Render
   ul.innerHTML = bullets.slice(0, 5).map(t => `<li>${t}</li>`).join('');
   if (mini) mini.textContent = `Applied so far: ${appliedSoFar.toLocaleString()} • Remaining: ${remainingWeek.toLocaleString()}`;
-}
-
-function inWeekByCompletedAt(r, ws) {
-  if (r.status !== 'complete') return false;
-
-  const start = new Date(ws + 'T00:00:00Z');
-  const end   = new Date(start); end.setDate(end.getDate() + 7);
-
-  if (r.completed_at) {
-    const t = new Date(r.completed_at).getTime();
-    return t >= start.getTime() && t < end.getTime();
-  }
-  // fallback to date_local if completed_at missing
-  const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
-  const we  = iso(weD);
-  return r.date_local && r.date_local >= ws && r.date_local <= we;
 }
 
 async function fetchActuals(ws, we) {
