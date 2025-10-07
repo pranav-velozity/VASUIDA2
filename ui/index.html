@@ -1063,55 +1063,100 @@ function toISODate(v) {
 
   // ---------- Ops metrics & Ops Pulse ----------
   function todayISO(){const d=new Date(); d.setHours(0,0,0,0); return iso(d);}
-  async function loadOpsMetrics(){
-    if(!apiBase) return;
-    try{
-      const res=await fetch(`${apiBase}/records?limit=5000`);
-      if(!res.ok) throw new Error(await res.text());
-      const rows=(await res.json()).records||[];
-      const now=Date.now(), startToday=new Date(); startToday.setHours(0,0,0,0);
-      const hourAgo=now-3600e3, halfAgo=now-1800e3;
-      let scansToday=0,lastHour=0,rate=0,drafts=0,dupes=0; const syncCounts={}, seen=new Set();
-      for(const r of rows){
-        const ct=r.completed_at?new Date(r.completed_at).getTime():null;
-        const todayByCompletion=!!ct && ct>=startToday.getTime();
-        if(r.status==='complete'){
-          if(todayByCompletion) scansToday++;
-          if(ct && ct>=hourAgo) lastHour++;
-          if(ct && ct>=halfAgo) rate++;
-          if(r.sku_code && r.uid){const k=r.sku_code+'|'+r.uid; if(seen.has(k)) dupes++; else seen.add(k);}
-        } else drafts++;
-        const s=r.sync_state||'unknown'; syncCounts[s]=(syncCounts[s]||0)+1;
+async function loadOpsMetrics(){
+  if(!apiBase) return;
+  try{
+    const today = todayISO(); // YYYY-MM-DD
+
+    // ✅ Fetch only today's complete records — up to 50,000 so no cap at 5000
+    const res = await fetch(`${apiBase}/records?from=${today}&to=${today}&status=complete&limit=50000`);
+    if(!res.ok) throw new Error(await res.text());
+    const rows = (await res.json()).records || [];
+
+    const now = Date.now();
+    const startToday = new Date(); startToday.setHours(0,0,0,0);
+    const hourAgo = now - 3600e3;
+    const halfAgo = now - 1800e3;
+
+    let scansToday = 0, lastHour = 0, rate = 0, drafts = 0, dupes = 0;
+    const syncCounts = {}, seen = new Set();
+
+    for (const r of rows) {
+      const ct = r.completed_at ? new Date(r.completed_at).getTime() : null;
+      const todayByCompletion = !!ct && ct >= startToday.getTime();
+
+      if (r.status === 'complete') {
+        if (todayByCompletion) scansToday++;
+        if (ct && ct >= hourAgo) lastHour++;
+        if (ct && ct >= halfAgo) rate++;
+        if (r.sku_code && r.uid) {
+          const k = r.sku_code + '|' + r.uid;
+          if (seen.has(k)) dupes++; else seen.add(k);
+        }
+      } else {
+        drafts++;
       }
-      $('#ops-today').textContent=scansToday.toLocaleString();
-      $('#ops-hour').textContent=lastHour.toLocaleString();
-      $('#ops-rate').textContent=(rate*2).toLocaleString();
-      $('#ops-drafts').textContent=drafts.toLocaleString();
-      $('#ops-dupes').textContent=dupes.toLocaleString();
-      $('#ops-last-updated').textContent=new Date().toLocaleTimeString();
 
-      // Ops Pulse (dashboard + intake mini)
-      const bpm=Math.max(40,Math.min(200,rate*2));
-      $('#intake-bpm').textContent=bpm;
-      const small=$('#ops-heart-small'); if(small){small.innerHTML=''; small.appendChild(createHeart(18,BRAND,bpm));}
-      const big = $('#ops-heart');
-if (big) {
-  big.innerHTML = '';
-  big.appendChild(createHeart(24, BRAND, bpm));
-  $('#ops-bpm').textContent = bpm;
-  const delta = bpm - 40;
-  $('#ops-extra').textContent = `${delta >= 0 ? '+' : ''}${delta} over 40`;
-} 
+      const s = r.sync_state || 'unknown';
+      syncCounts[s] = (syncCounts[s] || 0) + 1;
+    }
 
-      const wrap=$('#ops-sync-badges'); if(wrap){wrap.innerHTML=''; Object.entries(syncCounts).sort((a,b)=>b[1]-a[1]).forEach(([name,count])=>{
-        const span=document.createElement('span');
-        span.className='inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] '+(name==='synced'?'border-green-200 bg-green-50 text-green-700':(name==='pending'?'border-amber-200 bg-amber-50 text-amber-700':'border-gray-200 bg-gray-50 text-gray-700'));
-        span.textContent=`${name}: ${count}`; wrap.appendChild(span);
-      });}
-      const alerts=[]; if(drafts>0) alerts.push(`There ${drafts===1?'is':'are'} ${drafts} draft${drafts===1?'':'s'} to complete.`); if(dupes>0) alerts.push(`${dupes} duplicate UID${dupes===1?'':'s'} detected today.`);
-      $('#ops-alerts').innerHTML = alerts.length ? alerts.map(t=>`<li>${t}</li>`).join('') : '<li class="text-gray-400">No alerts.</li>';
-    }catch(e){ console.warn('Ops ribbon metrics load failed:',e); }
+    $('#ops-today').textContent = scansToday.toLocaleString();
+    $('#ops-hour').textContent = lastHour.toLocaleString();
+    $('#ops-rate').textContent = (rate * 2).toLocaleString();
+    $('#ops-drafts').textContent = drafts.toLocaleString();
+    $('#ops-dupes').textContent = dupes.toLocaleString();
+    $('#ops-last-updated').textContent = new Date().toLocaleTimeString();
+
+    // Ops Pulse (dashboard + intake mini)
+    const bpm = Math.max(40, Math.min(200, rate * 2));
+    $('#intake-bpm').textContent = bpm;
+
+    const small = $('#ops-heart-small');
+    if (small) {
+      small.innerHTML = '';
+      small.appendChild(createHeart(18, BRAND, bpm));
+    }
+
+    const big = $('#ops-heart');
+    if (big) {
+      big.innerHTML = '';
+      big.appendChild(createHeart(24, BRAND, bpm));
+      $('#ops-bpm').textContent = bpm;
+      const delta = bpm - 40;
+      $('#ops-extra').textContent = `${delta >= 0 ? '+' : ''}${delta} over 40`;
+    }
+
+    const wrap = $('#ops-sync-badges');
+    if (wrap) {
+      wrap.innerHTML = '';
+      Object.entries(syncCounts)
+        .sort((a,b)=>b[1]-a[1])
+        .forEach(([name,count])=>{
+          const span = document.createElement('span');
+          span.className =
+            'inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] ' +
+            (name==='synced' ? 'border-green-200 bg-green-50 text-green-700' :
+            (name==='pending' ? 'border-amber-200 bg-amber-50 text-amber-700' :
+            'border-gray-200 bg-gray-50 text-gray-700'));
+          span.textContent = `${name}: ${count}`;
+          wrap.appendChild(span);
+        });
+    }
+
+    const alerts = [];
+    if (drafts > 0)
+      alerts.push(`There ${drafts===1?'is':'are'} ${drafts} draft${drafts===1?'':'s'} to complete.`);
+    if (dupes > 0)
+      alerts.push(`${dupes} duplicate UID${dupes===1?'':'s'} detected today.`);
+    $('#ops-alerts').innerHTML = alerts.length
+      ? alerts.map(t=>`<li>${t}</li>`).join('')
+      : '<li class="text-gray-400">No alerts.</li>';
+
+  } catch(e) {
+    console.warn('Ops ribbon metrics load failed:', e);
   }
+}
   function startSSE(){
     if(!apiBase) return;
     try{
