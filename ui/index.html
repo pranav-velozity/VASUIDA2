@@ -697,14 +697,47 @@ function inWeekByCompletedAt(r, ws) {
   return r.date_local && r.date_local >= ws && r.date_local <= we;
 }
 
-async function fetchActualsAll(){
+async function fetchActuals(ws, we) {
   if (!apiBase) return [];
   try {
-    const d = await api(`/records?status=complete&limit=50000`);
-    return d.records || [];
+    // get everything, we’ll filter locally
+    const d = await api(`/records?limit=50000`);
+    const all = d.records || [];
+
+    const startTs = new Date(ws + 'T00:00:00Z').getTime();
+    const endTs   = startTs + 7 * 86400000;
+
+    return all.filter(r => {
+      if (r.status !== 'complete') return false;
+      // Prefer the business date
+      if (r.date_local && r.date_local >= ws && r.date_local <= we) return true;
+      // Fallback to completion timestamp if date_local missing
+      if (r.completed_at) {
+        const t = new Date(r.completed_at).getTime();
+        return t >= startTs && t < endTs;
+      }
+      return false;
+    });
   } catch {
     return [];
   }
+}
+
+function weekEndISO(ws){ const d=new Date(ws); d.setDate(d.getDate()+6); return iso(d); }
+
+function inWeekByDateLocal(r, ws){
+  if (!r || r.status !== 'complete') return false;
+  const we = weekEndISO(ws);                  // YYYY-MM-DD
+  const dl = String(r.date_local || '').trim();
+  return !!dl && dl >= ws && dl <= we;        // pure string compare on YYYY-MM-DD
+}
+
+function inWeekByCompletedAt(r, ws){
+  if (!r || r.status !== 'complete' || !r.completed_at) return false;
+  const start = new Date(ws + 'T00:00:00Z');
+  const end   = new Date(start); end.setDate(end.getDate() + 7); // [start, end)
+  const t = new Date(r.completed_at).getTime();
+  return t >= start.getTime() && t < end.getTime();
 }
 
   // ---------- setWeek ----------
@@ -713,7 +746,12 @@ async function fetchActualsAll(){
     const weDate=new Date(ws); weDate.setDate(weDate.getDate()+6); const we=iso(weDate);
 const [plan, allRecs] = await Promise.all([fetchPlan(ws), fetchActualsAll()]);
 state.plan = Array.isArray(plan) ? plan : [];
-state.records = Array.isArray(allRecs) ? allRecs.filter(r => inWeekByCompletedAt(r, ws)) : [];
+
+const recs = Array.isArray(allRecs) ? allRecs : [];
+// Prefer date_local window; fall back to completed_at only if date_local missing.
+state.records = recs.filter(r =>
+  inWeekByDateLocal(r, ws) || (!r.date_local && inWeekByCompletedAt(r, ws))
+);
     const agg=aggregate(state.records);
     const plannedTotal = state.plan.reduce((s,p)=> s + toNum(p.target_qty), 0);
     const appliedTotal = Array.from(agg.byPO.values()).reduce((s,v)=> s+v, 0);
