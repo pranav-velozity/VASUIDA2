@@ -419,32 +419,95 @@ async function fetchActualsAll(){
   function buildDiscrepancyPO(joined){
     return (joined||[]).map(r=>({'PO':r.po,'Planned':r.planned||0,'Applied':r.applied||0,'Discrepancy (Applied - Planned)':(r.applied||0)-(r.planned||0)}));
   }
-  function buildExecHTML(ws,we,pt,at,pct,topPO,topSKU){
-    const pretty=s=> (s||'').split('-').reverse().join('-');
-    const rowsPO=topPO.map(x=>`<tr><td>${x.key}</td><td style="text-align:right">${fmtInt(x.planned)}</td><td style="text-align:right">${fmtInt(x.applied)}</td><td style="text-align:right">${fmtInt(x.remaining)}</td><td style="text-align:right">${x.pct}%</td></tr>`).join('');
-    const rowsSKU=topSKU.map(x=>`<tr><td>${x.key}</td><td style="text-align:right">${fmtInt(x.planned)}</td><td style="text-align:right">${fmtInt(x.applied)}</td><td style="text-align:right">${fmtInt(x.remaining)}</td><td style="text-align:right">${x.pct}%</td></tr>`).join('');
-    return `<div style="font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111">
-      <h1 style="margin:0 0 8px;font-size:22px;color:${BRAND}">VAS Weekly Executive Summary</h1>
-      <div style="color:#555;font-size:12px;margin-bottom:16px">Week: ${pretty(ws)} – ${pretty(we)}</div>
-      <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
+  function buildExecHTML({
+  ws, we,
+  plannedTotal, appliedTotal, pct,
+  uniqueBins,
+  topPOSKU,             // [{po, sku, planned, applied, pct}]
+  topBins,              // [{bin, units, uniqueSkus}]
+  insights              // [string, ...]
+}) {
+  const pretty = s => (s||'').split('-').reverse().join('-');
+
+  const rowsPOSKU = (topPOSKU||[])
+    .map(r=>`<tr>
+      <td>${r.po}</td>
+      <td>${r.sku}</td>
+      <td style="text-align:right">${(r.planned||0).toLocaleString()}</td>
+      <td style="text-align:right">${(r.applied||0).toLocaleString()}</td>
+      <td style="text-align:right">${r.pct}%</td>
+    </tr>`).join('');
+
+  const rowsBins = (topBins||[])
+    .map(r=>`<tr>
+      <td>${r.bin}</td>
+      <td style="text-align:right">${(r.units||0).toLocaleString()}</td>
+      <td style="text-align:right">${(r.uniqueSkus||0).toLocaleString()}</td>
+    </tr>`).join('');
+
+  const bullets = (insights||[])
+    .map(t=>`<li>${t}</li>`).join('');
+
+  return `<!doctype html><meta charset="utf-8">
+  <div style="font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111;line-height:1.35">
+    <h1 style="margin:0 0 8px;font-size:22px;color:${BRAND}">VAS Weekly Executive Summary</h1>
+    <div style="color:#555;font-size:12px;margin-bottom:16px">Week: ${pretty(ws)} – ${pretty(we)}</div>
+
+    <!-- KPIs -->
+    <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
+      <tr>
+        <td style="padding:10px;border:1px solid #eee">
+          <div style="font-size:12px;color:#666;margin-bottom:4px">Planned</div>
+          <div style="font-size:20px;font-weight:700">${plannedTotal.toLocaleString()}</div>
+        </td>
+        <td style="padding:10px;border:1px solid #eee">
+          <div style="font-size:12px;color:#666;margin-bottom:4px">Applied</div>
+          <div style="font-size:20px;font-weight:700">${appliedTotal.toLocaleString()}</div>
+        </td>
+        <td style="padding:10px;border:1px solid #eee">
+          <div style="font-size:12px;color:#666;margin-bottom:4px">Completion</div>
+          <div style="font-size:20px;font-weight:700">${pct}%</div>
+        </td>
+        <td style="padding:10px;border:1px solid #eee">
+          <div style="font-size:12px;color:#666;margin-bottom:4px">Mobile Bins (wk)</div>
+          <div style="font-size:20px;font-weight:700">${uniqueBins.toLocaleString()}</div>
+        </td>
+      </tr>
+    </table>
+
+    <!-- Insights -->
+    <h2 style="font-size:16px;margin:0 0 8px">Top Insights</h2>
+    <ul style="margin:0 0 16px 16px;padding:0">${bullets || '<li style="color:#888">No notable insights.</li>'}</ul>
+
+    <!-- PO × SKU Applied -->
+    <h2 style="font-size:16px;margin:0 0 8px">PO × SKU — Applied (Top)</h2>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px">
+      <thead>
         <tr>
-          <td style="padding:10px;border:1px solid #eee"><div style="font-size:12px;color:#666;margin-bottom:4px">Planned</div><div style="font-size:20px;font-weight:700">${fmtInt(pt)}</div></td>
-          <td style="padding:10px;border:1px solid #eee"><div style="font-size:12px;color:#666;margin-bottom:4px">Applied</div><div style="font-size:20px;font-weight:700">${fmtInt(at)}</div></td>
-          <td style="padding:10px;border:1px solid #eee"><div style="font-size:12px;color:#666;margin-bottom:4px">Completion</div><div style="font-size:20px;font-weight:700">${pct}%</div></td>
+          <th style="text-align:left;border-bottom:1px solid #eee;padding:6px 4px">PO #</th>
+          <th style="text-align:left;border-bottom:1px solid #eee;padding:6px 4px">SKU</th>
+          <th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Planned</th>
+          <th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Applied</th>
+          <th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">%</th>
         </tr>
-      </table>
-      <h2 style="font-size:16px;margin:16px 0 8px">PO Discrepancy Focus</h2>
-      <table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead><tr><th style="text-align:left;border-bottom:1px solid #eee;padding:6px 4px">PO #</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Planned</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Applied</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Rem</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">%</th></tr></thead>
-        <tbody>${rowsPO||`<tr><td colspan="5" style="color:#888;padding:10px 4px">No POs at risk this week.</td></tr>`}</tbody>
-      </table>
-      <h2 style="font-size:16px;margin:20px 0 8px">SKU Discrepancy Focus</h2>
-      <table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead><tr><th style="text-align:left;border-bottom:1px solid #eee;padding:6px 4px">SKU</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Planned</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Applied</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Rem</th><th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">%</th></tr></thead>
-        <tbody>${rowsSKU||`<tr><td colspan="5" style="color:#888;padding:10px 4px">No SKUs at risk this week.</td></tr>`}</tbody>
-      </table>
-    </div>`;
-  }
+      </thead>
+      <tbody>${rowsPOSKU || `<tr><td colspan="5" style="color:#888;padding:10px 4px">No PO × SKU rows found.</td></tr>`}</tbody>
+    </table>
+
+    <!-- Units by Mobile Bin -->
+    <h2 style="font-size:16px;margin:0 0 8px">Units by Mobile Bin (Top)</h2>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead>
+        <tr>
+          <th style="text-align:left;border-bottom:1px solid #eee;padding:6px 4px">Mobile Bin</th>
+          <th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Units</th>
+          <th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Unique SKUs</th>
+        </tr>
+      </thead>
+      <tbody>${rowsBins || `<tr><td colspan="3" style="color:#888;padding:10px 4px">No bin data found.</td></tr>`}</tbody>
+    </table>
+  </div>`;
+}
 
 // ----- PO Progress table -----
 function renderPOProgress(rows){
@@ -797,13 +860,102 @@ renderInsights(state.records, state.plan, state.weekStart);
       const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download=`po_discrepancy_${ws}.csv`; a.click();
       setTimeout(()=>URL.revokeObjectURL(a.href),250);
     };
-    $('#btn-exec').onclick=()=>{
-      const html=buildExecHTML(ws,we,plannedTotal,appliedTotal,pct,riskPO,riskSKU);
-      const blob=new Blob(['<!doctype html><meta charset="utf-8">'+html],{type:'application/msword'});
-      const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`VAS_Executive_Summary_${ws}.doc`; a.click();
-      setTimeout(()=>URL.revokeObjectURL(a.href),250);
-    };
+    $('#btn-exec').onclick = () => {
+  // week window
+  const wsISO = state.weekStart;
+  const weD = new Date(wsISO); weD.setDate(weD.getDate() + 6);
+  const weISO = iso(weD);
+
+  // KPIs
+  const plannedTotal = (state.plan||[]).reduce((s,p)=> s + toNum(p.target_qty), 0);
+
+  // records for this week are already filtered in state.records
+  const recs = (state.records||[]).filter(r => r.status === 'complete');
+  const appliedTotal = recs.length;
+  const pct = plannedTotal>0 ? Math.round(appliedTotal*100/plannedTotal) : (state.plan.length?0:100);
+
+  // ----- PO × SKU (planned + applied) -----
+  const planPOSKU = new Map(); // "po||sku" -> planned
+  for (const p of state.plan||[]) {
+    const po = String(p.po_number||'').trim();
+    const sku = String(p.sku_code||'').trim();
+    if (!po || !sku) continue;
+    const k = `${po}||${sku}`;
+    planPOSKU.set(k, (planPOSKU.get(k)||0) + toNum(p.target_qty));
   }
+
+  const appliedPOSKU = new Map(); // "po||sku" -> applied count
+  for (const r of recs) {
+    const po = String(r.po_number||'').trim();
+    const sku = String(r.sku_code||'').trim();
+    if (!po || !sku) continue;
+    const k = `${po}||${sku}`;
+    appliedPOSKU.set(k, (appliedPOSKU.get(k)||0) + 1);
+  }
+
+  const poskuRows = Array.from(appliedPOSKU.entries()).map(([k, applied]) => {
+    const [po, sku] = k.split('||');
+    const planned = planPOSKU.get(k) || 0;
+    const pct = planned>0 ? Math.round(applied*100/planned) : 100;
+    return { po, sku, planned, applied, pct };
+  }).sort((a,b)=> b.applied - a.applied).slice(0, 50); // top 50 for readability
+
+  // ----- Mobile bins -----
+  const binUnits = new Map();   // bin -> units
+  const binSkuSet = new Map();  // bin -> Set(sku)
+
+  for (const r of recs) {
+    const bin = String(r.mobile_bin||'').trim();
+    const sku = String(r.sku_code||'').trim();
+    if (!bin) continue;
+    binUnits.set(bin, (binUnits.get(bin)||0) + 1);
+    if (sku) {
+      if (!binSkuSet.has(bin)) binSkuSet.set(bin, new Set());
+      binSkuSet.get(bin).add(sku);
+    }
+  }
+  const uniqueBins = binUnits.size;
+  const topBins = Array.from(binUnits.entries())
+    .map(([bin, units]) => ({ bin, units, uniqueSkus: (binSkuSet.get(bin)||new Set()).size }))
+    .sort((a,b)=> b.units - a.units)
+    .slice(0, 25); // top 25 bins
+
+  // ----- Insights (concise) -----
+  // 1) Top PO × SKU by volume
+  const leadPOSKU = poskuRows[0];
+  const insights = [];
+  if (leadPOSKU) {
+    insights.push(`Highest volume: PO ${leadPOSKU.po} × SKU ${leadPOSKU.sku} — ${leadPOSKU.applied.toLocaleString()} applied (${leadPOSKU.pct}% of ${leadPOSKU.planned.toLocaleString()} planned).`);
+  }
+  // 2) Bin diversity / leaders
+  if (uniqueBins) {
+    const tops = topBins.slice(0,5).map(b => `${b.bin} (${b.units.toLocaleString()})`).join(', ');
+    insights.push(`Mobile bins used: ${uniqueBins.toLocaleString()} • Top bins by units: ${tops}.`);
+  }
+  // 3) Pacing vs plan
+  const avgPerDay = Math.round(appliedTotal/7);
+  const rem = Math.max(0, plannedTotal - appliedTotal);
+  insights.push(`Pace: ~${avgPerDay.toLocaleString()}/day • Remaining vs plan: ${rem.toLocaleString()}.`);
+  // 4) PO/SKU risk callout (reuse at-risk already computed on page if you want)
+  //    Here, just pull any with remaining >0 (sorted outside) from existing tables would be ideal.
+
+  // ----- Build & download -----
+  const html = buildExecHTML({
+    ws: wsISO, we: weISO,
+    plannedTotal, appliedTotal, pct,
+    uniqueBins,
+    topPOSKU: poskuRows,
+    topBins,
+    insights
+  });
+
+  const blob = new Blob([html], { type: 'application/msword' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `VAS_Executive_Summary_${wsISO}.doc`;
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 250);
+};
 
   // ---------- Plan upload / zero (unchanged) ----------
   $('#btn-upload-plan').onclick=()=>$('#file-plan').click();
