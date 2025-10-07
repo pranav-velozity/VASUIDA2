@@ -29,6 +29,12 @@
     .wkcap .t{font-size:11px;margin-top:2px;color:#990033}
     .wkcap .bar{height:6px;border-radius:9999px;background:#e5e7eb;overflow:hidden;margin-top:4px}
     .wkcap .bar>div{height:6px;border-radius:9999px;background:#990033;width:0%}
+
+/* segmented toggle visuals */
+.seg { color:#9f1239; }
+.seg.active { background:#fff; color:#9f1239; box-shadow:0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.1); }
+.seg:not(.active):hover { background:rgba(225,29,72,.08); }
+
   </style>
 </head>
 <body class="bg-gray-50 min-h-screen">
@@ -39,10 +45,16 @@
         <div class="text-xl font-semibold">VelOzity Pinpoint</div>
         <div id="vo-today" class="text-gray-500 text-sm"></div>
       </div>
-      <nav class="flex items-center gap-2">
-        <a href="#dashboard" id="nav-dash"   class="px-3 py-2 rounded-lg text-sm font-medium border border-rose-700 text-rose-700">Operations</a>
-        <a href="#intake"    id="nav-intake" class="px-3 py-2 rounded-lg text-sm font-medium border border-rose-700 text-rose-700/80">Intake</a>
-      </nav>
+      <nav id="nav-toggle" class="inline-flex items-center gap-1 p-1 rounded-xl bg-rose-50 border border-rose-200">
+  <a href="#dashboard" id="nav-dash"
+     class="seg px-3 py-1.5 rounded-lg text-sm font-medium transition select-none">
+    Operations
+  </a>
+  <a href="#intake" id="nav-intake"
+     class="seg px-3 py-1.5 rounded-lg text-sm font-medium transition select-none">
+    Intake
+  </a>
+</nav>
     </div>
   </header>
 
@@ -66,7 +78,7 @@
         <div class="flex flex-wrap gap-2">
           <button id="btn-dl-posku" class="px-3 py-2 rounded-lg border text-sm">PO + SKU Discrepancy</button>
           <button id="btn-dl-po"    class="px-3 py-2 rounded-lg border text-sm">PO Discrepancy</button>
-          <button id="btn-exec"     class="px-3 py-2 rounded-lg border text-sm bg-rose-700 text-white">Executive Summary</button>
+          <button id="btn-exec" class="px-3 py-2 rounded-lg border text-sm">Executive Summary</button>
         </div>
       </div>
 
@@ -111,12 +123,12 @@
       </div>
 
 <!-- Top Insights -->
-<div class="bg-white rounded-2xl border shadow p-4 mb-3">
+<div class="rounded-2xl border shadow p-4 mb-3 text-white" style="background:#990033;border-color:#7a0029">
   <div class="text-base font-semibold mb-2">Top Insights for Ops</div>
-  <ul id="insights" class="text-sm text-gray-800 list-disc pl-5 space-y-1">
+  <ul id="insights" class="text-sm text-white list-disc pl-5 space-y-1">
     <li>Loading…</li>
   </ul>
-  <div id="insights-mini" class="mt-2 text-xs text-gray-500"></div>
+  <div id="insights-mini" class="mt-2 text-xs text-rose-100"></div>
 </div>
 
 <!-- PO Progress (This Week) -->
@@ -1408,7 +1420,7 @@ return dl && dl >= ws && dl <= we;
     $('#avg-week').textContent = appliedTotal.toLocaleString();
     $('#avg-day').textContent = Math.round((appliedTotal||0)/7).toLocaleString();
     setFooterHealth(pct, appliedTotal);
-    renderCapsules(ws, plannedTotal, appliedTotal);
+    
   }
 
   // ---------- Simple Search ----------
@@ -1432,14 +1444,50 @@ return dl && dl >= ws && dl <= we;
     });
   })();
 
-  // ---------- Routing & Init ----------
-  (function init(){
-    const ws=iso(mondayOf()); $('#week-start').value=ws;
-    setWeek(ws);
-    function show(hash){ $('#page-dashboard').classList.add('hidden'); $('#page-intake').classList.add('hidden'); (hash==='#intake'?$('#page-intake'):$('#page-dashboard')).classList.remove('hidden'); }
-    window.addEventListener('hashchange',()=>show(location.hash||'#dashboard')); show(location.hash||'#dashboard');
-    // intake scaffold
+// ---------- Routing & Init ----------
+(function init(){
+  const ws = iso(mondayOf());
+  $('#week-start').value = ws;
+  setWeek(ws);
+
+  function syncNav() {
+    const hash = (location.hash || '#dashboard');
+    const dash = document.getElementById('nav-dash');
+    const intake = document.getElementById('nav-intake');
+    if (!dash || !intake) return;
+
+    dash.classList.remove('active');
+    intake.classList.remove('active');
+
+    if (hash === '#intake') intake.classList.add('active');
+    else dash.classList.add('active');
+  }
+
+  function show(hash){
+    $('#page-dashboard').classList.add('hidden');
+    $('#page-intake').classList.add('hidden');
+    (hash === '#intake' ? $('#page-intake') : $('#page-dashboard')).classList.remove('hidden');
+    syncNav();
+  }
+
+  window.addEventListener('hashchange', () => show(location.hash || '#dashboard'));
+  show(location.hash || '#dashboard'); // initial render
+
+  // Intake scaffold + checkbox handler
+  renderIntake();
+  document.getElementById('chk-all')?.addEventListener('change', (e) => {
+    const on = e.target.checked;
+    intakeRows.forEach(r => r.selected = on);
     renderIntake();
+    document.getElementById('chk-all').checked = on;
+  });
+
+  // pulse hearts + metrics
+  $('#ops-heart').appendChild(createHeart(24, BRAND, 40));
+  $('#ops-heart-small').appendChild(createHeart(18, BRAND, 40));
+  loadOpsMetrics();
+  startSSE();
+})();
 
   // Select All checkbox (header)
   document.getElementById('chk-all')?.addEventListener('change', (e) => {F
