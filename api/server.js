@@ -115,6 +115,7 @@ const selectRecordById = db.prepare('SELECT * FROM records WHERE id = ?');
 const selectByComposite = db.prepare('SELECT id FROM records WHERE po_number = ? AND sku_code = ? AND uid = ?');
 const deleteById = db.prepare('DELETE FROM records WHERE id = ?');
 const deleteBySkuUid = db.prepare('DELETE FROM records WHERE uid = ? AND sku_code = ?');
+const deleteByUid = db.prepare('DELETE FROM records WHERE uid = ?');
 
 const upsertByComposite = db.prepare(`
 INSERT INTO records (id, date_local, mobile_bin, sscc_label, po_number, sku_code, uid, status, completed_at, sync_state)
@@ -327,27 +328,56 @@ app.get('/export/xlsx', async (req, res) => {
 app.delete('/records', (req, res) => {
   const uid = String(req.query.uid || '').trim();
   const sku = String(req.query.sku_code || '').trim();
-  if (!uid || !sku) return res.status(400).json({ error: 'uid and sku_code required' });
-  const info = deleteBySkuUid.run(uid, sku);
+
+  if (!uid) return res.status(400).json({ error: 'uid required' });
+
+  const info = sku
+    ? deleteBySkuUid.run(uid, sku)  // original behavior
+    : deleteByUid.run(uid);         // NEW: delete all rows with this UID
+
   return res.json({ ok: true, deleted: info.changes });
 });
 
 app.post('/records/delete', (req, res) => {
-  const body = req.body;
-  const pairs = Array.isArray(body) ? body : (body && typeof body === 'object' ? [body] : []);
-  if (!pairs.length) return res.status(400).json({ error: 'Body must be object or array of {uid, sku_code}' });
+  const input = req.body;
+
+  // Normalize input to a list of objects with { uid, sku_code? }
+  let items = [];
+  if (Array.isArray(input)) {
+    items = input.map(x => {
+      if (typeof x === 'string') return { uid: String(x).trim(), sku_code: '' };
+      return { uid: String(x?.uid || '').trim(), sku_code: String(x?.sku_code || '').trim() };
+    });
+  } else if (input && typeof input === 'object') {
+    items = [{ uid: String(input.uid || '').trim(), sku_code: String(input.sku_code || '').trim() }];
+  }
+
+  if (!items.length) {
+    return res.status(400).json({ error: 'Body must be array or object containing uid (and optional sku_code)' });
+  }
 
   const results = [];
-  const trx = db.transaction(arr => {
-    for (const p of arr) {
-      const uid = String(p?.uid || '').trim();
-      const sku = String(p?.sku_code || '').trim();
-      if (!uid || !sku) { results.push({ uid, sku_code: sku, deleted: 0, error: 'missing uid/sku_code' }); continue; }
-      const info = deleteBySkuUid.run(uid, sku);
+  const trx = db.transaction(list => {
+    for (const it of list) {
+      const uid = it.uid;
+      const sku = it.sku_code;
+
+      if (!uid) {
+        results.push({ uid, sku_code: sku, deleted: 0, error: 'missing uid' });
+        continue;
+      }
+
+      const info = sku
+        ? deleteBySkuUid.run(uid, sku) // original precise delete
+        : deleteByUid.run(uid);        // NEW: delete all rows with this UID
+
       results.push({ uid, sku_code: sku, deleted: info.changes });
     }
   });
-  try { trx(pairs); } catch (e) { return res.status(500).json({ error: String(e?.message || e) }); }
+
+  try { trx(items); }
+  catch (e) { return res.status(500).json({ error: String(e?.message || e) }); }
+
   const total = results.reduce((s, r) => s + (r.deleted || 0), 0);
   return res.json({ ok: true, total_deleted: total, results });
 });
