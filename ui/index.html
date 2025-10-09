@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <!-- ⬇️ Set to your Render API base (no trailing slash) -->
   <meta name="api-base" content="https://vasuida1.onrender.com"/>
+<meta name="business-tz" content="Asia/Shanghai"/>
   <title>VelOzity Pinpoint</title>
 
   <!-- Tailwind -->
@@ -316,7 +317,17 @@
 const BASE_BPM = 40;
   const apiBase = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/,'');
   const $ = (s)=>document.querySelector(s);
-  $('#vo-today').textContent = new Date().toLocaleDateString();
+  // Show "Month DD YYYY • <local TZ>" using the viewer's local timezone
+(function setNavToday(){
+  const d = new Date();
+  const month = d.toLocaleString('en-US', { month: 'long' });
+  const day   = String(d.getDate()).padStart(2, '0');
+  const year  = d.getFullYear();
+  const tzShort = new Intl.DateTimeFormat('en-US', { timeZoneName: 'short' })
+    .formatToParts(d)
+    .find(p => p.type === 'timeZoneName')?.value || '';
+  $('#vo-today').textContent = `${month} ${day} ${year} • ${tzShort}`;
+})();
 const iso = (d) => d.toISOString().slice(0,10);
 const mondayOf = (d=new Date()) => { const x=new Date(d); const day=x.getDay(); const diff=(day===0?-6:1)-day; x.setDate(x.getDate()+diff); x.setHours(0,0,0,0); return x; };
 const fmtInt = (n) => Number(n||0).toLocaleString();
@@ -325,6 +336,43 @@ const toUI = (isoStr) =>
   (isoStr && typeof isoStr === 'string' && isoStr.includes('-'))
     ? isoStr.split('-').reverse().join('-')
     : (isoStr || '');
+
+// ---- Business timezone helpers (single source of truth: Asia/Shanghai) ----
+const BUSINESS_TZ = document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai';
+
+// Format a Date into 'YYYY-MM-DD' in the given IANA TZ
+function ymdInTZ(d, tz = BUSINESS_TZ) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(d);
+  const get = k => parts.find(p => p.type === k)?.value;
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
+// Today as 'YYYY-MM-DD' in business TZ
+function todayInTZ(tz = BUSINESS_TZ) { return ymdInTZ(new Date(), tz); }
+
+// Day-of-week (0..6 Sun..Sat) for a given 'YYYY-MM-DD' in business TZ
+function dayOfWeekInTZ(ymd, tz = BUSINESS_TZ) {
+  const dt = new Date(ymd + 'T12:00:00Z'); // midday UTC avoids DST edges
+  const name = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: tz }).format(dt);
+  return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].indexOf(name);
+}
+
+// Monday anchor (returns Monday 'YYYY-MM-DD' for the given day, in business TZ)
+function mondayOfInTZ(ymd, tz = BUSINESS_TZ) {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const anchor = new Date(Date.UTC(y, m - 1, d));
+  const dow = dayOfWeekInTZ(ymd, tz);
+  const offset = dow === 0 ? -6 : (1 - dow);
+  anchor.setUTCDate(anchor.getUTCDate() + offset);
+  return ymdInTZ(anchor, tz);
+}
+
+// Convert a completed_at timestamp -> 'YYYY-MM-DD' in business TZ
+function ymdFromCompletedAtInTZ(completedAt, tz = BUSINESS_TZ) {
+  return completedAt ? ymdInTZ(new Date(completedAt), tz) : '';
+}
 
 function createHeart(size=24, color=BRAND, bpm=40){
   const s='http://www.w3.org/2000/svg', svg=document.createElementNS(s,'svg');
@@ -888,10 +936,10 @@ function inWeekByDateLocal(r, ws){
 
 function inWeekByCompletedAt(r, ws){
   if (!r || r.status !== 'complete' || !r.completed_at) return false;
-  const start = new Date(ws + 'T00:00:00Z');
-  const end   = new Date(start); end.setDate(end.getDate() + 7); // [start, end)
-  const t = new Date(r.completed_at).getTime();
-  return t >= start.getTime() && t < end.getTime();
+  const ymd = ymdFromCompletedAtInTZ(r.completed_at); // business-day bucket
+  const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
+  const we  = iso(weD);
+  return ymd && ymd >= ws && ymd <= we;
 }
 
   // ---------- setWeek ----------
@@ -1341,7 +1389,7 @@ function toISODate(v) {
   })();
 
   // ---------- Ops metrics & Ops Pulse ----------
-  function todayISO(){const d=new Date(); d.setHours(0,0,0,0); return iso(d);}
+  function todayISO(){ return todayInTZ(); }
 async function loadOpsMetrics() {
   if (!apiBase) return;
   try {
@@ -1451,43 +1499,38 @@ async function loadOpsMetrics() {
   }
 
   // ---------- Dashboard weekly refresh from completion timestamps ----------
-  async function refreshDashboardTotals(){
-    if(!apiBase) return;
-    const ws=state.weekStart;
-    const start = new Date(ws + 'T00:00:00');   // local midnight
-const end   = new Date(start); 
-end.setDate(end.getDate() + 7);
+async function refreshDashboardTotals(){
+  if(!apiBase) return;
+  const ws = state.weekStart;
+  const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
+  const we  = iso(weD);
 
-    const res=await fetch(`${apiBase}/records?limit=50000`);
-    if(!res.ok) return;
-    const all=(await res.json()).records||[];
+  const res = await fetch(`${apiBase}/records?limit=50000`);
+  if(!res.ok) return;
+  const all = (await res.json()).records || [];
 
-const inWeek = all.filter(r => {
-if (r.status !== 'complete') return false;
-if (r.completed_at) {
-const t = new Date(r.completed_at).getTime();
-return t >= start.getTime() && t < end.getTime();
+  const inWeek = all.filter(r => {
+    if (r.status !== 'complete') return false;
+    if (r.completed_at) {
+      const ymd = ymdFromCompletedAtInTZ(r.completed_at); // CN business day
+      return ymd >= ws && ymd <= we;
+    }
+    // Fallback: use provided date_local (already Y-M-D)
+    const dl = toISODate(r.date_local);
+    return dl && dl >= ws && dl <= we;
+  });
+
+  const appliedTotal = inWeek.length;
+  const plannedTotal = (state.plan||[]).reduce((s,p)=>s+toNum(p.target_qty),0);
+  const pct = plannedTotal>0?Math.round(appliedTotal*100/plannedTotal):(state.plan.length?0:100);
+
+  $('#planned-total').textContent = plannedTotal.toLocaleString();
+  $('#applied-total').textContent = appliedTotal.toLocaleString();
+  $('#pct-week').textContent = pct+'%';
+  $('#avg-week').textContent = appliedTotal.toLocaleString();
+  $('#avg-day').textContent = Math.round((appliedTotal||0)/7).toLocaleString();
+  setFooterHealth(pct, appliedTotal);
 }
-// Fallback: use date_local window if completed_at missing
-const ws = state.weekStart;           // YYYY-MM-DD
-const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
-const we = iso(weD);
-const dl = toISODate(r.date_local); // normalizes "06-10-2025", "6/10/25", Excel serials, etc.
-return dl && dl >= ws && dl <= we;
-});
-
-    const appliedTotal=inWeek.length;
-    const plannedTotal=(state.plan||[]).reduce((s,p)=>s+toNum(p.target_qty),0);
-    const pct = plannedTotal>0?Math.round(appliedTotal*100/plannedTotal):(state.plan.length?0:100);
-
-    $('#planned-total').textContent = plannedTotal.toLocaleString();
-    $('#applied-total').textContent = appliedTotal.toLocaleString();
-    $('#pct-week').textContent = pct+'%';
-    $('#avg-week').textContent = appliedTotal.toLocaleString();
-    $('#avg-day').textContent = Math.round((appliedTotal||0)/7).toLocaleString();
-    setFooterHealth(pct, appliedTotal);
-    
-  }
 
   // ---------- Simple Search ----------
   (function attachSearch(){
@@ -1564,7 +1607,7 @@ await setWeek(state.weekStart); // 🔄 refresh state.records so downloads refle
 
 // ---------- Routing & Init ----------
 (function init(){
-  const ws = iso(mondayOf());
+  const ws = mondayOfInTZ(todayInTZ());
   $('#week-start').value = ws;
   setWeek(ws);
 
