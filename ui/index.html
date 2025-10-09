@@ -1540,8 +1540,15 @@ async function deleteUIDs() {
     if (!res.ok) throw new Error(await res.text());
     // If your API returns {deleted:n}, you can show that instead:
 const body = await res.json().catch(()=>({}));
-const n = typeof body.deleted === 'number' ? body.deleted : list.length;
+const n = typeof body.total_deleted === 'number' ? body.total_deleted : list.length;
 status.textContent = `Deleted ${n} UID(s) successfully.`;
+if (Array.isArray(body.results) && body.results.length) {
+  const lines = body.results.map(r =>
+    `${r.uid}${r.sku_code ? ` (${r.sku_code})` : ''}: ${r.deleted}`
+  );
+  status.textContent += `  [ ${lines.join(' · ')} ]`;
+}
+
     ta.value = '';
 
     // Refresh dashboard + intake metrics
