@@ -284,6 +284,20 @@
       <div class="mt-3">
         <button id="btn-add-row" class="px-3 py-2 rounded-lg border text-sm">Add Row</button>
       </div>
+
+<!-- Quick Delete by UID -->
+<div class="mt-4 bg-white rounded-2xl border shadow p-4">
+  <div class="text-base font-semibold mb-2">Delete Applied UID(s)</div>
+  <p class="text-xs text-gray-500 mb-2">
+    Enter one or more UIDs (comma, space, or line separated). The system will remove matching records.
+  </p>
+  <textarea id="uids-to-delete" rows="3" placeholder="Paste UIDs here…" class="w-full border rounded-md px-3 py-2 text-sm outline-none focus:ring-2"></textarea>
+  <div class="mt-2 flex items-center gap-2">
+    <button id="btn-delete-uids" class="px-3 py-2 rounded-lg border border-rose-700 text-rose-700">Delete UID(s)</button>
+    <span id="delete-uids-status" class="text-xs text-gray-500"></span>
+  </div>
+</div>
+
     </section>
   </main>
 
@@ -1444,6 +1458,46 @@ return dl && dl >= ws && dl <= we;
     });
   })();
 
+// ========== Delete UIDs (simple utility) ==========
+async function deleteUIDs() {
+  const ta = document.getElementById('uids-to-delete');
+  const status = document.getElementById('delete-uids-status');
+  if (!ta) return;
+  const raw = ta.value.trim();
+  if (!raw) {
+    alert('Please enter at least one UID.');
+    return;
+  }
+
+  // Split by commas, spaces, or newlines
+  const list = raw.split(/[\s,]+/).filter(Boolean);
+  if (!list.length) return alert('No valid UIDs found.');
+
+  if (!confirm(`Delete ${list.length} UID record(s)?`)) return;
+
+  status.textContent = 'Deleting...';
+
+  try {
+    // Send to backend
+    const res = await fetch(`${apiBase}/records/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(list.map(uid => ({ uid }))) // only UID is needed
+    });
+
+    if (!res.ok) throw new Error(await res.text());
+    status.textContent = `Deleted ${list.length} UID(s) successfully.`;
+    ta.value = '';
+
+    // Refresh dashboard + intake metrics
+    await loadOpsMetrics();
+    await refreshDashboardTotals();
+  } catch (e) {
+    console.error(e);
+    status.textContent = 'Error deleting: ' + (e.message || e);
+  }
+}
+
 // ---------- Routing & Init ----------
 (function init(){
   const ws = iso(mondayOf());
@@ -1482,6 +1536,8 @@ return dl && dl >= ws && dl <= we;
     document.getElementById('chk-all').checked = on;
   });
 
+document.getElementById('btn-delete-uids')?.addEventListener('click', deleteUIDs);
+
   // pulse hearts + metrics
   $('#ops-heart').appendChild(createHeart(24, BRAND, 40));
   $('#ops-heart-small').appendChild(createHeart(18, BRAND, 40));
@@ -1497,6 +1553,8 @@ return dl && dl >= ws && dl <= we;
     // keep header checkbox visually in sync after re-render
     document.getElementById('chk-all').checked = on;
   });
+
+
 
   </script>
 </body>
