@@ -979,13 +979,14 @@ renderInsights(state.records, state.plan, state.weekStart);
       const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download=`po_discrepancy_${ws}.csv`; a.click();
       setTimeout(()=>URL.revokeObjectURL(a.href),250);
     };
+
+$('#btn-dl-week-applied').onclick = downloadAppliedWeek;
+
     $('#btn-exec').onclick = () => {
   // week window
   const wsISO = state.weekStart;
   const weD = new Date(wsISO); weD.setDate(weD.getDate() + 6);
   const weISO = iso(weD);
-
-$('#btn-dl-week-applied').onclick = downloadAppliedWeek;
 
   // KPIs
   const plannedTotal = (state.plan||[]).reduce((s,p)=> s + toNum(p.target_qty), 0);
@@ -1235,6 +1236,7 @@ if (!putRes.ok) {
         }catch{ row.sync='pending'; }
         renderIntake();
         await loadOpsMetrics(); await refreshDashboardTotals();
+await setWeek(state.weekStart);   // 🔄 keep state.records in sync
       });
     });
 
@@ -1536,12 +1538,17 @@ async function deleteUIDs() {
     });
 
     if (!res.ok) throw new Error(await res.text());
-    status.textContent = `Deleted ${list.length} UID(s) successfully.`;
+    // If your API returns {deleted:n}, you can show that instead:
+const body = await res.json().catch(()=>({}));
+const n = typeof body.deleted === 'number' ? body.deleted : list.length;
+status.textContent = `Deleted ${n} UID(s) successfully.`;
     ta.value = '';
 
     // Refresh dashboard + intake metrics
-    await loadOpsMetrics();
-    await refreshDashboardTotals();
+await loadOpsMetrics();
+await refreshDashboardTotals();
+await setWeek(state.weekStart); // 🔄 refresh state.records so downloads reflect deletes
+
   } catch (e) {
     console.error(e);
     status.textContent = 'Error deleting: ' + (e.message || e);
