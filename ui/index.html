@@ -328,7 +328,13 @@ const BASE_BPM = 40;
     .find(p => p.type === 'timeZoneName')?.value || '';
   $('#vo-today').textContent = `${month} ${day} ${year} • ${tzShort}`;
 })();
-const iso = (d) => d.toISOString().slice(0,10);
+const iso = (d) => {
+  const x = new Date(d);
+  const y = x.getFullYear();
+  const m = String(x.getMonth() + 1).padStart(2, '0');
+  const day = String(x.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
 const mondayOf = (d=new Date()) => { const x=new Date(d); const day=x.getDay(); const diff=(day===0?-6:1)-day; x.setDate(x.getDate()+diff); x.setHours(0,0,0,0); return x; };
 const fmtInt = (n) => Number(n||0).toLocaleString();
 const toNum = (v) => Number(String(v ?? 0).toString().replace(/,/g, '')) || 0;
@@ -384,7 +390,7 @@ function createHeart(size=24, color=BRAND, bpm=40){
   return svg;
 }
   // API helpers
-  const state={weekStart:iso(mondayOf()), plan:[], records:[]};
+  const state={weekStart:'', plan:[], records:[]};
   async function api(path,opts={}){const r=await fetch(`${apiBase}${path}`,{method:opts.method||'GET',headers:{'Content-Type':'application/json'},body:opts.body?JSON.stringify(opts.body):undefined}); if(!r.ok) throw new Error(await r.text()); const ct=r.headers.get('content-type')||''; return ct.includes('json')?r.json():r.text();}
   async function fetchPlan(w){
   if(!apiBase) return [];
@@ -1318,9 +1324,9 @@ function toISODate(v) {
   if (v == null || v === '') return '';
   if (typeof v === 'number') {
     const d = new Date(Math.round((v - 25569) * 86400 * 1000));
-    return d.toISOString().slice(0, 10);
+    return iso(d);
   }
-  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (v instanceof Date) return iso(v);
   const str = String(v).trim();
   const m = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
   if (m) {
@@ -1329,7 +1335,7 @@ function toISODate(v) {
     return `${yyyy}-${mth.padStart(2, '0')}-${d.padStart(2, '0')}`;
   }
   const d2 = new Date(str);
-  return isNaN(d2) ? '' : d2.toISOString().slice(0, 10);
+  return isNaN(d2) ? '' : iso(d2);
 }
 
   // Upload UIDs → table → sync (unchanged)
