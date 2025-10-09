@@ -79,6 +79,7 @@
           <button id="btn-dl-posku" class="px-3 py-2 rounded-lg border text-sm">PO + SKU Discrepancy</button>
           <button id="btn-dl-po"    class="px-3 py-2 rounded-lg border text-sm">PO Discrepancy</button>
           <button id="btn-exec" class="px-3 py-2 rounded-lg border text-sm">Executive Summary</button>
+<button id="btn-dl-week-applied" class="px-3 py-2 rounded-lg border text-sm">Download Applied</button>
         </div>
       </div>
 
@@ -466,6 +467,53 @@ async function fetchActualsAll(){
   function buildDiscrepancyPO(joined){
     return (joined||[]).map(r=>({'PO':r.po,'Planned':r.planned||0,'Applied':r.applied||0,'Discrepancy (Applied - Planned)':(r.applied||0)-(r.planned||0)}));
   }
+
+async function downloadAppliedWeek() {
+  const ws = state.weekStart;
+  const weDate = new Date(ws);
+  weDate.setDate(weDate.getDate() + 6);
+  const we = iso(weDate);
+
+  // Filter only 'complete' records within this week
+  const records = (state.records || []).filter(r => {
+    if (r.status !== 'complete') return false;
+    const d = toISODate(r.date_local);
+    return d && d >= ws && d <= we;
+  });
+
+  if (!records.length) {
+    alert('No applied UIDs found for this week.');
+    return;
+  }
+
+  // Build export-friendly rows
+  const rows = records.map(r => ({
+    'Date Applied': toUI(r.date_local),
+    'Mobile Bin': r.mobile_bin || '',
+    'SSCC Label': r.sscc_label || '',
+    'PO Number': r.po_number || '',
+    'SKU Code': r.sku_code || '',
+    'UID': r.uid || ''
+  }));
+
+  // Convert to CSV (simple)
+  const header = Object.keys(rows[0]);
+  const esc = v => /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : v;
+  const csv =
+    '\ufeff' +
+    header.join(',') +
+    '\r\n' +
+    rows.map(r => header.map(h => esc(r[h])).join(',')).join('\r\n');
+
+  // Download
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `Applied_UIDs_${ws}_to_${we}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 250);
+}
+
   function buildExecHTML({
   ws, we,
   plannedTotal, appliedTotal, pct,
@@ -936,6 +984,8 @@ renderInsights(state.records, state.plan, state.weekStart);
   const wsISO = state.weekStart;
   const weD = new Date(wsISO); weD.setDate(weD.getDate() + 6);
   const weISO = iso(weD);
+
+$('#btn-dl-week-applied').onclick = downloadAppliedWeek;
 
   // KPIs
   const plannedTotal = (state.plan||[]).reduce((s,p)=> s + toNum(p.target_qty), 0);
