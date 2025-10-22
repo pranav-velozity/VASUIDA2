@@ -434,9 +434,87 @@ app.get('/plan/weeks', (req, res) => {
   res.json(rows);
 });
 
+// --- bins.routes.js ---
+const binsRouter = express.Router();
+
+// Store: use your DB (SQL/NoSQL). Here we assume a generic DAL with upsertMany/getByWeek.
+const Bins = require('../dal/bins'); // implement with your DB layer
+
+// Helper: Monday anchor computed in business TZ on the server if you store server-side
+function mondayOf(ymd) {
+  const d = new Date(ymd + 'T00:00:00Z');
+  const day = d.getUTCDay();
+  const diff = (day === 0 ? -6 : (1 - day));
+  d.setUTCDate(d.getUTCDate() + diff);
+  return d.toISOString().slice(0,10);
+}
+
+// PUT /bins/weeks/:ws    body: [{mobile_bin, total_units?, weight_kg?, date_local?}, ...]
+binsRouter.put('/weeks/:ws', async (req, res) => {
+  try {
+    const ws = req.params.ws; // YYYY-MM-DD (business Monday from client)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) return res.status(400).send('Invalid week start');
+
+    const rows = Array.isArray(req.body) ? req.body : [];
+    if (!rows.length) return res.json({ ok: true, upserted: 0 });
+
+    const clean = [];
+    const seen = new Set();
+    const errors = [];
+
+    for (const r of rows) {
+      const bin = String(r.mobile_bin || '').trim();
+      const units = (r.total_units == null || r.total_units === '') ? null : Number(r.total_units);
+      const weight = (r.weight_kg == null || r.weight_kg === '') ? null : Number(r.weight_kg);
+      const dateLocal = String(r.date_local || ws);
+
+      if (!bin) { errors.push({row:r, reason:'missing mobile_bin'}); continue; }
+      if (units != null && (!Number.isFinite(units) || units < 0)) { errors.push({row:r, reason:'invalid total_units'}); continue; }
+      if (weight != null && (!Number.isFinite(weight) || weight < 0)) { errors.push({row:r, reason:'invalid weight_kg'}); continue; }
+
+      // de-dupe per (ws,bin). If multiple entries present, keep last one.
+      const key = ws + '|' + bin;
+      if (seen.has(key)) clean.pop();
+      seen.add(key);
+
+      clean.push({
+        week_start: ws,
+        mobile_bin: bin,
+        total_units: units,
+        weight_kg: weight,
+        date_local: dateLocal
+      });
+    }
+
+    if (!clean.length) return res.status(400).json({ ok:false, errors });
+
+    const upserted = await Bins.upsertMany(clean); // implement in DAL
+    return res.json({ ok:true, upserted, rejected: errors.length, errors });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send('Failed to upsert bins');
+  }
+});
+
+// GET /bins/weeks/:ws
+binsRouter.get('/weeks/:ws', async (req, res) => {
+  try {
+    const ws = req.params.ws;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) return res.status(400).send('Invalid week start');
+    const rows = await Bins.getByWeek(ws); // returns [{mobile_bin, total_units, weight_kg, date_local, week_start}, ...]
+    return res.json(rows);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send('Failed to fetch bins');
+  }
+});
+
+app.use('/bins', binsRouter);
+
 // ---- Start ----
 app.listen(PORT, () => {
   console.log(`UID Ops backend listening on http://localhost:${PORT}`);
   console.log(`DB file: ${DB_FILE}`);
   console.log(`CORS origin(s): ${allowList.join(', ')}`);
 });
+
