@@ -31,6 +31,10 @@
     .wkcap .bar{height:6px;border-radius:9999px;background:#e5e7eb;overflow:hidden;margin-top:4px}
     .wkcap .bar>div{height:6px;border-radius:9999px;background:#990033;width:0%}
 
+/* Hard guard so the dashboard “cards” always span the container width */
+#page-dashboard { display:flex; flex-direction:column; gap:.75rem; }
+#page-dashboard > * { width:100%; max-width:100%; }
+
 /* segmented toggle visuals */
 .seg { color:#9f1239; }
 .seg.active { background:#fff; color:#9f1239; box-shadow:0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.1); }
@@ -111,9 +115,9 @@
       </div>
 
       <!-- Capsules + Actions -->
-      <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div id="capsules" class="hidden sm:flex flex-wrap items-center gap-3"></div>
-        <div class="cmdbar" role="group" aria-label="Reports and downloads">
+      <div class="mb-3 flex flex-wrap items-start gap-3">
+  <div id="capsules" class="flex flex-wrap items-center gap-3 flex-1 min-w-[320px]"></div>
+  <div class="cmdbar shrink-0" role="group" aria-label="Reports and downloads">
   <button id="btn-dl-posku" class="cmd cmd--ghost" aria-label="PO × SKU Discrepancy" title="Compare planned vs applied at PO×SKU level">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false">
       <path d="M3 5h18M3 12h18M3 19h18" stroke-width="1.5" stroke-linecap="round"/>
