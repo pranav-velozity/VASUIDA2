@@ -438,7 +438,42 @@ app.get('/plan/weeks', (req, res) => {
 const binsRouter = express.Router();
 
 // Store: use your DB (SQL/NoSQL). Here we assume a generic DAL with upsertMany/getByWeek.
-const Bins = require('../dal/bins'); // implement with your DB layer
+// --- Bins DAL (SQLite, inline) ---
+db.exec(`
+CREATE TABLE IF NOT EXISTS bins (
+  week_start  TEXT NOT NULL,
+  mobile_bin  TEXT NOT NULL,
+  total_units INTEGER,
+  weight_kg   REAL,
+  date_local  TEXT,
+  PRIMARY KEY (week_start, mobile_bin)
+);
+CREATE INDEX IF NOT EXISTS idx_bins_week ON bins(week_start);
+`);
+
+const Bins = {
+  upsertMany: db.transaction((rows) => {
+    const stmt = db.prepare(`
+      INSERT INTO bins (week_start, mobile_bin, total_units, weight_kg, date_local)
+      VALUES (@week_start, @mobile_bin, @total_units, @weight_kg, @date_local)
+      ON CONFLICT(week_start, mobile_bin) DO UPDATE SET
+        total_units = excluded.total_units,
+        weight_kg   = excluded.weight_kg,
+        date_local  = excluded.date_local
+    `);
+    let n = 0;
+    for (const r of rows) { stmt.run(r); n++; }
+    return n;
+  }),
+  getByWeek: (ws) => {
+    return db.prepare(`
+      SELECT week_start, mobile_bin, total_units, weight_kg, date_local
+      FROM bins
+      WHERE week_start = ?
+      ORDER BY mobile_bin
+    `).all(ws);
+  }
+};
 
 // Helper: Monday anchor computed in business TZ on the server if you store server-side
 function mondayOf(ymd) {
