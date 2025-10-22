@@ -31,9 +31,11 @@
     .wkcap .bar{height:6px;border-radius:9999px;background:#e5e7eb;overflow:hidden;margin-top:4px}
     .wkcap .bar>div{height:6px;border-radius:9999px;background:#990033;width:0%}
 
-/* Hard guard so the dashboard “cards” always span the container width */
-#page-dashboard { display:flex; flex-direction:column; gap:.75rem; }
-#page-dashboard > * { width:100%; max-width:100%; }
+/* Hard guard: stack cards in normal block flow, full width */
+#page-dashboard { display:block; }
+#page-dashboard > * { width:100%; max-width:100%; margin-bottom:.75rem; }
+/* prevent child content (tables/grids) from forcing extra width */
+#page-dashboard > * { min-width:0; }
 
 /* segmented toggle visuals */
 .seg { color:#9f1239; }
@@ -92,8 +94,8 @@
 
   <main class="container py-4">
     <!-- ================= Operations ================= -->
-    <section id="page-dashboard" class="hidden flex flex-col gap-3">
-      <div class="flex items-center justify-between mb-2">
+    <section id="page-dashboard" class="hidden">
+      <div class="flex items-center justify-between mb-2 basis-full w-full">
         <div class="text-2xl font-semibold">Operations</div>
         <div class="flex items-center gap-2">
           <label class="text-sm text-gray-600">Week start</label>
@@ -115,7 +117,7 @@
       </div>
 
       <!-- Capsules + Actions -->
-      <div class="mb-3 flex flex-wrap items-start gap-3">
+      <div class="mb-3 flex flex-wrap items-start gap-3 basis-full w-full">
   <div id="capsules" class="flex flex-wrap items-center gap-3 flex-1 min-w-[320px]"></div>
   <div class="cmdbar shrink-0" role="group" aria-label="Reports and downloads">
   <button id="btn-dl-posku" class="cmd cmd--ghost" aria-label="PO × SKU Discrepancy" title="Compare planned vs applied at PO×SKU level">
@@ -189,7 +191,7 @@
       </div>
 
 <!-- Top Insights -->
-<div class="w-full basis-full rounded-2xl border shadow p-4 mb-3 text-white" style="background:#990033;border-color:#7a0029">
+<div class="w-full basis-full min-w-0 rounded-2xl border shadow p-4 mb-3 text-white" style="background:#990033;border-color:#7a0029">
   <div class="text-base font-semibold mb-2">Top Insights for Ops</div>
   <ul id="insights" class="text-sm text-white list-disc pl-5 space-y-1" aria-live="polite">
     <li>Loading…</li>
@@ -198,7 +200,7 @@
 </div>
 
 <!-- PO Progress (This Week) -->
-<div class="w-full basis-full bg-white rounded-2xl border shadow p-4 mb-3">
+<div class="w-full basis-full min-w-0 bg-white rounded-2xl border shadow p-4 mb-3">
   <div class="text-base font-semibold mb-2">PO Progress (This Week)</div>
   <div class="overflow-auto max-h-[480px]">
     <table class="w-full text-sm" id="po-progress">
@@ -219,7 +221,7 @@
 </div>
 
       <!-- Risks -->
-<div class="w-full basis-full grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+<div class="w-full basis-full min-w-0 grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
   <!-- Top PO's at Risk -->
   <div class="bg-white rounded-2xl border shadow p-4">
     <div class="text-base font-semibold mb-2">Top PO's at Risk</div>
