@@ -88,7 +88,7 @@
 
   <main class="container py-4">
     <!-- ================= Operations ================= -->
-    <section id="page-dashboard" class="hidden">
+    <section id="page-dashboard" class="hidden flex flex-col gap-3">
       <div class="flex items-center justify-between mb-2">
         <div class="text-2xl font-semibold">Operations</div>
         <div class="flex items-center gap-2">
@@ -111,7 +111,7 @@
       </div>
 
       <!-- Capsules + Actions -->
-      <div class="mb-3 flex items-center justify-between gap-3">
+      <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div id="capsules" class="hidden sm:flex flex-wrap items-center gap-3"></div>
         <div class="cmdbar" role="group" aria-label="Reports and downloads">
   <button id="btn-dl-posku" class="cmd cmd--ghost" aria-label="PO × SKU Discrepancy" title="Compare planned vs applied at PO×SKU level">
@@ -145,7 +145,7 @@
       </div>
 
       <!-- KPI tiles -->
-      <div class="grid grid-cols-1 sm:grid-cols-5 gap-3 mb-3">
+      <div class="w-full grid grid-cols-1 sm:grid-cols-5 gap-3 mb-3">
         <div class="bg-white rounded-2xl border shadow p-4">
           <div class="text-base font-semibold text-gray-600">Planned</div>
           <div class="text-xs text-gray-500" id="planned-range"></div>
@@ -178,14 +178,14 @@
       </div>
 
       <!-- Search -->
-      <div class="bg-white rounded-2xl border shadow p-4 mb-3">
+      <div class="w-full bg-white rounded-2xl border shadow p-4 mb-3">
         <div class="text-base font-semibold mb-2">Search by PO or SKU</div>
         <input id="search-input" type="search" aria-label="Search by PO or SKU" placeholder="Type a PO # or SKU Code and pause…" class="w-full border rounded-md px-3 py-2 text-sm outline-none focus:ring-2">
         <div id="search-results" class="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3 hidden"></div>
       </div>
 
 <!-- Top Insights -->
-<div class="rounded-2xl border shadow p-4 mb-3 text-white" style="background:#990033;border-color:#7a0029">
+<div class="w-full rounded-2xl border shadow p-4 mb-3 text-white" style="background:#990033;border-color:#7a0029">
   <div class="text-base font-semibold mb-2">Top Insights for Ops</div>
   <ul id="insights" class="text-sm text-white list-disc pl-5 space-y-1" aria-live="polite">
     <li>Loading…</li>
@@ -194,7 +194,7 @@
 </div>
 
 <!-- PO Progress (This Week) -->
-<div class="bg-white rounded-2xl border shadow p-4 mb-3">
+<div class="w-full bg-white rounded-2xl border shadow p-4 mb-3">
   <div class="text-base font-semibold mb-2">PO Progress (This Week)</div>
   <div class="overflow-auto max-h-[480px]">
     <table class="w-full text-sm" id="po-progress">
@@ -215,7 +215,7 @@
 </div>
 
       <!-- Risks -->
-<div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+<div class="w-full grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
   <!-- Top PO's at Risk -->
   <div class="bg-white rounded-2xl border shadow p-4">
     <div class="text-base font-semibold mb-2">Top PO's at Risk</div>
