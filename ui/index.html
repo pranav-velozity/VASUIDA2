@@ -36,6 +36,33 @@
 .seg.active { background:#fff; color:#9f1239; box-shadow:0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.1); }
 .seg:not(.active):hover { background:rgba(225,29,72,.08); }
 
+/* --- Command Bar (visual only) --- */
+.cmdbar{
+  display:flex; flex-wrap:wrap; gap:.25rem;
+  padding:.25rem; border-radius:12px;
+  background:#fff; border:1px solid #e5e7eb;
+  box-shadow:0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.08);
+}
+.cmd{
+  display:inline-flex; align-items:center; gap:.5rem;
+  font-size:.875rem; line-height:1;
+  padding:.5rem .75rem; border-radius:10px;
+  border:1px solid transparent; background:transparent; color:#374151;
+  transition:background .15s ease, border-color .15s ease, transform .05s ease;
+}
+.cmd:hover{ background:#f9fafb; border-color:#e5e7eb; }
+.cmd:active{ transform:translateY(1px); }
+.cmd:focus-visible{ outline:none; box-shadow:0 0 0 3px rgba(153,0,51,.15); }
+
+/* variants */
+.cmd--primary{ background:#990033; color:#fff; }
+.cmd--primary:hover{ filter:brightness(.98); }
+.cmd--danger{ color:#991b1b; background:#fff5f5; border-color:#fecaca; }
+.cmd--ghost{ background:transparent; }
+
+/* icon sizing */
+.cmd svg{ width:16px; height:16px; opacity:.85; }
+
   </style>
 </head>
 <body class="bg-gray-50 min-h-screen">
@@ -66,21 +93,54 @@
         <div class="text-2xl font-semibold">Operations</div>
         <div class="flex items-center gap-2">
           <label class="text-sm text-gray-600">Week start</label>
-          <input id="week-start" type="date" class="px-2 py-1 border rounded-md text-sm"/>
-          <input id="file-plan" type="file" accept=".xlsx,.csv" class="hidden"/>
-          <button id="btn-upload-plan" class="px-3 py-2 rounded-lg text-sm border">Upload Plan</button>
-          <button id="btn-zero-plan"   class="px-3 py-2 rounded-lg text-sm border">Zero Plan</button>
+<input id="week-start" type="date" class="px-2 py-1 border rounded-md text-sm"/>
+
+<input id="file-plan" type="file" accept=".xlsx,.csv" class="hidden"/>
+
+<div class="cmdbar" role="group" aria-label="Operations actions">
+  <button id="btn-upload-plan" class="cmd cmd--primary" aria-label="Upload Plan" title="Upload planned PO×SKU for the selected week">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false"> 
+<path d="M12 3v12m0-12 4 4m-4-4-4 4M4 17h16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    Upload Plan
+  </button>
+  <button id="btn-zero-plan" class="cmd cmd--danger" aria-label="Zero Plan" title="Clear the plan for this week">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false"><path d="M6 18L18 6M6 6l12 12" stroke-width="1.5" stroke-linecap="round"/></svg>
+    Zero Plan
+  </button>
         </div>
       </div>
 
       <!-- Capsules + Actions -->
       <div class="mb-3 flex items-center justify-between gap-3">
         <div id="capsules" class="hidden sm:flex items-center gap-3"></div>
-        <div class="flex flex-wrap gap-2">
-          <button id="btn-dl-posku" class="px-3 py-2 rounded-lg border text-sm">PO + SKU Discrepancy</button>
-          <button id="btn-dl-po"    class="px-3 py-2 rounded-lg border text-sm">PO Discrepancy</button>
-          <button id="btn-exec" class="px-3 py-2 rounded-lg border text-sm">Executive Summary</button>
-<button id="btn-dl-week-applied" class="px-3 py-2 rounded-lg border text-sm">Download Applied</button>
+        <div class="cmdbar" role="group" aria-label="Reports and downloads">
+  <button id="btn-dl-posku" class="cmd cmd--ghost" aria-label="PO × SKU Discrepancy" title="Compare planned vs applied at PO×SKU level">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false">
+      <path d="M3 5h18M3 12h18M3 19h18" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+    PO × SKU Discrepancy
+  </button>
+
+  <button id="btn-dl-po" class="cmd cmd--ghost" aria-label="PO Discrepancy" title="Compare planned vs applied at PO level">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false">
+      <path d="M4 6h16M4 12h10M4 18h7" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+    PO Discrepancy
+  </button>
+
+  <button id="btn-exec" class="cmd" aria-label="Executive Summary" title="Generate weekly Executive Summary">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false">
+      <path d="M7 4h10a2 2 0 0 1 2 2v12l-4-2-4 2-4-2-4 2V6a2 2 0 0 1 2-2z" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    Executive Summary
+  </button>
+
+  <button id="btn-dl-week-applied" class="cmd cmd--ghost" aria-label="Download Applied" title="Export applied UIDs for this week">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false">
+      <path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    Download Applied
+  </button>
         </div>
       </div>
 
@@ -120,14 +180,14 @@
       <!-- Search -->
       <div class="bg-white rounded-2xl border shadow p-4 mb-3">
         <div class="text-base font-semibold mb-2">Search by PO or SKU</div>
-        <input id="search-input" type="search" placeholder="Type a PO # or SKU Code and pause…" class="w-full border rounded-md px-3 py-2 text-sm outline-none focus:ring-2">
+        <input id="search-input" type="search" aria-label="Search by PO or SKU" placeholder="Type a PO # or SKU Code and pause…" class="w-full border rounded-md px-3 py-2 text-sm outline-none focus:ring-2">
         <div id="search-results" class="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3 hidden"></div>
       </div>
 
 <!-- Top Insights -->
 <div class="rounded-2xl border shadow p-4 mb-3 text-white" style="background:#990033;border-color:#7a0029">
   <div class="text-base font-semibold mb-2">Top Insights for Ops</div>
-  <ul id="insights" class="text-sm text-white list-disc pl-5 space-y-1">
+  <ul id="insights" class="text-sm text-white list-disc pl-5 space-y-1" aria-live="polite">
     <li>Loading…</li>
   </ul>
   <div id="insights-mini" class="mt-2 text-xs text-rose-100"></div>
@@ -140,11 +200,11 @@
     <table class="w-full text-sm" id="po-progress">
       <thead>
         <tr class="text-gray-500">
-          <th class="text-left py-1 pr-2">PO #</th>
-          <th class="text-left py-1 pr-2">Due</th>
-          <th class="text-right py-1 pr-2">Planned</th>
-          <th class="text-right py-1 pr-2">Applied</th>
-          <th class="text-right py-1">%</th>
+          <th scope="col" class="text-left py-1 pr-2">PO #</th>
+          <th scope="col" class="text-left py-1 pr-2">Due</th>
+          <th scope="col" class="text-right py-1 pr-2">Planned</th>
+          <th scope="col" class="text-right py-1 pr-2">Applied</th>
+          <th scope="col" class="text-right py-1">%</th>
         </tr>
       </thead>
       <tbody id="po-progress-body">
@@ -204,17 +264,19 @@
         <div class="flex items-center gap-5">
           <div class="text-2xl font-semibold">UID Intake (Table Mode)</div>
           <div class="flex items-center gap-2 bg-white border rounded-xl px-3 py-2">
-            <svg viewBox="0 0 24 24" width="18" height="18" class="heartbeat">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" width="18" height="18" class="heartbeat">
               <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" fill="#990033"/>
             </svg>
             <div class="text-sm"><span class="font-semibold">Ops</span> • <span id="intake-bpm">0</span> bpm</div>
           </div>
         </div>
         <div class="flex items-center gap-2">
-          <button id="btn-export-day" class="px-3 py-2 rounded-lg text-sm border">Export XLSX</button>
-          <button id="btn-upload-applied" class="px-3 py-2 rounded-lg text-sm border">Upload UIDs</button>
+          <button id="btn-export-day" class="px-3 py-2 rounded-lg text-sm border" aria-label="Export XLSX">Export XLSX</button>
+          <button id="btn-upload-applied" class="px-3 py-2 rounded-lg text-sm border" aria-label="Upload UIDs">Upload UIDs</button>
+<button id="btn-upload-bins" class="px-3 py-2 rounded-lg text-sm border" aria-label="Upload Bin Manifest">Upload Bin Manifest</button>
+<input id="file-bins" type="file" accept=".xlsx,.csv" class="hidden"/>
           <input id="file-upload-applied" type="file" accept=".xlsx,.csv" class="hidden"/>
-          <button id="btn-delete-selected" class="px-3 py-2 rounded-lg text-sm border border-rose-700 text-rose-700">Delete Selected</button>
+          <button id="btn-delete-selected" class="px-3 py-2 rounded-lg text-sm border border-rose-700 text-rose-700" aria-label="Delete Selected">Delete Selected</button>
         </div>
       </div>
 
@@ -259,7 +321,7 @@
                 </span>
               </small>
             </div>
-            <ul id="ops-alerts" class="list-disc ml-4 mt-1 text-sm"><li class="text-gray-400">No alerts.</li></ul>
+            <ul id="ops-alerts" class="list-disc ml-4 mt-1 text-sm" aria-live="polite"><li class="text-gray-400">No alerts.</li></ul>
           </div>
         </div>
       </div>
@@ -411,6 +473,98 @@ async function fetchActualsAll(){
   }
 }
   async function fetchActuals(f,t){ if(!apiBase) return []; try{const d=await api(`/records?from=${f}&to=${t}&status=complete&limit=50000`); return d.records||[];}catch{return [];} }
+
+// --- Fetch bins for a week (business week start) ---
+async function fetchBins(ws) {
+  if (!apiBase) return [];
+  try {
+    const r = await api(`/bins/weeks/${ws}?limit=50000`);
+    return Array.isArray(r) ? r : (r.bins || []);
+  } catch {
+    return [];
+  }
+}
+
+// --- Compute bin QA (cross-check with applied records) ---
+function computeBinQA(ws, records=[], bins=[]) {
+  // stats from bins
+  const binMap = new Map(); // bin -> { units, weight }
+  let binsCount = 0, totalUnitsFromBins = 0, totalWeightKg = 0;
+
+  for (const b of bins) {
+    const id = String(b.mobile_bin || '').trim();
+    if (!id) continue;
+    binsCount++;
+    const u = Number(b.total_units ?? 0) || 0;
+    const w = Number(b.weight_kg ?? 0) || 0;
+    totalUnitsFromBins += u;
+    totalWeightKg += w;
+
+    const rec = binMap.get(id) || { units: 0, weight: 0 };
+    rec.units += u;
+    rec.weight += w;
+    binMap.set(id, rec);
+  }
+
+  // stats from applied records (this week)
+  const byBin = new Map(); // bin -> units counted from UIDs
+  for (const r of records || []) {
+    if (r.status !== 'complete') continue;
+    const bin = String(r.mobile_bin || '').trim();
+    if (!bin) continue;
+    byBin.set(bin, (byBin.get(bin) || 0) + 1);
+  }
+
+  // anomalies
+  const anomalies = [];
+  const suspicious = [];
+
+  // 1) bin exists in manifest but no UIDs, or vice versa
+  const manifestBins = new Set(binMap.keys());
+  const uidBins = new Set(byBin.keys());
+
+  // bins in manifest but zero UIDs
+  for (const b of manifestBins) {
+    const m = binMap.get(b);
+    const uids = byBin.get(b) || 0;
+    if (uids === 0) anomalies.push({ type: 'no_uids_for_manifest_bin', bin: b, units_manifest: m.units, weight_kg: m.weight });
+  }
+  // bins with UIDs but missing in manifest
+  for (const b of uidBins) {
+    if (!manifestBins.has(b)) anomalies.push({ type: 'uids_without_manifest', bin: b, uids: byBin.get(b) });
+  }
+
+  // 2) count mismatch (UIDs vs manifest units)
+  for (const b of manifestBins) {
+    const m = binMap.get(b);
+    const uids = byBin.get(b) || 0;
+    if (m.units && Math.abs(m.units - uids) > 0) {
+      anomalies.push({ type: 'units_mismatch', bin: b, units_manifest: m.units, uids });
+    }
+  }
+
+  // 3) weight plausibility per unit (very light or very heavy)
+  for (const [b, m] of binMap.entries()) {
+    if (!m.units || !m.weight) continue;
+    const per = m.weight / Math.max(1, m.units);
+    if (per < 0.005 || per > 5) {
+      suspicious.push({ type: 'weight_per_unit_outlier', bin: b, units: m.units, weight_kg: m.weight, kg_per_unit: per });
+    }
+  }
+
+  return {
+    ws,
+    binsCount,
+    totalUnitsFromBins,
+    totalWeightKg,
+    avgWeightPerBin: binsCount ? (totalWeightKg / binsCount) : 0,
+    totalsFromUIDs: Array.from(byBin.values()).reduce((s, v) => s + v, 0),
+    anomalies,
+    suspicious,
+    topOutliers: suspicious.sort((a,b) => Math.abs(b.kg_per_unit - 1) - Math.abs(a.kg_per_unit - 1)).slice(0,5),
+  };
+}
+
 
   // ---------- Capsules ----------
   function addDaysISO(s,days){const [y,m,d]=s.split('-').map(Number);const b=new Date(y,m-1,d);b.setDate(b.getDate()+days);return iso(b)}
@@ -574,7 +728,8 @@ async function downloadAppliedWeek() {
   uniqueBins,
   topPOSKU,             // [{po, sku, planned, applied, pct}]
   topBins,              // [{bin, units, uniqueSkus}]
-  insights              // [string, ...]
+  insights,             // [string, ...]
+  binQA                  // { binsCount, totalUnitsFromBins, totalWeightKg, avgWeightPerBin, anomalies[], suspicious[], ... }
 }) {
   const pretty = s => (s||'').split('-').reverse().join('-');
 
@@ -597,64 +752,101 @@ async function downloadAppliedWeek() {
   const bullets = (insights||[])
     .map(t=>`<li>${t}</li>`).join('');
 
+  // Bin summary rows
+  const binSummary = binQA ? `
+    <table style="width:100%;border-collapse:collapse;margin:8px 0 0 0;font-size:13px">
+      <tbody>
+        <tr><td style="padding:6px 4px;border:1px solid #eee">Bins (count)</td><td style="padding:6px 4px;border:1px solid #eee;text-align:right">${(binQA.binsCount||0).toLocaleString()}</td></tr>
+        <tr><td style="padding:6px 4px;border:1px solid #eee">Units (manifest)</td><td style="padding:6px 4px;border:1px solid #eee;text-align:right">${(binQA.totalUnitsFromBins||0).toLocaleString()}</td></tr>
+        <tr><td style="padding:6px 4px;border:1px solid #eee">Weight (kg, total)</td><td style="padding:6px 4px;border:1px solid #eee;text-align:right">${(binQA.totalWeightKg||0).toFixed(1)}</td></tr>
+        <tr><td style="padding:6px 4px;border:1px solid #eee">Avg kg / bin</td><td style="padding:6px 4px;border:1px solid #eee;text-align:right">${(binQA.avgWeightPerBin||0).toFixed(2)}</td></tr>
+        <tr><td style="padding:6px 4px;border:1px solid #eee">UID Units (this week)</td><td style="padding:6px 4px;border:1px solid #eee;text-align:right">${(binQA.totalsFromUIDs||0).toLocaleString()}</td></tr>
+        <tr><td style="padding:6px 4px;border:1px solid #eee">Anomalies (count)</td><td style="padding:6px 4px;border:1px solid #eee;text-align:right">${(((binQA.anomalies||[]).length) + ((binQA.suspicious||[]).length)).toLocaleString()}</td></tr>
+      </tbody>
+    </table>
+  ` : '<div style="color:#888">No bin manifest uploaded for this week.</div>';
+
+  const topOutliers = (binQA?.topOutliers || []).slice(0,5).map(x =>
+    `<li>Bin ${x.bin}: ${x.units.toLocaleString()} units, ${x.weight_kg.toFixed(1)} kg (${x.kg_per_unit.toFixed(3)} kg/unit)</li>`
+  ).join('');
+
   return `<!doctype html><meta charset="utf-8">
-  <div style="font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111;line-height:1.35">
-    <h1 style="margin:0 0 8px;font-size:22px;color:${BRAND}">VAS Weekly Executive Summary</h1>
+  <style>
+    @page { size: A4 landscape; margin: 16mm; }
+    body  { font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:#111; line-height:1.35; }
+    h1    { margin:0 0 8px; font-size:22px; color:${BRAND}; }
+    h2    { font-size:16px; margin:16px 0 8px; }
+    table { border-collapse:collapse; width:100%; }
+    th, td { border:1px solid #eee; padding:6px 4px; }
+    th    { text-align:left; }
+    .kpi  { margin-bottom:16px; }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+  </style>
+
+  <div>
+    <h1>VAS Weekly Executive Summary</h1>
     <div style="color:#555;font-size:12px;margin-bottom:16px">Week: ${pretty(ws)} – ${pretty(we)}</div>
 
     <!-- KPIs -->
-    <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
+    <table class="kpi">
       <tr>
-        <td style="padding:10px;border:1px solid #eee">
+        <td>
           <div style="font-size:12px;color:#666;margin-bottom:4px">Planned</div>
           <div style="font-size:20px;font-weight:700">${plannedTotal.toLocaleString()}</div>
         </td>
-        <td style="padding:10px;border:1px solid #eee">
+        <td>
           <div style="font-size:12px;color:#666;margin-bottom:4px">Applied</div>
           <div style="font-size:20px;font-weight:700">${appliedTotal.toLocaleString()}</div>
         </td>
-        <td style="padding:10px;border:1px solid #eee">
+        <td>
           <div style="font-size:12px;color:#666;margin-bottom:4px">Completion</div>
           <div style="font-size:20px;font-weight:700">${pct}%</div>
         </td>
-        <td style="padding:10px;border:1px solid #eee">
-          <div style="font-size:12px;color:#666;margin-bottom:4px">Mobile Bins (wk)</div>
+        <td>
+          <div style="font-size:12px;color:#666;margin-bottom:4px">Mobile Bins (wk, from UIDs)</div>
           <div style="font-size:20px;font-weight:700">${uniqueBins.toLocaleString()}</div>
         </td>
       </tr>
     </table>
 
-    <!-- Insights -->
-    <h2 style="font-size:16px;margin:0 0 8px">Top Insights</h2>
-    <ul style="margin:0 0 16px 16px;padding:0">${bullets || '<li style="color:#888">No notable insights.</li>'}</ul>
+    <div class="grid">
+      <div>
+        <h2>Top Insights</h2>
+        <ul style="margin:0 0 16px 16px;padding:0">${bullets || '<li style="color:#888">No notable insights.</li>'}</ul>
 
-    <!-- PO × SKU Applied -->
-    <h2 style="font-size:16px;margin:0 0 8px">PO × SKU — Applied (Top)</h2>
-    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px">
-      <thead>
-        <tr>
-          <th style="text-align:left;border-bottom:1px solid #eee;padding:6px 4px">PO #</th>
-          <th style="text-align:left;border-bottom:1px solid #eee;padding:6px 4px">SKU</th>
-          <th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Planned</th>
-          <th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Applied</th>
-          <th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">%</th>
-        </tr>
-      </thead>
-      <tbody>${rowsPOSKU || `<tr><td colspan="5" style="color:#888;padding:10px 4px">No PO × SKU rows found.</td></tr>`}</tbody>
-    </table>
+        <h2>Mobile Bin Summary</h2>
+        ${binSummary}
+        ${topOutliers ? `<div style="margin-top:8px"><strong>Outliers (kg/unit):</strong><ul>${topOutliers}</ul></div>` : ''}
+      </div>
 
-    <!-- Units by Mobile Bin -->
-    <h2 style="font-size:16px;margin:0 0 8px">Units by Mobile Bin (Top)</h2>
-    <table style="width:100%;border-collapse:collapse;font-size:13px">
-      <thead>
-        <tr>
-          <th style="text-align:left;border-bottom:1px solid #eee;padding:6px 4px">Mobile Bin</th>
-          <th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Units</th>
-          <th style="text-align:right;border-bottom:1px solid #eee;padding:6px 4px">Unique SKUs</th>
-        </tr>
-      </thead>
-      <tbody>${rowsBins || `<tr><td colspan="3" style="color:#888;padding:10px 4px">No bin data found.</td></tr>`}</tbody>
-    </table>
+      <div>
+        <h2>PO × SKU — Applied (Top)</h2>
+        <table style="font-size:13px; margin-bottom:16px">
+          <thead>
+            <tr>
+              <th>PO #</th>
+              <th>SKU</th>
+              <th style="text-align:right">Planned</th>
+              <th style="text-align:right">Applied</th>
+              <th style="text-align:right">%</th>
+            </tr>
+          </thead>
+          <tbody>${rowsPOSKU || `<tr><td colspan="5" style="color:#888;padding:10px 4px">No PO × SKU rows found.</td></tr>`}</tbody>
+        </table>
+
+        <h2>Units by Mobile Bin (Top)</h2>
+        <table style="font-size:13px">
+          <thead>
+            <tr>
+              <th>Mobile Bin</th>
+              <th style="text-align:right">Units</th>
+              <th style="text-align:right">Unique SKUs</th>
+            </tr>
+          </thead>
+          <tbody>${rowsBins || `<tr><td colspan="3" style="color:#888;padding:10px 4px">No bin data found.</td></tr>`}</tbody>
+        </table>
+      </div>
+    </div>
   </div>`;
 }
 
@@ -905,7 +1097,8 @@ if (binsByDiversity.length) {
   if (mini) mini.textContent = `Applied so far: ${appliedSoFar.toLocaleString()} • Remaining: ${remainingWeek.toLocaleString()}`;
 }
 
-async function fetchActuals(ws, we) {
+async function fetchActualsInWeek(ws, we) {
+
   if (!apiBase) return [];
   try {
     // get everything, we’ll filter locally
@@ -960,6 +1153,11 @@ const recs = Array.isArray(allRecs) ? allRecs : [];
 state.records = recs.filter(r =>
   inWeekByDateLocal(r, ws) || (!r.date_local && inWeekByCompletedAt(r, ws))
 );
+
+const bins = await fetchBins(ws);
+state.bins = Array.isArray(bins) ? bins : [];
+state.binQA = computeBinQA(ws, state.records, state.bins);
+
     const agg=aggregate(state.records);
     const plannedTotal = state.plan.reduce((s,p)=> s + toNum(p.target_qty), 0);
     const appliedTotal = Array.from(agg.byPO.values()).reduce((s,v)=> s+v, 0);
@@ -1096,10 +1294,30 @@ $('#btn-dl-week-applied').onclick = downloadAppliedWeek;
     .sort((a,b)=> b.units - a.units)
     .slice(0, 25); // top 25 bins
 
+// --- Bin QA bullet (if available from state.binQA for current week) ---
+const insights = [];
+try {
+  if (state?.binQA && state.binQA.ws === wsISO) {
+    const q = state.binQA;
+    const aCount = (q.anomalies?.length || 0) + (q.suspicious?.length || 0);
+    const top3 = (q.topOutliers || []).slice(0,3).map(x =>
+      `${x.bin} (${(x.kg_per_unit).toFixed(3)} kg/unit)`
+    ).join(', ');
+    insights.push(
+      `Bin QA: ${q.binsCount.toLocaleString()} bins • ` +
+      `${q.totalUnitsFromBins.toLocaleString()} units • ` +
+      `${q.totalWeightKg.toFixed(1)} kg total • ` +
+      `Anomalies: ${aCount ? aCount : 'none'}${top3 ? ` (e.g., ${top3})` : ''}`
+    );
+  }
+} catch {}
+
+
+
   // ----- Insights (concise) -----
-  // 1) Top PO × SKU by volume
-  const leadPOSKU = poskuRows[0];
-  const insights = [];
+// 1) Top PO × SKU by volume
+const leadPOSKU = poskuRows[0];
+// 'insights' was initialised above (includes Bin QA, if any)
   if (leadPOSKU) {
     insights.push(`Highest volume: PO ${leadPOSKU.po} × SKU ${leadPOSKU.sku} — ${leadPOSKU.applied.toLocaleString()} applied (${leadPOSKU.pct}% of ${leadPOSKU.planned.toLocaleString()} planned).`);
   }
@@ -1122,7 +1340,7 @@ $('#btn-dl-week-applied').onclick = downloadAppliedWeek;
     uniqueBins,
     topPOSKU: poskuRows,
     topBins,
-    insights
+    insights, binQA: state.binQA 
   });
 
   const blob = new Blob([html], { type: 'application/msword' });
@@ -1394,6 +1612,127 @@ function toISODate(v) {
     });
   })();
 
+
+// ===== Upload Bin Manifest (intake page) =====
+(function wireUploadBins(){
+  const btn  = document.getElementById('btn-upload-bins');
+  const file = document.getElementById('file-bins');
+  if (!btn || !file) return;
+
+  btn.onclick = () => file.click();
+
+  function toNumberOrNull(v) {
+    const n = Number(String(v ?? '').toString().replace(/,/g,'').trim());
+    return Number.isFinite(n) ? n : null;
+  }
+
+  // Flexible header mapping
+  function normalizeRow(r) {
+    const n = {};
+    for (const k in r) n[k.toLowerCase().replace(/\s+/g,'_')] = r[k];
+    const pick = (...keys) => {
+      for (const k of keys) {
+        const v = n[k];
+        if (v != null && String(v).trim() !== '') return String(v).trim();
+      }
+      return '';
+    };
+    // Expected columns (lenient): mobile_bin, bin_id, total_units, units, weight_kg, weight, date
+    const id   = pick('mobile_bin','bin_id','bin','bin_no','bin_number');
+    const unitsRaw = pick('total_units','units','qty','quantity');
+    const weightRaw= pick('weight_kg','weight','kg');
+    const dateRaw  = pick('date','date_local','created_at');
+
+    return {
+      mobile_bin: id,
+      total_units: toNumberOrNull(unitsRaw),
+      weight_kg: toNumberOrNull(weightRaw),
+      date_local: toISODate(dateRaw) || todayInTZ()     // default to business day
+    };
+  }
+
+  // lightweight front-end validation
+  function validateBin(b) {
+    const errs = [];
+    if (!b.mobile_bin) errs.push('Missing mobile_bin');
+    if (b.total_units != null && b.total_units < 0) errs.push('total_units < 0');
+    if (b.weight_kg != null && b.weight_kg < 0) errs.push('weight_kg < 0');
+    // soft plausibility (don’t block upload—backend will enforce)
+    if (b.total_units != null && b.weight_kg != null) {
+      const perUnit = b.weight_kg / Math.max(1, b.total_units);
+      if (perUnit < 0.001 || perUnit > 10) {
+        // mark as suspicious; let backend record and flag
+        b._suspicious = true;
+      }
+    }
+    return errs;
+  }
+
+  file.addEventListener('change', async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f || !apiBase) return;
+
+    try {
+      // Parse CSV/XLSX using SheetJS (already loaded on page)
+      let rows = [];
+      if (/\.xlsx?$/i.test(f.name)) {
+        const buf = await f.arrayBuffer();
+        const wb  = XLSX.read(buf, { type: 'array' });
+        rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+      } else {
+        const buf = await f.arrayBuffer();
+        const wb  = XLSX.read(new Uint8Array(buf), { type: 'array' });
+        rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+      }
+
+      if (!rows.length) { alert('No rows found in manifest.'); return; }
+
+      const ws = state.weekStart;   // current Monday anchor (business TZ)
+      const items = rows.map(normalizeRow)
+        .filter(r => r.mobile_bin); // require at least an ID
+
+      // Client-side validate and split into valid + rejected (still send valid)
+      const rejected = [];
+      for (const it of items) {
+        const errs = validateBin(it);
+        if (errs.length) rejected.push({ it, errs });
+      }
+      const valid = items.filter(it => !rejected.find(x => x.it === it));
+
+      if (!valid.length) {
+        alert('No valid bin rows to upload.');
+        return;
+      }
+
+      // Send to backend (bulk upsert)
+      const resp = await fetch(`${apiBase}/bins/weeks/${ws}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(valid)
+      });
+      if (!resp.ok) {
+        const msg = await resp.text().catch(()=> 'Upload failed');
+        alert(msg);
+        return;
+      }
+
+      const summary = await resp.json().catch(()=> ({}));
+      const ok = summary?.ok ?? true;
+      alert(ok
+        ? `Bin manifest uploaded: ${valid.length} row(s).${rejected.length ? `  Rejected: ${rejected.length}` : ''}`
+        : `Upload finished with warnings. Accepted: ${valid.length}${rejected.length ? `, Rejected: ${rejected.length}` : ''}`
+      );
+
+      // Refresh week so bin QA & insights update
+      await setWeek(state.weekStart);
+    } catch (err) {
+      console.error(err);
+      alert('Upload failed: ' + (err?.message || err));
+    }
+  });
+})();
+
   // ---------- Ops metrics & Ops Pulse ----------
   function todayISO(){ return todayInTZ(); }
 async function loadOpsMetrics() {
@@ -1623,11 +1962,18 @@ await setWeek(state.weekStart); // 🔄 refresh state.records so downloads refle
     const intake = document.getElementById('nav-intake');
     if (!dash || !intake) return;
 
-    dash.classList.remove('active');
-    intake.classList.remove('active');
+dash.classList.remove('active');
+intake.classList.remove('active');
+dash.removeAttribute('aria-current');
+intake.removeAttribute('aria-current');
 
-    if (hash === '#intake') intake.classList.add('active');
-    else dash.classList.add('active');
+if (hash === '#intake') {
+  intake.classList.add('active');
+  intake.setAttribute('aria-current', 'page');
+} else {
+  dash.classList.add('active');
+  dash.setAttribute('aria-current', 'page');
+}
   }
 
   function show(hash){
@@ -1657,17 +2003,6 @@ document.getElementById('btn-delete-uids')?.addEventListener('click', deleteUIDs
   loadOpsMetrics();
   startSSE();
 })();
-
-  // Select All checkbox (header)
-  document.getElementById('chk-all')?.addEventListener('change', (e) => {
-    const on = e.target.checked;
-    intakeRows.forEach(r => r.selected = on);
-    renderIntake();
-    // keep header checkbox visually in sync after re-render
-    document.getElementById('chk-all').checked = on;
-  });
-
-
 
   </script>
 </body>
