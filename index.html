@@ -83,6 +83,24 @@
 /* icon sizing */
 .cmd svg{ width:16px; height:16px; opacity:.85; }
 
+:root{
+  --brand:#990033;            /* primary */
+  --brand-700:#7a0029;
+  --brand-100:#fde7ef;        /* soft bg */
+  --ink:#111827;
+  --muted:#6b7280;
+  --accent:#374151;           /* cool gray accent for balance */
+}
+.card{background:#fff;border:1px solid #eee;border-radius:16px;box-shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.08);padding:16px}
+.ct{font-weight:600;color:var(--muted)}
+.brand-soft{background:var(--brand-100);border-color:#f5c6d6}
+.gc{color:var(--muted);text-align:center;margin-top:.25rem}
+.g,.g-sm{display:flex;align-items:center;justify-content:center;min-height:120px}
+.g-sm{min-height:90px}
+.radar-wrap{min-height:320px;display:flex;align-items:center;justify-content:center}
+.seg.active{background:#fff;color:var(--brand);box-shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.1)}
+.seg{color:var(--brand)}
+
   </style>
 </head>
 <body class="bg-gray-50 min-h-screen">
@@ -102,6 +120,10 @@
      class="seg px-3 py-1.5 rounded-lg text-sm font-medium transition select-none">
     Intake
   </a>
+<a href="#exec" id="nav-exec"
+   class="seg px-3 py-1.5 rounded-lg text-sm font-medium transition select-none">
+  Executive
+</a>
 </nav>
     </div>
   </header>
@@ -238,7 +260,7 @@
 <div class="w-full basis-full min-w-0 grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
   <!-- Top PO's at Risk -->
   <div class="bg-white rounded-2xl border shadow p-4">
-    <div class="text-base font-semibold mb-2">Top PO's at Risk</div>
+    <div class="text-base font-semibold mb-2">Top POs at Risk</div>
     <table class="w-full text-sm">
       <thead>
         <tr class="text-gray-500">
@@ -258,7 +280,7 @@
 
   <!-- Top SKU's at Risk -->
   <div class="bg-white rounded-2xl border shadow p-4">
-    <div class="text-base font-semibold mb-2">Top SKU's at Risk</div>
+    <div class="text-base font-semibold mb-2">Top SKUs at Risk</div>
     <table class="w-full text-sm">
       <thead>
         <tr class="text-gray-500">
@@ -299,6 +321,32 @@
           <button id="btn-delete-selected" class="px-3 py-2 rounded-lg text-sm border border-rose-700 text-rose-700" aria-label="Delete Selected">Delete Selected</button>
         </div>
       </div>
+
+  <!-- KPI rings -->
+  <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+    <div class="card brand-soft"><div id="g-week" class="g"></div><div class="gc">Week Completion</div></div>
+    <div class="card brand-soft"><div id="g-due3" class="g"></div><div class="gc">Due ≤3d</div></div>
+    <div class="card brand-soft"><div id="g-quality" class="g"></div><div class="gc">Data Quality</div></div>
+  </div>
+
+  <!-- Radar + Bin QA -->
+  <div class="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-3">
+    <div class="card">
+      <div class="ct">Risk Profile</div>
+      <div id="radar" class="radar-wrap"></div>
+      <div class="cap text-xs text-gray-500 mt-2">Axes: Plan • ≤3d • Quality • Sync • Bin QA • On-Time</div>
+    </div>
+
+    <div class="card">
+      <div class="ct">Bin QA</div>
+      <div id="binqa-line" class="text-sm mt-1"></div>
+      <div class="mt-3 brand-soft rounded-xl p-3">
+        <div id="g-manifest" class="g-sm"></div>
+        <div class="gc text-xs">Manifest Coverage</div>
+      </div>
+    </div>
+  </div>
+</section>
 
       <!-- Ops ribbon -->
       <div id="ops-ribbon" class="mt-3 bg-white border rounded-xl shadow p-3">
@@ -383,6 +431,23 @@
 </div>
 
     </section>
+
+
+<!-- ================= Executive (Client) ================= -->
+<section id="page-exec" class="hidden">
+  <div class="flex items-center justify-between mb-3">
+    <div>
+      <div class="text-2xl font-semibold">Executive Summary</div>
+      <div id="exec-sub" class="text-xs text-rose-900/70 mt-0.5"></div>
+    </div>
+    <div class="flex items-center gap-2">
+      <button id="btn-exec-doc" class="cmd cmd--primary">Download .doc</button>
+      <button id="btn-exec-csv" class="cmd">PO×SKU CSV</button>
+    </div>
+  </div>
+
+</section>
+
   </main>
 
   <!-- Footer health pill (shows Applied this week) -->
@@ -554,14 +619,16 @@ function computeBinQA(ws, records=[], bins=[]) {
     if (!manifestBins.has(b)) anomalies.push({ type: 'uids_without_manifest', bin: b, uids: byBin.get(b) });
   }
 
-  // 2) count mismatch (UIDs vs manifest units)
-  for (const b of manifestBins) {
-    const m = binMap.get(b);
-    const uids = byBin.get(b) || 0;
-    if (m.units && Math.abs(m.units - uids) > 0) {
-      anomalies.push({ type: 'units_mismatch', bin: b, units_manifest: m.units, uids });
-    }
+// 2) count mismatch (UIDs vs manifest units)
+//    add a small tolerance so we only flag meaningful diffs
+const UNITS_TOLERANCE = 2; // change to 0 if you want strict
+for (const b of manifestBins) {
+  const m = binMap.get(b);
+  const uids = byBin.get(b) || 0;
+  if (m.units != null && Math.abs((m.units || 0) - uids) > UNITS_TOLERANCE) {
+    anomalies.push({ type: 'units_mismatch', bin: b, units_manifest: m.units || 0, uids });
   }
+}
 
   // 3) weight plausibility per unit (very light or very heavy)
   for (const [b, m] of binMap.entries()) {
@@ -870,6 +937,137 @@ async function downloadAppliedWeek() {
   </div>`;
 }
 
+
+// --- helper: compute POSKU rows (same shape you use in the doc export) ---
+function buildPoskuRowsForWeek() {
+  const wsISO = state.weekStart;
+  const weD = new Date(wsISO); weD.setDate(weD.getDate() + 6);
+  const weISO = iso(weD);
+
+  const plannedTotal = (state.plan||[]).reduce((s,p)=> s + toNum(p.target_qty), 0);
+  const recs = (state.records||[]).filter(r => r.status === 'complete');
+  const appliedTotal = recs.length;
+  const pct = plannedTotal>0 ? Math.round(appliedTotal*100/plannedTotal)
+                             : ((state.plan||[]).length ? 0 : 100);
+
+  // planned map
+  const planPOSKU = new Map();
+  for (const p of state.plan||[]) {
+    const po  = String(p.po_number||'').trim();
+    const sku = String(p.sku_code ||'').trim();
+    if (!po || !sku) continue;
+    const k = `${po}||${sku}`;
+    planPOSKU.set(k, (planPOSKU.get(k)||0) + toNum(p.target_qty));
+  }
+
+  // applied map (this week only — state.records already filtered to week)
+  const appliedPOSKU = new Map();
+  for (const r of recs) {
+    const po  = String(r.po_number||'').trim();
+    const sku = String(r.sku_code ||'').trim();
+    if (!po || !sku) continue;
+    const k = `${po}||${sku}`;
+    appliedPOSKU.set(k, (appliedPOSKU.get(k)||0) + 1);
+  }
+
+  const rows = Array.from(appliedPOSKU.entries()).map(([k, applied]) => {
+    const [po, sku] = k.split('||');
+    const planned = planPOSKU.get(k) || 0;
+    const pct = planned>0 ? Math.round(applied*100/planned) : 100;
+    return { po, sku, planned, applied, pct };
+  }).sort((a,b)=> b.applied - a.applied);
+
+  return { wsISO, weISO, rows, plannedTotal, appliedTotal, pct };
+}
+
+// --- Exec view wiring: call once when Exec is shown ---
+function wireExecButtonsOnce() {
+  const btnDoc = document.getElementById('btn-exec-doc');
+  const btnCsv = document.getElementById('btn-exec-csv');
+  if (!btnDoc || !btnCsv) return;
+
+  if (!btnDoc.dataset.wired) {
+    btnDoc.dataset.wired = '1';
+    btnDoc.addEventListener('click', () => {
+      const { wsISO, weISO, rows, plannedTotal, appliedTotal, pct } = buildPoskuRowsForWeek();
+
+      // bins (top & unique) for the doc
+      const recs = (state.records||[]).filter(r => r.status === 'complete');
+      const binUnits = new Map(), binSkuSet = new Map();
+      for (const r of recs) {
+        const bin = String(r.mobile_bin||'').trim();
+        const sku = String(r.sku_code ||'').trim();
+        if (!bin) continue;
+        binUnits.set(bin, (binUnits.get(bin)||0)+1);
+        if (sku) {
+          if (!binSkuSet.has(bin)) binSkuSet.set(bin, new Set());
+          binSkuSet.get(bin).add(sku);
+        }
+      }
+      const uniqueBins = binUnits.size;
+      const topBins = Array.from(binUnits.entries())
+        .map(([bin, units]) => ({ bin, units, uniqueSkus: (binSkuSet.get(bin)||new Set()).size }))
+        .sort((a,b)=> b.units - a.units)
+        .slice(0, 25);
+
+      // build insights (re-use your renderInsights ideas lightly)
+      const insights = [];
+      if (rows[0]) {
+        insights.push(`Highest volume: PO ${rows[0].po} × SKU ${rows[0].sku} — ${rows[0].applied.toLocaleString()} applied (${rows[0].pct}% of ${rows[0].planned.toLocaleString()} planned).`);
+      }
+      if (uniqueBins) {
+        const tops = topBins.slice(0,5).map(b => `${b.bin} (${b.units.toLocaleString()})`).join(', ');
+        insights.push(`Mobile bins used: ${uniqueBins.toLocaleString()} • Top bins by units: ${tops}.`);
+      }
+      const avgPerDay = Math.round(appliedTotal/7);
+      const rem = Math.max(0, plannedTotal - appliedTotal);
+      insights.push(`Pace: ~${avgPerDay.toLocaleString()}/day • Remaining vs plan: ${rem.toLocaleString()}.`);
+
+      const html = buildExecHTML({
+        ws: wsISO, we: weISO,
+        plannedTotal, appliedTotal, pct,
+        uniqueBins,
+        topPOSKU: rows.slice(0, 50),
+        topBins,
+        insights,
+        binQA: state.binQA
+      });
+
+      const blob = new Blob([html], { type: 'application/msword' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `VAS_Executive_Summary_${wsISO}.doc`;
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href), 250);
+    });
+  }
+
+  if (!btnCsv.dataset.wired) {
+    btnCsv.dataset.wired = '1';
+    btnCsv.addEventListener('click', () => {
+      const { wsISO, rows } = buildPoskuRowsForWeek();
+      const header = ['PO','SKU','Planned','Applied','%'];
+      const esc = v => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g,'""')}"` : v;
+      const csv = '\ufeff' + header.join(',') + '\r\n' +
+        rows.map(r => [r.po, r.sku, r.planned, r.applied, r.pct]
+          .map(esc).join(',')).join('\r\n');
+      const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `POxSKU_${wsISO}.csv`;
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href), 250);
+    });
+  }
+}
+
+// Call inside your `show(hash)` when `#exec` is shown:
+//// ...
+// if (hash === '#exec') {
+//   // existing subtitle + gauges code...
+//   wireExecButtonsOnce();
+// }
+
 // ----- PO Progress table -----
 function renderPOProgress(rows){
   const tbody = document.getElementById('po-progress-body');
@@ -921,11 +1119,113 @@ function renderRisk(list, selector){
   });
 }
 
+
+function ensureCanvas(hostId, w=160, h=160){
+  const host = document.getElementById(hostId);
+  if (!host) return null;
+  host.innerHTML = '';
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  host.appendChild(c);
+  return c.getContext('2d');
+}
+
+function drawRingGaugeIn(hostId, value /*0..100*/, label){
+  const ctx = ensureCanvas(hostId, 160, 160);
+  if (!ctx) return;
+  const cx = 80, cy = 80, r = 60, start = -Math.PI/2;
+  const frac = Math.max(0, Math.min(1, (value||0)/100));
+
+  // background
+  ctx.lineWidth = 12;
+  ctx.strokeStyle = '#e5e7eb';
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.stroke();
+
+  // value
+  ctx.strokeStyle = '#990033';
+  ctx.beginPath(); ctx.arc(cx, cy, r, start, start + Math.PI*2*frac); ctx.stroke();
+
+  // text
+  ctx.fillStyle = '#111827';
+  ctx.font = '700 18px system-ui, -apple-system, Segoe UI, Roboto';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${Math.round((value||0))}%`, cx, cy+6);
+  ctx.fillStyle = '#6b7280';
+  ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto';
+  ctx.fillText(label || '', cx, cy+26);
+}
+
+function drawRadarIn(hostId, axes /* [{name, value 0..1}] */){
+  const ctx = ensureCanvas(hostId, 280, 240);
+  if (!ctx) return;
+  const w=280, h=240, cx=w/2, cy=h/2+10, r=80;
+  const pts = (axes||[]).map((a,i,arr)=>{
+    const ang = -Math.PI/2 + i*(2*Math.PI/arr.length);
+    const rr  = r * Math.max(0, Math.min(1, a.value||0));
+    return [cx + rr*Math.cos(ang), cy + rr*Math.sin(ang)];
+  });
+  // web
+  ctx.strokeStyle = '#e5e7eb';
+  ctx.lineWidth = 1;
+  for(let ring=0; ring<=4; ring++){
+    const rr = r*ring/4;
+    ctx.beginPath();
+    for(let i=0;i<(axes||[]).length;i++){
+      const ang = -Math.PI/2 + i*(2*Math.PI/(axes||[]).length);
+      const x = cx + rr*Math.cos(ang), y = cy + rr*Math.sin(ang);
+      i?ctx.lineTo(x,y):ctx.moveTo(x,y);
+    }
+    ctx.closePath(); ctx.stroke();
+  }
+  // polygon
+  if (pts.length){
+    ctx.fillStyle = 'rgba(153,0,51,0.12)';
+    ctx.strokeStyle = '#990033';
+    ctx.beginPath();
+    pts.forEach(([x,y],i)=> i?ctx.lineTo(x,y):ctx.moveTo(x,y));
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
+}
+
+function renderExecutiveWidgets({ pct, due3Pct, qualityPct, qa }) {
+  // Rings
+  drawRingGaugeIn('g-week', pct, 'Week');
+  drawRingGaugeIn('g-due3', due3Pct ?? 0, '≤3d');
+  drawRingGaugeIn('g-quality', qualityPct ?? 0, 'Quality');
+
+  // Radar (axes already normalized 0..1)
+  drawRadarIn('radar', qa || []);
+}
+
 // ---------- Actionable Top Insights (with Duplicates & Bin diversity) ----------
 function renderInsights(records, plan = [], weekStartISO = '') {
   const ul   = document.getElementById('insights');
   const mini = document.getElementById('insights-mini');
   if (!ul) return;
+
+// ---- compute KPIs up front (used later in this function)
+  const plannedTotal = (plan || []).reduce((s,p)=> s + toNum(p.target_qty), 0);
+  const appliedTotal = (records || []).filter(r => r.status === 'complete').length;
+  const pct = plannedTotal > 0 ? Math.round(appliedTotal * 100 / plannedTotal) : (plan.length ? 0 : 100);
+
+// after: plannedTotal/appliedTotal/pct are computed, and state.binQA exists
+const avgPerDay = Math.round((appliedTotal || 0) / 7);
+const remaining  = Math.max(0, plannedTotal - appliedTotal);
+const daysLeft   = 7; // or compute remaining days of week if you prefer
+const needPerDay = remaining ? Math.ceil(remaining / daysLeft) : 0;
+const pacePct    = needPerDay ? Math.max(0, Math.min(100, Math.round((avgPerDay * 100) / needPerDay))) : 100;
+
+// Bin QA → normalize to radar axes 0..1
+const qa = (() => {
+  const q = state.binQA || {};
+  const anomalies = ((q.anomalies || []).length + (q.suspicious || []).length) || 0;
+  return [
+    { name: 'Bins',     value: Math.min(1, (q.binsCount || 0) / 50) },
+    { name: 'Units',    value: Math.min(1, (q.totalUnitsFromBins || 0) / Math.max(1, plannedTotal)) },
+    { name: 'Weight',   value: Math.min(1, (q.totalWeightKg || 0) / 5000) },
+    { name: 'AnomInv',  value: Math.min(1, 1 / Math.max(1, anomalies)) }, // fewer anomalies → closer to 1
+  ];
+})();
 
   // --- dates & helpers ---
   const today = todayISO();
@@ -944,6 +1244,62 @@ function renderInsights(records, plan = [], weekStartISO = '') {
 };
   const weekRecords = (records || []).filter(inWeek);
 
+let due3Pct = 100, qualityPct = 100;   // add this line once, before the IIFE
+
+// --- Due ≤3d and Quality (assign to the lets above; no shadowing) ---
+{
+  const today = todayInTZ();
+  const d3 = new Date(today + 'T00:00:00'); d3.setDate(d3.getDate() + 2);
+  const due3ISO = iso(d3);
+
+  // Build: PO -> planned (only those due in next 3 days)
+  const due3PO = new Map();
+  (plan || []).forEach(p => {
+    const po  = String(p.po_number || '').trim();
+    const due = String(p.due_date  || '').trim();
+    const qty = toNum(p.target_qty);
+    if (!po || !due) return;
+    if (due >= today && due <= due3ISO) {
+      due3PO.set(po, (due3PO.get(po) || 0) + qty);
+    }
+  });
+  const plannedDue3 = Array.from(due3PO.values()).reduce((s, v) => s + v, 0);
+
+  // Applied against those POs (this week's filtered records are already in `weekRecords`)
+  const appliedAgainstDue3 = (weekRecords || []).reduce((s, r) => {
+    if (r.status !== 'complete') return s;
+    const po = String(r.po_number || '').trim();
+    return s + (due3PO.has(po) ? 1 : 0);
+  }, 0);
+
+  // assign to outer lets
+  due3Pct = plannedDue3 > 0
+    ? Math.max(0, Math.min(100, Math.round((appliedAgainstDue3 * 100) / plannedDue3)))
+    : 100; // nothing due → treat as complete
+
+  // --- Data Quality % (duplicates + bin QA penalties)
+  const seenPairs = new Map(); // "sku||uid" -> count
+  for (const r of weekRecords || []) {
+    const sku = String(r.sku_code || '').trim();
+    const uid = String(r.uid || '').trim();
+    if (!sku || !uid) continue;
+    const k = `${sku}||${uid}`;
+    seenPairs.set(k, (seenPairs.get(k) || 0) + 1);
+  }
+  let dupes = 0;
+  for (const c of seenPairs.values()) if (c > 1) dupes += (c - 1); // only extra scans
+  const dupRate    = (weekRecords || []).length ? (dupes / weekRecords.length) : 0; // 0..1
+  const dupPenalty = Math.min(60, Math.round(dupRate * 100));                        // cap 60
+
+  const aCount    = ((state.binQA?.anomalies || []).length + (state.binQA?.suspicious || []).length) || 0;
+  const qaPenalty = Math.min(40, aCount * 2.5); // ~2.5 pts per anomaly, cap 40
+
+  qualityPct = Math.max(0, 100 - dupPenalty - qaPenalty);
+}
+
+renderExecutiveWidgets({ pct, due3Pct, qualityPct, qa });
+
+
   // per-PO & per-SKU counts in week
   const appliedPO  = new Map();
   const appliedSKU = new Map();
@@ -957,14 +1313,12 @@ function renderInsights(records, plan = [], weekStartISO = '') {
   // --- plan aggregates (planned totals & earliest due) ---
   const planPO = new Map();   // po -> { planned, due }
   const planSKU = new Map();  // sku -> { planned, due }
-  let plannedTotal = 0;
 
   for (const p of plan || []) {
     const po  = String(p.po_number||'').trim();
     const sku = String(p.sku_code||'').trim();
     const due = String(p.due_date||'').trim();
     const qty = toNum(p.target_qty);
-    plannedTotal += qty;
 
     if (po) {
       const cur = planPO.get(po) || { planned:0, due: due || '' };
@@ -1976,35 +2330,153 @@ await setWeek(state.weekStart); // 🔄 refresh state.records so downloads refle
   $('#week-start').value = ws;
   setWeek(ws);
 
-  function syncNav() {
-    const hash = (location.hash || '#dashboard');
-    const dash = document.getElementById('nav-dash');
-    const intake = document.getElementById('nav-intake');
-    if (!dash || !intake) return;
+  // keep all pages in sync when week is changed
+  const weekInput = document.getElementById('week-start');
+  weekInput?.addEventListener('change', (e) => {
+    const v = String(e.target.value || '').trim();
+    if (v) setWeek(v);   // recomputes plan, records, bin QA, widgets, etc.
+  });
 
-dash.classList.remove('active');
-intake.classList.remove('active');
-dash.removeAttribute('aria-current');
-intake.removeAttribute('aria-current');
+function syncNav() {
+  const hash = (location.hash || '#dashboard');
 
-if (hash === '#intake') {
-  intake.classList.add('active');
-  intake.setAttribute('aria-current', 'page');
-} else {
-  dash.classList.add('active');
-  dash.setAttribute('aria-current', 'page');
+  const dash   = document.getElementById('nav-dash');
+  const intake = document.getElementById('nav-intake');
+  const exec   = document.getElementById('nav-exec');
+
+  if (!dash || !intake || !exec) return;
+
+  // clear
+  [dash, intake, exec].forEach(el => {
+    el.classList.remove('active');
+    el.removeAttribute('aria-current');
+  });
+
+  // set active
+  if (hash === '#intake') {
+    intake.classList.add('active');
+    intake.setAttribute('aria-current', 'page');
+  } else if (hash === '#exec') {
+    exec.classList.add('active');
+    exec.setAttribute('aria-current', 'page');
+  } else {
+    dash.classList.add('active');
+    dash.setAttribute('aria-current', 'page');
+  }
 }
+
+function show(hash) {
+  // hide all
+  document.getElementById('page-dashboard')?.classList.add('hidden');
+  document.getElementById('page-intake')?.classList.add('hidden');
+  document.getElementById('page-exec')?.classList.add('hidden');
+
+  // show selected
+  if (hash === '#intake') {
+    document.getElementById('page-intake')?.classList.remove('hidden');
+  } else if (hash === '#exec') {
+    document.getElementById('page-exec')?.classList.remove('hidden');
+
+    // ---- lightweight refresh hooks for the Executive view ----
+    // subtitle (week range)
+    const ws = state.weekStart;
+    const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
+    const we = iso(weD);
+    const sub = document.getElementById('exec-sub');
+    if (sub) sub.textContent = `${ws} – ${we}`;
+
+    // draw gauges/radar from current state (already computed in setWeek)
+    try {
+      const plannedTotal = (state.plan || []).reduce((s,p)=> s + toNum(p.target_qty), 0);
+      const appliedTotal = (state.records || []).filter(r => r.status === 'complete').length;
+      const pct = plannedTotal > 0 ? Math.round(appliedTotal * 100 / plannedTotal) : ((state.plan||[]).length ? 0 : 100);
+
+// --- Due ≤3d %
+const today = todayInTZ();                     // business TZ helper already defined
+const d3 = new Date(today + 'T00:00:00');
+d3.setDate(d3.getDate() + 2);
+const due3ISO = iso(d3);
+
+// Build: PO -> planned (only those due in next 3 days)
+const due3PO = new Map();
+(state.plan || []).forEach(p => {
+  const po  = String(p.po_number || '').trim();
+  const due = String(p.due_date  || '').trim();
+  const qty = toNum(p.target_qty);
+  if (!po || !due) return;
+  if (due >= today && due <= due3ISO) {
+    due3PO.set(po, (due3PO.get(po) || 0) + qty);
+  }
+});
+const plannedDue3 = Array.from(due3PO.values()).reduce((s, v) => s + v, 0);
+
+// Applied against those POs (this week’s filtered records are already in state.records)
+const appliedAgainstDue3 = (state.records || []).reduce((s, r) => {
+  if (r.status !== 'complete') return s;
+  const po = String(r.po_number || '').trim();
+  return s + (due3PO.has(po) ? 1 : 0);
+}, 0);
+
+const due3Pct = plannedDue3 > 0
+  ? Math.max(0, Math.min(100, Math.round((appliedAgainstDue3 * 100) / plannedDue3)))
+  : 100; // nothing due → treat as complete
+
+// --- Data Quality %
+const weekRecs = (state.records || []).filter(r => r.status === 'complete');
+
+// duplicate pairs
+const seenPairs = new Map(); // "sku||uid" -> count
+for (const r of weekRecs) {
+  const sku = String(r.sku_code || '').trim();
+  const uid = String(r.uid || '').trim();
+  if (!sku || !uid) continue;
+  const k = `${sku}||${uid}`;
+  seenPairs.set(k, (seenPairs.get(k) || 0) + 1);
+}
+let dupes = 0;
+for (const c of seenPairs.values()) if (c > 1) dupes += (c - 1); // only extra scans
+const dupRate    = weekRecs.length ? (dupes / weekRecs.length) : 0; // 0..1
+const dupPenalty = Math.min(60, Math.round(dupRate * 100));         // cap 60
+
+// bin QA anomalies
+const aCount    = ((state.binQA?.anomalies || []).length + (state.binQA?.suspicious || []).length) || 0;
+// ~2.5 pts per anomaly, cap 40
+const qaPenalty = Math.min(40, aCount * 2.5);
+
+// combine → 0..100
+const qualityPct = Math.max(0, 100 - dupPenalty - qaPenalty);
+
+      // pace vs need (coarse): need/day through week
+      const avgPerDay = Math.round((appliedTotal || 0) / 7);
+      const rem = Math.max(0, plannedTotal - appliedTotal);
+      const needPerDay = rem ? Math.ceil(rem / 7) : 0;
+      const pacePct = needPerDay ? Math.max(0, Math.min(100, Math.round((avgPerDay * 100) / needPerDay))) : 100;
+
+      // QA axes (normalize from state.binQA)
+      const q = state.binQA || {};
+      const anomalies = ((q.anomalies || []).length + (q.suspicious || []).length) || 0;
+      const qa = [
+        { name: 'Bins',    value: Math.min(1, (q.binsCount || 0) / 50) },
+        { name: 'Units',   value: Math.min(1, (q.totalUnitsFromBins || 0) / Math.max(1, plannedTotal)) },
+        { name: 'Weight',  value: Math.min(1, (q.totalWeightKg || 0) / 5000) },
+        { name: 'Anom',    value: Math.min(1, 1 / Math.max(1, anomalies)) }
+      ];
+
+      renderExecutiveWidgets?.({ pct, due3Pct, qualityPct, qa });
+    } catch {}
+  // ⬇️ add this line
+  wireExecButtonsOnce();
+
+    // ----------------------------------------------------------
+  } else {
+    document.getElementById('page-dashboard')?.classList.remove('hidden');
   }
 
-  function show(hash){
-    $('#page-dashboard').classList.add('hidden');
-    $('#page-intake').classList.add('hidden');
-    (hash === '#intake' ? $('#page-intake') : $('#page-dashboard')).classList.remove('hidden');
-    syncNav();
-  }
+  syncNav();
+}
 
-  window.addEventListener('hashchange', () => show(location.hash || '#dashboard'));
-  show(location.hash || '#dashboard'); // initial render
+  window.addEventListener('hashchange', () => show(location.hash || '#exec'));
+  show(location.hash || '#exec'); // initial render
 
   // Intake scaffold + checkbox handler
   renderIntake();
@@ -2022,6 +2494,7 @@ document.getElementById('btn-delete-uids')?.addEventListener('click', deleteUIDs
   $('#ops-heart-small').appendChild(createHeart(18, BRAND, 40));
   loadOpsMetrics();
   startSSE();
+
 })();
 
   </script>
