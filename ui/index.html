@@ -499,8 +499,6 @@
       const d = String(x.getDate()).padStart(2, '0');
       return `${y}-${m}-${d}`;
     })();
-  ? mondayOfInTZ(todayInTZ())
-  : iso(mondayOf(new Date())); // fallback: compute Monday in viewer’s local TZ
     $('#week-start').value = ws;
     setWeek(ws);
 
