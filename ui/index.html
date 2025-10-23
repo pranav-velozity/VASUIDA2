@@ -500,7 +500,14 @@
       return `${y}-${m}-${d}`;
     })();
     $('#week-start').value = ws;
-    setWeek(ws);
+    // wait until setWeek is defined (handles script-order issues)
+(function startWhenReady(){
+  if (typeof window.setWeek === 'function') {
+    window.setWeek(ws);
+  } else {
+    setTimeout(startWhenReady, 30);
+  }
+})();
 
     const weekInput = document.getElementById('week-start');
     weekInput?.addEventListener('change', (e) => {
