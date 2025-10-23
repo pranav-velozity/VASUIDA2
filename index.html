@@ -486,7 +486,9 @@
 
   /* === The ONLY behavioral tweak: initial routing default === */
   (function init(){
-    const ws = mondayOfInTZ(todayInTZ());
+    const ws = (typeof mondayOfInTZ === 'function')
+  ? mondayOfInTZ(todayInTZ())
+  : iso(mondayOf(new Date())); // fallback: compute Monday in viewer’s local TZ
     $('#week-start').value = ws;
     setWeek(ws);
 
