@@ -488,6 +488,18 @@
   (function init(){
     const ws = (typeof mondayOfInTZ === 'function')
   ? mondayOfInTZ(todayInTZ())
+  : (() => {
+      const x = new Date();
+      const dow = x.getDay();                    // 0..6 (Sun..Sat)
+      const diff = (dow === 0 ? -6 : 1) - dow;   // move to Monday
+      x.setDate(x.getDate() + diff);
+      x.setHours(0, 0, 0, 0);
+      const y = x.getFullYear();
+      const m = String(x.getMonth() + 1).padStart(2, '0');
+      const d = String(x.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    })();
+  ? mondayOfInTZ(todayInTZ())
   : iso(mondayOf(new Date())); // fallback: compute Monday in viewer’s local TZ
     $('#week-start').value = ws;
     setWeek(ws);
