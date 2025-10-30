@@ -2059,7 +2059,28 @@ document.getElementById('btn-delete-uids')?.addEventListener('click', deleteUIDs
 
   </script>
 
-<script src="/exec_live_additive.js?v=5" defer></script>
+<script>
+(function () {
+  // Try in order; stops on the first that loads.
+  var candidates = [
+    "/exec_live_additive.js?v=6",
+    "/ui/exec_live_additive.js?v=6",
+    "/js/exec_live_additive.js?v=6",
+    "/ui/js/exec_live_additive.js?v=6"
+  ];
+  function tryNext() {
+    if (!candidates.length) return console.error("exec_live_additive.js not found at any path.");
+    var src = candidates.shift();
+    var s = document.createElement("script");
+    s.defer = true;
+    s.src = src;
+    s.onload = function(){ console.log("Loaded:", src); };
+    s.onerror = tryNext;
+    document.body.appendChild(s);
+  }
+  tryNext();
+})();
+</script>
 
 </body>
 </html>
