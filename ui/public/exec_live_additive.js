@@ -182,6 +182,181 @@
     </svg>`;
   }
 
+// ===== SVG Helpers (no libs) =====
+const GREY  = '#e5e7eb';
+const GREY_STROKE = '#d1d5db';
+
+function _el(tag, attrs={}, children=[]) {
+  const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  children.forEach(c => e.appendChild(c));
+  return e;
+}
+
+// ---- Donut ----
+function renderDonutWithBaseline(slot, planned, applied) {
+  slot.innerHTML = '';
+  const size = 220, r = 90, cx = size/2, cy = size/2;
+  const CIRC = 2*Math.PI*r;
+
+  const svg = _el('svg', { viewBox: `0 0 ${size} ${size}`, width: size, height: size, style: 'display:block' });
+
+  // Baseline ring (light grey)
+  svg.appendChild(_el('circle', {
+    cx, cy, r,
+    fill: 'none',
+    stroke: GREY,
+    'stroke-width': 18
+  }));
+
+  // Applied ring (brand)
+  const appliedArc = _el('circle', {
+    cx, cy, r,
+    fill: 'none',
+    stroke: BRAND,
+    'stroke-width': 18,
+    'stroke-linecap': 'round',
+    'transform': `rotate(-90 ${cx} ${cy})`,
+    'stroke-dasharray': CIRC,
+    'stroke-dashoffset': CIRC
+  });
+  svg.appendChild(appliedArc);
+
+  slot.appendChild(svg);
+
+  // Label center
+  const pctText = document.createElement('div');
+  pctText.className = 'absolute inset-0 flex items-center justify-center text-sm text-gray-600';
+  pctText.style.pointerEvents = 'none';
+  pctText.textContent = '—';
+  slot.style.position = 'relative';
+  slot.appendChild(pctText);
+
+  // Animate in
+  const animateTo = (pct) => {
+    const dash = CIRC * (1 - Math.max(0, Math.min(1, pct)));
+    appliedArc.style.transition = 'stroke-dashoffset 600ms ease';
+    appliedArc.setAttribute('stroke-dashoffset', dash);
+    pctText.textContent = Math.round(pct * 100) + '%';
+  };
+
+  if (Number.isFinite(planned) && planned > 0 && Number.isFinite(applied)) {
+    const pct = Math.max(0, Math.min(1, applied / planned));
+    // small delay so the sweep is visible
+    requestAnimationFrame(() => animateTo(pct));
+  } else {
+    // Idle sweep (no data yet)
+    pctText.textContent = '';
+    appliedArc.style.animation = 'donutIdle 2.2s linear infinite';
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes donutIdle {
+        0%   { stroke-dashoffset: ${CIRC}; }
+        50%  { stroke-dashoffset: ${CIRC*0.25}; }
+        100% { stroke-dashoffset: ${CIRC}; }
+      }
+    `;
+    slot.appendChild(style);
+  }
+}
+
+// ---- Radar (N axes) ----
+function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
+  slot.innerHTML = '';
+
+  const N = labels.length;
+  const size = 320, pad = 24, cx = size/2, cy = size/2, R = (size/2) - pad;
+  const svg = _el('svg', { viewBox: `0 0 ${size} ${size}`, width: size, height: size, style: 'display:block' });
+
+  // Polar helpers
+  const pt = (i, v) => {
+    const ang = (-Math.PI/2) + (i * 2*Math.PI / N);
+    const r = (v/100) * R;
+    return [cx + r * Math.cos(ang), cy + r * Math.sin(ang)];
+  };
+  const poly = (vals) => vals.map((v,i)=>pt(i,v)).map(([x,y])=>`${x},${y}`).join(' ');
+
+  // Radar grid circles
+  [20,40,60,80,100].forEach(t => {
+    svg.appendChild(_el('circle', {
+      cx, cy, r: (t/100)*R, fill: 'none', stroke: GREY_STROKE, 'stroke-width': 1
+    }));
+  });
+
+  // Axes
+  for (let i=0;i<N;i++){
+    const [x,y] = pt(i, 100);
+    svg.appendChild(_el('line', { x1: cx, y1: cy, x2: x, y2: y, stroke: GREY_STROKE, 'stroke-width': 1 }));
+  }
+
+  // Labels
+  labels.forEach((lab,i)=>{
+    const [x,y] = pt(i, 112);
+    const t = _el('text', { x, y, 'text-anchor':'middle', 'dominant-baseline':'middle', 'font-size':'11', fill:'#6b7280' });
+    t.textContent = lab;
+    svg.appendChild(t);
+  });
+
+  // Baseline ghost polygon (light grey)
+  const base = _el('polygon', {
+    points: poly(baselineValues),
+    fill: GREY,
+    'fill-opacity': 0.35,
+    stroke: GREY_STROKE,
+    'stroke-width': 1
+  });
+  svg.appendChild(base);
+
+  // Actual polygon (brand)
+  const actual = _el('polygon', {
+    points: poly((actualValues && actualValues.length===N) ? actualValues.map(()=>0) : baselineValues.map(()=>0)),
+    fill: BRAND,
+    'fill-opacity': 0.15,
+    stroke: BRAND,
+    'stroke-width': 2
+  });
+  svg.appendChild(actual);
+
+  slot.appendChild(svg);
+
+  if (actualValues && actualValues.length === N) {
+    // animate morph (simple frame tween)
+    const steps = 22;
+    let k = 0;
+    const from = baselineValues.map(()=>0);
+    const to   = actualValues.slice();
+    const tick = () => {
+      k++;
+      const cur = from.map((_,i)=> from[i] + (to[i]-from[i])*(k/steps));
+      actual.setAttribute('points', poly(cur));
+      if (k < steps) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  } else {
+    // Idle live feel: subtle rotating glare
+    const glare = _el('circle', {
+      cx, cy, r: R*0.55, fill: 'url(#radar-glare)'
+    });
+    const defs = _el('defs');
+    const grad = _el('radialGradient', { id: 'radar-glare' }, [
+      _el('stop', { offset: '0%', 'stop-color': '#ffffff', 'stop-opacity': 0.15 }),
+      _el('stop', { offset: '100%', 'stop-color': '#ffffff', 'stop-opacity': 0 })
+    ]);
+    defs.appendChild(grad);
+    svg.insertBefore(defs, svg.firstChild);
+    svg.appendChild(glare);
+
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes radarSpin { to { transform: rotate(360deg); } }
+      svg { transform-origin: ${cx}px ${cy}px; }
+      svg { animation: radarSpin 12s linear infinite; }
+    `;
+    slot.appendChild(style);
+  }
+}
+
+
   // ---------- Cards render ----------
   function renderExec(){
     const host = $('#page-exec'); if (!host) return;
@@ -229,7 +404,15 @@
           </div>
         </div>`;
       host.appendChild(wrap);
- host.appendChild(wrap); // already in your code
+// --- ADD: paint ghost charts immediately ---
+renderDonutWithBaseline(document.getElementById('donut-slot'), null, null);
+renderRadarWithBaseline(
+  document.getElementById('radar-slot'),
+  ['Late appliers','Under pace','Heavy bins','Duplicates','Manifest gaps'],
+  [55,50,45,60,50],   // ghost baseline shape
+  null                // no actual yet -> idle animation
+);
+
 
   // --- INLINE SKELETONS (shows immediately) ---
   // 1) Ensure skeleton CSS exists once
@@ -357,6 +540,10 @@
     let dips=0, spikes=0; const lo=mean - 1.5*std, hi=mean + 1.5*std;
     for (const v of counts){ if (v < lo) dips++; else if (v > hi) spikes++; }
     $('#anom-badges').textContent = `Dips: ${dips} · Spikes: ${spikes}`;
+
+// Repaint charts using grey baseline + brand overlay (uses m, axes, values already computed)
+renderDonutWithBaseline(document.getElementById('donut-slot'), m.plannedTotal, m.appliedTotal);
+renderRadarWithBaseline(document.getElementById('radar-slot'), axes, [55,50,45,60,50], values);
   }
 
   // Render when Exec page is shown
@@ -378,12 +565,6 @@
   }
 })();
 
-
-// --- Exec live: skeleton-first, animate-on-data -----------------------------
-(function () {
-  const RADAR_ID = '#exec-radar';
-  const DONUT_ID = '#exec-pva';
-  const BRAND = '#990033';
 
   // 1) Mount skeletons once
   function mountSkeletons() {
