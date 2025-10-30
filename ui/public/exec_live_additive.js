@@ -229,6 +229,7 @@
           </div>
         </div>`;
       host.appendChild(wrap);
+ window.execBootSkeletons && window.execBootSkeletons();
     }
 
     const m = computeExecMetrics(); if (!m) return;
