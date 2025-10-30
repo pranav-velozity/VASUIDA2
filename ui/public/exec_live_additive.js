@@ -338,3 +338,150 @@
     };
   }
 })();
+
+
+// --- Exec live: skeleton-first, animate-on-data -----------------------------
+(function () {
+  const RADAR_ID = '#exec-radar';
+  const DONUT_ID = '#exec-pva';
+  const BRAND = '#990033';
+
+  // 1) Mount skeletons once
+  function mountSkeletons() {
+    const r = document.querySelector(RADAR_ID);
+    if (r && !r.querySelector('svg')) {
+      r.innerHTML = `
+        <svg viewBox="0 0 200 200" width="100%" height="140">
+          <g transform="translate(100,100)" fill="none" stroke="#e5e7eb">
+            ${[20,40,60,80].map(rad => `<circle r="${rad}" />`).join('')}
+          </g>
+          <g transform="translate(100,100)" stroke="#cbd5e1" stroke-width="2">
+            ${Array.from({length:6}).map((_,i)=>{
+              const a = (Math.PI*2/6)*i - Math.PI/2;
+              const x = 90*Math.cos(a), y=90*Math.sin(a);
+              return `<line x1="0" y1="0" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}"/>`;
+            }).join('')}
+          </g>
+          <g transform="translate(100,100)">
+            <polygon id="radar-poly" points="" fill="${BRAND}11" stroke="${BRAND}" stroke-width="2"/>
+          </g>
+        </svg>`;
+    }
+    const d = document.querySelector(DONUT_ID);
+    if (d && !d.querySelector('svg')) {
+      d.innerHTML = `
+        <svg viewBox="0 0 160 160" width="100%" height="140">
+          <g transform="translate(80,80)" fill="none" stroke-linecap="round">
+            <circle r="54" stroke="#e5e7eb" stroke-width="12"/>
+            <circle id="ring-planned" r="54" stroke="#d1d5db" stroke-width="12"
+              stroke-dasharray="0 339" transform="rotate(-90)"/>
+            <circle r="36" stroke="#f3f4f6" stroke-width="12"/>
+            <circle id="ring-applied" r="36" stroke="${BRAND}" stroke-width="12"
+              stroke-dasharray="0 226" transform="rotate(-90)"/>
+            <text id="donut-label" x="0" y="6" text-anchor="middle" font-size="14" fill="#374151">—</text>
+          </g>
+        </svg>`;
+    }
+  }
+
+  // 2) Helpers
+  const lerp = (a,b,t)=>a+(b-a)*t;
+  function animate(from, to, ms, step, done) {
+    const t0 = performance.now();
+    function tick(now){
+      const p = Math.min(1,(now-t0)/ms);
+      step(lerp(from,to,p));
+      if (p<1) requestAnimationFrame(tick); else done && done();
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // 3) Draw/animate
+  function drawRadar(values /* 6 numbers 0..100 */){
+    const poly = document.getElementById('radar-poly');
+    if (!poly) return;
+    const target = values.map((v,i)=>{
+      const a = (Math.PI*2/6)*i - Math.PI/2;
+      const r = 90*(Math.max(0,Math.min(100,v))/100);
+      return [r*Math.cos(a), r*Math.sin(a)];
+    });
+    // animate from current to target
+    const cur = (poly.getAttribute('points')||'')
+      .trim()
+      .split(/\s+/)
+      .map(p=>p.split(',').map(Number))
+      .filter(p=>p.length===2);
+    const from = cur.length===6 ? cur : target.map(()=>[0,0]);
+    const dur = 650;
+    animate(0,1,dur,(t)=>{
+      const pts = target.map((p,i)=>[
+        lerp(from[i][0], p[0], t).toFixed(1),
+        lerp(from[i][1], p[1], t).toFixed(1)
+      ].join(',')).join(' ');
+      poly.setAttribute('points', pts);
+    });
+  }
+
+  function drawDonut(planned, applied){
+    const ringP = document.getElementById('ring-planned');
+    const ringA = document.getElementById('ring-applied');
+    const label = document.getElementById('donut-label');
+    if (!ringP || !ringA) return;
+
+    const C_P = 2*Math.PI*54; // ≈ 339
+    const C_A = 2*Math.PI*36; // ≈ 226
+
+    const pct = planned>0 ? Math.round((applied/planned)*100) : 0;
+    label && (label.textContent = `${applied.toLocaleString()} / ${planned.toLocaleString()} (${pct}%)`);
+
+    const curP = +(ringP.getAttribute('data-val')||0);
+    const curA = +(ringA.getAttribute('data-val')||0);
+    const tgtP = 100;                  // planned ring fills to 100%
+    const tgtA = Math.max(0,Math.min(100,pct));
+
+    animate(curP,tgtP,700,(v)=>{
+      ringP.setAttribute('stroke-dasharray', `${(v/100*C_P).toFixed(1)} ${C_P.toFixed(1)}`);
+      ringP.setAttribute('data-val', v.toFixed(1));
+    });
+    animate(curA,tgtA,900,(v)=>{
+      ringA.setAttribute('stroke-dasharray', `${(v/100*C_A).toFixed(1)} ${C_A.toFixed(1)}`);
+      ringA.setAttribute('data-val', v.toFixed(1));
+    });
+  }
+
+  // 4) Simple watcher: mount skeletons immediately; when data arrives, animate once
+  let booted = false, painted = false;
+  function tick() {
+    if (location.hash !== '#exec') { setTimeout(tick, 600); return; }
+    if (!booted) { mountSkeletons(); booted = true; }
+    try {
+      // Need plan + records; bins only for radar’s heavy-bins component (we’ll derive inputs)
+      const hasPlan = Array.isArray(window.state?.plan) && window.state.plan.length>=0;
+      const hasRecs = Array.isArray(window.state?.records);
+      if (hasPlan && hasRecs && !painted) {
+        // Compute inputs
+        const planned = window.state.plan.reduce((s,p)=> s + (Number(p.target_qty)||0), 0);
+        const applied = window.state.records.filter(r=>r.status==='complete').length;
+
+        // Radar inputs (0..100) — reuse what you already compute; place quick guards here
+        // You can replace these with your actual normalized metrics:
+        const dup = Math.min(100, (document.getElementById('ops-dupes') ? Number(document.getElementById('ops-dupes').textContent)||0 : 0)*5);
+        const skuGap = 100 - Math.min(100, Math.round((applied/(planned||1))*100)); // invert completion as "gap"
+        const poGap  = skuGap; // placeholder; wire your PO-level metric if desired
+        const heavy  = Math.min(100, (window.state?.binQA?.anomalies||[]).filter(a=>a.type==='units_mismatch').length*10);
+        const late   = 0; // optional metric if you implement it
+        const badSync= Math.min(100, (window.state?.records||[]).filter(r=>r.sync_state && r.sync_state!=='synced').length);
+
+        drawRadar([dup, skuGap, poGap, heavy, late, badSync]);
+        drawDonut(planned, applied);
+        painted = true;
+      }
+    } catch {}
+    setTimeout(tick, painted ? 1500 : 600);
+  }
+
+  // start
+  mountSkeletons();
+  tick();
+})();
+
