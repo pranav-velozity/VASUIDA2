@@ -229,7 +229,45 @@
           </div>
         </div>`;
       host.appendChild(wrap);
- window.execBootSkeletons && window.execBootSkeletons();
+ host.appendChild(wrap); // already in your code
+
+  // --- INLINE SKELETONS (shows immediately) ---
+  // 1) Ensure skeleton CSS exists once
+  if (!document.getElementById('vo-skel-css')) {
+    const style = document.createElement('style');
+    style.id = 'vo-skel-css';
+    style.textContent = `
+      @keyframes voShimmer {
+        0% { background-position:-200% 0; }
+        100% { background-position:200% 0; }
+      }
+      .vo-skel {
+        background: linear-gradient(90deg, #f3f4f6 0%, #e5e7eb 50%, #f3f4f6 100%);
+        background-size: 200% 100%;
+        animation: voShimmer 1.2s ease-in-out infinite;
+        border-radius: 12px;
+      }
+      .vo-skel-radar  { width: 260px; height: 180px; }
+      .vo-skel-donut  { width: 180px; height: 180px; border-radius: 9999px; }
+    `;
+    document.head.appendChild(style);
+  }
+
+  // 2) Drop skeleton blocks into the two chart slots (only once)
+  const radarSlot = document.getElementById('radar-slot');
+  if (radarSlot && !radarSlot.dataset.skel) {
+    radarSlot.dataset.skel = '1';
+    radarSlot.innerHTML = `<div class="vo-skel vo-skel-radar"></div>`;
+  }
+
+  const donutSlot = document.getElementById('donut-slot');
+  if (donutSlot && !donutSlot.dataset.skel) {
+    donutSlot.dataset.skel = '1';
+    donutSlot.innerHTML = `<div class="vo-skel vo-skel-donut"></div>`;
+  }
+
+  // (Optional) if your external helper exists, run it too
+  if (window.execBootSkeletons) window.execBootSkeletons();
     }
 
     const m = computeExecMetrics(); if (!m) return;
