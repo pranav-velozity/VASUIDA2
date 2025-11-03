@@ -2059,6 +2059,30 @@ document.getElementById('btn-delete-uids')?.addEventListener('click', deleteUIDs
 
   </script>
 
+
+<script>
+(function () {
+  function isReady(s) {
+    return s && (
+      (Array.isArray(s.plan)    && s.plan.length) ||
+      (Array.isArray(s.records) && s.records.length) ||
+      (Array.isArray(s.bins)    && s.bins.length)
+    );
+  }
+  function fire() { window.dispatchEvent(new Event('state:ready')); }
+  var fired = false;
+
+  if (isReady(window.state)) { fired = true; fire(); }
+  var t = setInterval(function () {
+    if (isReady(window.state)) {
+      if (!fired) { fired = true; fire(); }
+      clearInterval(t);
+    }
+  }, 300);
+})();
+</script>
+
+
 <script src="/exec_live_additive.js?v=8" defer></script>
 
 </body>
