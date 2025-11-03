@@ -586,31 +586,61 @@ renderRadarWithBaseline(document.getElementById('radar-slot'), axes, [55,50,45,6
     };
   }
 
+// --- lightweight data loader for Executive (no backend code changes) ---
+async function _execLoadWeek(ws) {
+  const s = window.state || (window.state = {});
+  s.weekStart = ws;
+
+  // Pick your existing endpoints; these names mirror the Ops page.
+  // If your server uses different paths, update the URLs only.
+  const qs = '?weekStart=' + encodeURIComponent(ws);
+  const [plan, records, bins] = await Promise.all([
+    fetch('/api/plan'    + qs).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    fetch('/api/records' + qs).then(r=>r.ok?r.json():[]).catch(()=>[]),
+    fetch('/api/bins'    + qs).then(r=>r.ok?r.json():[]).catch(()=>[]),
+  ]);
+
+  s.plan    = Array.isArray(plan)    ? plan    : [];
+  s.records = Array.isArray(records) ? records : [];
+  s.bins    = Array.isArray(bins)    ? bins    : [];
+}
+
+
 // --- Data-ready watcher: render once the app actually has data ---
   let _execBootTimer = null;
 
-  function _execTryRender() {
-    if (location.hash !== '#exec') return;
-    const s = window.state || {};
-    const hasWeek = !!s.weekStart;
-    const hasPlan = Array.isArray(s.plan) && s.plan.length > 0;
-    const hasRecs = Array.isArray(s.records) && s.records.length > 0;
+function _execTryRender() {
+  if (location.hash !== '#exec') return;
 
-    if (!hasWeek && typeof window.todayInTZ === 'function' &&
-        typeof window.mondayOfInTZ === 'function' &&
-        typeof window.setWeek === 'function') {
-      try {
-        const today  = window.todayInTZ(BUSINESS_TZ);
-        const monday = window.mondayOfInTZ(today);
-        window.setWeek(monday);
-      } catch {}
-    }
+  const s = window.state || {};
+  const hasWeek = !!s.weekStart;
+  const hasPlan = Array.isArray(s.plan) && s.plan.length > 0;
+  const hasRecs = Array.isArray(s.records) && s.records.length > 0;
 
-    if ((hasWeek && (hasPlan || hasRecs))) {
-      try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
-      if (_execBootTimer) { clearInterval(_execBootTimer); _execBootTimer = null; }
-    }
+  // Decide a week if missing
+  let ws = s.weekStart;
+  if (!hasWeek && typeof window.todayInTZ === 'function' &&
+      typeof window.mondayOfInTZ === 'function') {
+    try {
+      const today  = window.todayInTZ(BUSINESS_TZ);
+      ws = window.mondayOfInTZ(today);
+    } catch {}
   }
+
+  // 🔹 NEW: if we still don't have data, fetch it now
+  if (ws && (!hasPlan || !hasRecs)) {
+    _execLoadWeek(ws).then(() => {
+      // data filled -> try render again
+      try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
+    });
+    return; // wait for the load to complete
+  }
+
+  // If we already have enough data, render immediately
+  if (hasWeek && (hasPlan || hasRecs)) {
+    try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
+  }
+}
 
   _execBootTimer = setInterval(_execTryRender, 600);
   document.addEventListener('visibilitychange', _execTryRender);
