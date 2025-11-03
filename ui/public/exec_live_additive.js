@@ -565,7 +565,7 @@ if (!window.__execDebugOnce) {
 
 // Repaint charts using grey baseline + brand overlay (uses m, axes, values already computed)
 renderDonutWithBaseline(document.getElementById('donut-slot'), m.plannedTotal, m.appliedTotal);
-renderRadarWithBaseline(document.getElementById('radar-slot'), axes, [55,50,45,60,50], values);
+renderRadarWithBaseline(document.getElementById('radar-slot'), axes, [55,50,45,60,50,40], values);
   }
 
   // Render when Exec page is shown
