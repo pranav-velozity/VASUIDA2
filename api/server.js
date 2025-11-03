@@ -302,14 +302,25 @@ app.post('/records/import', (req, res) => {
 
 // --- Fetch records ---
 app.get('/records', (req, res) => {
-  const { from, to, status, limit } = req.query;
+  // Accept either from/to OR weekStart/weekEnd (we translate weekStart/weekEnd to from/to)
+  const weekStart = req.query.weekStart ? String(req.query.weekStart) : '';
+  const weekEnd   = req.query.weekEnd   ? String(req.query.weekEnd)   : '';
+  const fromQ     = req.query.from      ? String(req.query.from)      : '';
+  const toQ       = req.query.to        ? String(req.query.to)        : '';
+
+  const from = fromQ || weekStart || '';
+  const to   = toQ   || weekEnd   || '';
+  const status = req.query.status ? String(req.query.status) : '';
+  const limit  = req.query.limit  ? Number(req.query.limit)  : undefined;
+
   const params = [];
   let sql = 'SELECT * FROM records WHERE 1=1';
-  if (from)   { sql += ' AND date_local >= ?'; params.push(String(from)); }
-  if (to)     { sql += ' AND date_local <= ?'; params.push(String(to)); }
-  if (status) { sql += ' AND status = ?';      params.push(String(status)); }
+  if (from)   { sql += ' AND date_local >= ?'; params.push(from); }
+  if (to)     { sql += ' AND date_local <= ?'; params.push(to); }
+  if (status) { sql += ' AND status = ?';      params.push(status); }
   sql += ' ORDER BY completed_at DESC';
-  if (limit)  { sql += ' LIMIT ?';             params.push(Number(limit)); }
+  if (limit)  { sql += ' LIMIT ?';             params.push(limit); }
+
   const rows = db.prepare(sql).all(...params);
   res.json({ records: rows });
 });
