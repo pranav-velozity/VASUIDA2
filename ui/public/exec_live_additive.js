@@ -372,23 +372,35 @@ function renderDonutWithBaseline(slot, planned, applied) {
 
   // Totals line: "Planned 844 · Applied 247"
   const totalsText = document.createElement('div');
-  totalsText.className = 'absolute inset-x-0 bottom-2 text-xs text-gray-600 text-center';
+  totalsText.className = 'absolute inset-x-0 bottom-0 text-base font-semibold text-gray-700 text-center';
   totalsText.style.pointerEvents = 'none';
   totalsText.textContent = `Planned ${fmt(planned || 0)} · Applied ${fmt(applied || 0)}`;
   slot.appendChild(totalsText);
 
+
 }
+
+
 // ---- Radar (N axes) ----
 function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
   slot.innerHTML = '';
 
   const N = labels.length;
-  const size = 320, pad = 24, cx = size/2, cy = size/2, R = (size/2) - pad;
-  const svg = _el('svg', { viewBox: `0 0 ${size} ${size}`, width: size, height: size, style: 'display:block' });
+  // give ourselves a larger canvas so long labels aren't clipped
+  const size = 420;        // was 320
+  const pad  = 36;         // was 24
+  const cx = size / 2, cy = size / 2;
+  const R  = (size / 2) - pad;
+
+  const svg = _el('svg', {
+    viewBox: `0 0 ${size} ${size}`,
+    width: size, height: size,
+    style: 'display:block'
+  });
 
   const pt = (i, v) => {
     const ang = (-Math.PI/2) + (i * 2*Math.PI / N);
-    const r = (Math.max(0, Math.min(100, v))/100) * R;
+    const r = (Math.max(0, Math.min(100, v)) / 100) * R;
     return [cx + r * Math.cos(ang), cy + r * Math.sin(ang)];
   };
   const poly = (vals) => vals.map((v,i)=>pt(i,v)).map(([x,y])=>`${x},${y}`).join(' ');
@@ -402,21 +414,24 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
     svg.appendChild(_el('line', { x1:cx, y1:cy, x2:x, y2:y, stroke: GREY_STROKE, 'stroke-width':1 }));
   }
 
+  // labels – push them outside the web and make them readable
+  const labelRadius = R + 32;    // farther out than before
   labels.forEach((lab,i)=>{
-    const [x,y] = pt(i, 114);  // tiny nudge outward
+    const ang = (-Math.PI/2) + (i * 2*Math.PI / N);
+    const x = cx + labelRadius * Math.cos(ang);
+    const y = cy + labelRadius * Math.sin(ang);
+
     const t = _el('text', {
       x, y,
       'text-anchor':'middle',
       'dominant-baseline':'middle',
-      'font-size':'14',         // was 11
-      'font-weight':'600',      // bolder for legibility
-      fill:'#374151'            // darker gray
+      'font-size':'14',          // was 11
+      'font-weight':'600',
+      fill:'#374151'
     });
     t.textContent = lab;
     svg.appendChild(t);
   });
-
-
 
   // baseline
   svg.appendChild(_el('polygon', {
