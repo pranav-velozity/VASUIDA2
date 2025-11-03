@@ -233,7 +233,7 @@ function _el(tag, attrs={}, children=[]) {
   return e;
 }
 
-// ---- Donut ----
+// ---- Donut (no flicker, single animateTo) ----
 function renderDonutWithBaseline(slot, planned, applied) {
   slot.innerHTML = '';
   const size = 220, r = 90, cx = size/2, cy = size/2;
@@ -261,18 +261,16 @@ function renderDonutWithBaseline(slot, planned, applied) {
     'stroke-dashoffset': CIRC
   });
   svg.appendChild(appliedArc);
-
   slot.appendChild(svg);
 
-  // Label center
+  // Center label
   const pctText = document.createElement('div');
   pctText.className = 'absolute inset-0 flex items-center justify-center text-sm text-gray-600';
   pctText.style.pointerEvents = 'none';
-  pctText.textContent = '—';
   slot.style.position = 'relative';
   slot.appendChild(pctText);
 
-  // Animate in
+  // One animate function only
   const animateTo = (pct) => {
     const dash = CIRC * (1 - Math.max(0, Math.min(1, pct)));
     appliedArc.style.transition = 'stroke-dashoffset 600ms ease';
@@ -280,23 +278,17 @@ function renderDonutWithBaseline(slot, planned, applied) {
     pctText.textContent = Math.round(pct * 100) + '%';
   };
 
-// Animate in (always compute a pct; avoid "idle sweep")
-const animateTo = (pct) => {
-  const dash = CIRC * (1 - Math.max(0, Math.min(1, pct)));
-  appliedArc.style.transition = 'stroke-dashoffset 600ms ease';
-  appliedArc.setAttribute('stroke-dashoffset', dash);
-  pctText.textContent = Math.round(pct * 100) + '%';
-};
-
-// Robust pct: show 0% if planned<=0, show 100% if planned==0 but we have applied>0
-let p;
-if (!Number.isFinite(planned) || planned <= 0) {
-  p = applied > 0 ? 1 : 0;
-} else {
-  p = Math.max(0, Math.min(1, applied / planned));
+  // Robust % logic:
+  // - planned <= 0: show 0% unless applied > 0, then show 100% (to indicate “over plan”)
+  // - planned  > 0: show applied/planned (capped 0..1)
+  let p;
+  if (!Number.isFinite(planned) || planned <= 0) {
+    p = (Number(applied) > 0) ? 1 : 0;
+  } else {
+    p = Math.max(0, Math.min(1, Number(applied || 0) / Number(planned)));
+  }
+  requestAnimationFrame(() => animateTo(p));
 }
-requestAnimationFrame(() => animateTo(p));
-
 // ---- Radar (N axes) ----
 function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
   slot.innerHTML = '';
