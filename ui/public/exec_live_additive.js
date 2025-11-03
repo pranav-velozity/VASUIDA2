@@ -68,13 +68,15 @@ function bizYMDFromRecord(r){
     const bins = Array.isArray(window.state?.bins) ? window.state.bins : [];
 
 // --- in computeExecMetrics(), replace the wkRecords filter block with this ---
-const wkRecords = recordsAll.filter(r=>{
+const wkRecords = recordsAll.filter(r => {
   const ymd = bizYMDFromRecord(r);
-  if (!(ymd && ymd >= ws && ymd <= we)) return false;
+  // If a date is present, enforce week range; if not, assume server already filtered by ?from/&to
+  if (ymd && (ymd < ws || ymd > we)) return false;
 
   const st = String(r?.status || '').toLowerCase();
-  // count as done if 'complete' or 'applied' (or if there is a UID + date in-range)
-  const looksDone = st === 'complete' || st === 'applied' || !!r.uid;
+  const looksDone =
+    !!r.uid || st.includes('complete') || st.includes('appl') || st === 'done';
+
   return looksDone;
 });
 
@@ -305,28 +307,22 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
   const size = 320, pad = 24, cx = size/2, cy = size/2, R = (size/2) - pad;
   const svg = _el('svg', { viewBox: `0 0 ${size} ${size}`, width: size, height: size, style: 'display:block' });
 
-  // Polar helpers
   const pt = (i, v) => {
     const ang = (-Math.PI/2) + (i * 2*Math.PI / N);
-    const r = (v/100) * R;
+    const r = (Math.max(0, Math.min(100, v))/100) * R;
     return [cx + r * Math.cos(ang), cy + r * Math.sin(ang)];
   };
   const poly = (vals) => vals.map((v,i)=>pt(i,v)).map(([x,y])=>`${x},${y}`).join(' ');
 
-  // Radar grid circles
+  // grid
   [20,40,60,80,100].forEach(t => {
-    svg.appendChild(_el('circle', {
-      cx, cy, r: (t/100)*R, fill: 'none', stroke: GREY_STROKE, 'stroke-width': 1
-    }));
+    svg.appendChild(_el('circle', { cx, cy, r:(t/100)*R, fill:'none', stroke: GREY_STROKE, 'stroke-width':1 }));
   });
-
-  // Axes
   for (let i=0;i<N;i++){
     const [x,y] = pt(i, 100);
-    svg.appendChild(_el('line', { x1: cx, y1: cy, x2: x, y2: y, stroke: GREY_STROKE, 'stroke-width': 1 }));
+    svg.appendChild(_el('line', { x1:cx, y1:cy, x2:x, y2:y, stroke: GREY_STROKE, 'stroke-width':1 }));
   }
-
-  // Labels
+  // labels
   labels.forEach((lab,i)=>{
     const [x,y] = pt(i, 112);
     const t = _el('text', { x, y, 'text-anchor':'middle', 'dominant-baseline':'middle', 'font-size':'11', fill:'#6b7280' });
@@ -334,65 +330,22 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
     svg.appendChild(t);
   });
 
-  // Baseline ghost polygon (light grey)
-  const base = _el('polygon', {
+  // baseline
+  svg.appendChild(_el('polygon', {
     points: poly(baselineValues),
-    fill: GREY,
-    'fill-opacity': 0.35,
-    stroke: GREY_STROKE,
-    'stroke-width': 1
-  });
-  svg.appendChild(base);
+    fill: GREY, 'fill-opacity': 0.35, stroke: GREY_STROKE, 'stroke-width': 1
+  }));
 
-  // Actual polygon (brand)
-  const actual = _el('polygon', {
-    points: poly((actualValues && actualValues.length===N) ? actualValues.map(()=>0) : baselineValues.map(()=>0)),
-    fill: BRAND,
-    'fill-opacity': 0.15,
-    stroke: BRAND,
-    'stroke-width': 2
-  });
-  svg.appendChild(actual);
+  // actual (draw once, no animation)
+  if (actualValues && actualValues.length === N) {
+    svg.appendChild(_el('polygon', {
+      points: poly(actualValues),
+      fill: BRAND, 'fill-opacity': 0.15, stroke: BRAND, 'stroke-width': 2
+    }));
+  }
 
   slot.appendChild(svg);
-
-  if (actualValues && actualValues.length === N) {
-    // animate morph (simple frame tween)
-    const steps = 22;
-    let k = 0;
-    const from = baselineValues.map(()=>0);
-    const to   = actualValues.slice();
-    const tick = () => {
-      k++;
-      const cur = from.map((_,i)=> from[i] + (to[i]-from[i])*(k/steps));
-      actual.setAttribute('points', poly(cur));
-      if (k < steps) requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
-  } else {
-    // Idle live feel: subtle rotating glare
-    const glare = _el('circle', {
-      cx, cy, r: R*0.55, fill: 'url(#radar-glare)'
-    });
-    const defs = _el('defs');
-    const grad = _el('radialGradient', { id: 'radar-glare' }, [
-      _el('stop', { offset: '0%', 'stop-color': '#ffffff', 'stop-opacity': 0.15 }),
-      _el('stop', { offset: '100%', 'stop-color': '#ffffff', 'stop-opacity': 0 })
-    ]);
-    defs.appendChild(grad);
-    svg.insertBefore(defs, svg.firstChild);
-    svg.appendChild(glare);
-
-    const style = document.createElement('style');
-    style.textContent = `
-      @keyframes radarSpin { to { transform: rotate(360deg); } }
-      svg { transform-origin: ${cx}px ${cy}px; }
-      svg { animation: radarSpin 12s linear infinite; }
-    `;
-    slot.appendChild(style);
-  }
 }
-
 
   // ---------- Cards render ----------
   function renderExec(){
