@@ -620,84 +620,35 @@ renderRadarWithBaseline(document.getElementById('radar-slot'), axes, [55,50,45,6
     };
   }
 
-// --- lightweight data loader for Executive (no backend code changes) ---
+// --- lightweight data loader for Executive (disabled; use in-memory state only) ---
 async function _execLoadWeek(ws) {
+  // Intentionally empty — Executive renders from window.state populated by the app (Ops).
   const s = window.state || (window.state = {});
-  s.weekStart = ws;
-
-const [plan, records, bins] = await Promise.all([
-g(`plan?weekStart=${encodeURIComponent(ws)}`),
-g(`records?weekStart=${encodeURIComponent(ws)}`),
-g(`bins?weekStart=${encodeURIComponent(ws)}`),
-]);
-
-  s.plan    = Array.isArray(plan)    ? plan    : [];
-  s.records = Array.isArray(records) ? records : [];
-  s.bins    = Array.isArray(bins)    ? bins    : [];
+  s.weekStart = ws || s.weekStart;
 }
 
-
-// --- Data-ready watcher: render once the app actually has data ---
-  let _execBootTimer = null;
 
 function _execTryRender() {
   if (location.hash !== '#exec') return;
 
-  const s = window.state || {};
-  const hasWeek = !!s.weekStart;
-  const hasPlan = Array.isArray(s.plan) && s.plan.length > 0;
-  const hasRecs = Array.isArray(s.records) && s.records.length > 0;
+  const s = window.state || (window.state = {});
 
-  // Decide a week if missing
-  let ws = s.weekStart;
-  if (!hasWeek && typeof window.todayInTZ === 'function' &&
-      typeof window.mondayOfInTZ === 'function') {
+  // If the app hasn’t set a week yet, derive one (no network calls)
+  if (!s.weekStart && typeof window.todayInTZ === 'function' && typeof window.mondayOfInTZ === 'function') {
     try {
-      const today  = window.todayInTZ(BUSINESS_TZ);
-      ws = window.mondayOfInTZ(today);
+      const today = window.todayInTZ(BUSINESS_TZ);
+      s.weekStart = window.mondayOfInTZ(today);
     } catch {}
   }
 
-  // 🔹 NEW: if we still don't have data, fetch it now
-  if (ws && (!hasPlan || !hasRecs)) {
-    _execLoadWeek(ws).then(() => {
-      // data filled -> try render again
-      try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
-    });
-    return; // wait for the load to complete
-  }
+  const hasPlan = Array.isArray(s.plan) && s.plan.length > 0;
+  const hasRecs = Array.isArray(s.records) && s.records.length > 0;
 
-  // If week selected but no data yet, try to hydrate from API using API_BASE
-  if (hasWeek && !hasPlan && !hasRecs) {
-    (async () => {
-      try {
-        const [bins, records, plan] = await Promise.all([
-          g(`bins?weekStart=${encodeURIComponent(s.weekStart)}`),
-          g(`records?weekStart=${encodeURIComponent(s.weekStart)}`),
-          g(`plan?weekStart=${encodeURIComponent(s.weekStart)}`)
-        ]);
-        // Write into the same shape the app uses
-        window.state = Object.assign({}, s, {
-          bins: Array.isArray(bins) ? bins : [],
-          records: Array.isArray(records) ? records : [],
-          plan: Array.isArray(plan) ? plan : []
-        });
-      } catch (e) {
-        console.warn('[Exec] bootstrap fetch skipped:', e?.message || e);
-      }
-    })();
-  }
-
-
-
-
-  // If we already have enough data, render immediately
-  if (hasWeek && (hasPlan || hasRecs)) {
+  // Render only when the app’s state has data (same as Ops)
+  if (s.weekStart && (hasPlan || hasRecs)) {
     try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
   }
-}
-
-  _execBootTimer = setInterval(_execTryRender, 600);
+}  _execBootTimer = setInterval(_execTryRender, 600);
   document.addEventListener('visibilitychange', _execTryRender);
   setTimeout(_execTryRender, 0);
 
