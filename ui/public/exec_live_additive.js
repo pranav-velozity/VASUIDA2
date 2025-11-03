@@ -8,6 +8,9 @@
   const BRAND = (typeof window.BRAND !== 'undefined') ? window.BRAND : '#990033';
   const BUSINESS_TZ = document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai';
 
+// --- Exec should not fetch; rely on Ops-populated window.state
+const EXEC_USE_NETWORK = false;
+
 // --- API base (match Ops; rooted routes, no /api suffix)
 const API_BASE =
   (document.querySelector('meta[name="api-base"]')?.content || '')
@@ -44,16 +47,12 @@ const g = (path) =>
   }
 // --- replace bizYMDFromRecord with this ---
 function bizYMDFromRecord(r){
-  // Prefer date_local; accept both YYYY-MM-DD and DD-MM-YYYY
-  if (r?.date_local) {
-    const s = String(r.date_local).trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;           // YYYY-MM-DD
-    if (/^\d{2}-\d{2}-\d{4}$/.test(s)) {                   // DD-MM-YYYY -> YYYY-MM-DD
-      const [d,m,y] = s.split('-');
-      return `${y}-${m}-${d}`;
-    }
+  if (r?.date_local || r?.date) {
+    const raw = r.date_local || r.date;
+    const s = String(raw).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    if (/^\d{2}-\d{2}-\d{4}$/.test(s)) { const [d,m,y]=s.split('-'); return `${y}-${m}-${d}`; }
   }
-  // else: bucket completed_at to business day via helper if available
   if (r?.completed_at && typeof window.ymdFromCompletedAtInTZ === 'function') {
     return window.ymdFromCompletedAtInTZ(r.completed_at, BUSINESS_TZ);
   }
@@ -70,14 +69,11 @@ function bizYMDFromRecord(r){
 // --- in computeExecMetrics(), replace the wkRecords filter block with this ---
 const wkRecords = recordsAll.filter(r => {
   const ymd = bizYMDFromRecord(r);
-  // If a date is present, enforce week range; if not, assume server already filtered by ?from/&to
-  if (ymd && (ymd < ws || ymd > we)) return false;
+  if (!(ymd && ymd >= ws && ymd <= we)) return false;
 
   const st = String(r?.status || '').toLowerCase();
-  const looksDone =
-    !!r.uid || st.includes('complete') || st.includes('appl') || st === 'done';
-
-  return looksDone;
+  // treat as applied if: explicit status OR has a uid OR has positive quantity
+  return (st === 'complete' || st === 'applied' || !!r.uid || Number(r.qty || r.quantity || 0) > 0);
 });
 
     // Planned totals
@@ -570,31 +566,11 @@ renderRadarWithBaseline(document.getElementById('radar-slot'), axes, [55,50,45,6
     };
   }
 
-// --- lightweight data loader for Executive (fetch if state is missing) ---
 async function _execLoadWeek(ws) {
   const s = window.state || (window.state = {});
-  s.weekStart = ws || s.weekStart;
-  if (!s.weekStart) return;
-
-  const wsISO = s.weekStart;
-  const weISO = weekEndISO(wsISO);
-
-  // helper that tries ?weekStart=… then falls back to ?from=…&to=…
-  const tryFetch = async (basePath) => {
-    // 1) /api/<resource>?weekStart=YYYY-MM-DD
-    try {
-      const r1 = await g(`${basePath}?weekStart=${encodeURIComponent(wsISO)}`);
-      if (Array.isArray(r1) && r1.length >= 0) return r1;
-    } catch (_) {}
-
-    // 2) /api/<resource>?from=YYYY-MM-DD&to=YYYY-MM-DD
-    try {
-      const r2 = await g(`${basePath}?from=${encodeURIComponent(wsISO)}&to=${encodeURIComponent(weISO)}`);
-      if (Array.isArray(r2) && r2.length >= 0) return r2;
-    } catch (_) {}
-
-    return [];
-  };
+  if (ws) s.weekStart = ws;
+  // no fetch here on Exec
+}
 
   // Only pull what’s missing to avoid stomping on Ops state
   const needPlan    = !Array.isArray(s.plan)    || s.plan.length === 0;
@@ -618,7 +594,7 @@ function _execTryRender() {
 
   const s = window.state || (window.state = {});
 
-  // ensure weekStart
+  // Keep the week Ops chose; only derive if still missing
   if (!s.weekStart && typeof window.todayInTZ === 'function' && typeof window.mondayOfInTZ === 'function') {
     try {
       const today = window.todayInTZ(BUSINESS_TZ);
@@ -630,15 +606,9 @@ function _execTryRender() {
   const hasPlan = Array.isArray(s.plan) && s.plan.length > 0;
   const hasRecs = Array.isArray(s.records) && s.records.length > 0;
 
-  // If we don’t have plan/records yet, fetch them now; then render
-  if (!hasPlan || !hasRecs || !Array.isArray(s.bins)) {
-    _execLoadWeek(s.weekStart)
-      .then(() => { try { renderExec(); } catch (e) { console.error('[Exec render error]', e); } })
-      .catch(e => console.warn('[Exec] load skipped:', e?.message || e));
-    return;
-  }
+  // If Ops hasn’t filled state yet, wait (don’t fetch/overwrite)
+  if (!(hasPlan || hasRecs)) return;
 
-  // data already present
   try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
 }
 
