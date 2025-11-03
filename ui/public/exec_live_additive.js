@@ -570,52 +570,76 @@ renderRadarWithBaseline(document.getElementById('radar-slot'), axes, [55,50,45,6
     };
   }
 
-// --- lightweight data loader for Executive (mirror Ops endpoints) ---
+// --- lightweight data loader for Executive (fetch if state is missing) ---
 async function _execLoadWeek(ws) {
   const s = window.state || (window.state = {});
   s.weekStart = ws || s.weekStart;
-  const we = (typeof weekEndISO === 'function') ? weekEndISO(s.weekStart) : s.weekStart;
+  if (!s.weekStart) return;
 
-  const [plan, bins, records] = await Promise.all([
-    fetch(`${API_BASE}/plan/weeks/${s.weekStart}`).then(r => r.ok ? r.json() : [] ).catch(() => []),
-    fetch(`${API_BASE}/bins/weeks/${s.weekStart}`).then(r => r.ok ? r.json() : [] ).catch(() => []),
-    fetch(`${API_BASE}/records?from=${encodeURIComponent(s.weekStart)}&to=${encodeURIComponent(we)}`).then(r => r.ok ? r.json() : [] ).catch(() => []),
+  const wsISO = s.weekStart;
+  const weISO = weekEndISO(wsISO);
+
+  // helper that tries ?weekStart=… then falls back to ?from=…&to=…
+  const tryFetch = async (basePath) => {
+    // 1) /api/<resource>?weekStart=YYYY-MM-DD
+    try {
+      const r1 = await g(`${basePath}?weekStart=${encodeURIComponent(wsISO)}`);
+      if (Array.isArray(r1) && r1.length >= 0) return r1;
+    } catch (_) {}
+
+    // 2) /api/<resource>?from=YYYY-MM-DD&to=YYYY-MM-DD
+    try {
+      const r2 = await g(`${basePath}?from=${encodeURIComponent(wsISO)}&to=${encodeURIComponent(weISO)}`);
+      if (Array.isArray(r2) && r2.length >= 0) return r2;
+    } catch (_) {}
+
+    return [];
+  };
+
+  // Only pull what’s missing to avoid stomping on Ops state
+  const needPlan    = !Array.isArray(s.plan)    || s.plan.length === 0;
+  const needRecords = !Array.isArray(s.records) || s.records.length === 0;
+  const needBins    = !Array.isArray(s.bins);
+
+  const [plan, records, bins] = await Promise.all([
+    needPlan    ? tryFetch('plan')    : Promise.resolve(s.plan),
+    needRecords ? tryFetch('records') : Promise.resolve(s.records),
+    needBins    ? tryFetch('bins')    : Promise.resolve(s.bins),
   ]);
 
-  s.plan    = Array.isArray(plan)    ? plan    : [];
-  s.bins    = Array.isArray(bins)    ? bins    : [];
-  s.records = Array.isArray(records) ? records : [];
+  // write back, preserving anything that already existed
+  s.plan    = Array.isArray(plan)    ? plan    : (s.plan || []);
+  s.records = Array.isArray(records) ? records : (s.records || []);
+  s.bins    = Array.isArray(bins)    ? bins    : (s.bins || []);
 }
-
 
 function _execTryRender() {
   if (location.hash !== '#exec') return;
 
   const s = window.state || (window.state = {});
 
+  // ensure weekStart
   if (!s.weekStart && typeof window.todayInTZ === 'function' && typeof window.mondayOfInTZ === 'function') {
     try {
       const today = window.todayInTZ(BUSINESS_TZ);
       s.weekStart = window.mondayOfInTZ(today);
     } catch {}
   }
+  if (!s.weekStart) return;
 
   const hasPlan = Array.isArray(s.plan) && s.plan.length > 0;
   const hasRecs = Array.isArray(s.records) && s.records.length > 0;
 
-  // If we don't have enough data yet, fetch it now and then render
-  if (s.weekStart && (!hasPlan || !hasRecs)) {
-    _execLoadWeek(s.weekStart).then(() => {
-      if (location.hash === '#exec') {
-        try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
-      }
-    });
+  // If we don’t have plan/records yet, fetch them now; then render
+  if (!hasPlan || !hasRecs || !Array.isArray(s.bins)) {
+    _execLoadWeek(s.weekStart)
+      .then(() => { try { renderExec(); } catch (e) { console.error('[Exec render error]', e); } })
+      .catch(e => console.warn('[Exec] load skipped:', e?.message || e));
     return;
   }
 
-  if (s.weekStart) {
-    try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
-  }
+  // data already present
+  try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
 }
 
   _execBootTimer = setInterval(_execTryRender, 600);
