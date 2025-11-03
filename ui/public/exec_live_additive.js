@@ -608,6 +608,30 @@ async function _execLoadWeek(ws) {
   // no fetch here on Exec
 }
 
+
+async function _execEnsureStateLoaded(ws) {
+  const s = window.state || (window.state = {});
+  if (ws) s.weekStart = ws;
+
+  const needPlan    = !Array.isArray(s.plan)    || s.plan.length === 0;
+  const needRecords = !Array.isArray(s.records) || s.records.length === 0;
+  const needBins    = !Array.isArray(s.bins);
+
+  if (!(needPlan || needRecords || needBins)) return;
+
+  const qs = `weekStart=${encodeURIComponent(s.weekStart || '')}`;
+
+  const [plan, records, bins] = await Promise.all([
+    needPlan    ? g(`plan?${qs}`)    : Promise.resolve(s.plan),
+    needRecords ? g(`records?${qs}`) : Promise.resolve(s.records),
+    needBins    ? g(`bins?${qs}`)    : Promise.resolve(s.bins),
+  ]);
+
+  s.plan    = Array.isArray(plan)    ? plan    : (s.plan || []);
+  s.records = Array.isArray(records) ? records : (s.records || []);
+  s.bins    = Array.isArray(bins)    ? bins    : (s.bins || []);
+}
+
 let _execBootTimer = null;
 
 
@@ -677,7 +701,7 @@ async function _execTryRender() {
 
 
   // Ensure data exists at least once (fallback fetch), then continue
-  await __execEnsureStateLoaded();
+await _execEnsureStateLoaded(s.weekStart);
 
   const hasPlan = Array.isArray(s.plan) && s.plan.length > 0;
   const hasRecs = Array.isArray(s.records) && s.records.length > 0;
