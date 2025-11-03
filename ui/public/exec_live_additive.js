@@ -8,9 +8,16 @@
   const BRAND = (typeof window.BRAND !== 'undefined') ? window.BRAND : '#990033';
   const BUSINESS_TZ = document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai';
 
-// --- API base (use meta tag from index.html, or window.API_BASE, else fall back to /api)
-const API_BASE = document.querySelector('meta[name="api-base"]')?.content
-              || (typeof window.API_BASE !== 'undefined' ? window.API_BASE : '/api');
+// --- API base (normalized; always ends with /api)
+const _rawBase =
+  document.querySelector('meta[name="api-base"]')?.content
+  || (typeof window.API_BASE !== 'undefined' ? window.API_BASE : 'https://vasudia1.onrender.com');
+
+const API_BASE = (() => {
+  const b = String(_rawBase || '').replace(/\/+$/, ''); // strip trailing /
+  if (/\/api$/i.test(b)) return b;                      // already ends with /api
+  return b ? (b + '/api') : '/api';                    // append /api or default
+})();
 
 const g = (path) =>
   fetch(`${API_BASE}/${path}`, { headers: { 'Content-Type': 'application/json' } })
