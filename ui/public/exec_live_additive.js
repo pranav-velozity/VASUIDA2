@@ -380,76 +380,71 @@ function renderDonutWithBaseline(slot, planned, applied) {
 
 }
 
-
-// ---- Radar (N axes) — same tile size; bigger, unclipped labels ----
-function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
+function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opts = {}) {
   slot.innerHTML = '';
 
   const N = labels.length;
-
-  // Displayed pixel size (keep as before)
-  const displaySize = 320;
-
-  // Extra invisible margin in the viewBox to prevent label clipping
-  const vbPad  = 44;                              // how much room for labels
+  const displaySize = opts.size ?? 260;     // smaller chart
+  const vbPad  = 56;                        // extra bleed for labels
   const vbSize = displaySize + vbPad * 2;
+  const pad = 18;
+  const cx  = displaySize / 2, cy = displaySize / 2;
+  const R   = (displaySize / 2) - pad;
 
-  // Chart geometry (unchanged ring size inside the 320 box)
-  const pad = 22;                                  // inner padding for the web
-  const cx  = displaySize / 2;
-  const cy  = displaySize / 2;
-  const R   = (displaySize / 2) - pad;             // web radius
-
-  // SVG: keep width/height = displaySize so tile size is unchanged,
-  // but expand the viewBox so text outside isn't clipped.
   const svg = _el('svg', {
     viewBox: `${-vbPad} ${-vbPad} ${vbSize} ${vbSize}`,
-    width: displaySize,
-    height: displaySize,
-    style: 'display:block'
+    width: displaySize, height: displaySize, style: 'display:block'
   });
 
   const pt = (i, v) => {
-    const ang = (-Math.PI/2) + (i * 2*Math.PI / N);
+    const ang = (-Math.PI / 2) + (i * 2 * Math.PI / N);
     const r = (Math.max(0, Math.min(100, v)) / 100) * R;
     return [cx + r * Math.cos(ang), cy + r * Math.sin(ang)];
   };
-  const poly = (vals) => vals.map((v,i)=>pt(i,v)).map(([x,y])=>`${x},${y}`).join(' ');
+  const poly = vals => vals.map((v, i) => pt(i, v)).map(([x, y]) => `${x},${y}`).join(' ');
 
   // grid
-  [20,40,60,80,100].forEach(t => {
-    svg.appendChild(_el('circle', { cx, cy, r:(t/100)*R, fill:'none', stroke: GREY_STROKE, 'stroke-width':1 }));
+  [20, 40, 60, 80, 100].forEach(t => {
+    svg.appendChild(_el('circle', { cx, cy, r: (t / 100) * R, fill: 'none', stroke: GREY_STROKE, 'stroke-width': 1 }));
   });
-  for (let i=0;i<N;i++){
-    const [x,y] = pt(i, 100);
-    svg.appendChild(_el('line', { x1:cx, y1:cy, x2:x, y2:y, stroke: GREY_STROKE, 'stroke-width':1 }));
+  for (let i = 0; i < N; i++) {
+    const [x, y] = pt(i, 100);
+    svg.appendChild(_el('line', { x1: cx, y1: cy, x2: x, y2: y, stroke: GREY_STROKE, 'stroke-width': 1 }));
   }
 
-  // labels – slightly farther out, larger, semibold
-  const labelRadius = R + 28;                       // push labels out (but web size unchanged)
-  labels.forEach((lab,i)=>{
-    const ang = (-Math.PI/2) + (i * 2*Math.PI / N);
-    const x = cx + labelRadius * Math.cos(ang);
-    const y = cy + labelRadius * Math.sin(ang);
-    const t = _el('text', {
-      x, y,
-      'text-anchor':'middle',
-      'dominant-baseline':'middle',
-      'font-size':'14',
-      'font-weight':'600',
-      fill:'#374151'
-    });
-    t.textContent = lab;
-    svg.appendChild(t);
-  });
+  // label/value placement (more space)
+  const labelR = R + 34;
+  const valueR = R + 18;
 
-  // baseline polygon
+  for (let i = 0; i < N; i++) {
+    const ang = (-Math.PI / 2) + (i * 2 * Math.PI / N);
+    const lx = cx + labelR * Math.cos(ang);
+    const ly = cy + labelR * Math.sin(ang);
+    const vx = cx + valueR * Math.cos(ang);
+    const vy = cy + valueR * Math.sin(ang);
+
+    const t = _el('text', {
+      x: lx, y: ly, 'text-anchor': 'middle', 'dominant-baseline': 'middle',
+      'font-size': '14', 'font-weight': '600', fill: '#374151'
+    });
+    t.textContent = labels[i];
+    svg.appendChild(t);
+
+    if (actualValues && actualValues.length === N) {
+      const v = _el('text', {
+        x: vx, y: vy, 'text-anchor': 'middle', 'dominant-baseline': 'middle',
+        'font-size': '12', 'font-weight': '600', fill: BRAND
+      });
+      v.textContent = Math.round(actualValues[i]) + '';
+      svg.appendChild(v);
+    }
+  }
+
+  // polygons
   svg.appendChild(_el('polygon', {
     points: poly(baselineValues),
     fill: GREY, 'fill-opacity': 0.35, stroke: GREY_STROKE, 'stroke-width': 1
   }));
-
-  // actual polygon
   if (actualValues && actualValues.length === N) {
     svg.appendChild(_el('polygon', {
       points: poly(actualValues),
@@ -459,6 +454,7 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
 
   slot.appendChild(svg);
 }
+
 
   // ---------- Cards render ----------
   function renderExec(){
@@ -471,17 +467,19 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
           <div id="exec-tiles" class="grid grid-cols-2 sm:grid-cols-6 gap-3"></div>
           <!-- Charts row -->
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div class="bg-white rounded-2xl border shadow p-4" id="card-radar">
+            <div class="bg-white rounded-2xl border shadow p-3" id="card-radar">
               <div class="text-base font-semibold mb-1">Exceptions Radar</div>
               <div class="text-xs text-gray-500 mb-2">Risk-normalized (0–100)</div>
               <div id="radar-slot" class="flex items-center justify-center"></div>
               <div id="radar-note" class="mt-2 text-xs text-gray-500"></div>
             </div>
-            <div class="bg-white rounded-2xl border shadow p-4" id="card-donut">
-              <div class="text-base font-semibold mb-1">Planned vs Applied</div>
-              <div class="text-xs text-gray-500 mb-2">Week scope (business TZ)</div>
-              <div id="donut-slot" class="flex items-center justify-center"></div>
-            </div>
+            <div class="bg-white rounded-2xl border shadow p-3" id="card-donut">
+  <div class="text-base font-semibold mb-0.5">Planned vs Applied</div>
+  <div class="text-xs text-gray-500">Week scope (business TZ)</div>
+  <div id="donut-stats" class="mt-1 text-sm font-semibold"></div>
+  <div id="donut-slot" class="mt-2 flex items-center justify-center"></div>
+</div>
+
           </div>
           <!-- Exception widgets -->
           <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -508,13 +506,15 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
         </div>`;
       host.appendChild(wrap);
 // --- ADD: paint ghost charts immediately ---
-renderDonutWithBaseline(document.getElementById('donut-slot'), null, null);
+renderDonutWithBaseline(document.getElementById('donut-slot'), 0, 0);
 renderRadarWithBaseline(
   document.getElementById('radar-slot'),
   ['Dup UIDs','Avg SKU %Δ','Avg PO %Δ','Heavy bins','Diversity (heavy)','Late appliers %'],
   [55,50,45,60,50,40],
-  null
+  null,
+  { size: 260 }
 );
+
     }
 
 // ---- DEBUG: Exec data snapshot (runs once) ----
@@ -572,6 +572,12 @@ if (!window.__execDebugOnce) {
 
 
     const m = computeExecMetrics(); if (!m) return;
+
+const donutStatsEl = document.getElementById('donut-stats');
+if (donutStatsEl) {
+  donutStatsEl.textContent = `Planned ${fmt(m.plannedTotal)} · Applied ${fmt(m.appliedTotal)}`;
+}
+
 
     // Tiles
     const tiles = [
@@ -661,8 +667,18 @@ if (!window.__execDebugOnce) {
     $('#anom-badges').textContent = `Dips: ${dips} · Spikes: ${spikes}`;
 
 // Repaint charts using grey baseline + brand overlay (uses m, axes, values already computed)
-renderDonutWithBaseline(document.getElementById('donut-slot'), m.plannedTotal, m.appliedTotal);
-renderRadarWithBaseline(document.getElementById('radar-slot'), axes, [55,50,45,60,50,40], values);
+renderDonutWithBaseline(
+  document.getElementById('donut-slot'),
+  m.plannedTotal,
+  m.appliedTotal
+);
+renderRadarWithBaseline(
+  document.getElementById('radar-slot'),
+  axes,
+  [55,50,45,60,50,40],
+  values,
+  { size: 260 }
+);
   }
 
   // Render when Exec page is shown
