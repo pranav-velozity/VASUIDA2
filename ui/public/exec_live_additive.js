@@ -46,120 +46,20 @@ const g = (path) =>
     return `${y}-${m}-${day}`;
   }
 
-// --- helpers ---
+
+// --- replace bizYMDFromRecord with this ---
 function bizYMDFromRecord(r){
-  if (r?.date_local) return String(r.date_local).trim();
-  if (r?.date)       return String(r.date).trim(); // fallback if some feeds use `date`
+  if (r?.date_local || r?.date) {
+    const raw = r.date_local || r.date;
+    const s = String(raw).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    if (/^\d{2}-\d{2}-\d{4}$/.test(s)) { const [d,m,y]=s.split('-'); return `${y}-${m}-${d}`; }
+  }
   if (r?.completed_at && typeof window.ymdFromCompletedAtInTZ === 'function') {
     return window.ymdFromCompletedAtInTZ(r.completed_at, BUSINESS_TZ);
   }
   return '';
 }
-
-// --- in computeExecMetrics(), replace the wkRecords / totals section with this ---
-const wkRecords = recordsAll.filter(r => {
-  const ymd = bizYMDFromRecord(r);
-  if (!(ymd && ymd >= ws && ymd <= we)) return false;
-
-  const st = String(r?.status || '').toLowerCase();
-  // treat as applied if: explicit status OR has a uid OR has positive quantity
-  return (st === 'complete' || st === 'applied' || !!r.uid || Number(r.qty || r.quantity || 0) > 0);
-});
-
-const plannedTotal = plan.reduce((s, p) => s + (window.toNum ? toNum(p.target_qty) : Number(p.target_qty || 0)), 0);
-
-// Sum units if qty/quantity present, otherwise count 1 per record
-const appliedTotal = wkRecords.reduce((s, r) => {
-  const q = Number(r.qty ?? r.quantity ?? 1);
-  return s + (Number.isFinite(q) && q > 0 ? q : 0);
-}, 0);
-
-const completionPct = pct(appliedTotal, plannedTotal);
-
-    // Aggregates for discrepancy
-    const agg = (typeof window.aggregate === 'function') ? window.aggregate(wkRecords) : {byPO:new Map(), bySKU:new Map()};
-
-    // --- Discrepancy % (SKU) ---
-    const planBySKU = new Map();
-    for (const p of plan){ const sku=String(p.sku_code||'').trim(); if(!sku) continue; planBySKU.set(sku, (planBySKU.get(sku)||0) + (toNum? toNum(p.target_qty):Number(p.target_qty||0))); }
-    let skuPctSum=0, skuCnt=0;
-    for (const [sku, planned] of planBySKU.entries()){
-      const applied = agg.bySKU.get(sku)||0;
-      if (planned>0){ skuPctSum += Math.abs(applied - planned)/planned; skuCnt++; }
-    }
-    const avgSkuDiscPct = Math.round((skuCnt? (skuPctSum/skuCnt) : 0)*100);
-
-    // --- Discrepancy % (PO) ---
-    const planByPO = new Map();
-    const poDue = new Map();
-    for (const p of plan){
-      const po = String(p.po_number||'').trim(); if(!po) continue;
-      planByPO.set(po,(planByPO.get(po)||0)+(toNum? toNum(p.target_qty):Number(p.target_qty||0)));
-      const d = String(p.due_date||'').trim();
-      if (!poDue.has(po)) poDue.set(po,d); else if (d && (!poDue.get(po) || d < poDue.get(po))) poDue.set(po,d);
-    }
-    let poPctSum=0, poCnt=0;
-    for (const [po, planned] of planByPO.entries()){
-      const applied = agg.byPO.get(po)||0;
-      if (planned>0){ poPctSum += Math.abs(applied - planned)/planned; poCnt++; }
-    }
-    const avgPoDiscPct = Math.round((poCnt? (poPctSum/poCnt) : 0)*100);
-
-    // --- Duplicate UIDs (same SKU+UID >1 within the week) ---
-    const pairCounts = new Map();
-    for (const r of wkRecords){
-      const sku = String(r.sku_code||'').trim();
-      const uid = String(r.uid||'').trim();
-      if (!sku || !uid) continue;
-      const k = `${sku}||${uid}`;
-      pairCounts.set(k, (pairCounts.get(k)||0) + 1);
-    }
-    let dupScanCount = 0; const dupPairs=[];
-    for (const [k,c] of pairCounts.entries()) if (c>1){ const [sku,uid]=k.split('||'); dupPairs.push({sku,uid,count:c}); dupScanCount+=c; }
-
-    // --- Heavy bins (>12kg) + diversity
-    const heavyBins = (bins||[]).filter(b => Number(b.weight_kg||0) > 12);
-    const heavyBinSet = new Set(heavyBins.map(b=> String(b.mobile_bin||'').trim()).filter(Boolean));
-    const heavyCount = heavyBinSet.size;
-    const skuByBin = new Map();
-    for (const r of wkRecords){ const bin = String(r.mobile_bin||'').trim(); const sku=String(r.sku_code||'').trim(); if(!bin||!sku) continue; if(!skuByBin.has(bin)) skuByBin.set(bin,new Set()); skuByBin.get(bin).add(sku); }
-    let diversitySum=0, diversityN=0;
-    for (const bin of heavyBinSet){ diversitySum += (skuByBin.get(bin)?.size || 0); diversityN++; }
-    const avgDiversityHeavy = diversityN? (diversitySum/diversityN) : 0;
-
-    // --- Late appliers: record business date > PO due_date (earliest per PO)
-    let lateCount = 0;
-    for (const r of wkRecords){
-      const po = String(r.po_number||'').trim(); if(!po) continue;
-      const due = poDue.get(po); if (!due) continue; // skip when due_date missing
-      const ymd = bizYMDFromRecord(r); if (!ymd) continue;
-      if (ymd > due) lateCount++;
-    }
-    const lateRatePct = pct(lateCount, appliedTotal);
-
-    // Pareto Top gap drivers (PO×SKU by discrepancy amount)
-    const appliedPOSKU = new Map();
-    for (const r of wkRecords){ const po=String(r.po_number||'').trim(); const sku=String(r.sku_code||'').trim(); if(!po||!sku) continue; const k=`${po}|||${sku}`; appliedPOSKU.set(k,(appliedPOSKU.get(k)||0)+1); }
-    const plannedPOSKU = new Map();
-    for (const p of plan){ const po=String(p.po_number||'').trim(); const sku=String(p.sku_code||'').trim(); if(!po||!sku) continue; const k=`${po}|||${sku}`; plannedPOSKU.set(k,(plannedPOSKU.get(k)||0)+ (toNum? toNum(p.target_qty):Number(p.target_qty||0))); }
-    const gaps=[]; let totalGapAbs=0;
-    for (const [k, planned] of plannedPOSKU.entries()){
-      const applied = appliedPOSKU.get(k)||0; const gap = planned - applied; // planned minus applied
-      if (gap !== 0){ gaps.push({k, gap, planned, applied}); totalGapAbs += Math.abs(gap); }
-    }
-    gaps.sort((a,b)=> Math.abs(b.gap)-Math.abs(a.gap));
-    const topGap = gaps.slice(0,5).map(g=>{ const [po,sku]=g.k.split('|||'); return {po,sku,gap:g.gap,planned:g.planned,applied:g.applied}; });
-
-    return {
-      ws, we,
-      plannedTotal, appliedTotal, completionPct,
-      avgSkuDiscPct, avgPoDiscPct,
-      dupScanCount,
-      heavyCount, avgDiversityHeavy,
-      lateCount, lateRatePct,
-      topGap
-    };
-  }
 
 // ---------- Metric computations (scoped to selected week) ----------
 function computeExecMetrics() {
@@ -308,7 +208,6 @@ function computeExecMetrics() {
     topGap
   };
 }
-
 
 
   // ---------- SVG renderers ----------
