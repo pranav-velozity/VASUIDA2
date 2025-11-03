@@ -319,20 +319,22 @@ function _el(tag, attrs={}, children=[]) {
   return e;
 }
 
-function renderDonutWithBaseline(slot, planned, applied) {
+function renderDonutWithBaseline(slot, planned, applied, opts = {}) {
   slot.innerHTML = '';
-  const size = 180;               // smaller donut
-  const r    = 74;
+
+  // size derived from slot/card, with safe bounds
+  const auto = Math.min(
+    slot.clientWidth || 9999,
+    (slot.parentElement?.clientHeight || 9999)
+  ) * 0.75;
+
+  const size = Math.max(140, Math.min(opts.size ?? auto || 180, 240));
+  const r    = Math.round(size * 0.41);
   const cx = size / 2, cy = size / 2;
   const CIRC = 2 * Math.PI * r;
 
-  const svg = _el('svg', {
-    viewBox: `0 0 ${size} ${size}`,
-    width: size,
-    height: size,
-    style: 'display:block'
-  });
-
+  const svg = _el('svg', { viewBox: `0 0 ${size} ${size}`, width: size, height: size, style: 'display:block' });
+  
   // baseline ring
   svg.appendChild(_el('circle', {
     cx, cy, r,
@@ -466,18 +468,31 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
           <div id="exec-tiles" class="grid grid-cols-2 sm:grid-cols-6 gap-3"></div>
           <!-- Charts row -->
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div class="bg-white rounded-2xl border shadow p-3" id="card-radar">
-              <div class="text-base font-semibold mb-1">Exceptions Radar</div>
-              <div class="text-xs text-gray-500 mb-2">Risk-normalized (0–100)</div>
-              <div id="radar-slot" class="flex items-center justify-center"></div>
-              <div id="radar-note" class="mt-2 text-xs text-gray-500"></div>
-            </div>
-            <div class="bg-white rounded-2xl border shadow p-3" id="card-donut">
-  <div class="text-base font-semibold mb-0.5">Planned vs Applied</div>
-  <div class="text-xs text-gray-500">Week scope (business TZ)</div>
-  <div id="donut-stats" class="mt-1 text-sm font-semibold"></div>
-  <div id="donut-slot" class="mt-2 flex items-center justify-center"></div>
+
+
+<div class="bg-white rounded-2xl border shadow p-3 flex flex-col max-h-[360px]" id="card-radar">
+  <div class="text-base font-semibold">Exceptions Radar</div>
+  <div class="text-xs text-gray-500">Risk-normalized (0–100)</div>
+  <div class="flex-1 min-h-[220px] flex items-center justify-center">
+    <div id="radar-slot"></div>
+  </div>
+  <div id="radar-note" class="mt-2 text-xs text-gray-500"></div>
 </div>
+
+
+            <div class="bg-white rounded-2xl border shadow p-3 flex flex-col max-h-[360px]" id="card-donut">
+  <div class="flex items-baseline justify-between">
+    <div>
+      <div class="text-base font-semibold leading-tight">Planned vs Applied</div>
+      <div class="text-xs text-gray-500">Week scope (business TZ)</div>
+    </div>
+    <div id="donut-stats" class="text-sm font-semibold text-gray-700"></div>
+  </div>
+  <div class="flex-1 min-h-[220px] flex items-center justify-center">
+    <div id="donut-slot"></div>
+  </div>
+</div>
+
 
           </div>
           <!-- Exception widgets -->
@@ -578,6 +593,18 @@ if (donutStatsEl) {
 }
 
 
+// compute sizes from actual slots
+const donutSlot = document.getElementById('donut-slot');
+const radarSlot = document.getElementById('radar-slot');
+
+const donutSize = Math.floor(
+  Math.min(donutSlot.clientWidth || 240, (donutSlot.parentElement?.clientHeight || 280)) * 0.75
+);
+const radarSize = Math.floor(
+  Math.min(radarSlot.clientWidth || 300, (radarSlot.parentElement?.clientHeight || 320)) * 0.90
+);
+
+
     // Tiles
     const tiles = [
       {label:'Completion %', value: `${m.completionPct}%`},
@@ -665,20 +692,11 @@ if (donutStatsEl) {
     for (const v of counts){ if (v < lo) dips++; else if (v > hi) spikes++; }
     $('#anom-badges').textContent = `Dips: ${dips} · Spikes: ${spikes}`;
 
-// Repaint charts using grey baseline + brand overlay (uses m, axes, values already computed)
-renderDonutWithBaseline(
-  document.getElementById('donut-slot'),
-  m.plannedTotal,
-  m.appliedTotal
-);
-renderRadarWithBaseline(
-  document.getElementById('radar-slot'),
-  axes,
-  [55,50,45,60,50,40],
-  values,
-  { size: 260 }
-);
-  }
+renderDonutWithBaseline(donutSlot, m.plannedTotal, m.appliedTotal, { size: donutSize });
+renderRadarWithBaseline(radarSlot, axes, [55,50,45,60,50,40], values, {
+  size: Math.max(220, Math.min(radarSize, 300))
+});
+
 
   // Render when Exec page is shown
   function onHash(){
