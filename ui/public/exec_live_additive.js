@@ -8,6 +8,17 @@
   const BRAND = (typeof window.BRAND !== 'undefined') ? window.BRAND : '#990033';
   const BUSINESS_TZ = document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai';
 
+ // --- Alias real app state if it lives somewhere else ---
+  const _maybeState =
+    window.state ||
+    window.app?.state ||
+    window.pinpoint?.state ||
+    window.vo?.state ||
+    window.store?.state ||
+    window.__APP__?.state;
+
+  if (_maybeState && !window.state) window.state = _maybeState;
+
   // ---------- Small utilities ----------
   const $ = (s)=>document.querySelector(s);
   const fmt = (n)=> Number(n||0).toLocaleString();
@@ -574,6 +585,38 @@ renderRadarWithBaseline(document.getElementById('radar-slot'), axes, [55,50,45,6
       return r;
     };
   }
+
+// --- Data-ready watcher: render once the app actually has data ---
+  let _execBootTimer = null;
+
+  function _execTryRender() {
+    if (location.hash !== '#exec') return;
+    const s = window.state || {};
+    const hasWeek = !!s.weekStart;
+    const hasPlan = Array.isArray(s.plan) && s.plan.length > 0;
+    const hasRecs = Array.isArray(s.records) && s.records.length > 0;
+
+    if (!hasWeek && typeof window.todayInTZ === 'function' &&
+        typeof window.mondayOfInTZ === 'function' &&
+        typeof window.setWeek === 'function') {
+      try {
+        const today  = window.todayInTZ(BUSINESS_TZ);
+        const monday = window.mondayOfInTZ(today);
+        window.setWeek(monday);
+      } catch {}
+    }
+
+    if ((hasWeek && (hasPlan || hasRecs))) {
+      try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
+      if (_execBootTimer) { clearInterval(_execBootTimer); _execBootTimer = null; }
+    }
+  }
+
+  _execBootTimer = setInterval(_execTryRender, 600);
+  document.addEventListener('visibilitychange', _execTryRender);
+  setTimeout(_execTryRender, 0);
+
+
 })();
 
 
