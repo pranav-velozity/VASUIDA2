@@ -540,8 +540,6 @@ renderRadarWithBaseline(
   { size: 260 }
 );
 
-    }
-
 // ---- DEBUG: Exec data snapshot (runs once) ----
 if (!window.__execDebugOnce) {
   window.__execDebugOnce = true;
