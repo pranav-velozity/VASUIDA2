@@ -462,61 +462,73 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
     if (!host.querySelector('#exec-live')){
       const wrap = document.createElement('div'); wrap.id='exec-live';
       wrap.innerHTML = `
-        <div class="grid grid-cols-1 gap-3">
-          <!-- Tiles -->
-          <div id="exec-tiles" class="grid grid-cols-2 sm:grid-cols-6 gap-3"></div>
-          <!-- Charts row -->
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+  <div class="grid grid-cols-1 gap-3">
+    <!-- Tiles -->
+    <div id="exec-tiles" class="grid grid-cols-2 sm:grid-cols-6 gap-3"></div>
 
+    <!-- Charts row -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
 
-<div class="bg-white rounded-2xl border shadow p-3 flex flex-col max-h-[360px]" id="card-radar">
-  <div class="text-base font-semibold">Exceptions Radar</div>
-  <div class="text-xs text-gray-500">Risk-normalized (0–100)</div>
-  <div class="flex-1 min-h-[220px] flex items-center justify-center">
-    <div id="radar-slot"></div>
-  </div>
-  <div id="radar-note" class="mt-2 text-xs text-gray-500"></div>
-</div>
+      <div class="bg-white rounded-2xl border shadow p-3 flex flex-col max-h-[360px]" id="card-radar">
+        <div class="text-base font-semibold">Exceptions Radar</div>
+        <div class="text-xs text-gray-500">Risk-normalized (0–100)</div>
+        <div class="flex-1 min-h-[220px] flex items-center justify-center">
+          <div id="radar-slot"></div>
+        </div>
+        <div id="radar-note" class="mt-2 text-xs text-gray-500"></div>
+      </div>
 
+      <div class="bg-white rounded-2xl border shadow p-3 flex flex-col max-h-[360px]" id="card-donut">
+        <div class="flex items-baseline justify-between">
+          <div>
+            <div class="text-base font-semibold leading-tight">Planned vs Applied</div>
+            <div class="text-xs text-gray-500">Week scope (business TZ)</div>
+          </div>
+          <div id="donut-stats" class="text-sm font-semibold text-gray-700"></div>
+        </div>
+        <div class="flex-1 min-h-[220px] flex items-center justify-center">
+          <div id="donut-slot"></div>
+        </div>
+      </div>
 
-            <div class="bg-white rounded-2xl border shadow p-3 flex flex-col max-h-[360px]" id="card-donut">
-  <div class="flex items-baseline justify-between">
-    <div>
-      <div class="text-base font-semibold leading-tight">Planned vs Applied</div>
-      <div class="text-xs text-gray-500">Week scope (business TZ)</div>
     </div>
-    <div id="donut-stats" class="text-sm font-semibold text-gray-700"></div>
-  </div>
-  <div class="flex-1 min-h-[220px] flex items-center justify-center">
-    <div id="donut-slot"></div>
-  </div>
-</div>
 
+    <!-- Exception widgets -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div class="bg-white rounded-2xl border shadow p-4" id="card-pareto">
+        <div class="text-base font-semibold mb-1">Top Gap Drivers (PO × SKU)</div>
+        <div class="text-xs text-gray-500 mb-2">Planned − Applied</div>
+        <div id="pareto-list" class="space-y-2"></div>
+      </div>
 
-          </div>
-          <!-- Exception widgets -->
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div class="bg-white rounded-2xl border shadow p-4" id="card-pareto">
-              <div class="text-base font-semibold mb-1">Top Gap Drivers (PO × SKU)</div>
-              <div class="text-xs text-gray-500 mb-2">Planned − Applied</div>
-              <div id="pareto-list" class="space-y-2"></div>
-            </div>
-            <div class="bg-white rounded-2xl border shadow p-4" id="card-heavy">
-              <div class="text-base font-semibold mb-1">Heavy Bins Snapshot</div>
-              <div class="text-xs text-gray-500 mb-2">weight_kg > 12</div>
-              <table class="w-full text-sm"><thead class="text-gray-500">
-                <tr><th class="text-left py-1 pr-2">Bin</th><th class="text-right py-1 pr-2">Units</th><th class="text-right py-1 pr-2">kg</th><th class="text-right py-1">SKU div.</th></tr>
-              </thead><tbody id="heavy-body"><tr><td colspan="4" class="text-xs text-gray-400 text-center py-3">Loading…</td></tr></tbody></table>
-              <div id="heavy-foot" class="text-xs text-gray-500 mt-2"></div>
-            </div>
-            <div class="bg-white rounded-2xl border shadow p-4" id="card-anom">
-              <div class="text-base font-semibold mb-1">Intake Anomalies</div>
-              <div class="text-xs text-gray-500 mb-2">Daily/Hourly sparkline</div>
-              <div id="anom-spark"></div>
-              <div id="anom-badges" class="mt-2 text-xs text-gray-600"></div>
-            </div>
-          </div>
-        </div>`;
+      <div class="bg-white rounded-2xl border shadow p-4" id="card-heavy">
+        <div class="text-base font-semibold mb-1">Heavy Bins Snapshot</div>
+        <div class="text-xs text-gray-500 mb-2">weight_kg > 12</div>
+        <table class="w-full text-sm">
+          <thead class="text-gray-500">
+            <tr>
+              <th class="text-left py-1 pr-2">Bin</th>
+              <th class="text-right py-1 pr-2">Units</th>
+              <th class="text-right py-1 pr-2">kg</th>
+              <th class="text-right py-1">SKU div.</th>
+            </tr>
+          </thead>
+          <tbody id="heavy-body">
+            <tr><td colspan="4" class="text-xs text-gray-400 text-center py-3">Loading…</td></tr>
+          </tbody>
+        </table>
+        <div id="heavy-foot" class="text-xs text-gray-500 mt-2"></div>
+      </div>
+
+      <div class="bg-white rounded-2xl border shadow p-4" id="card-anom">
+        <div class="text-base font-semibold mb-1">Intake Anomalies</div>
+        <div class="text-xs text-gray-500 mb-2">Daily/Hourly sparkline</div>
+        <div id="anom-spark"></div>
+        <div id="anom-badges" class="mt-2 text-xs text-gray-600"></div>
+      </div>
+    </div>
+  </div>`;
+
       host.appendChild(wrap);
 // --- ADD: paint ghost charts immediately ---
 renderDonutWithBaseline(document.getElementById('donut-slot'), 0, 0);
