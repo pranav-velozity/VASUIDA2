@@ -356,24 +356,27 @@ function renderDonutWithBaseline(slot, planned, applied) {
   slot.style.position = 'relative';
   slot.appendChild(pctText);
 
-  // One animate function only
-  const animateTo = (pct) => {
-    const dash = CIRC * (1 - Math.max(0, Math.min(1, pct)));
-    appliedArc.style.transition = 'stroke-dashoffset 600ms ease';
-    appliedArc.setAttribute('stroke-dashoffset', dash);
-    pctText.textContent = Math.round(pct * 100) + '%';
-  };
-
-  // Robust % logic:
-  // - planned <= 0: show 0% unless applied > 0, then show 100% (to indicate “over plan”)
-  // - planned  > 0: show applied/planned (capped 0..1)
+  // Robust % logic (no animation)
   let p;
   if (!Number.isFinite(planned) || planned <= 0) {
     p = (Number(applied) > 0) ? 1 : 0;
   } else {
     p = Math.max(0, Math.min(1, Number(applied || 0) / Number(planned)));
   }
-  requestAnimationFrame(() => animateTo(p));
+
+  // Set ring immediately, no transition
+  appliedArc.style.transition = 'none';
+  const dash = CIRC * (1 - p);
+  appliedArc.setAttribute('stroke-dashoffset', dash);
+  pctText.textContent = Math.round(p * 100) + '%';
+
+  // Totals line: "Planned 844 · Applied 247"
+  const totalsText = document.createElement('div');
+  totalsText.className = 'absolute inset-x-0 bottom-2 text-xs text-gray-600 text-center';
+  totalsText.style.pointerEvents = 'none';
+  totalsText.textContent = `Planned ${fmt(planned || 0)} · Applied ${fmt(applied || 0)}`;
+  slot.appendChild(totalsText);
+
 }
 // ---- Radar (N axes) ----
 function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
@@ -398,13 +401,22 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
     const [x,y] = pt(i, 100);
     svg.appendChild(_el('line', { x1:cx, y1:cy, x2:x, y2:y, stroke: GREY_STROKE, 'stroke-width':1 }));
   }
-  // labels
+
   labels.forEach((lab,i)=>{
-    const [x,y] = pt(i, 112);
-    const t = _el('text', { x, y, 'text-anchor':'middle', 'dominant-baseline':'middle', 'font-size':'11', fill:'#6b7280' });
+    const [x,y] = pt(i, 114);  // tiny nudge outward
+    const t = _el('text', {
+      x, y,
+      'text-anchor':'middle',
+      'dominant-baseline':'middle',
+      'font-size':'14',         // was 11
+      'font-weight':'600',      // bolder for legibility
+      fill:'#374151'            // darker gray
+    });
     t.textContent = lab;
     svg.appendChild(t);
   });
+
+
 
   // baseline
   svg.appendChild(_el('polygon', {
