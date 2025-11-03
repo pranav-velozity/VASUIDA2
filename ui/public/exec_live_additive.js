@@ -8,6 +8,14 @@
   const BRAND = (typeof window.BRAND !== 'undefined') ? window.BRAND : '#990033';
   const BUSINESS_TZ = document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai';
 
+// --- API base (use meta tag from index.html, or window.API_BASE, else fall back to /api)
+const API_BASE = document.querySelector('meta[name="api-base"]')?.content
+              || (typeof window.API_BASE !== 'undefined' ? window.API_BASE : '/api');
+
+const g = (path) =>
+  fetch(`${API_BASE}/${path}`, { headers: { 'Content-Type': 'application/json' } })
+    .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)));
+
  // --- Alias real app state if it lives somewhere else ---
   const _maybeState =
     window.state ||
@@ -548,7 +556,12 @@ if (!window.__execDebugOnce) {
     const heavy = bins.filter(b=> Number(b.weight_kg||0) > 12);
     const ws = m.ws, we = m.we;
     // Build units & diversity from week records
-    const wkRecords = (window.state?.records||[]).filter(r=> r.status==='complete' && (bizYMDFromRecord(r) >= ws && bizYMDFromRecord(r) <= we));
+    const wkRecords = (window.state?.records||[]).filter(r=>{
+  const ymd = bizYMDFromRecord(r);
+  if (!(ymd && ymd >= ws && ymd <= we)) return false;
+  const st = String(r?.status || '').toLowerCase();
+  return st === 'complete' || st === 'applied' || !!r.uid;
+});
     const unitsByBin = new Map(); const skuSetByBin = new Map();
     for (const r of wkRecords){ const bin = String(r.mobile_bin||'').trim(); const sku = String(r.sku_code||'').trim(); if(!bin) continue; unitsByBin.set(bin,(unitsByBin.get(bin)||0)+1); if(sku){ if(!skuSetByBin.has(bin)) skuSetByBin.set(bin,new Set()); skuSetByBin.get(bin).add(sku); } }
     const rows = heavy.slice(0,3).map(b=>{
@@ -605,14 +618,11 @@ async function _execLoadWeek(ws) {
   const s = window.state || (window.state = {});
   s.weekStart = ws;
 
-  // Pick your existing endpoints; these names mirror the Ops page.
-  // If your server uses different paths, update the URLs only.
-  const qs = '?weekStart=' + encodeURIComponent(ws);
-  const [plan, records, bins] = await Promise.all([
-    fetch('/api/plan'    + qs).then(r=>r.ok?r.json():[]).catch(()=>[]),
-    fetch('/api/records' + qs).then(r=>r.ok?r.json():[]).catch(()=>[]),
-    fetch('/api/bins'    + qs).then(r=>r.ok?r.json():[]).catch(()=>[]),
-  ]);
+const [plan, records, bins] = await Promise.all([
+g(`plan?weekStart=${encodeURIComponent(ws)}`),
+g(`records?weekStart=${encodeURIComponent(ws)}`),
+g(`bins?weekStart=${encodeURIComponent(ws)}`),
+]);
 
   s.plan    = Array.isArray(plan)    ? plan    : [];
   s.records = Array.isArray(records) ? records : [];
@@ -649,6 +659,30 @@ function _execTryRender() {
     });
     return; // wait for the load to complete
   }
+
+  // If week selected but no data yet, try to hydrate from API using API_BASE
+  if (hasWeek && !hasPlan && !hasRecs) {
+    (async () => {
+      try {
+        const [bins, records, plan] = await Promise.all([
+          g(`bins?weekStart=${encodeURIComponent(s.weekStart)}`),
+          g(`records?weekStart=${encodeURIComponent(s.weekStart)}`),
+          g(`plan?weekStart=${encodeURIComponent(s.weekStart)}`)
+        ]);
+        // Write into the same shape the app uses
+        window.state = Object.assign({}, s, {
+          bins: Array.isArray(bins) ? bins : [],
+          records: Array.isArray(records) ? records : [],
+          plan: Array.isArray(plan) ? plan : []
+        });
+      } catch (e) {
+        console.warn('[Exec] bootstrap fetch skipped:', e?.message || e);
+      }
+    })();
+  }
+
+
+
 
   // If we already have enough data, render immediately
   if (hasWeek && (hasPlan || hasRecs)) {
