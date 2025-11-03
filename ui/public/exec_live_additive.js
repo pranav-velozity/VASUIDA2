@@ -697,6 +697,7 @@ renderRadarWithBaseline(radarSlot, axes, [55,50,45,60,50,40], values, {
   size: Math.max(220, Math.min(radarSize, 300))
 });
 
+}
 
   // Render when Exec page is shown
   function onHash(){
