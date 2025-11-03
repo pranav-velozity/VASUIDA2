@@ -414,6 +414,60 @@ renderRadarWithBaseline(
 );
     }
 
+// ---- DEBUG: Exec data snapshot (runs once) ----
+if (!window.__execDebugOnce) {
+  window.__execDebugOnce = true;
+  (function () {
+    const out = {};
+    out.hash = location.hash;
+    out.execContainer = !!document.querySelector('#page-exec');
+    out.execLive = !!document.querySelector('#exec-live');
+
+    const s = window.state || {};
+    out.stateKeys = Object.keys(s);
+    out.weekStart = s.weekStart;
+    out.planCount = Array.isArray(s.plan) ? s.plan.length : -1;
+    out.recordsCount = Array.isArray(s.records) ? s.records.length : -1;
+    out.binsCount = Array.isArray(s.bins) ? s.bins.length : -1;
+
+    const plan = Array.isArray(s.plan) ? s.plan : [];
+    out.planSample = plan.slice(0, 3).map(p => ({
+      po: p.po_number, sku: p.sku_code, target_qty: p.target_qty, due_date: p.due_date
+    }));
+
+    const BUSINESS_TZ = document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai';
+    const toISODate = v => { const d=new Date(v); const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${day}`; };
+    const weekEndISO = ws => { const d=new Date(ws); d.setDate(d.getDate()+6); return toISODate(d); };
+    const bizYMDFromRecord = r => r?.date_local ? String(r.date_local).trim()
+      : (r?.completed_at && typeof window.ymdFromCompletedAtInTZ==='function'
+          ? window.ymdFromCompletedAtInTZ(r.completed_at, BUSINESS_TZ) : '');
+
+    if (s.weekStart) {
+      const ws = s.weekStart, we = weekEndISO(ws);
+      out.weekEnd = we;
+      const wk = (Array.isArray(s.records)? s.records:[]).filter(r=>{
+        if (r?.status !== 'complete') return false;
+        const ymd = bizYMDFromRecord(r);
+        return ymd && ymd >= ws && ymd <= we;
+      });
+      out.wkRecordsCount = wk.length;
+      out.wkRecordDatesSample = (s.records||[]).slice(0,5).map(r=>({
+        uid:r.uid, status:r.status, date_local:r.date_local, completed_at:r.completed_at, ymd: bizYMDFromRecord(r)
+      }));
+    }
+
+    const toNum = window.toNum || (x => Number(String(x||0).replace(/[, ]/g,'')));
+    out.plannedTotal = plan.reduce((sum,p)=> sum + toNum(p.target_qty), 0);
+
+    console.log('[Exec DEBUG] Snapshot below:');
+    console.table(out.planSample);
+    console.table(out.wkRecordDatesSample || []);
+    console.log(out);
+  })();
+}
+
+
+
     const m = computeExecMetrics(); if (!m) return;
 
     // Tiles
