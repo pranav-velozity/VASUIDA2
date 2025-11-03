@@ -26,6 +26,47 @@ const g = (path) =>
   fetch(`${API_BASE}/${path}`, { headers: { 'Content-Type': 'application/json' } })
     .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)));
 
+// --- Robust fetchers with endpoint fallback -------------------
+async function tryFetchJson(urls) {
+  for (const u of urls) {
+    try {
+      const r = await fetch(u, { headers: { 'Content-Type': 'application/json' } });
+      if (r.ok) return r.json();
+    } catch (_) {}
+  }
+  throw new Error('All endpoints failed: ' + urls.join(' | '));
+}
+
+function trimBase(base) { return String(base || '').replace(/\/+$/,''); }
+
+async function fetchPlanForWeek(ws) {
+  const base = trimBase(API_BASE);
+  return tryFetchJson([
+    `${base}/api/plan?weekStart=${ws}`,
+    `${base}/plan?weekStart=${ws}`,
+    `${base}/plan/weeks/${ws}`
+  ]);
+}
+
+async function fetchBinsForWeek(ws) {
+  const base = trimBase(API_BASE);
+  return tryFetchJson([
+    `${base}/api/bins?weekStart=${ws}`,
+    `${base}/bins?weekStart=${ws}`,
+    `${base}/bins/weeks/${ws}`
+  ]);
+}
+
+async function fetchRecordsForWeek(ws, we) {
+  const base = trimBase(API_BASE);
+  return tryFetchJson([
+    `${base}/api/records?from=${ws}&to=${we}&status=complete`,
+    `${base}/records?from=${ws}&to=${we}&status=complete`
+  ]);
+}
+
+
+
  // --- Alias real app state if it lives somewhere else ---
   const _maybeState =
     window.state ||
@@ -608,6 +649,27 @@ async function _execLoadWeek(ws) {
   // no fetch here on Exec
 }
 
+// Ensure state is populated for the selected week if Exec needs to fetch
+async function execEnsureStateLoaded(ws) {
+  const s = window.state || (window.state = {});
+  const we = (window.weekEndISO || (w => { const d=new Date(w); d.setDate(d.getDate()+6); return d.toISOString().slice(0,10); }))(ws);
+
+  const needPlan    = !Array.isArray(s.plan)    || s.plan.length === 0;
+  const needRecords = !Array.isArray(s.records) || s.records.length === 0;
+  const needBins    = !Array.isArray(s.bins);
+
+  const [plan, records, bins] = await Promise.all([
+    needPlan    ? fetchPlanForWeek(ws).catch(()=>[])         : Promise.resolve(s.plan),
+    needRecords ? fetchRecordsForWeek(ws, we).then(x => x.records || []).catch(()=>[]) : Promise.resolve(s.records),
+    needBins    ? fetchBinsForWeek(ws).catch(()=>[])         : Promise.resolve(s.bins),
+  ]);
+
+  s.plan    = Array.isArray(plan)    ? plan    : (s.plan || []);
+  s.records = Array.isArray(records) ? records : (s.records || []);
+  s.bins    = Array.isArray(bins)    ? bins    : (s.bins || []);
+}
+
+
 
 async function _execEnsureStateLoaded(ws) {
   const s = window.state || (window.state = {});
@@ -706,11 +768,16 @@ await _execEnsureStateLoaded(s.weekStart);
   const hasPlan = Array.isArray(s.plan) && s.plan.length > 0;
   const hasRecs = Array.isArray(s.records) && s.records.length > 0;
 
-  // If Ops hasn’t filled state yet, wait (don’t fetch/overwrite)
-  if (!(hasPlan || hasRecs)) return;
+  if (!(hasPlan || hasRecs)) {
+    // Fetch what we’re missing for this week, then render
+    execEnsureStateLoaded(s.weekStart)
+      .then(() => { try { renderExec(); } catch (e) { console.error('[Exec render error]', e); } })
+      .catch(e  => console.error('[Exec fetch error]', e));
+    return;
+  }
 
   try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
-}
+
 
 // 🔹 NEW: re-render exactly when the app signals data is ready
 window.addEventListener('state:ready', _execTryRender);
