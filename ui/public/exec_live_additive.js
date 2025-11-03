@@ -30,13 +30,23 @@
     const d = new Date(v); const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,'0'); const day=String(d.getDate()).padStart(2,'0');
     return `${y}-${m}-${day}`;
   }
-  function bizYMDFromRecord(r){
-    // Prefer date_local (already YYYY-MM-DD in biz TZ), else bucket completed_at -> business day
-    if (r?.date_local) return String(r.date_local).trim();
-    if (r?.completed_at && typeof window.ymdFromCompletedAtInTZ === 'function') return window.ymdFromCompletedAtInTZ(r.completed_at, BUSINESS_TZ);
-    return '';
+// --- replace bizYMDFromRecord with this ---
+function bizYMDFromRecord(r){
+  // Prefer date_local; accept both YYYY-MM-DD and DD-MM-YYYY
+  if (r?.date_local) {
+    const s = String(r.date_local).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;           // YYYY-MM-DD
+    if (/^\d{2}-\d{2}-\d{4}$/.test(s)) {                   // DD-MM-YYYY -> YYYY-MM-DD
+      const [d,m,y] = s.split('-');
+      return `${y}-${m}-${d}`;
+    }
   }
-
+  // else: bucket completed_at to business day via helper if available
+  if (r?.completed_at && typeof window.ymdFromCompletedAtInTZ === 'function') {
+    return window.ymdFromCompletedAtInTZ(r.completed_at, BUSINESS_TZ);
+  }
+  return '';
+}
   // ---------- Metric computations (scoped to selected week) ----------
   function computeExecMetrics(){
     const ws = window.state?.weekStart; if (!ws) return null;
@@ -45,12 +55,16 @@
     const recordsAll = Array.isArray(window.state?.records) ? window.state.records : [];
     const bins = Array.isArray(window.state?.bins) ? window.state.bins : [];
 
-    // window.state.records already week-filtered in app, but keep a defensive guard
-    const wkRecords = recordsAll.filter(r=>{
-      if (r?.status !== 'complete') return false;
-      const ymd = bizYMDFromRecord(r);
-      return ymd && ymd >= ws && ymd <= we;
-    });
+// --- in computeExecMetrics(), replace the wkRecords filter block with this ---
+const wkRecords = recordsAll.filter(r=>{
+  const ymd = bizYMDFromRecord(r);
+  if (!(ymd && ymd >= ws && ymd <= we)) return false;
+
+  const st = String(r?.status || '').toLowerCase();
+  // count as done if 'complete' or 'applied' (or if there is a UID + date in-range)
+  const looksDone = st === 'complete' || st === 'applied' || !!r.uid;
+  return looksDone;
+});
 
     // Planned totals
     const plannedTotal = plan.reduce((s,p)=> s + (window.toNum? toNum(p.target_qty) : Number(p.target_qty||0)), 0);
