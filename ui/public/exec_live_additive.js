@@ -777,6 +777,7 @@ await _execEnsureStateLoaded(s.weekStart);
   }
 
   try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
+}
 
 
 // 🔹 NEW: re-render exactly when the app signals data is ready
