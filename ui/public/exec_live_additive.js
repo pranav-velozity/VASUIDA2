@@ -319,50 +319,65 @@ function _el(tag, attrs={}, children=[]) {
   return e;
 }
 
-// ---- Donut (no flicker, single animateTo) ----
 function renderDonutWithBaseline(slot, planned, applied) {
   slot.innerHTML = '';
-  const size = 220, r = 90, cx = size/2, cy = size/2;
-  const CIRC = 2*Math.PI*r;
+  const size = 180;               // smaller donut
+  const r    = 74;
+  const cx = size / 2, cy = size / 2;
+  const CIRC = 2 * Math.PI * r;
 
-  const svg = _el('svg', { viewBox: `0 0 ${size} ${size}`, width: size, height: size, style: 'display:block' });
+  const svg = _el('svg', {
+    viewBox: `0 0 ${size} ${size}`,
+    width: size,
+    height: size,
+    style: 'display:block'
+  });
 
-  // Baseline ring (light grey)
+  // baseline ring
   svg.appendChild(_el('circle', {
     cx, cy, r,
     fill: 'none',
     stroke: GREY,
-    'stroke-width': 18
+    'stroke-width': 16
   }));
 
-  // Applied ring (brand)
+  // applied ring
   const appliedArc = _el('circle', {
     cx, cy, r,
     fill: 'none',
     stroke: BRAND,
-    'stroke-width': 18,
+    'stroke-width': 16,
     'stroke-linecap': 'round',
-    'transform': `rotate(-90 ${cx} ${cy})`,
+    transform: `rotate(-90 ${cx} ${cy})`,
     'stroke-dasharray': CIRC,
     'stroke-dashoffset': CIRC
   });
   svg.appendChild(appliedArc);
   slot.appendChild(svg);
 
-  // Center label
+  // fixed % label in the center
   const pctText = document.createElement('div');
   pctText.className = 'absolute inset-0 flex items-center justify-center text-sm text-gray-600';
   pctText.style.pointerEvents = 'none';
   slot.style.position = 'relative';
   slot.appendChild(pctText);
 
-  // Robust % logic (no animation)
+  // % computation (robust when planned <= 0)
   let p;
   if (!Number.isFinite(planned) || planned <= 0) {
     p = (Number(applied) > 0) ? 1 : 0;
   } else {
     p = Math.max(0, Math.min(1, Number(applied || 0) / Number(planned)));
   }
+
+  // one-time animate to target and stay there
+  requestAnimationFrame(() => {
+    const dash = CIRC * (1 - p);
+    appliedArc.style.transition = 'stroke-dashoffset 600ms ease';
+    appliedArc.setAttribute('stroke-dashoffset', dash);
+    pctText.textContent = Math.round(p * 100) + '%';
+  });
+}
 
   // Set ring immediately, no transition
   appliedArc.style.transition = 'none';
