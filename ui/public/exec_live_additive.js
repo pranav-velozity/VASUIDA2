@@ -41,28 +41,31 @@ function trimBase(base) { return String(base || '').replace(/\/+$/,''); }
 
 async function fetchPlanForWeek(ws) {
   const base = trimBase(API_BASE);
-  return tryFetchJson([
-    `${base}/api/plan?weekStart=${ws}`,
-    `${base}/plan?weekStart=${ws}`,
-    `${base}/plan/weeks/${ws}`
-  ]);
+return tryFetchJson([
+  // API_BASE already includes /api
+  `${base}/plan?weekStart=${ws}`,
+  // fallback to non-/api base if the alias isn’t present
+  `${base.replace(/\/api$/,'')}/plan/weeks/${ws}`
+]);
+
 }
 
 async function fetchBinsForWeek(ws) {
   const base = trimBase(API_BASE);
-  return tryFetchJson([
-    `${base}/api/bins?weekStart=${ws}`,
-    `${base}/bins?weekStart=${ws}`,
-    `${base}/bins/weeks/${ws}`
-  ]);
+return tryFetchJson([
+  `${base}/bins?weekStart=${ws}`,
+  `${base.replace(/\/api$/,'')}/bins/weeks/${ws}`
+]);
+
 }
 
 async function fetchRecordsForWeek(ws, we) {
   const base = trimBase(API_BASE);
-  return tryFetchJson([
-    `${base}/api/records?from=${ws}&to=${we}&status=complete`,
-    `${base}/records?from=${ws}&to=${we}&status=complete`
-  ]);
+return tryFetchJson([
+  `${base}/records?from=${ws}&to=${we}&status=complete`,
+  `${base.replace(/\/api$/,'')}/records?from=${ws}&to=${we}&status=complete`
+]);
+
 }
 
 
