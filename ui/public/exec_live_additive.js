@@ -11,13 +11,16 @@
 // --- Exec should not fetch; rely on Ops-populated window.state
 const EXEC_USE_NETWORK = false;
 
-// --- API base (match Ops; rooted routes, no /api suffix)
-const API_BASE =
-  (document.querySelector('meta[name="api-base"]')?.content || '')
-    .toString().replace(/\/+$/,'')
-  || (typeof window.API_BASE !== 'undefined'
-      ? String(window.API_BASE).replace(/\/+$/,'')
-      : location.origin);
+// --- API base (normalized; always ends with /api)
+const _rawBase =
+  document.querySelector('meta[name="api-base"]')?.content
+  || (typeof window.API_BASE !== 'undefined' ? window.API_BASE : location.origin);
+
+const API_BASE = (() => {
+  const b = String(_rawBase || '').replace(/\/+$/, ''); // strip trailing /
+  if (/\/api$/i.test(b)) return b;                      // already ends with /api
+  return b ? (b + '/api') : '/api';                     // append /api or default
+})();
 
 const g = (path) =>
   fetch(`${API_BASE}/${path}`, { headers: { 'Content-Type': 'application/json' } })
