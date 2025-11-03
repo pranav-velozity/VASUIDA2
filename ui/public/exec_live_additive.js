@@ -607,7 +607,58 @@ async function _execLoadWeek(ws) {
 
 let _execBootTimer = null;
 
-function _execTryRender() {
+
+// --- Fallback: if Ops hasn't hydrated window.state on Exec, load minimal data once
+async function __execEnsureStateLoaded() {
+  const s = window.state || (window.state = {});
+
+  // Ensure we at least have a weekStart
+  if (!s.weekStart) {
+    try {
+      if (typeof window.todayInTZ === 'function' && typeof window.mondayOfInTZ === 'function') {
+        const today = window.todayInTZ(BUSINESS_TZ);
+        s.weekStart = window.mondayOfInTZ(today);
+      } else {
+        // plain Monday-of-week fallback
+        const d = new Date();
+        const day = (d.getDay() + 6) % 7; // 0 = Monday
+        d.setHours(0,0,0,0);
+        d.setDate(d.getDate() - day);
+        s.weekStart = toISODate(d);
+      }
+    } catch {}
+  }
+  if (!s.weekStart) return; // nothing to do
+
+  const ws = s.weekStart;
+  const we = (window.weekEndISO || function (w) { const d=new Date(w); d.setDate(d.getDate()+6); return toISODate(d); })(ws);
+
+  const hasPlan = Array.isArray(s.plan)    && s.plan.length > 0;
+  const hasRecs = Array.isArray(s.records) && s.records.length > 0;
+  const hasBins = Array.isArray(s.bins)    && s.bins.length > 0;
+  if (hasPlan || hasRecs || hasBins) return; // already hydrated by Ops
+
+  try {
+    // Minimal endpoints: adjust the paths if your server uses different names
+    const [plan, records, bins] = await Promise.all([
+      g(`plan?weekStart=${ws}&weekEnd=${we}`),
+      g(`records?weekStart=${ws}&weekEnd=${we}`),
+      g(`bins?weekStart=${ws}&weekEnd=${we}`),
+    ]);
+
+    s.plan    = Array.isArray(plan)    ? plan    : [];
+    s.records = Array.isArray(records) ? records : [];
+    s.bins    = Array.isArray(bins)    ? bins    : [];
+
+    // Let Exec render now, and also allow Ops to overwrite later if it wants
+    window.dispatchEvent(new Event('state:ready'));
+  } catch (e) {
+    console.warn('[Exec fallback] fetch failed:', e);
+  }
+}
+
+
+async function _execTryRender() {
   if (location.hash !== '#exec') return;
 
   const s = window.state || (window.state = {});
@@ -620,6 +671,10 @@ function _execTryRender() {
     } catch {}
   }
   if (!s.weekStart) return;
+
+
+  // Ensure data exists at least once (fallback fetch), then continue
+  await __execEnsureStateLoaded();
 
   const hasPlan = Array.isArray(s.plan) && s.plan.length > 0;
   const hasRecs = Array.isArray(s.records) && s.records.length > 0;
