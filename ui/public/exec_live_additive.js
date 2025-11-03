@@ -78,8 +78,13 @@ const wkRecords = recordsAll.filter(r => {
 
     // Planned totals
     const plannedTotal = plan.reduce((s,p)=> s + (window.toNum? toNum(p.target_qty) : Number(p.target_qty||0)), 0);
-    const appliedTotal = wkRecords.length;
-    const completionPct = pct(appliedTotal, plannedTotal);
+// Sum units if qty/quantity present, otherwise count 1 per record
+const appliedTotal = wkRecords.reduce((s, r) => {
+  const q = Number(r.qty ?? r.quantity ?? 1);
+  return s + (Number.isFinite(q) && q > 0 ? q : 0);
+}, 0);
+
+const completionPct = pct(appliedTotal, plannedTotal);
 
     // Aggregates for discrepancy
     const agg = (typeof window.aggregate === 'function') ? window.aggregate(wkRecords) : {byPO:new Map(), bySKU:new Map()};
@@ -275,25 +280,22 @@ function renderDonutWithBaseline(slot, planned, applied) {
     pctText.textContent = Math.round(pct * 100) + '%';
   };
 
-  if (Number.isFinite(planned) && planned > 0 && Number.isFinite(applied)) {
-    const pct = Math.max(0, Math.min(1, applied / planned));
-    // small delay so the sweep is visible
-    requestAnimationFrame(() => animateTo(pct));
-  } else {
-    // Idle sweep (no data yet)
-    pctText.textContent = '';
-    appliedArc.style.animation = 'donutIdle 2.2s linear infinite';
-    const style = document.createElement('style');
-    style.textContent = `
-      @keyframes donutIdle {
-        0%   { stroke-dashoffset: ${CIRC}; }
-        50%  { stroke-dashoffset: ${CIRC*0.25}; }
-        100% { stroke-dashoffset: ${CIRC}; }
-      }
-    `;
-    slot.appendChild(style);
-  }
+// Animate in (always compute a pct; avoid "idle sweep")
+const animateTo = (pct) => {
+  const dash = CIRC * (1 - Math.max(0, Math.min(1, pct)));
+  appliedArc.style.transition = 'stroke-dashoffset 600ms ease';
+  appliedArc.setAttribute('stroke-dashoffset', dash);
+  pctText.textContent = Math.round(pct * 100) + '%';
+};
+
+// Robust pct: show 0% if planned<=0, show 100% if planned==0 but we have applied>0
+let p;
+if (!Number.isFinite(planned) || planned <= 0) {
+  p = applied > 0 ? 1 : 0;
+} else {
+  p = Math.max(0, Math.min(1, applied / planned));
 }
+requestAnimationFrame(() => animateTo(p));
 
 // ---- Radar (N axes) ----
 function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
