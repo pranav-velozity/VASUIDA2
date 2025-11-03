@@ -2082,6 +2082,21 @@ document.getElementById('btn-delete-uids')?.addEventListener('click', deleteUIDs
 })();
 </script>
 
+<script>
+(function () {
+  // Re-fire state:ready after Ops switches weeks (or re-populates state)
+  var oldSetWeek = window.setWeek;
+  if (typeof oldSetWeek === 'function') {
+    window.setWeek = async function () {
+      var r = await oldSetWeek.apply(this, arguments);
+      // At this point Ops has updated window.state.{weekStart, plan, records, bins}
+      window.dispatchEvent(new Event('state:ready'));
+      return r;
+    };
+  }
+})();
+</script>
+
 
 <script src="/exec_live_additive.js?v=8" defer></script>
 
