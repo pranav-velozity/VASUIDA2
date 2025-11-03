@@ -379,22 +379,6 @@ function renderDonutWithBaseline(slot, planned, applied) {
   });
 }
 
-  // Set ring immediately, no transition
-  appliedArc.style.transition = 'none';
-  const dash = CIRC * (1 - p);
-  appliedArc.setAttribute('stroke-dashoffset', dash);
-  pctText.textContent = Math.round(p * 100) + '%';
-
-  // Totals line: "Planned 844 · Applied 247"
-  const totalsText = document.createElement('div');
-  totalsText.className = 'absolute inset-x-0 bottom-0 text-base font-semibold text-gray-700 text-center';
-  totalsText.style.pointerEvents = 'none';
-  totalsText.textContent = `Planned ${fmt(planned || 0)} · Applied ${fmt(applied || 0)}`;
-  slot.appendChild(totalsText);
-
-
-}
-
 function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opts = {}) {
   slot.innerHTML = '';
 
