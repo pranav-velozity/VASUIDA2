@@ -8,16 +8,13 @@
   const BRAND = (typeof window.BRAND !== 'undefined') ? window.BRAND : '#990033';
   const BUSINESS_TZ = document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai';
 
-// --- API base (normalized; always ends with /api)
-const _rawBase =
-  document.querySelector('meta[name="api-base"]')?.content
-  || (typeof window.API_BASE !== 'undefined' ? window.API_BASE : 'https://vasudia1.onrender.com');
-
-const API_BASE = (() => {
-  const b = String(_rawBase || '').replace(/\/+$/, ''); // strip trailing /
-  if (/\/api$/i.test(b)) return b;                      // already ends with /api
-  return b ? (b + '/api') : '/api';                    // append /api or default
-})();
+// --- API base (match Ops; rooted routes, no /api suffix)
+const API_BASE =
+  (document.querySelector('meta[name="api-base"]')?.content || '')
+    .toString().replace(/\/+$/,'')
+  || (typeof window.API_BASE !== 'undefined'
+      ? String(window.API_BASE).replace(/\/+$/,'')
+      : location.origin);
 
 const g = (path) =>
   fetch(`${API_BASE}/${path}`, { headers: { 'Content-Type': 'application/json' } })
@@ -620,11 +617,21 @@ renderRadarWithBaseline(document.getElementById('radar-slot'), axes, [55,50,45,6
     };
   }
 
-// --- lightweight data loader for Executive (disabled; use in-memory state only) ---
+// --- lightweight data loader for Executive (mirror Ops endpoints) ---
 async function _execLoadWeek(ws) {
-  // Intentionally empty — Executive renders from window.state populated by the app (Ops).
   const s = window.state || (window.state = {});
   s.weekStart = ws || s.weekStart;
+  const we = (typeof weekEndISO === 'function') ? weekEndISO(s.weekStart) : s.weekStart;
+
+  const [plan, bins, records] = await Promise.all([
+    fetch(`${API_BASE}/plan/weeks/${s.weekStart}`).then(r => r.ok ? r.json() : [] ).catch(() => []),
+    fetch(`${API_BASE}/bins/weeks/${s.weekStart}`).then(r => r.ok ? r.json() : [] ).catch(() => []),
+    fetch(`${API_BASE}/records?from=${encodeURIComponent(s.weekStart)}&to=${encodeURIComponent(we)}`).then(r => r.ok ? r.json() : [] ).catch(() => []),
+  ]);
+
+  s.plan    = Array.isArray(plan)    ? plan    : [];
+  s.bins    = Array.isArray(bins)    ? bins    : [];
+  s.records = Array.isArray(records) ? records : [];
 }
 
 
@@ -633,7 +640,6 @@ function _execTryRender() {
 
   const s = window.state || (window.state = {});
 
-  // If the app hasn’t set a week yet, derive one (no network calls)
   if (!s.weekStart && typeof window.todayInTZ === 'function' && typeof window.mondayOfInTZ === 'function') {
     try {
       const today = window.todayInTZ(BUSINESS_TZ);
@@ -644,11 +650,22 @@ function _execTryRender() {
   const hasPlan = Array.isArray(s.plan) && s.plan.length > 0;
   const hasRecs = Array.isArray(s.records) && s.records.length > 0;
 
-  // Render only when the app’s state has data (same as Ops)
-  if (s.weekStart && (hasPlan || hasRecs)) {
+  // If we don't have enough data yet, fetch it now and then render
+  if (s.weekStart && (!hasPlan || !hasRecs)) {
+    _execLoadWeek(s.weekStart).then(() => {
+      if (location.hash === '#exec') {
+        try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
+      }
+    });
+    return;
+  }
+
+  if (s.weekStart) {
     try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
   }
-}  _execBootTimer = setInterval(_execTryRender, 600);
+}
+
+  _execBootTimer = setInterval(_execTryRender, 600);
   document.addEventListener('visibilitychange', _execTryRender);
   setTimeout(_execTryRender, 0);
 
