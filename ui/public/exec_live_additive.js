@@ -675,24 +675,26 @@ async function _execEnsureStateLoaded(ws) {
   const s = window.state || (window.state = {});
   if (ws) s.weekStart = ws;
 
+  // compute weekEnd for records
+  const we = (window.weekEndISO || (w => { const d=new Date(w); d.setDate(d.getDate()+6); return d.toISOString().slice(0,10); }))(s.weekStart);
+
   const needPlan    = !Array.isArray(s.plan)    || s.plan.length === 0;
   const needRecords = !Array.isArray(s.records) || s.records.length === 0;
-  const needBins    = !Array.isArray(s.bins);
+  const needBins    = !Array.isArray(s.bins)    || s.bins.length === 0;
 
   if (!(needPlan || needRecords || needBins)) return;
 
-  const qs = `weekStart=${encodeURIComponent(s.weekStart || '')}`;
-
   const [plan, records, bins] = await Promise.all([
-    needPlan    ? g(`plan?${qs}`)    : Promise.resolve(s.plan),
-    needRecords ? g(`records?${qs}`) : Promise.resolve(s.records),
-    needBins    ? g(`bins?${qs}`)    : Promise.resolve(s.bins),
+    needPlan    ? fetchPlanForWeek(s.weekStart).catch(() => [])                                : Promise.resolve(s.plan),
+    needRecords ? fetchRecordsForWeek(s.weekStart, we).then(x => x.records || []).catch(() => []) : Promise.resolve(s.records),
+    needBins    ? fetchBinsForWeek(s.weekStart).catch(() => [])                                : Promise.resolve(s.bins),
   ]);
 
   s.plan    = Array.isArray(plan)    ? plan    : (s.plan || []);
   s.records = Array.isArray(records) ? records : (s.records || []);
   s.bins    = Array.isArray(bins)    ? bins    : (s.bins || []);
 }
+
 
 let _execBootTimer = null;
 
