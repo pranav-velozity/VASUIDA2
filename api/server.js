@@ -41,6 +41,19 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '100mb' }));
 
+/* ===== BEGIN: /api alias -> root endpoints =====
+   This lets /api/plan, /api/records, /api/bins hit the same handlers as
+   /plan, /records, /bins without duplicating code.
+   Place ABOVE all your app.get('/...') routes.
+*/
+app.use('/api', (req, res, next) => {
+  // keep querystring; only drop the /api prefix
+  // e.g. /api/plan?weekStart=2025-11-03 -> /plan?weekStart=2025-11-03
+  req.url = req.url.replace(/^\/api\/?/, '/');
+  next();
+});
+/* ===== END: /api alias ===== */
+
 // --- Time helpers (America/Chicago) ---
 function chicagoISOFromDate(d = new Date()) {
   try {
@@ -382,6 +395,36 @@ app.post('/records/delete', (req, res) => {
   return res.json({ ok: true, total_deleted: total, results });
 });
 
+// Simple helper to compute Monday for a given date (kept consistent with your existing mondayOf)
+function mondayOfLoose(ymd) {
+  if (!ymd) return '';
+  try {
+    const d = new Date(String(ymd).trim() + 'T00:00:00Z');
+    const day = d.getUTCDay();               // 0..6, Sunday=0
+    const diff = (day === 0 ? -6 : (1 - day));
+    d.setUTCDate(d.getUTCDate() + diff);
+    return d.toISOString().slice(0,10);
+  } catch { return ''; }
+}
+
+/* ===== BEGIN: /plan?weekStart=YYYY-MM-DD alias =====
+   Returns the same payload as GET /plan/weeks/:mondayISO
+   (works for /api/plan too thanks to the /api alias above)
+*/
+app.get('/plan', (req, res) => {
+  const ws = String(req.query.weekStart || req.query.ws || '').trim();
+  if (!ws) return res.status(400).json({ error: 'weekStart required' });
+  const monday = mondayOfLoose(ws);
+  if (!monday) return res.status(400).json({ error: 'invalid weekStart' });
+
+  const row = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(monday);
+  if (!row) return res.json([]);
+  try { return res.json(JSON.parse(row.data) || []); }
+  catch { return res.json([]); }
+});
+/* ===== END: /plan alias ===== */
+
+
 // ---------- Weekly Plan API (kept) ----------
 function normalizePlanArray(body, fallbackStart) {
   if (!Array.isArray(body)) return [];
@@ -545,6 +588,28 @@ binsRouter.get('/weeks/:ws', async (req, res) => {
 });
 
 app.use('/bins', binsRouter);
+
+/* ===== BEGIN: /bins?weekStart=YYYY-MM-DD alias =====
+   Returns the same as GET /bins/weeks/:ws
+   (works for /api/bins too thanks to the /api alias above)
+*/
+app.get('/bins', (req, res) => {
+  const ws = String(req.query.weekStart || req.query.ws || '').trim();
+  if (!ws) return res.status(400).json({ error: 'weekStart required' });
+  const monday = mondayOfLoose(ws);
+  if (!monday) return res.status(400).json({ error: 'invalid weekStart' });
+
+  try {
+    const rows = Bins.getByWeek(monday);
+    return res.json(rows);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send('Failed to fetch bins');
+  }
+});
+/* ===== END: /bins alias ===== */
+
+
 
 // ---- Start ----
 app.listen(PORT, () => {
