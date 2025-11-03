@@ -372,13 +372,12 @@ function renderDonutWithBaseline(slot, planned, applied, opts = {}) {
     p = Math.max(0, Math.min(1, Number(applied || 0) / Number(planned)));
   }
 
-  // one-time animate to target and stay there
-  requestAnimationFrame(() => {
-    const dash = CIRC * (1 - p);
-    appliedArc.style.transition = 'stroke-dashoffset 600ms ease';
-    appliedArc.setAttribute('stroke-dashoffset', dash);
-    pctText.textContent = Math.round(p * 100) + '%';
-  });
+// set once, no animation
+const dash = CIRC * (1 - p);
+appliedArc.style.transition = 'none';
+appliedArc.setAttribute('stroke-dashoffset', dash);
+pctText.textContent = Math.round(p * 100) + '%';
+
 }
 
 function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opts = {}) {
