@@ -572,23 +572,6 @@ async function _execLoadWeek(ws) {
   // no fetch here on Exec
 }
 
-  // Only pull what’s missing to avoid stomping on Ops state
-  const needPlan    = !Array.isArray(s.plan)    || s.plan.length === 0;
-  const needRecords = !Array.isArray(s.records) || s.records.length === 0;
-  const needBins    = !Array.isArray(s.bins);
-
-  const [plan, records, bins] = await Promise.all([
-    needPlan    ? tryFetch('plan')    : Promise.resolve(s.plan),
-    needRecords ? tryFetch('records') : Promise.resolve(s.records),
-    needBins    ? tryFetch('bins')    : Promise.resolve(s.bins),
-  ]);
-
-  // write back, preserving anything that already existed
-  s.plan    = Array.isArray(plan)    ? plan    : (s.plan || []);
-  s.records = Array.isArray(records) ? records : (s.records || []);
-  s.bins    = Array.isArray(bins)    ? bins    : (s.bins || []);
-}
-
 function _execTryRender() {
   if (location.hash !== '#exec') return;
 
