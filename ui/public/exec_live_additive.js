@@ -381,20 +381,31 @@ function renderDonutWithBaseline(slot, planned, applied) {
 }
 
 
-// ---- Radar (N axes) ----
+// ---- Radar (N axes) — same tile size; bigger, unclipped labels ----
 function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
   slot.innerHTML = '';
 
   const N = labels.length;
-  // give ourselves a larger canvas so long labels aren't clipped
-  const size = 420;        // was 320
-  const pad  = 36;         // was 24
-  const cx = size / 2, cy = size / 2;
-  const R  = (size / 2) - pad;
 
+  // Displayed pixel size (keep as before)
+  const displaySize = 320;
+
+  // Extra invisible margin in the viewBox to prevent label clipping
+  const vbPad  = 44;                              // how much room for labels
+  const vbSize = displaySize + vbPad * 2;
+
+  // Chart geometry (unchanged ring size inside the 320 box)
+  const pad = 22;                                  // inner padding for the web
+  const cx  = displaySize / 2;
+  const cy  = displaySize / 2;
+  const R   = (displaySize / 2) - pad;             // web radius
+
+  // SVG: keep width/height = displaySize so tile size is unchanged,
+  // but expand the viewBox so text outside isn't clipped.
   const svg = _el('svg', {
-    viewBox: `0 0 ${size} ${size}`,
-    width: size, height: size,
+    viewBox: `${-vbPad} ${-vbPad} ${vbSize} ${vbSize}`,
+    width: displaySize,
+    height: displaySize,
     style: 'display:block'
   });
 
@@ -414,18 +425,17 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
     svg.appendChild(_el('line', { x1:cx, y1:cy, x2:x, y2:y, stroke: GREY_STROKE, 'stroke-width':1 }));
   }
 
-  // labels – push them outside the web and make them readable
-  const labelRadius = R + 32;    // farther out than before
+  // labels – slightly farther out, larger, semibold
+  const labelRadius = R + 28;                       // push labels out (but web size unchanged)
   labels.forEach((lab,i)=>{
     const ang = (-Math.PI/2) + (i * 2*Math.PI / N);
     const x = cx + labelRadius * Math.cos(ang);
     const y = cy + labelRadius * Math.sin(ang);
-
     const t = _el('text', {
       x, y,
       'text-anchor':'middle',
       'dominant-baseline':'middle',
-      'font-size':'14',          // was 11
+      'font-size':'14',
       'font-weight':'600',
       fill:'#374151'
     });
@@ -433,13 +443,13 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues) {
     svg.appendChild(t);
   });
 
-  // baseline
+  // baseline polygon
   svg.appendChild(_el('polygon', {
     points: poly(baselineValues),
     fill: GREY, 'fill-opacity': 0.35, stroke: GREY_STROKE, 'stroke-width': 1
   }));
 
-  // actual (draw once, no animation)
+  // actual polygon
   if (actualValues && actualValues.length === N) {
     svg.appendChild(_el('polygon', {
       points: poly(actualValues),
