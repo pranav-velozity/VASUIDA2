@@ -561,6 +561,36 @@ const sameDay = (a,b) => a && b && compareYMD(a,b) === 0;
 // Domain = planned baseline thru the end of this week (don’t extend view for baseline week)
 const axisMin = plannedBaseline;
 const axisMax = we;
+// Centered bar geometry you already have
+const spanFactor = 0.82;
+const inner = width - pad * 2;
+const span  = Math.round(inner * spanFactor);
+const originX = pad + Math.round((inner - span) / 2);
+
+// Piece-wise allocation: small left stub for Baseline→Inventory, big segment for Mon→Sun
+const leftFrac   = 0.12;                 // 12% for baseline stub (tweak 0.1–0.18)
+const rightFrac  = 1 - leftFrac;         // rest for the week
+const leftSpan   = Math.round(span * leftFrac);
+const rightSpan  = span - leftSpan;
+const leftStartX = originX;
+const rightStartX = originX + leftSpan;
+
+// Helpers for time math
+const tBaseline = parseYMD(plannedBaseline).getTime();
+const tMon      = parseYMD(ws).getTime();
+const tSun      = parseYMD(we).getTime();
+
+// New scale: clamp to [baseline, Sun], compress [baseline..Mon] into left stub, [Mon..Sun] into main segment
+const scaleX = (ymd) => {
+  const t = parseYMD(ymd).getTime();
+  if (t <= tMon) {
+    const p = (t - tBaseline) / Math.max(1, (tMon - tBaseline)); // 0..1 in stub
+    return leftStartX + Math.round(Math.max(0, Math.min(1, p)) * leftSpan);
+  } else {
+    const p = (t - tMon) / Math.max(1, (tSun - tMon));           // 0..1 in week
+    return rightStartX + Math.round(Math.max(0, Math.min(1, p)) * rightSpan);
+  }
+};
 
 
   const minT = parseYMD(axisMin).getTime();
@@ -642,23 +672,42 @@ const dots = [
 ];
 
 
-  dots.forEach(d => {
-    const x  = scaleX(d.ymd);
-    const cy = d.where === 'above' ? (barY - 18) : (barY + barH + 18);
+dots.forEach(d => {
+  if (!d.ymd) return;
 
-// dot
-svg.appendChild(_el('circle', {
-  cx: x, cy: d.where === 'above' ? (barY - 6) : (barY + barH + 6), r: 4, fill: d.color
-}));
-// label
-if (d.label) {
-  const labelEl = _el('text', {
-    x, y: cy, 'text-anchor': 'middle', 'font-size': '11', fill: '#374151'
-  });
-  labelEl.textContent = d.label;
-  svg.appendChild(labelEl);
-}
-  });
+  const x  = scaleX(d.ymd);
+  const cy = d.where === 'above' ? (barY - 18) : (barY + barH + 18);
+
+  // Keep marks/labels slightly inside the bar edges
+  const minX = originX + 8;
+  const maxX = originX + span - 8;
+  const xClamped = Math.max(minX, Math.min(maxX, x));
+
+  // Gentle left/right nudges to avoid crowding near week end
+  let xLabel = xClamped;
+  if (d.label && /Processing \(Plan\)/.test(d.label)) xLabel -= 10;  // nudge left
+  if (d.label && /Dispatched \(Plan\)/.test(d.label)) xLabel += 10;  // nudge right
+
+  const yDot = d.where === 'above' ? (barY - 6) : (barY + barH + 6);
+
+  // dot (use clamped x)
+  svg.appendChild(_el('circle', { cx: xClamped, cy: yDot, r: 4, fill: d.color }));
+
+  // label (use nudged x)
+  if (d.label) {
+    const labelEl = _el('text', {
+      x: xLabel,
+      y: cy,
+      'text-anchor': 'middle',
+      'dominant-baseline': 'middle',
+      'font-size': '11',
+      fill: '#374151'
+    });
+    labelEl.textContent = d.label;
+    svg.appendChild(labelEl);
+  }
+});
+
 
   slot.appendChild(svg);
 }  // end renderExecTimeline
