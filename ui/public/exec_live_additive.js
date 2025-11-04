@@ -264,7 +264,6 @@ let ws = window.state?.weekStart;
   };
 }
 
-
   // ---------- SVG renderers ----------
   function radarSVG({axes, values, size=260}){
     const cx=size/2, cy=size/2, r=size*0.38; const n=axes.length; const toRad=(deg)=> (deg*Math.PI/180);
@@ -315,24 +314,6 @@ let ws = window.state?.weekStart;
       <polyline points="${pts}" fill="none" stroke="${BRAND}" stroke-width="2" />
     </svg>`;
   }
-
-// ===== Date helpers for timeline =====
-function parseYMD(ymd){ const [y,m,d] = String(ymd).split('-').map(Number); return new Date(y, m-1, d); }
-function toYMD(d){ const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${day}`; }
-function addDaysYMD(ymd, n){ const d=parseYMD(ymd); d.setDate(d.getDate()+n); return toYMD(d); }
-function isBusinessDay(d){ const wd=d.getDay(); return wd!==0 && wd!==6; } // Mon..Fri
-function minusBusinessDaysFrom(ymd, n){
-  let d=parseYMD(ymd), left=n;
-  while(left>0){ d.setDate(d.getDate()-1); if(isBusinessDay(d)) left--; }
-  return toYMD(d);
-}
-function clampYMD(ymd, minYMD, maxYMD){
-  const t=parseYMD(ymd).getTime(), a=parseYMD(minYMD).getTime(), b=parseYMD(maxYMD).getTime();
-  if (t < a) return minYMD; if (t > b) return maxYMD; return ymd;
-}
-function compareYMD(a,b){ return parseYMD(a) - parseYMD(b); }
-
-
 
 // ===== SVG Helpers (no libs) =====
 const GREY  = '#e5e7eb';
@@ -488,16 +469,9 @@ function renderExecTimeline(slot, m) {
   if (!slot) return;
 slot.innerHTML = '';
 
-const monthShort = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-const shortDate = (ymd) => {
-  const d = parseYMD(ymd);
-  return `${monthShort[d.getMonth()]} ${String(d.getDate()).padStart(1,'0')}`;
-};
-const sameDay = (a,b) => a && b && compareYMD(a,b) === 0;
+  // ===== Helpers (declare before any use) =====
 
-
-
-  // ---------- tiny helpers (local to avoid globals)
+  // Tiny date helpers (pure)
   const parseYMD = (s) => {
     const [y, mo, d] = String(s).split('-').map(Number);
     return new Date(y, mo - 1, d);
@@ -515,7 +489,7 @@ const sameDay = (a,b) => a && b && compareYMD(a,b) === 0;
   };
   const compareYMD = (a, b) => parseYMD(a).getTime() - parseYMD(b).getTime();
 
-  // minus business days from a YMD (Mon–Fri only)
+  // Business-day math
   const minusBusinessDaysFrom = (ymd, nBiz) => {
     let d = parseYMD(ymd);
     let left = nBiz;
@@ -527,6 +501,7 @@ const sameDay = (a,b) => a && b && compareYMD(a,b) === 0;
     return toYMD(d);
   };
 
+  // Range clamp
   const clampYMD = (ymd, lo, hi) => {
     if (!ymd) return ymd;
     if (compareYMD(ymd, lo) < 0) return lo;
@@ -534,7 +509,17 @@ const sameDay = (a,b) => a && b && compareYMD(a,b) === 0;
     return ymd;
   };
 
-  // ---------- inputs from metrics/state
+  // Formatting helpers that depend on parseYMD
+const monthShort = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const shortDate = (ymd) => {
+  const d = parseYMD(ymd);
+  return `${monthShort[d.getMonth()]} ${String(d.getDate()).padStart(1,'0')}`;
+};
+const sameDay = (a,b) => a && b && compareYMD(a,b) === 0;
+
+
+
+   // ---------- inputs from metrics/state
   const ws = m.ws;              // week start (Mon)
   const we = m.we;              // week end (Sun)
   if (!ws || !we) return;
@@ -558,68 +543,43 @@ const sameDay = (a,b) => a && b && compareYMD(a,b) === 0;
     processingActual = addDaysYMD(ws, 2); // Wed fallback
   }
 
-// Domain = planned baseline thru the end of this week (don’t extend view for baseline week)
-const axisMin = plannedBaseline;
-const axisMax = we;
-// Centered bar geometry you already have
-const spanFactor = 0.82;
-const inner = width - pad * 2;
-const span  = Math.round(inner * spanFactor);
-const originX = pad + Math.round((inner - span) / 2);
+  // ---------- draw prelude (short, centered bar + piece-wise scale)
+  const w0    = slot.clientWidth || slot.parentElement?.clientWidth || 0;
+  const width = Math.max(720, w0 || 720);
+  const height = 120;
+  const pad    = 28;
 
-// Piece-wise allocation: small left stub for Baseline→Inventory, big segment for Mon→Sun
-const leftFrac   = 0.12;                 // 12% for baseline stub (tweak 0.1–0.18)
-const rightFrac  = 1 - leftFrac;         // rest for the week
-const leftSpan   = Math.round(span * leftFrac);
-const rightSpan  = span - leftSpan;
-const leftStartX = originX;
-const rightStartX = originX + leftSpan;
+  const inner      = width - pad * 2;
+  const spanFactor = 0.82;                     // shorten bar (tweak 0.76–0.88)
+  const span       = Math.round(inner * spanFactor);
+  const originX    = pad + Math.round((inner - span) / 2);
 
-// Helpers for time math
-const tBaseline = parseYMD(plannedBaseline).getTime();
-const tMon      = parseYMD(ws).getTime();
-const tSun      = parseYMD(we).getTime();
+  // small stub for Baseline→Mon, full segment for Mon→Sun
+  const leftFrac    = 0.12;                    // tweak 0.10–0.18
+  const leftSpan    = Math.round(span * leftFrac);
+  const rightSpan   = span - leftSpan;
+  const leftStartX  = originX;
+  const rightStartX = originX + leftSpan;
 
-// New scale: clamp to [baseline, Sun], compress [baseline..Mon] into left stub, [Mon..Sun] into main segment
-const scaleX = (ymd) => {
-  const t = parseYMD(ymd).getTime();
-  if (t <= tMon) {
-    const p = (t - tBaseline) / Math.max(1, (tMon - tBaseline)); // 0..1 in stub
-    return leftStartX + Math.round(Math.max(0, Math.min(1, p)) * leftSpan);
-  } else {
-    const p = (t - tMon) / Math.max(1, (tSun - tMon));           // 0..1 in week
-    return rightStartX + Math.round(Math.max(0, Math.min(1, p)) * rightSpan);
-  }
-};
+  const tBaseline = parseYMD(plannedBaseline).getTime();
+  const tMon      = parseYMD(ws).getTime();
+  const tSun      = parseYMD(we).getTime();
 
-
-  const minT = parseYMD(axisMin).getTime();
-  const maxT = parseYMD(axisMax).getTime();
-
-  // ---------- draw
-// If slot is not laid out yet, look at parent; still default to a wide canvas
-const w0 = slot.clientWidth || slot.parentElement?.clientWidth || 0;
-const width = Math.max(720, w0 || 720);
-const height = 120;
-const pad = 28;
-// Use only a portion of the available width and center it
-const spanFactor = 0.82;                 // 82% of inner width — tweak if you want shorter/longer
-const inner = width - pad * 2;
-const span  = Math.round(inner * spanFactor);
-const originX = pad + Math.round((inner - span) / 2);  // centered left edge for drawing
-
-
+  const scaleX = (ymd) => {
+    const t = parseYMD(ymd).getTime();
+    if (t <= tMon) {
+      const p = (t - tBaseline) / Math.max(1, (tMon - tBaseline));   // 0..1 in stub
+      return leftStartX + Math.round(Math.max(0, Math.min(1, p)) * leftSpan);
+    } else {
+      const p = (t - tMon) / Math.max(1, (tSun - tMon));              // 0..1 in week
+      return rightStartX + Math.round(Math.max(0, Math.min(1, p)) * rightSpan);
+    }
+  };
 
   const svg = _el('svg', {
     viewBox: `0 0 ${width} ${height}`,
     width, height, style: 'display:block'
   });
-
-const scaleX = (ymd) => {
-  const t = parseYMD(ymd).getTime();
-  const p = (t - minT) / Math.max(1, (maxT - minT));
-  return originX + Math.round(p * span);
-};
 
 // base bar (soft grey so it’s visible on white cards)
 const barY = 72, barH = 12;
