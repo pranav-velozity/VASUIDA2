@@ -486,6 +486,7 @@ function _mix(a,b,t){ return a + (b-a)*t; } // linear map
 
 function renderExecTimeline(slot, m) {
   if (!slot) return;
+slot.innerHTML = '';
 
   // ---------- tiny helpers (local to avoid globals)
   const parseYMD = (s) => {
@@ -918,8 +919,7 @@ renderRadarWithBaseline(radarSlot, axes, [55,50,45,60,50,40], values, { size: ra
 
 // ---- Feed actual dates for the timeline (preferred: Ops overrides; fallback: records)
 {
-  // Optional overrides if Ops provides them (exact names can be adjusted to your schema)
-  const invOverride  = window.state?.milestones?.inventory_actual_ymd
+    const invOverride  = window.state?.milestones?.inventory_actual_ymd
                     || window.state?.inventory_actual_ymd
                     || window.state?.inventoryActualYMD;
 
@@ -931,13 +931,22 @@ renderRadarWithBaseline(radarSlot, axes, [55,50,45,60,50,40], values, { size: ra
 
   if (invOverride)  m.inventoryActualYMD  = invOverride;
   if (dispOverride) m.dispatchedActualYMD = dispOverride;
+
+  // Fallbacks from week record dates if overrides absent
+  const ymds = Array.isArray(m._wkDatesSorted) ? m._wkDatesSorted : [];
+  const invFromRecs  = ymds.length ? ymds[0] : m.ws;
+  const dispFromRecs = ymds.length ? ymds[ymds.length - 1] : m.we;
+  if (!m.inventoryActualYMD)  m.inventoryActualYMD  = invFromRecs;
+  if (!m.dispatchedActualYMD) m.dispatchedActualYMD = dispFromRecs;
 }
 
-}
-
-// Timeline (planned vs actual)
+// Timeline (planned vs actual) — render once, here
 const timelineSlot = document.getElementById('timeline-slot');
 if (timelineSlot) renderExecTimeline(timelineSlot, m);
+}
+
+
+
 
 
   // Render when Exec page is shown
@@ -947,13 +956,14 @@ if (timelineSlot) renderExecTimeline(timelineSlot, m);
   }
   window.addEventListener('hashchange', onHash);
   // Also render once if Exec is already selected
-  if ((location.hash||'#dashboard') === '#exec') setTimeout(renderExec, 0);
+  if ((location.hash||'#dashboard') === '#exec') setTimeout(_execTryRender, 0);
+
   // Re-render on week change from existing app
   const _oldSetWeek = window.setWeek;
   if (typeof _oldSetWeek === 'function'){
     window.setWeek = async function(ws){
       const r = await _oldSetWeek.apply(this, arguments);
-      if ((location.hash||'#dashboard') === '#exec') setTimeout(renderExec, 0);
+      if ((location.hash||'#dashboard') === '#exec') setTimeout(_execTryRender, 0);
       return r;
     };
   }
