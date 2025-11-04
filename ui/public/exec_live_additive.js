@@ -321,31 +321,27 @@ function _el(tag, attrs={}, children=[]) {
 
 function renderDonutWithBaseline(slot, planned, applied, opts = {}) {
   slot.innerHTML = '';
-  // center the SVG within the card
+
+  // Stable, explicit size
+  const size = Math.max(260, Math.min((opts.size || 340), 460));
+  slot.style.minHeight = size + 'px';
   slot.style.display = 'flex';
   slot.style.alignItems = 'center';
   slot.style.justifyContent = 'center';
+  slot.style.position = 'relative';
 
-  // size derived from slot/card, with safe bounds
-  const autoSide = Math.min(
-    slot.clientWidth || 9999,
-    (slot.clientHeight || slot.parentElement?.clientHeight || 9999)
-  );
-  // slightly smaller and capped so it doesn't dominate the card
-  const size = Math.max(220, Math.min(opts.size ?. (autoSide * 0.72) || 360, 420));
-
-  const r    = Math.round(size * 0.48);
+  const r = Math.round(size * 0.41);
   const cx = size / 2, cy = size / 2;
   const CIRC = 2 * Math.PI * r;
 
-  const svg = _el('svg', { viewBox: `0 0 ${size} ${size}`, width: size, height: size, style: 'display:block' });
+  const svg = _el('svg', { viewBox: `0 0 ${size} ${size}`, width: size, height: size, style: 'display:block;margin:auto' });
 
   // baseline ring
   svg.appendChild(_el('circle', {
     cx, cy, r,
     fill: 'none',
     stroke: GREY,
-    'stroke-width': 18
+    'stroke-width': 16
   }));
 
   // applied ring
@@ -353,7 +349,7 @@ function renderDonutWithBaseline(slot, planned, applied, opts = {}) {
     cx, cy, r,
     fill: 'none',
     stroke: BRAND,
-    'stroke-width': 18,
+    'stroke-width': 16,
     'stroke-linecap': 'round',
     transform: `rotate(-90 ${cx} ${cy})`,
     'stroke-dasharray': CIRC,
@@ -362,14 +358,13 @@ function renderDonutWithBaseline(slot, planned, applied, opts = {}) {
   svg.appendChild(appliedArc);
   slot.appendChild(svg);
 
-  // fixed % label in the center
+  // % label in the center
   const pctText = document.createElement('div');
   pctText.className = 'absolute inset-0 flex items-center justify-center text-sm text-gray-600';
   pctText.style.pointerEvents = 'none';
-  slot.style.position = 'relative';
   slot.appendChild(pctText);
 
-  // % computation (robust when planned <= 0)
+  // compute %
   let p;
   if (!Number.isFinite(planned) || planned <= 0) {
     p = (Number(applied) > 0) ? 1 : 0;
@@ -377,7 +372,6 @@ function renderDonutWithBaseline(slot, planned, applied, opts = {}) {
     p = Math.max(0, Math.min(1, Number(applied || 0) / Number(planned)));
   }
 
-  // set once, no animation
   const dash = CIRC * (1 - p);
   appliedArc.style.transition = 'none';
   appliedArc.setAttribute('stroke-dashoffset', dash);
@@ -386,24 +380,20 @@ function renderDonutWithBaseline(slot, planned, applied, opts = {}) {
 
 function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opts = {}) {
   slot.innerHTML = '';
-  // center the SVG within the card
-  slot.style.display = 'flex';
-  slot.style.alignItems = 'center';
-  slot.style.justifyContent = 'center';
 
-  const N = labels.length;
-  const displaySize = opts.size ?? 360;   // used only if size wasn't passed
-  const vbPad  = 28;                      // tighter outer bleed
+  // Bigger, centered radar
+  const displaySize = Math.max(360, Math.min((opts.size || 420), 520));
+  const vbPad  = 64;                              // extra bleed for labels
   const vbSize = displaySize + vbPad * 2;
-  const pad = 10;
   const cx  = displaySize / 2, cy = displaySize / 2;
-  const R   = (displaySize / 2) - pad;
+  const R   = (displaySize / 2) - 22;             // chart radius
 
   const svg = _el('svg', {
     viewBox: `${-vbPad} ${-vbPad} ${vbSize} ${vbSize}`,
-    width: displaySize, height: displaySize, style: 'display:block'
+    width: displaySize, height: displaySize, style: 'display:block;margin:auto'
   });
 
+  const N = labels.length;
   const pt = (i, v) => {
     const ang = (-Math.PI / 2) + (i * 2 * Math.PI / N);
     const r = (Math.max(0, Math.min(100, v)) / 100) * R;
@@ -411,7 +401,7 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
   };
   const poly = vals => vals.map((v, i) => pt(i, v)).map(([x, y]) => `${x},${y}`).join(' ');
 
-  // grid
+  // grid + spokes
   [20, 40, 60, 80, 100].forEach(t => {
     svg.appendChild(_el('circle', { cx, cy, r: (t / 100) * R, fill: 'none', stroke: GREY_STROKE, 'stroke-width': 1 }));
   });
@@ -420,22 +410,19 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
     svg.appendChild(_el('line', { x1: cx, y1: cy, x2: x, y2: y, stroke: GREY_STROKE, 'stroke-width': 1 }));
   }
 
-    // label placement (no numeric value labels)
-  const labelR = R + 24;
-
+  // axis labels (slightly bigger)
+  const labelR = R + 34;
   for (let i = 0; i < N; i++) {
     const ang = (-Math.PI / 2) + (i * 2 * Math.PI / N);
     const lx = cx + labelR * Math.cos(ang);
     const ly = cy + labelR * Math.sin(ang);
-
     const t = _el('text', {
       x: lx, y: ly, 'text-anchor': 'middle', 'dominant-baseline': 'middle',
-      'font-size': '16', 'font-weight': '600', fill: '#374151'
+      'font-size': '13', 'font-weight': '600', fill: '#374151'
     });
     t.textContent = labels[i];
     svg.appendChild(t);
   }
-
 
   // polygons
   svg.appendChild(_el('polygon', {
@@ -443,9 +430,10 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
     fill: GREY, 'fill-opacity': 0.35, stroke: GREY_STROKE, 'stroke-width': 1
   }));
   if (actualValues && actualValues.length === N) {
+    // NOTE: labels for actual values are intentionally removed
     svg.appendChild(_el('polygon', {
       points: poly(actualValues),
-      fill: BRAND, 'fill-opacity': 0.15, stroke: BRAND, 'stroke-width': 2
+      fill: BRAND, 'fill-opacity': 0.18, stroke: BRAND, 'stroke-width': 2
     }));
   }
 
@@ -592,16 +580,13 @@ if (donutStatsEl) {
 }
 
 
-// compute sizes from actual slots
+// compute sizes from actual slots (use stable sizes so charts don’t vanish)
 const donutSlot = document.getElementById('donut-slot');
 const radarSlot = document.getElementById('radar-slot');
 
-const donutSize = Math.floor(
-  Math.min(donutSlot.clientWidth || 400, (donutSlot.parentElement?.clientHeight || 400)) * 0.75
-);
-const radarSize = Math.floor(
-  Math.min(radarSlot.clientWidth || 400, (radarSlot.parentElement?.clientHeight || 400)) * 0.90
-);
+// lock sensible sizes; avoid depending on parent heights which can be 0 during layout
+const donutSize = 340;  // px canvas for donut
+const radarSize = 420;  // px canvas for radar
 
 
     // Tiles
