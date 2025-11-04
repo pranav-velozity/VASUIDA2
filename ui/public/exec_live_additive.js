@@ -4,7 +4,7 @@
  * - Uses existing global state & helpers: state, weekEndISO, ymdFromCompletedAtInTZ, todayInTZ, mondayOfInTZ, toNum, aggregate, joinPOProgress
  * - No edits to existing routes/exports/logic; safe to include after current script.
  */
-(function ExecLiveAdditive(){
+;(function ExecLiveAdditive(){
   const BRAND = (typeof window.BRAND !== 'undefined') ? window.BRAND : '#990033';
   const BUSINESS_TZ = document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai';
 
