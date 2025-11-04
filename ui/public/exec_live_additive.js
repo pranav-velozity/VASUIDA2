@@ -583,6 +583,12 @@ const sameDay = (a,b) => a && b && compareYMD(a,b) === 0;
 
 // base bar (soft grey so it’s visible on white cards)
 const barY = 72, barH = 12;
+// Colors
+const PLANNED_STROKE = '#B73A5C';  // planned line
+const ACTUAL_FILL    = BRAND;      // actual fill & dots
+const ACTUAL_DOT     = BRAND;
+const PLANNED_DOT    = '#B73A5C';
+
 svg.appendChild(_el('rect', {
   x: pad,
   y: barY,
@@ -600,14 +606,15 @@ svg.appendChild(_el('rect', {
   const plannedStartX = scaleX(inventoryPlanned);
   const plannedEndX   = scaleX(dispatchedPlanned);
   svg.appendChild(_el('line', {
-    x1: plannedStartX, y1: barY + barH / 2, x2: plannedEndX, y2: barY + barH / 2,
-    stroke: '#B73A5C', 'stroke-width': 4, 'stroke-linecap': 'round'
-  }));
+  x1: plannedStartX, y1: barY + barH / 2, x2: plannedEndX, y2: barY + barH / 2,
+  stroke: PLANNED_STROKE, 'stroke-width': 4, 'stroke-linecap': 'round'
+}));
+
 
     // ===== Actual progress fill =====
   // Priority: 1) Ops override %; 2) latest actual date among Dispatched/Processing/Inventory; 3) none -> no fill
-  const fillStartX = scaleX(inventoryPlanned); // progress starts at planned inventory (Mon)
-
+  const fillStartX = scaleX(baselineActual || inventoryPlanned);
+ 
   // Case 1: Ops % override
   if (m._opsCompletionPct != null) {
     const pct01 = Math.max(0, Math.min(100, m._opsCompletionPct)) / 100;
@@ -617,7 +624,7 @@ svg.appendChild(_el('rect', {
     const w = Math.max(2, Math.abs(endX - fillStartX));
     svg.appendChild(_el('rect', {
       x, y: barY + 2, width: w, height: barH - 4,
-      rx: 5, ry: 5, fill: '#990033'
+      rx: 5, ry: 5, fill: ACTUAL_FILL
     }));
   } else {
     // Case 2: infer from actual dates
@@ -633,7 +640,7 @@ svg.appendChild(_el('rect', {
       const w = Math.max(2, Math.abs(endX - fillStartX));
       svg.appendChild(_el('rect', {
         x, y: barY + 2, width: w, height: barH - 4,
-        rx: 5, ry: 5, fill: '#990033'
+        rx: 5, ry: 5, fill: ACTUAL_FILL
       }));
     }
     // Else: no fill (cylinder stays grey)
@@ -642,15 +649,19 @@ svg.appendChild(_el('rect', {
 
   // milestones (planned above, actuals below)
 const dots = [
-  { ymd: plannedBaseline,   label: `Planned (Baseline) — ${shortDate(plannedBaseline)}`,  color: '#7A0A2A', where: 'above' },
-  { ymd: inventoryPlanned,  label: `Inventory (Plan) — ${shortDate(inventoryPlanned)}`,   color: '#B73A5C', where: 'above' },
-  { ymd: processingPlanned, label: `Processing (Plan) — ${shortDate(processingPlanned)}`, color: '#B73A5C', where: 'above' },
-  { ymd: dispatchedPlanned, label: `Dispatched (Plan) — ${shortDate(dispatchedPlanned)}`, color: '#B73A5C', where: 'above' },
-  // Actuals below, but skip label if it’s the same day as the plan to avoid crowding
-  ...(inventoryActual  ? [{ ymd: inventoryActual,  label: sameDay(inventoryActual,  inventoryPlanned)  ? '' : 'Inventory (Actual)',  color: '#990033', where: 'below' }] : []),
-  ...(processingActual ? [{ ymd: processingActual, label: sameDay(processingActual, processingPlanned) ? '' : 'Processing (Actual)', color: '#990033', where: 'below' }] : []),
-  ...(dispatchedActual ? [{ ymd: dispatchedActual, label: sameDay(dispatchedActual, dispatchedPlanned) ? '' : 'Dispatched (Actual)', color: '#990033', where: 'below' }] : []),
+  // Planned (top)
+  { ymd: plannedBaseline,   label: `Planned (Baseline) — ${shortDate(plannedBaseline)}`,  color: PLANNED_DOT, where: 'above' },
+  { ymd: inventoryPlanned,  label: `Inventory (Plan) — ${shortDate(inventoryPlanned)}`,   color: PLANNED_DOT, where: 'above' },
+  { ymd: processingPlanned, label: `Processing (Plan) — ${shortDate(processingPlanned)}`, color: PLANNED_DOT, where: 'above' },
+  { ymd: dispatchedPlanned, label: `Dispatched (Plan) — ${shortDate(dispatchedPlanned)}`, color: PLANNED_DOT, where: 'above' },
+
+  // Actuals (bottom) — always label with date
+  ...(baselineActual  ? [{ ymd: baselineActual,  label: `Baseline (Actual) — ${shortDate(baselineActual)}`,  color: ACTUAL_DOT, where: 'below' }] : []),
+  ...(inventoryActual ? [{ ymd: inventoryActual, label: `Inventory (Actual) — ${shortDate(inventoryActual)}`, color: ACTUAL_DOT, where: 'below' }] : []),
+  ...(processingActual? [{ ymd: processingActual,label: `Processing (Actual) — ${shortDate(processingActual)}`,color: ACTUAL_DOT, where: 'below' }] : []),
+  ...(dispatchedActual? [{ ymd: dispatchedActual,label: `Dispatched (Actual) — ${shortDate(dispatchedActual)}`,color: ACTUAL_DOT, where: 'below' }] : []),
 ];
+
 
 
 dots.forEach(d => {
@@ -747,8 +758,15 @@ dots.forEach(d => {
     Edit actuals
   </button>
 </div>
+
 <div id="timeline-editor" class="hidden mt-2">
-  <div class="grid grid-cols-2 md:grid-cols-5 gap-2">
+  <div class="grid grid-cols-2 md:grid-cols-6 gap-2">
+
+    <label class="text-xs text-gray-600">
+      Baseline (Actual)
+      <input id="ba-act" type="date" class="w-full border rounded px-2 py-1 text-sm">
+    </label>
+
     <label class="text-xs text-gray-600">
       Inventory (Actual)
       <input id="in-act" type="date" class="w-full border rounded px-2 py-1 text-sm">
@@ -1047,14 +1065,20 @@ function wireTimelineEditor(m) {
   const prAct  = document.getElementById('pr-act');
   const diAct  = document.getElementById('di-act');
   const opsPct = document.getElementById('ops-pct');
+const baAct = document.getElementById('ba-act');
+
 
   // Bind once per page life; safe across re-renders
   if (!btn || !pane || !save || !cancel) return;
   if (btn.dataset.bound === '1') return;
   btn.dataset.bound = '1';
 
+baAct.value  = (window.state?.milestones?.baseline_actual_ymd || m.baselineActualYMD || '').slice(0,10);
+
+
   // Hydrate fields from current state/metrics
   const ms = window.state?.milestones || {};
+baAct.value = (ms.baseline_actual_ymd || m.baselineActualYMD || '').slice(0,10);
   inAct.value  = (ms.inventory_actual_ymd  || m.inventoryActualYMD   || '').slice(0, 10);
   prAct.value  = (ms.processing_actual_ymd || m.processingActualYMD  || '').slice(0, 10);
   diAct.value  = (ms.dispatched_actual_ymd || m.dispatchedActualYMD  || '').slice(0, 10);
@@ -1073,17 +1097,20 @@ function wireTimelineEditor(m) {
     pane.classList.add('hidden');
   };
 
-  save.onclick = (e) => {
-    e?.preventDefault?.();
+save.onclick = (e) => {
+  e?.preventDefault?.();
+  const s  = window.state || (window.state = {});
+  const ms = s.milestones || (s.milestones = {});
 
-    const s  = window.state || (window.state = {});
-    const ms = s.milestones || (s.milestones = {});
 
+const vBa  = baAct.value?.trim();
     const vIn  = inAct.value?.trim();
     const vPr  = prAct.value?.trim();
     const vDi  = diAct.value?.trim();
     const vPct = opsPct.value?.trim();
 
+
+ms.baseline_actual_ymd = vBa || undefined;
     ms.inventory_actual_ymd  = vIn || undefined;
     ms.processing_actual_ymd = vPr || undefined;
     ms.dispatched_actual_ymd = vDi || undefined;
