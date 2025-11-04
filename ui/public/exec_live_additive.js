@@ -308,6 +308,24 @@ function computeExecMetrics() {
     </svg>`;
   }
 
+// ===== Date helpers for timeline =====
+function parseYMD(ymd){ const [y,m,d] = String(ymd).split('-').map(Number); return new Date(y, m-1, d); }
+function toYMD(d){ const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${day}`; }
+function addDaysYMD(ymd, n){ const d=parseYMD(ymd); d.setDate(d.getDate()+n); return toYMD(d); }
+function isBusinessDay(d){ const wd=d.getDay(); return wd!==0 && wd!==6; } // Mon..Fri
+function minusBusinessDaysFrom(ymd, n){
+  let d=parseYMD(ymd), left=n;
+  while(left>0){ d.setDate(d.getDate()-1); if(isBusinessDay(d)) left--; }
+  return toYMD(d);
+}
+function clampYMD(ymd, minYMD, maxYMD){
+  const t=parseYMD(ymd).getTime(), a=parseYMD(minYMD).getTime(), b=parseYMD(maxYMD).getTime();
+  if (t < a) return minYMD; if (t > b) return maxYMD; return ymd;
+}
+function compareYMD(a,b){ return parseYMD(a) - parseYMD(b); }
+
+
+
 // ===== SVG Helpers (no libs) =====
 const GREY  = '#e5e7eb';
 const GREY_STROKE = '#d1d5db';
@@ -458,216 +476,166 @@ function _clamp01(v){ return Math.max(0, Math.min(1, v)); }
 
 function _mix(a,b,t){ return a + (b-a)*t; } // linear map
 
-function renderExecTimeline(slot, m, opts = {}) {
-  slot.innerHTML = '';
-  const BRAND = (typeof window.BRAND !== 'undefined') ? window.BRAND : '#990033';
+function renderExecTimeline(slot, m) {
+  if (!slot) return;
 
-  // ---- sizing
-  const W = Math.max(680, Math.floor(slot.clientWidth || 980));
-  const H = Math.max(160, opts.height || 180);
-  const P = { l: 32, r: 32, t: 28, b: 42 };
-  const CX = W - P.l - P.r;
-  const CY = H - P.t - P.b;
-  const railY = P.t + Math.floor(CY * 0.48);
+  // ---------- tiny helpers (local to avoid globals)
+  const parseYMD = (s) => {
+    const [y, mo, d] = String(s).split('-').map(Number);
+    return new Date(y, mo - 1, d);
+  };
+  const toYMD = (d) => {
+    const y = d.getFullYear();
+    const m2 = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m2}-${dd}`;
+  };
+  const addDaysYMD = (ymd, n) => {
+    const d = parseYMD(ymd);
+    d.setDate(d.getDate() + n);
+    return toYMD(d);
+  };
+  const compareYMD = (a, b) => parseYMD(a).getTime() - parseYMD(b).getTime();
 
-  // ---- svg root
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  svg.setAttribute('width', W);
-  svg.setAttribute('height', H);
-  svg.setAttribute('role', 'img');
-  svg.style.display = 'block';
-
-  // ---- helpers
-  const parseYMD = (s) => new Date(`${s}T00:00:00`);
-  const addDays  = (d, n) => { const x = new Date(d); x.setDate(x.getDate()+n); return x; };
-  const clamp    = (v,a,b)=>Math.max(a,Math.min(b,v));
-
-  const ws = parseYMD(m.ws);                 // Monday
-  const we = parseYMD(m.we);                 // Sunday
-  const rangeEnd = addDays(we, 1);           // exclusive end for scale
-  const t0 = ws.getTime();
-  const t1 = rangeEnd.getTime();
-
-  const xScale = (d) => P.l + ((d - t0) / (t1 - t0)) * CX;
-
-  // ---- rail: white with subtle border (no pink fill)
-  const R = 9;
-  const rail = document.createElementNS(svg.namespaceURI, 'rect');
-  rail.setAttribute('x', P.l);
-  rail.setAttribute('y', railY - 10);
-  rail.setAttribute('width', CX);
-  rail.setAttribute('height', 20);
-  rail.setAttribute('rx', R);
-  rail.setAttribute('fill', '#ffffff');
-  rail.setAttribute('stroke', '#e5e7eb');
-  rail.setAttribute('stroke-width', '2');
-  svg.appendChild(rail);
-
-  // ---- day ticks (Mon..Sun), labels with thinning & collision guard
-  const dayNames = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-  let lastLabelX = -1e9;
-  for (let i=0;i<7;i++){
-    const d = addDays(ws, i);
-    const x = xScale(d.getTime());
-    // tick
-    const tick = document.createElementNS(svg.namespaceURI, 'line');
-    tick.setAttribute('x1', x); tick.setAttribute('x2', x);
-    tick.setAttribute('y1', railY - 18); tick.setAttribute('y2', railY - 10);
-    tick.setAttribute('stroke', '#d1d5db');
-    tick.setAttribute('stroke-width', '1');
-    svg.appendChild(tick);
-
-    // label only for Mon / Wed / Fri / Sun
-    const shouldLabel = (i === 0 || i === 2 || i === 4 || i === 6);
-    if (shouldLabel) {
-      // basic collision guard (min 42px apart)
-      if (x - lastLabelX >= 42) {
-        const t = document.createElementNS(svg.namespaceURI, 'text');
-        t.setAttribute('x', x);
-        t.setAttribute('y', railY - 22);
-        t.setAttribute('text-anchor', 'middle');
-        t.setAttribute('font-size', '11');
-        t.setAttribute('fill', '#6b7280');
-        t.textContent = dayNames[i];
-        svg.appendChild(t);
-        lastLabelX = x;
-      }
+  // minus business days from a YMD (Mon–Fri only)
+  const minusBusinessDaysFrom = (ymd, nBiz) => {
+    let d = parseYMD(ymd);
+    let left = nBiz;
+    while (left > 0) {
+      d.setDate(d.getDate() - 1);
+      const dow = d.getDay(); // 0 Sun..6 Sat
+      if (dow !== 0 && dow !== 6) left--;
     }
-  }
-
-  // ---- planned processing window (Mon..Fri) as a thin line overlay
-  const px0 = xScale(ws.getTime());
-  const px1 = xScale(addDays(ws, 5).getTime()); // Fri start
-  const planLine = document.createElementNS(svg.namespaceURI, 'line');
-  planLine.setAttribute('x1', px0);
-  planLine.setAttribute('x2', px1);
-  planLine.setAttribute('y1', railY);
-  planLine.setAttribute('y2', railY);
-  planLine.setAttribute('stroke', BRAND);
-  planLine.setAttribute('stroke-opacity', '0.25'); // subtle
-  planLine.setAttribute('stroke-width', '4');
-  planLine.setAttribute('stroke-linecap', 'round');
-  svg.appendChild(planLine);
-
-  // ---- actual throughput progress (deep brand), based on planned/applied
-  // If you have more precise start/end times (inventory/dispatch), wire them in here.
-  const planned = Number(m.plannedTotal || 0);
-  const applied = Number(m.appliedTotal || 0);
-  const pctDone = planned > 0 ? clamp(applied / planned, 0, 1) : 0;
-  const actualStartX = px0;
-  const actualEndX   = px0 + (px1 - px0) * pctDone;
-
-  if (pctDone > 0) {
-    const prog = document.createElementNS(svg.namespaceURI, 'line');
-    prog.setAttribute('x1', actualStartX);
-    prog.setAttribute('x2', actualEndX);
-    prog.setAttribute('y1', railY);
-    prog.setAttribute('y2', railY);
-    prog.setAttribute('stroke', BRAND);
-    prog.setAttribute('stroke-width', '10');
-    prog.setAttribute('stroke-linecap', 'round');
-    svg.appendChild(prog);
-  }
-
-  // ---- milestone helper (two lanes: planned above, actual below)
-  const lane = { planned: railY - 34, actual: railY + 34 };
-  const makeDot = (x,y,color) => {
-    const c = document.createElementNS(svg.namespaceURI, 'circle');
-    c.setAttribute('cx', x); c.setAttribute('cy', y);
-    c.setAttribute('r', 5);
-    c.setAttribute('fill', color);
-    c.setAttribute('stroke', '#fff');
-    c.setAttribute('stroke-width', '2');
-    return c;
-  };
-  const makeText = (x,y,txt,color,anchor='middle') => {
-    const t = document.createElementNS(svg.namespaceURI, 'text');
-    t.setAttribute('x', x); t.setAttribute('y', y);
-    t.setAttribute('text-anchor', anchor);
-    t.setAttribute('font-size', '11');
-    t.setAttribute('font-weight', '600');
-    t.setAttribute('fill', color);
-    t.textContent = txt;
-    return t;
+    return toYMD(d);
   };
 
-  // colors
-  const BRAND_LIGHT = '#d66a90';  // planned marker
-  const BRAND_DEEP  = BRAND;      // actual marker
+  const clampYMD = (ymd, lo, hi) => {
+    if (!ymd) return ymd;
+    if (compareYMD(ymd, lo) < 0) return lo;
+    if (compareYMD(ymd, hi) > 0) return hi;
+    return ymd;
+  };
 
-  // ---- planned milestones (static baseline assumptions)
-  // Planned: “ready to process” target = Fri (Mon..Fri work window)
-  const planInvX  = xScale(ws.getTime());               // Inventory planned (Mon)
-  const planProcX = xScale(addDays(ws, 4).getTime());   // Processing planned (Fri)
-  const planDispX = xScale(addDays(ws, 6).getTime());   // Dispatch planned (Sun)
+  // ---------- inputs from metrics/state
+  const ws = m.ws;              // week start (Mon)
+  const we = m.we;              // week end (Sun)
+  if (!ws || !we) return;
 
-  // Place planned markers
-  [
-    { x: planInvX,  label: 'Inventory (Plan)' },
-    { x: planProcX, label: 'Processing (Plan)' },
-    { x: planDispX, label: 'Dispatched (Plan)' },
-  ].forEach((p, idx) => {
-    const x = clamp(p.x, P.l, P.l + CX);
-    const y = lane.planned;
-    svg.appendChild(makeDot(x, y, BRAND_LIGHT));
-    const t = makeText(x, y - 8, p.label, '#6b7280');
-    // avoid edge clipping
-    if (x < P.l + 30) t.setAttribute('text-anchor','start');
-    if (x > P.l + CX - 30) t.setAttribute('text-anchor','end');
-    svg.appendChild(t);
+  // baseline & plans
+  const plannedBaseline   = minusBusinessDaysFrom(ws, 7);
+  const inventoryPlanned  = ws;               // Mon
+  const processingPlanned = addDaysYMD(ws, 4);// Fri
+  const dispatchedPlanned = we;               // Sun
+
+  // actuals (if you feed them in m.* they will show, else fallbacks)
+  const inventoryActual   = m.inventoryActualYMD  ? clampYMD(m.inventoryActualYMD, plannedBaseline, we) : null;
+  const dispatchedActual  = m.dispatchedActualYMD ? clampYMD(m.dispatchedActualYMD, plannedBaseline, addDaysYMD(we, 3)) : null;
+
+  // processing actual: choose mid of week record dates if available, else Wed fallback
+  let processingActual = null;
+  if (Array.isArray(m._wkDatesSorted) && m._wkDatesSorted.length) {
+    const mid = Math.floor(m._wkDatesSorted.length / 2);
+    processingActual = m._wkDatesSorted[mid];
+  } else {
+    processingActual = addDaysYMD(ws, 2); // Wed fallback
+  }
+
+  // ---------- domain & scale (calendar-accurate spacing)
+  const axisMin = (compareYMD(plannedBaseline, ws) < 0) ? plannedBaseline : ws;
+  const axisMaxCandidate = dispatchedActual || dispatchedPlanned || we;
+  const axisMax = (compareYMD(axisMaxCandidate, we) > 0) ? axisMaxCandidate : we;
+
+  const minT = parseYMD(axisMin).getTime();
+  const maxT = parseYMD(axisMax).getTime();
+
+  // ---------- draw
+  slot.innerHTML = '';
+  const width = Math.max(640, slot.clientWidth || 640);
+  const height = 120;
+  const pad = 28;
+
+  const svg = _el('svg', {
+    viewBox: `0 0 ${width} ${height}`,
+    width, height, style: 'display:block'
   });
 
-  // ---- actual milestones (use what you have; otherwise hide gracefully)
-  // You can pass m.actualInventoryYMD / m.actualDispatchedYMD if available.
-  const actualInvYMD  = m.inventoryActualYMD || m.ws;   // default Mon
-  const actualProcPct = pctDone;                         // derives from throughput
-  const actualDispYMD = m.dispatchedActualYMD || m.we;  // default Sun
+  const scaleX = (ymd) => {
+    const t = parseYMD(ymd).getTime();
+    const p = (t - minT) / Math.max(1, (maxT - minT));
+    return pad + Math.round(p * (width - pad * 2));
+  };
 
-  const actInvX  = xScale(parseYMD(actualInvYMD).getTime());
-  const actProcX = px0 + (px1 - px0) * actualProcPct;  // mid-progress marker
-  const actDispX = xScale(parseYMD(actualDispYMD).getTime());
+  // base bar (white w/ subtle outline)
+  const barY = 72, barH = 12;
+  svg.appendChild(_el('rect', {
+    x: pad, y: barY, width: width - pad * 2, height: barH,
+    rx: 6, ry: 6, fill: '#ffffff', stroke: '#E5E7EB', 'stroke-width': 1
+  }));
 
-  const actuals = [
-    { x: actInvX,  label: 'Inventory (Actual)' },
-    { x: actProcX, label: 'Processing (Actual)' },
-    { x: actDispX, label: 'Dispatched (Actual)' },
+  // planned span (thin stroke over planned window)
+  const plannedStartX = scaleX(inventoryPlanned);
+  const plannedEndX   = scaleX(dispatchedPlanned);
+  svg.appendChild(_el('line', {
+    x1: plannedStartX, y1: barY + barH / 2, x2: plannedEndX, y2: barY + barH / 2,
+    stroke: '#B73A5C', 'stroke-width': 4, 'stroke-linecap': 'round'
+  }));
+
+  // actual progress fill
+  const actualStart = inventoryActual || inventoryPlanned;
+  const todayFallback = (() => {
+    const todayIdx = ((new Date().getDay() + 6) % 7); // 0..6 with 0=Mon
+    return addDaysYMD(ws, Math.min(6, Math.max(0, todayIdx)));
+  })();
+  const actualEnd = dispatchedActual || todayFallback;
+
+  const ax1 = scaleX(actualStart);
+  const ax2 = scaleX(actualEnd);
+  svg.appendChild(_el('rect', {
+    x: Math.min(ax1, ax2), y: barY + 2, width: Math.max(2, Math.abs(ax2 - ax1)), height: barH - 4,
+    rx: 5, ry: 5, fill: '#990033' // main brand
+  }));
+
+  // milestones (planned above, actuals below)
+  const dots = [
+    { ymd: plannedBaseline,   label: 'Planned (Baseline)',  color: '#7A0A2A', where: 'above' },
+    { ymd: inventoryPlanned,  label: 'Inventory (Plan)',    color: '#B73A5C', where: 'above' },
+    { ymd: processingPlanned, label: 'Processing (Plan)',   color: '#B73A5C', where: 'above' },
+    { ymd: dispatchedPlanned, label: 'Dispatched (Plan)',   color: '#B73A5C', where: 'above' },
+    ...(inventoryActual  ? [{ ymd: inventoryActual,  label: 'Inventory (Actual)',  color: '#990033', where: 'below' }] : []),
+    ...(processingActual ? [{ ymd: processingActual, label: 'Processing (Actual)', color: '#990033', where: 'below' }] : []),
+    ...(dispatchedActual ? [{ ymd: dispatchedActual, label: 'Dispatched (Actual)', color: '#990033', where: 'below' }] : []),
   ];
 
-  // simple de-overlap in the actual lane (nudges if too close)
-  actuals.sort((a,b)=>a.x-b.x);
-  for (let i=1;i<actuals.length;i++){
-    if (actuals[i].x - actuals[i-1].x < 46){
-      actuals[i].x = actuals[i-1].x + 46;
-    }
-  }
+  dots.forEach(d => {
+    const x  = scaleX(d.ymd);
+    const cy = d.where === 'above' ? (barY - 18) : (barY + barH + 18);
 
-  actuals.forEach(p => {
-    const x = clamp(p.x, P.l, P.l + CX);
-    const y = lane.actual;
-    svg.appendChild(makeDot(x, y, BRAND_DEEP));
-    const t = makeText(x, y + 16, p.label, '#374151');
-    if (x < P.l + 30) t.setAttribute('text-anchor','start');
-    if (x > P.l + CX - 30) t.setAttribute('text-anchor','end');
-    svg.appendChild(t);
+    // dot
+    svg.appendChild(_el('circle', {
+      cx: x, cy: d.where === 'above' ? (barY - 6) : (barY + barH + 6), r: 4, fill: d.color
+    }));
+    // label
+    const labelEl = _el('text', {
+      x, y: cy, 'text-anchor': 'middle', 'font-size': '11', fill: '#374151'
+    });
+    labelEl.textContent = d.label;
+    svg.appendChild(labelEl);
   });
 
-  // ---- legend (small, top-left)
-  const legendY = P.t - 6;
-  const lg = (x, txt, color) => {
-    const r = document.createElementNS(svg.namespaceURI,'rect');
-    r.setAttribute('x', x); r.setAttribute('y', legendY - 9);
-    r.setAttribute('width', 14); r.setAttribute('height', 4);
-    r.setAttribute('rx', 2); r.setAttribute('fill', color);
-    svg.appendChild(r);
-    const t = makeText(x + 20, legendY - 2, txt, '#6b7280','start');
+  // Mon..Sun ticks for current week
+  const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  for (let i = 0; i < 7; i++) {
+    const dayYMD = addDaysYMD(ws, i);
+    const x = scaleX(dayYMD);
+    svg.appendChild(_el('line', { x1:x, y1: barY - 6, x2:x, y2: barY - 2, stroke: '#CBD5E1', 'stroke-width': 1 }));
+    const t = _el('text', { x, y: barY - 12, 'text-anchor':'middle', 'font-size':'10', fill:'#6B7280' });
+    t.textContent = days[i];
     svg.appendChild(t);
-  };
-  lg(P.l, 'Actual', BRAND_DEEP);
-  lg(P.l + 110, 'Planned', BRAND_LIGHT);
+  }
 
   slot.appendChild(svg);
-}
+}  // end renderExecTimeline
+
 
 
 
@@ -886,6 +854,13 @@ const radarSize = 420;  // px canvas for radar
   const st = String(r?.status || '').toLowerCase();
   return st === 'complete' || st === 'applied' || !!r.uid;
 });
+
+// Sorted unique YMDs for timeline (used to infer Processing Actual midpoint if needed)
+m._wkDatesSorted = Array.from(new Set(
+  wkRecords.map(r => bizYMDFromRecord(r)).filter(Boolean)
+)).sort();
+
+
     const unitsByBin = new Map(); const skuSetByBin = new Map();
     for (const r of wkRecords){ const bin = String(r.mobile_bin||'').trim(); const sku = String(r.sku_code||'').trim(); if(!bin) continue; unitsByBin.set(bin,(unitsByBin.get(bin)||0)+1); if(sku){ if(!skuSetByBin.has(bin)) skuSetByBin.set(bin,new Set()); skuSetByBin.get(bin).add(sku); } }
     const rows = heavy.slice(0,3).map(b=>{
@@ -918,16 +893,29 @@ const radarSize = 420;  // px canvas for radar
 renderDonutWithBaseline(donutSlot, m.plannedTotal, m.appliedTotal, { size: donutSize });
 renderRadarWithBaseline(radarSlot, axes, [55,50,45,60,50,40], values, { size: radarSize });
 
+// (Optional) If you have actuals for this week, feed them explicitly:
+/// m.inventoryActualYMD  = '2025-11-03'; // example
+/// m.dispatchedActualYMD = '2025-11-09'; // example
 
 // ---- Feed actual dates for the timeline (preferred: Ops overrides; fallback: records)
 {
   // Optional overrides if Ops provides them (exact names can be adjusted to your schema)
-  const invOverride = window.state?.milestones?.inventory_actual_ymd
-                   || window.state?.inventory_actual_ymd
-                   || window.state?.inventoryActualYMD;
+  const invOverride  = window.state?.milestones?.inventory_actual_ymd
+                    || window.state?.inventory_actual_ymd
+                    || window.state?.inventoryActualYMD;
+
   const dispOverride = window.state?.milestones?.dispatched_actual_ymd
                     || window.state?.dispatched_actual_ymd
                     || window.state?.dispatchedActualYMD;
+
+  if (invOverride)  m.inventoryActualYMD  = invOverride;
+  if (dispOverride) m.dispatchedActualYMD = dispOverride;
+}
+
+// Render the timeline (after overrides are set)
+const timelineSlot = document.getElementById('timeline-slot');
+if (timelineSlot) renderExecTimeline(timelineSlot, m);
+
 
   // We already have wkRecords in this scope (built a few lines above for Heavy Bins / anomalies).
   // If not, you can rebuild it using the same predicate you used earlier.
