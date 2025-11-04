@@ -530,6 +530,13 @@ const sameDay = (a,b) => a && b && compareYMD(a,b) === 0;
   const processingPlanned = addDaysYMD(ws, 4);// Fri
   const dispatchedPlanned = we;               // Sun
 
+// Baseline (Actual) — optional override; only show if provided
+const baselineActual = m.baselineActualYMD
+  ? clampYMD(m.baselineActualYMD, minusBusinessDaysFrom(ws, 30), ws)
+  : (window.state?.milestones?.baseline_actual_ymd
+      ? clampYMD(window.state.milestones.baseline_actual_ymd, minusBusinessDaysFrom(ws, 30), ws)
+      : null);
+
   // actuals (if you feed them in m.* they will show, else fallbacks)
   const inventoryActual   = m.inventoryActualYMD  ? clampYMD(m.inventoryActualYMD, plannedBaseline, we) : null;
   const dispatchedActual  = m.dispatchedActualYMD ? clampYMD(m.dispatchedActualYMD, plannedBaseline, addDaysYMD(we, 3)) : null;
@@ -1032,10 +1039,17 @@ const dispOverride = window.state?.milestones?.dispatched_actual_ymd
                   || window.state?.dispatched_actual_ymd
                   || window.state?.dispatchedActualYMD;
 
+const baseOverride = window.state?.milestones?.baseline_actual_ymd
+                  || window.state?.baseline_actual_ymd
+                  || window.state?.baselineActualYMD;
+
+
 // (optional) pre-seed
 if (invOverride)  m.inventoryActualYMD  = invOverride;
 if (procOverride) m.processingActualYMD = procOverride;
 if (dispOverride) m.dispatchedActualYMD = dispOverride;
+if (baseOverride) m.baselineActualYMD = baseOverride;
+
 
   // Fallbacks from week record dates if overrides absent
   const ymds = Array.isArray(m._wkDatesSorted) ? m._wkDatesSorted : [];
