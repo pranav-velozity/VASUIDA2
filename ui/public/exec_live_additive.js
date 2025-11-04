@@ -4,7 +4,7 @@
  * - Uses existing global state & helpers: state, weekEndISO, ymdFromCompletedAtInTZ, todayInTZ, mondayOfInTZ, toNum, aggregate, joinPOProgress
  * - No edits to existing routes/exports/logic; safe to include after current script.
  */
-; (function ExecLiveAdditive(){
+(function ExecLiveAdditive(){
   const BRAND = (typeof window.BRAND !== 'undefined') ? window.BRAND : '#990033';
   const BUSINESS_TZ = document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai';
 
@@ -371,14 +371,12 @@ function renderDonutWithBaseline(slot, planned, applied, opts = {}) {
   } else {
     p = Math.max(0, Math.min(1, Number(applied || 0) / Number(planned)));
   }
-}
 
 // set once, no animation
 const dash = CIRC * (1 - p);
 appliedArc.style.transition = 'none';
 appliedArc.setAttribute('stroke-dashoffset', dash);
 pctText.textContent = Math.round(p * 100) + '%';
-
 }
 
 function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opts = {}) {
