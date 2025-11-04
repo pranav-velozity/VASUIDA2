@@ -531,8 +531,7 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
     [55,50,45,60,50,40],
     null,
     { size: 260 }
-  );
-}
+  );}
 
 // ---- DEBUG: Exec data snapshot (runs once) ----
 if (!window.__execDebugOnce) {
