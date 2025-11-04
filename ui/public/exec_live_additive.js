@@ -557,15 +557,12 @@ function renderExecTimeline(slot, m) {
   const maxT = parseYMD(axisMax).getTime();
 
   // ---------- draw
-  slot.innerHTML = '';  
 // If slot is not laid out yet, look at parent; still default to a wide canvas
 const w0 = slot.clientWidth || slot.parentElement?.clientWidth || 0;
 const width = Math.max(720, w0 || 720);
-  const height = 120;
-  const pad = 28;
-fill: '#F3F4F6',
-stroke: '#E5E7EB',
-'stroke-width': 1
+const height = 120;
+const pad = 28;
+
 
 
   const svg = _el('svg', {
@@ -579,12 +576,20 @@ stroke: '#E5E7EB',
     return pad + Math.round(p * (width - pad * 2));
   };
 
-  // base bar (soft grey so it’s visible on white cards)
-  const barY = 60, barH = 12;
-  svg.appendChild(_el('rect', {
-    x: pad, y: barY, width: width - pad * 2, height: barH,
-    rx: 6, ry: 6, fill: '#F3F4F6', stroke: '#E5E7EB', 'stroke-width': 1
-  }));
+// base bar (soft grey so it’s visible on white cards)
+const barY = 72, barH = 12;
+svg.appendChild(_el('rect', {
+  x: pad,
+  y: barY,
+  width: width - pad * 2,
+  height: barH,
+  rx: 6,
+  ry: 6,
+  fill: '#F3F4F6',
+  stroke: '#E5E7EB',
+  'stroke-width': 1
+}));
+
 
   // planned span (thin stroke over planned window)
   const plannedStartX = scaleX(inventoryPlanned);
