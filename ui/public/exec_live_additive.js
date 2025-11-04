@@ -1086,12 +1086,13 @@ async function _execTryRender() {
 
 
   // Ensure data exists at least once (fallback fetch), then continue
-if (EXEC_USE_NETWORK) {
-  await _execEnsureStateLoaded(s.weekStart);
-}
+if (EXEC_USE_NETWORK) { 
 
-  const hasPlan = Array.isArray(s.plan) && s.plan.length > 0;
-  const hasRecs = Array.isArray(s.records) && s.records.length > 0;
+await _execEnsureStateLoaded(s.weekStart); 
+} 
+
+const hasPlan = Array.isArray(s.plan) && s.plan.length > 0; 
+const hasRecs = Array.isArray(s.records) && s.records.length > 0; 
 
 if (!(hasPlan || hasRecs)) {
   if (EXEC_USE_NETWORK) {
@@ -1104,6 +1105,8 @@ if (!(hasPlan || hasRecs)) {
   }
   return;
 }
+ 
+try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
 
 }
 
