@@ -321,14 +321,19 @@ function _el(tag, attrs={}, children=[]) {
 
 function renderDonutWithBaseline(slot, planned, applied, opts = {}) {
   slot.innerHTML = '';
+  // center the SVG within the card
+  slot.style.display = 'flex';
+  slot.style.alignItems = 'center';
+  slot.style.justifyContent = 'center';
 
   // size derived from slot/card, with safe bounds
-  const auto = Math.min(
+  const autoSide = Math.min(
     slot.clientWidth || 9999,
     (slot.clientHeight || slot.parentElement?.clientHeight || 9999)
-  ) * 0.98;
+  );
+  // slightly smaller and capped so it doesn't dominate the card
+  const size = Math.max(220, Math.min(opts.size ?. (autoSide * 0.72) || 360, 420));
 
-  const size = Math.max(220, Math.min(opts.size ?. auto || 360, 640));
   const r    = Math.round(size * 0.48);
   const cx = size / 2, cy = size / 2;
   const CIRC = 2 * Math.PI * r;
@@ -381,6 +386,10 @@ function renderDonutWithBaseline(slot, planned, applied, opts = {}) {
 
 function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opts = {}) {
   slot.innerHTML = '';
+  // center the SVG within the card
+  slot.style.display = 'flex';
+  slot.style.alignItems = 'center';
+  slot.style.justifyContent = 'center';
 
   const N = labels.length;
   const displaySize = opts.size ?? 360;   // used only if size wasn't passed
@@ -411,16 +420,13 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
     svg.appendChild(_el('line', { x1: cx, y1: cy, x2: x, y2: y, stroke: GREY_STROKE, 'stroke-width': 1 }));
   }
 
-  // label/value placement
-  const labelR = R + 24;   // just outside the web
-  const valueR = R + 10;   // close to the web
+    // label placement (no numeric value labels)
+  const labelR = R + 24;
 
   for (let i = 0; i < N; i++) {
     const ang = (-Math.PI / 2) + (i * 2 * Math.PI / N);
     const lx = cx + labelR * Math.cos(ang);
     const ly = cy + labelR * Math.sin(ang);
-    const vx = cx + valueR * Math.cos(ang);
-    const vy = cy + valueR * Math.sin(ang);
 
     const t = _el('text', {
       x: lx, y: ly, 'text-anchor': 'middle', 'dominant-baseline': 'middle',
@@ -428,16 +434,8 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
     });
     t.textContent = labels[i];
     svg.appendChild(t);
-
-    if (actualValues && actualValues.length === N) {
-      const v = _el('text', {
-        x: vx, y: vy, 'text-anchor': 'middle', 'dominant-baseline': 'middle',
-        'font-size': '14', 'font-weight': '600', fill: BRAND
-      });
-      v.textContent = Math.round(actualValues[i]) + '';
-      svg.appendChild(v);
-    }
   }
+
 
   // polygons
   svg.appendChild(_el('polygon', {
