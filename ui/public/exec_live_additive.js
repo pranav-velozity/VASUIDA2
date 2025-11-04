@@ -1030,48 +1030,58 @@ if (dispOverride) m.dispatchedActualYMD = dispOverride;
 // Timeline (planned vs actual) — render once, here
 const timelineSlot = document.getElementById('timeline-slot');
 if (timelineSlot) renderExecTimeline(timelineSlot, m);
+
+// now that DOM exists, (re)wire the editor idempotently
+wireTimelineEditor(m);
 }
 
+
 // ===== Inline editor for actuals / Ops % =====
-(function wireTimelineEditor(){
-  const btn   = document.getElementById('timeline-edit-btn');
-  const pane  = document.getElementById('timeline-editor');
-  const save  = document.getElementById('timeline-save');
-  const cancel= document.getElementById('timeline-cancel');
-  const inAct = document.getElementById('in-act');
-  const prAct = document.getElementById('pr-act');
-  const diAct = document.getElementById('di-act');
-  const opsPct= document.getElementById('ops-pct');
+// ===== Inline editor for actuals / Ops % =====
+function wireTimelineEditor(m) {
+  const btn    = document.getElementById('timeline-edit-btn');
+  const pane   = document.getElementById('timeline-editor');
+  const save   = document.getElementById('timeline-save');
+  const cancel = document.getElementById('timeline-cancel');
+  const inAct  = document.getElementById('in-act');
+  const prAct  = document.getElementById('pr-act');
+  const diAct  = document.getElementById('di-act');
+  const opsPct = document.getElementById('ops-pct');
 
+  // Bind once per page life; safe across re-renders
   if (!btn || !pane || !save || !cancel) return;
+  if (btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
 
-  // hydrate fields from state
+  // Hydrate fields from current state/metrics
   const ms = window.state?.milestones || {};
-  inAct.value = (ms.inventory_actual_ymd || m.inventoryActualYMD || '').slice(0,10);
-  prAct.value = (ms.processing_actual_ymd || m.processingActualYMD || '').slice(0,10);
-  diAct.value = (ms.dispatched_actual_ymd || m.dispatchedActualYMD || '').slice(0,10);
+  inAct.value  = (ms.inventory_actual_ymd  || m.inventoryActualYMD   || '').slice(0, 10);
+  prAct.value  = (ms.processing_actual_ymd || m.processingActualYMD  || '').slice(0, 10);
+  diAct.value  = (ms.dispatched_actual_ymd || m.dispatchedActualYMD  || '').slice(0, 10);
   opsPct.value = String(
-  window.state?.ops?.completion_pct ??
-  ms.completion_pct ??
-  ''
-);
+    window.state?.ops?.completion_pct ??
+    ms.completion_pct ?? ''
+  );
 
-  btn.onclick = () => {
+  btn.onclick = (e) => {
+    e?.preventDefault?.();
     pane.classList.toggle('hidden');
   };
-cancel.onclick = (e) => {
-  e?.preventDefault?.();
-  pane.classList.add('hidden');
-};
-save.onclick = (e) => {
-  e?.preventDefault?.();
-  const s = window.state || (window.state = {});
 
+  cancel.onclick = (e) => {
+    e?.preventDefault?.();
+    pane.classList.add('hidden');
+  };
+
+  save.onclick = (e) => {
+    e?.preventDefault?.();
+
+    const s  = window.state || (window.state = {});
     const ms = s.milestones || (s.milestones = {});
 
-    const vIn = inAct.value?.trim();
-    const vPr = prAct.value?.trim();
-    const vDi = diAct.value?.trim();
+    const vIn  = inAct.value?.trim();
+    const vPr  = prAct.value?.trim();
+    const vDi  = diAct.value?.trim();
     const vPct = opsPct.value?.trim();
 
     ms.inventory_actual_ymd  = vIn || undefined;
@@ -1080,20 +1090,19 @@ save.onclick = (e) => {
 
     if (vPct !== '' && vPct != null) {
       const n = Math.round(Math.max(0, Math.min(100, Number(vPct))));
-      // store in both places for convenience
       s.ops = s.ops || {};
       s.ops.completion_pct = n;
-      ms.completion_pct = n;
+      ms.completion_pct    = n;
     } else {
       if (s.ops) delete s.ops.completion_pct;
       delete ms.completion_pct;
     }
 
-    // Let the dashboard re-render
+    // Re-render
     window.dispatchEvent(new Event('state:ready'));
     pane.classList.add('hidden');
   };
-})();
+}
 
 
 
