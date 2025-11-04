@@ -9,7 +9,7 @@
   const BUSINESS_TZ = document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai';
 
 // --- Exec should not fetch; rely on Ops-populated window.state
-const EXEC_USE_NETWORK = false;
+const EXEC_USE_NETWORK = true;
 
 // --- API base (normalized; always ends with /api)
 const _rawBase =
