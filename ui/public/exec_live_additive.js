@@ -110,7 +110,15 @@ function bizYMDFromRecord(r){
 
 // ---------- Metric computations (scoped to selected week) ----------
 function computeExecMetrics() {
-  const ws = window.state?.weekStart; 
+
+let ws = window.state?.weekStart;
+ if (!ws) {
+    try {
+      ws = (typeof window.todayInTZ === 'function' && typeof window.mondayOfInTZ === 'function')
+        ? window.mondayOfInTZ(window.todayInTZ(BUSINESS_TZ))
+        : (function(){ const d=new Date(); const day=(d.getDay()+6)%7; d.setHours(0,0,0,0); d.setDate(d.getDate()-day); return d.toISOString().slice(0,10);}());
+    } catch { /* ignore */ }
+  }
   if (!ws) return null;
 
   const we = (window.weekEndISO || function (ws) {
@@ -549,8 +557,10 @@ function renderExecTimeline(slot, m) {
   const maxT = parseYMD(axisMax).getTime();
 
   // ---------- draw
-  slot.innerHTML = '';
-  const width = Math.max(640, slot.clientWidth || 640);
+  slot.innerHTML = '';  
+// If slot is not laid out yet, look at parent; still default to a wide canvas
+const w0 = slot.clientWidth || slot.parentElement?.clientWidth || 0;
+const width = Math.max(720, w0 || 720);
   const height = 120;
   const pad = 28;
 
@@ -565,11 +575,11 @@ function renderExecTimeline(slot, m) {
     return pad + Math.round(p * (width - pad * 2));
   };
 
-  // base bar (white w/ subtle outline)
-  const barY = 72, barH = 12;
+  // base bar (soft grey so it’s visible on white cards)
+  const barY = 60, barH = 12;
   svg.appendChild(_el('rect', {
     x: pad, y: barY, width: width - pad * 2, height: barH,
-    rx: 6, ry: 6, fill: '#ffffff', stroke: '#E5E7EB', 'stroke-width': 1
+    rx: 6, ry: 6, fill: '#F3F4F6', stroke: '#E5E7EB', 'stroke-width': 1
   }));
 
   // planned span (thin stroke over planned window)
@@ -960,6 +970,17 @@ async function execEnsureStateLoaded(ws) {
   const s = window.state || (window.state = {});
   const we = (window.weekEndISO || (w => { const d=new Date(w); d.setDate(d.getDate()+6); return d.toISOString().slice(0,10); }))(ws);
 
+// Exec = read-only; do not fetch if disabled
+if (EXEC_USE_NETWORK === false) {
+// Ensure minimally required fields exist so downstream renderers are happy
+if (!s.weekStart) s.weekStart = ws;
+if (!Array.isArray(s.plan))    s.plan = [];
+if (!Array.isArray(s.records)) s.records = [];
+if (!Array.isArray(s.bins))    s.bins = [];
+ return;
+}
+
+
   const needPlan    = !Array.isArray(s.plan)    || s.plan.length === 0;
   const needRecords = !Array.isArray(s.records) || s.records.length === 0;
   const needBins    = !Array.isArray(s.bins);
@@ -1077,8 +1098,8 @@ await _execEnsureStateLoaded(s.weekStart);
   const hasRecs = Array.isArray(s.records) && s.records.length > 0;
 
   if (!(hasPlan || hasRecs)) {
-    // Fetch what we’re missing for this week, then render
-    execEnsureStateLoaded(s.weekStart)
+// Exec: only attempt fetches if allowed
+(EXEC_USE_NETWORK !== false ? execEnsureStateLoaded(s.weekStart) : Promise.resolve())
       .then(() => { try { renderExec(); } catch (e) { console.error('[Exec render error]', e); } })
       .catch(e  => console.error('[Exec fetch error]', e));
     return;
