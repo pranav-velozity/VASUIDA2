@@ -386,7 +386,7 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
   const displaySize = opts.size ?? 340;     // smaller chart
   const vbPad  = 88;                        // extra bleed for labels
   const vbSize = displaySize + vbPad * 2;
-  const pad = 25;
+  const pad = 22;
   const cx  = displaySize / 2, cy = displaySize / 2;
   const R   = (displaySize / 2) - pad;
 
@@ -412,8 +412,8 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
   }
 
   // label/value placement (more space)
-  const labelR = R + 52;
-  const valueR = R + 32;
+  const labelR = R + 80;
+  const valueR = R + 60;
 
   for (let i = 0; i < N; i++) {
     const ang = (-Math.PI / 2) + (i * 2 * Math.PI / N);
@@ -424,7 +424,7 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
 
     const t = _el('text', {
       x: lx, y: ly, 'text-anchor': 'middle', 'dominant-baseline': 'middle',
-      'font-size': '18', 'font-weight': '600', fill: '#374151'
+      'font-size': '28', 'font-weight': '600', fill: '#374151'
     });
     const lines = String(labels[i]).split(' ');
 if (lines.length <= 1) {
@@ -443,7 +443,7 @@ if (lines.length <= 1) {
     if (actualValues && actualValues.length === N) {
       const v = _el('text', {
         x: vx, y: vy, 'text-anchor': 'middle', 'dominant-baseline': 'middle',
-        'font-size': '16', 'font-weight': '600', fill: BRAND
+        'font-size': '22', 'font-weight': '600', fill: BRAND
       });
       v.textContent = Math.round(actualValues[i]) + '';
       svg.appendChild(v);
@@ -540,7 +540,7 @@ if (lines.length <= 1) {
     ['Dup UIDs','Avg SKU %Δ','Avg PO %Δ','Heavy bins','Diversity (heavy)','Late appliers %'],
     [55,50,45,60,50,40],
     null,
-    { size: 360 }
+    { size: 340 }
   );}
 
 // ---- DEBUG: Exec data snapshot (runs once) ----
@@ -610,7 +610,7 @@ const donutSlot = document.getElementById('donut-slot');
 const radarSlot = document.getElementById('radar-slot');
 
 const donutSize = Math.floor(
-  Math.min(donutSlot.clientWidth || 340, (donutSlot.parentElement?.clientHeight || 380)) * 0.75
+  Math.min(donutSlot.clientWidth || 420, (donutSlot.parentElement?.clientHeight || 440)) * 0.75
 );
 const radarSize = Math.floor(
   Math.min(radarSlot.clientWidth || 420, (radarSlot.parentElement?.clientHeight || 440)) * 0.90
@@ -706,7 +706,7 @@ const radarSize = Math.floor(
 
 renderDonutWithBaseline(donutSlot, m.plannedTotal, m.appliedTotal, { size: donutSize });
 renderRadarWithBaseline(radarSlot, axes, [55,50,45,60,50,40], values, {
-  size: Math.max(320, Math.min(radarSize, 420))
+  size: Math.max(280, Math.min(radarSize, 420))
 });
 
 }
