@@ -418,7 +418,7 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
     const ly = cy + labelR * Math.sin(ang);
     const t = _el('text', {
       x: lx, y: ly, 'text-anchor': 'middle', 'dominant-baseline': 'middle',
-      'font-size': '13', 'font-weight': '600', fill: '#374151'
+      'font-size': '18', 'font-weight': '600', fill: '#374151'
     });
     t.textContent = labels[i];
     svg.appendChild(t);
@@ -440,6 +440,171 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
   slot.appendChild(svg);
 }
 
+// ---------- Timeline helpers & renderer ----------
+function _businessDaysBack(isoYMD, n) {
+  const d = new Date(isoYMD + 'T00:00:00');
+  let left = Math.max(0, n|0);
+  while (left > 0) {
+    d.setDate(d.getDate() - 1);
+    const wd = d.getDay(); // 0 Sun .. 6 Sat
+    if (wd !== 0 && wd !== 6) left--;
+  }
+  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+
+function _toDate(ymd){ return new Date(ymd + 'T00:00:00'); }
+function _clamp01(v){ return Math.max(0, Math.min(1, v)); }
+
+function _mix(a,b,t){ return a + (b-a)*t; } // linear map
+
+function renderExecTimeline(slot, m, opts={}) {
+  slot.innerHTML = '';
+  if (!m?.ws || !m?.we) return;
+
+  // Colors (shades of #990033)
+  const BRAND = (typeof window.BRAND !== 'undefined') ? window.BRAND : '#990033';
+  const C_TRACK    = '#fde4ee';
+  const C_FILL     = BRAND;           // progress fill
+  const C_PLAN     = '#b3124a';       // planned pings
+  const C_ACTUAL   = '#e27aa3';       // actual pings
+
+  const width  = Math.max(320, Math.floor(slot.clientWidth || 720));
+  const height = 140;
+  const padX   = 24;
+  const padY   = 26;
+  const trackR = 10;
+
+  const ws = m.ws;
+  const we = m.we;
+
+  // Planned dates
+  const planned_planned    = _businessDaysBack(ws, 7); // "Planned" baseline = Monday minus 7 business days
+  const planned_inventory  = ws;                       // Inventory Received planned = Monday
+  const planned_processing = (function(){ const d=_toDate(ws); d.setDate(d.getDate()+4); return d.toISOString().slice(0,10); })(); // Friday
+  const planned_dispatch   = we; // anytime in week → use week end as plan anchor
+
+  // Actuals can be provided/overridden by Ops in state.execTimelineActuals as ISO strings
+  const a = (window.execTimelineActuals || {});
+  // Derive from records as fallback
+  const sRecs = Array.isArray(window.state?.records) ? window.state.records : [];
+  const wkRecs = sRecs.filter(r=>{
+    const ymd = (typeof window.bizYMDFromRecord==='function' ? window.bizYMDFromRecord(r) : (r.date_local||'')).trim();
+    return ymd && ymd >= ws && ymd <= we;
+  });
+  const recDates = wkRecs.map(r=>(typeof window.bizYMDFromRecord==='function' ? window.bizYMDFromRecord(r) : (r.date_local||'')).trim()).filter(Boolean).sort();
+
+  const actual_planned    = a.planned_date || null;                // optional
+  const actual_inventory  = a.inventory_received || recDates[0] || null;
+  const actual_processingStart = a.processing_start || recDates[0] || null;
+  const actual_processingEnd   = a.processing_complete || recDates[recDates.length-1] || null;
+  const actual_dispatched = a.dispatched_date || null;
+
+  // Map YMD → 0..1 position across the week
+  const t0 = _toDate(ws).getTime();
+  const t1 = _toDate(we).getTime();
+  const span = Math.max(1, (t1 - t0));
+  const toT = (ymd) => _clamp01((_toDate(ymd).getTime() - t0) / span);
+
+  // Track geometry
+  const x0 = padX, x1 = width - padX, y = Math.round(height/2) - 6;
+  const trackW = x1 - x0;
+
+  // Fill percent from completion
+  const pFill = _clamp01((m.completionPct||0) / 100);
+
+  // Build SVG
+  const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.setAttribute('width', String(width));
+  svg.setAttribute('height', String(height));
+  svg.setAttribute('role','img');
+  svg.setAttribute('aria-label','Timeline planned vs actual');
+
+  // Track
+  const track = document.createElementNS(svg.namespaceURI,'rect');
+  track.setAttribute('x', x0); track.setAttribute('y', y);
+  track.setAttribute('rx', trackR); track.setAttribute('ry', trackR);
+  track.setAttribute('width', trackW); track.setAttribute('height', 16);
+  track.setAttribute('fill', C_TRACK);
+  svg.appendChild(track);
+
+  // Fill
+  const fill = document.createElementNS(svg.namespaceURI,'rect');
+  fill.setAttribute('x', x0); fill.setAttribute('y', y);
+  fill.setAttribute('rx', trackR); fill.setAttribute('ry', trackR);
+  fill.setAttribute('width', Math.max(0.0001, trackW * pFill)); fill.setAttribute('height', 16);
+  fill.setAttribute('fill', C_FILL);
+  svg.appendChild(fill);
+
+  // Milestones (plan + actual)
+  const milestones = [
+    { key:'Planned',   plan: planned_planned,   actual: actual_planned },
+    { key:'Inventory', plan: planned_inventory, actual: actual_inventory },
+    { key:'Processing',plan: planned_processing,actual: actual_processingEnd }, // show end as the main actual
+    { key:'Dispatched',plan: planned_dispatch,  actual: actual_dispatched },
+  ];
+
+  const labelY = y + 36;
+
+  milestones.forEach(ms=>{
+    // Plan ping (diamond)
+    if (ms.plan) {
+      const px = _mix(x0, x1, toT(ms.plan));
+      const g = document.createElementNS(svg.namespaceURI,'g');
+      const dia = document.createElementNS(svg.namespaceURI,'rect');
+      dia.setAttribute('x', px-6); dia.setAttribute('y', y+8-6);
+      dia.setAttribute('width', 12); dia.setAttribute('height', 12);
+      dia.setAttribute('transform', `rotate(45 ${px} ${y+8})`);
+      dia.setAttribute('fill', C_PLAN);
+      g.appendChild(dia);
+      const t = document.createElementNS(svg.namespaceURI,'text');
+      t.setAttribute('x', px); t.setAttribute('y', labelY);
+      t.setAttribute('text-anchor','middle'); t.setAttribute('font-size','12'); t.setAttribute('fill','#4b5563');
+      t.textContent = `${ms.key} (Plan)`;
+      g.appendChild(t);
+      svg.appendChild(g);
+    }
+    // Actual ping (circle)
+    if (ms.actual) {
+      const ax = _mix(x0, x1, toT(ms.actual));
+      const g = document.createElementNS(svg.namespaceURI,'g');
+      const c = document.createElementNS(svg.namespaceURI,'circle');
+      c.setAttribute('cx', ax); c.setAttribute('cy', y+8);
+      c.setAttribute('r', 6); c.setAttribute('fill', C_ACTUAL); c.setAttribute('stroke', '#ffffff'); c.setAttribute('stroke-width', '2');
+      g.appendChild(c);
+      const t = document.createElementNS(svg.namespaceURI,'text');
+      t.setAttribute('x', ax); t.setAttribute('y', labelY+16);
+      t.setAttribute('text-anchor','middle'); t.setAttribute('font-size','12'); t.setAttribute('fill','#6b7280');
+      t.textContent = `${ms.key} (Actual)`;
+      g.appendChild(t);
+      svg.appendChild(g);
+    }
+  });
+
+  // Axis ticks (Mon..Sun)
+  const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  for (let i=0;i<7;i++){
+    const d = _toDate(ws); d.setDate(d.getDate()+i);
+    const ymd = d.toISOString().slice(0,10);
+    const tx = _mix(x0, x1, toT(ymd));
+    const tick = document.createElementNS(svg.namespaceURI,'line');
+    tick.setAttribute('x1', tx); tick.setAttribute('y1', y-6);
+    tick.setAttribute('x2', tx); tick.setAttribute('y2', y-12);
+    tick.setAttribute('stroke', '#d1d5db'); tick.setAttribute('stroke-width', '1');
+    svg.appendChild(tick);
+    const tl = document.createElementNS(svg.namespaceURI,'text');
+    tl.setAttribute('x', tx); tl.setAttribute('y', y-16);
+    tl.setAttribute('text-anchor', 'middle'); tl.setAttribute('font-size','11'); tl.setAttribute('fill','#6b7280');
+    tl.textContent = days[i];
+    svg.appendChild(tl);
+  }
+
+  slot.appendChild(svg);
+}
+
+
+
 
   // ---------- Cards render ----------
   function renderExec(){
@@ -452,21 +617,21 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
       <!-- Tiles -->
       <div id="exec-tiles" class="grid grid-cols-2 sm:grid-cols-6 gap-3"></div>
 
-      <!-- Charts row -->
+            <!-- Charts row -->
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
 
         <!-- Radar -->
-        <div class="bg-white rounded-2xl border shadow p-3 flex flex-col max-h-[460px]" id="card-radar">
+        <div class="bg-white rounded-2xl border shadow p-3 flex flex-col max-h-[420px]" id="card-radar">
           <div class="text-base font-semibold">Exceptions Radar</div>
           <div class="text-xs text-gray-500">Risk-normalized (0–100)</div>
-          <div class="flex-1 min-h-[380px]">
-  <div id="radar-slot" class="w-full h-full"></div>
-</div>
-          <div id="radar-note" class="mt-2 text-xs text-gray-500"></div>
+          <div class="flex-1 min-h-[260px] flex items-center justify-center">
+            <div id="radar-slot" class="w-full flex items-center justify-center"></div>
+          </div>
+          <div id="radar-note" class="mt-2 text-xs text-gray-500 text-center"></div>
         </div>
 
         <!-- Donut -->
-        <div class="bg-white rounded-2xl border shadow p-3 flex flex-col max-h-[460px]" id="card-donut">
+        <div class="bg-white rounded-2xl border shadow p-3 flex flex-col max-h-[420px]" id="card-donut">
           <div class="flex items-baseline justify-between">
             <div>
               <div class="text-base font-semibold leading-tight">Planned vs Applied</div>
@@ -474,12 +639,20 @@ function renderRadarWithBaseline(slot, labels, baselineValues, actualValues, opt
             </div>
             <div id="donut-stats" class="text-sm font-semibold text-gray-700"></div>
           </div>
-          <div class="flex-1 min-h-[380px]">
-  <div id="donut-slot" class="w-full h-full"></div>
-</div>
+          <div class="flex-1 min-h-[260px] flex items-center justify-center">
+            <div id="donut-slot" class="w-full flex items-center justify-center"></div>
+          </div>
         </div>
 
       </div>
+
+      <!-- Timeline -->
+      <div class="bg-white rounded-2xl border shadow p-3" id="card-timeline">
+        <div class="text-base font-semibold">Week Timeline</div>
+        <div class="text-xs text-gray-500 mb-2">Planned vs Actual</div>
+        <div id="timeline-slot" class="min-h-[140px]"></div>
+      </div>
+
 
       <!-- Exception widgets -->
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -678,6 +851,11 @@ const radarSize = 420;  // px canvas for radar
 
 renderDonutWithBaseline(donutSlot, m.plannedTotal, m.appliedTotal, { size: donutSize });
 renderRadarWithBaseline(radarSlot, axes, [55,50,45,60,50,40], values, { size: radarSize });
+
+// Timeline (planned vs actual)
+const timelineSlot = document.getElementById('timeline-slot');
+if (timelineSlot) renderExecTimeline(timelineSlot, m);
+
 }
 
   // Render when Exec page is shown
