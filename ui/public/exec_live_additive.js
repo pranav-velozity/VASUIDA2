@@ -924,9 +924,6 @@ renderRadarWithBaseline(radarSlot, axes, [55,50,45,60,50,40], values, { size: ra
    m.dispatchedActualYMD = dispOverride || dispFromRecs;
  }
 
-}
-
-
 // Timeline (planned vs actual)
 const timelineSlot = document.getElementById('timeline-slot');
 if (timelineSlot) renderExecTimeline(timelineSlot, m);
