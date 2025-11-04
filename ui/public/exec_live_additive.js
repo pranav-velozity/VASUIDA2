@@ -563,6 +563,10 @@ const w0 = slot.clientWidth || slot.parentElement?.clientWidth || 0;
 const width = Math.max(720, w0 || 720);
   const height = 120;
   const pad = 28;
+fill: '#F3F4F6',
+stroke: '#E5E7EB',
+'stroke-width': 1
+
 
   const svg = _el('svg', {
     viewBox: `0 0 ${width} ${height}`,
@@ -922,17 +926,7 @@ renderRadarWithBaseline(radarSlot, axes, [55,50,45,60,50,40], values, { size: ra
 
   if (invOverride)  m.inventoryActualYMD  = invOverride;
   if (dispOverride) m.dispatchedActualYMD = dispOverride;
-
-// Build fallbacks from in-week records
-   const wkRecords = (window.state?.records||[]).filter(/* same predicate already used */);
-   const ymds = Array.from(new Set(wkRecords.map(r => bizYMDFromRecord(r)).filter(Boolean))).sort();
-   const invFromRecs  = ymds.length ? ymds[0] : m.ws;
-   const dispFromRecs = ymds.length ? ymds[ymds.length - 1] : m.we;
-
-   // Final values used by timeline (override wins, else fallback)
-   m.inventoryActualYMD  = invOverride  || invFromRecs;
-   m.dispatchedActualYMD = dispOverride || dispFromRecs;
- }
+}
 
 }
 
@@ -944,7 +938,7 @@ if (timelineSlot) renderExecTimeline(timelineSlot, m);
   // Render when Exec page is shown
   function onHash(){
     const hash = location.hash || '#dashboard';
-    if (hash === '#exec') renderExec();
+    if (hash === '#exec') _execTryRender();
   }
   window.addEventListener('hashchange', onHash);
   // Also render once if Exec is already selected
@@ -1092,20 +1086,25 @@ async function _execTryRender() {
 
 
   // Ensure data exists at least once (fallback fetch), then continue
-await _execEnsureStateLoaded(s.weekStart);
+if (EXEC_USE_NETWORK) {
+  await _execEnsureStateLoaded(s.weekStart);
+}
 
   const hasPlan = Array.isArray(s.plan) && s.plan.length > 0;
   const hasRecs = Array.isArray(s.records) && s.records.length > 0;
 
-  if (!(hasPlan || hasRecs)) {
-// Exec: only attempt fetches if allowed
-(EXEC_USE_NETWORK !== false ? execEnsureStateLoaded(s.weekStart) : Promise.resolve())
+if (!(hasPlan || hasRecs)) {
+  if (EXEC_USE_NETWORK) {
+    _execEnsureStateLoaded(s.weekStart)
       .then(() => { try { renderExec(); } catch (e) { console.error('[Exec render error]', e); } })
       .catch(e  => console.error('[Exec fetch error]', e));
-    return;
+  } else {
+    // No network on Exec: render immediately with empty arrays (UI still shows baseline)
+    try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
   }
+  return;
+}
 
-  try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
 }
 
 
