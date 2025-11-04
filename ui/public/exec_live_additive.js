@@ -604,20 +604,41 @@ svg.appendChild(_el('rect', {
     stroke: '#B73A5C', 'stroke-width': 4, 'stroke-linecap': 'round'
   }));
 
-  // actual progress fill
-  const actualStart = inventoryActual || inventoryPlanned;
-  const todayFallback = (() => {
-    const todayIdx = ((new Date().getDay() + 6) % 7); // 0..6 with 0=Mon
-    return addDaysYMD(ws, Math.min(6, Math.max(0, todayIdx)));
-  })();
-  const actualEnd = dispatchedActual || todayFallback;
+    // ===== Actual progress fill =====
+  // Priority: 1) Ops override %; 2) latest actual date among Dispatched/Processing/Inventory; 3) none -> no fill
+  const fillStartX = scaleX(inventoryPlanned); // progress starts at planned inventory (Mon)
 
-  const ax1 = scaleX(actualStart);
-  const ax2 = scaleX(actualEnd);
-  svg.appendChild(_el('rect', {
-    x: Math.min(ax1, ax2), y: barY + 2, width: Math.max(2, Math.abs(ax2 - ax1)), height: barH - 4,
-    rx: 5, ry: 5, fill: '#990033' // main brand
-  }));
+  // Case 1: Ops % override
+  if (m._opsCompletionPct != null) {
+    const pct01 = Math.max(0, Math.min(100, m._opsCompletionPct)) / 100;
+    // fill only the Mon→Sun segment by percentage
+    const endX = rightStartX + Math.round(rightSpan * pct01);
+    const x = Math.min(fillStartX, endX);
+    const w = Math.max(2, Math.abs(endX - fillStartX));
+    svg.appendChild(_el('rect', {
+      x, y: barY + 2, width: w, height: barH - 4,
+      rx: 5, ry: 5, fill: '#990033'
+    }));
+  } else {
+    // Case 2: infer from actual dates
+    const latestActualYMD =
+      (m.dispatchedActualYMD && clampYMD(m.dispatchedActualYMD, plannedBaseline, addDaysYMD(we, 3))) ||
+      (m.processingActualYMD && clampYMD(m.processingActualYMD, plannedBaseline, we)) ||
+      (m.inventoryActualYMD && clampYMD(m.inventoryActualYMD, plannedBaseline, we)) ||
+      null;
+
+    if (latestActualYMD) {
+      const endX = scaleX(latestActualYMD);
+      const x = Math.min(fillStartX, endX);
+      const w = Math.max(2, Math.abs(endX - fillStartX));
+      svg.appendChild(_el('rect', {
+        x, y: barY + 2, width: w, height: barH - 4,
+        rx: 5, ry: 5, fill: '#990033'
+      }));
+    }
+    // Else: no fill (cylinder stays grey)
+  }
+
 
   // milestones (planned above, actuals below)
 const dots = [
@@ -717,9 +738,41 @@ dots.forEach(d => {
 
       <!-- Timeline -->
       <div class="bg-white rounded-2xl border shadow p-3" id="card-timeline">
-        <div class="text-base font-semibold">Week Timeline</div>
-        <div class="text-xs text-gray-500 mb-2">Planned vs Actual</div>
-        <div id="timeline-slot" class="min-h-[140px]"></div>
+<div class="flex items-center justify-between">
+  <div>
+    <div class="text-base font-semibold">Week Timeline</div>
+    <div class="text-xs text-gray-500 -mt-0.5">Planned vs Actual</div>
+  </div>
+  <button id="timeline-edit-btn" class="text-xs px-2 py-1 rounded-full border text-gray-600 hover:bg-gray-50">
+    Edit actuals
+  </button>
+</div>
+<div id="timeline-editor" class="hidden mt-2">
+  <div class="grid grid-cols-2 md:grid-cols-5 gap-2">
+    <label class="text-xs text-gray-600">
+      Inventory (Actual)
+      <input id="in-act" type="date" class="w-full border rounded px-2 py-1 text-sm">
+    </label>
+    <label class="text-xs text-gray-600">
+      Processing (Actual)
+      <input id="pr-act" type="date" class="w-full border rounded px-2 py-1 text-sm">
+    </label>
+    <label class="text-xs text-gray-600">
+      Dispatched (Actual)
+      <input id="di-act" type="date" class="w-full border rounded px-2 py-1 text-sm">
+    </label>
+    <label class="text-xs text-gray-600">
+      Completion %
+      <input id="ops-pct" type="number" min="0" max="100" step="1" placeholder="0–100" class="w-full border rounded px-2 py-1 text-sm">
+    </label>
+    <div class="flex items-end gap-2">
+      <button id="timeline-save" class="px-3 py-1 rounded bg-rose-700 text-white text-xs">Save</button>
+      <button id="timeline-cancel" class="px-3 py-1 rounded border text-xs">Cancel</button>
+    </div>
+  </div>
+</div>
+<div id="timeline-slot" class="min-h-[140px] mt-2"></div>
+
       </div>
 
 
@@ -933,20 +986,38 @@ renderRadarWithBaseline(radarSlot, axes, [55,50,45,60,50,40], values, { size: ra
 /// m.inventoryActualYMD  = '2025-11-03'; // example
 /// m.dispatchedActualYMD = '2025-11-09'; // example
 
+
+// ---- Ops completion % (if provided) + actuals snapshot -------------
+m._opsCompletionPct =
+  (window.state?.ops?.completion_pct ?? 
+   window.state?.completion_pct ?? 
+   window.state?.milestones?.completion_pct);
+
+// normalize to 0..100 if present
+if (m._opsCompletionPct != null) {
+  const v = Number(m._opsCompletionPct);
+  m._opsCompletionPct = Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : null;
+}
+
+
 // ---- Feed actual dates for the timeline (preferred: Ops overrides; fallback: records)
 {
-    const invOverride  = window.state?.milestones?.inventory_actual_ymd
-                    || window.state?.inventory_actual_ymd
-                    || window.state?.inventoryActualYMD;
+const invOverride  = window.state?.milestones?.inventory_actual_ymd
+                  || window.state?.inventory_actual_ymd
+                  || window.state?.inventoryActualYMD;
 
-  const dispOverride = window.state?.milestones?.dispatched_actual_ymd
-                    || window.state?.dispatched_actual_ymd
-                    || window.state?.dispatchedActualYMD;
+const procOverride = window.state?.milestones?.processing_actual_ymd
+                  || window.state?.processing_actual_ymd
+                  || window.state?.processingActualYMD;
+
+const dispOverride = window.state?.milestones?.dispatched_actual_ymd
+                  || window.state?.dispatched_actual_ymd
+                  || window.state?.dispatchedActualYMD;
 
 // (optional) pre-seed
-
-  if (invOverride)  m.inventoryActualYMD  = invOverride;
-  if (dispOverride) m.dispatchedActualYMD = dispOverride;
+if (invOverride)  m.inventoryActualYMD  = invOverride;
+if (procOverride) m.processingActualYMD = procOverride;
+if (dispOverride) m.dispatchedActualYMD = dispOverride;
 
   // Fallbacks from week record dates if overrides absent
   const ymds = Array.isArray(m._wkDatesSorted) ? m._wkDatesSorted : [];
@@ -961,6 +1032,68 @@ const timelineSlot = document.getElementById('timeline-slot');
 if (timelineSlot) renderExecTimeline(timelineSlot, m);
 }
 
+// ===== Inline editor for actuals / Ops % =====
+(function wireTimelineEditor(){
+  const btn   = document.getElementById('timeline-edit-btn');
+  const pane  = document.getElementById('timeline-editor');
+  const save  = document.getElementById('timeline-save');
+  const cancel= document.getElementById('timeline-cancel');
+  const inAct = document.getElementById('in-act');
+  const prAct = document.getElementById('pr-act');
+  const diAct = document.getElementById('di-act');
+  const opsPct= document.getElementById('ops-pct');
+
+  if (!btn || !pane || !save || !cancel) return;
+
+  // hydrate fields from state
+  const ms = window.state?.milestones || {};
+  inAct.value = (ms.inventory_actual_ymd || m.inventoryActualYMD || '').slice(0,10);
+  prAct.value = (ms.processing_actual_ymd || m.processingActualYMD || '').slice(0,10);
+  diAct.value = (ms.dispatched_actual_ymd || m.dispatchedActualYMD || '').slice(0,10);
+  opsPct.value = String(
+  window.state?.ops?.completion_pct ??
+  ms.completion_pct ??
+  ''
+);
+
+  btn.onclick = () => {
+    pane.classList.toggle('hidden');
+  };
+cancel.onclick = (e) => {
+  e?.preventDefault?.();
+  pane.classList.add('hidden');
+};
+save.onclick = (e) => {
+  e?.preventDefault?.();
+  const s = window.state || (window.state = {});
+
+    const ms = s.milestones || (s.milestones = {});
+
+    const vIn = inAct.value?.trim();
+    const vPr = prAct.value?.trim();
+    const vDi = diAct.value?.trim();
+    const vPct = opsPct.value?.trim();
+
+    ms.inventory_actual_ymd  = vIn || undefined;
+    ms.processing_actual_ymd = vPr || undefined;
+    ms.dispatched_actual_ymd = vDi || undefined;
+
+    if (vPct !== '' && vPct != null) {
+      const n = Math.round(Math.max(0, Math.min(100, Number(vPct))));
+      // store in both places for convenience
+      s.ops = s.ops || {};
+      s.ops.completion_pct = n;
+      ms.completion_pct = n;
+    } else {
+      if (s.ops) delete s.ops.completion_pct;
+      delete ms.completion_pct;
+    }
+
+    // Let the dashboard re-render
+    window.dispatchEvent(new Event('state:ready'));
+    pane.classList.add('hidden');
+  };
+})();
 
 
 
