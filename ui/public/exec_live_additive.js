@@ -458,151 +458,216 @@ function _clamp01(v){ return Math.max(0, Math.min(1, v)); }
 
 function _mix(a,b,t){ return a + (b-a)*t; } // linear map
 
-function renderExecTimeline(slot, m, opts={}) {
+function renderExecTimeline(slot, m, opts = {}) {
   slot.innerHTML = '';
-  if (!m?.ws || !m?.we) return;
-
-  // Colors (shades of #990033)
   const BRAND = (typeof window.BRAND !== 'undefined') ? window.BRAND : '#990033';
-  const C_TRACK    = '#fde4ee';
-  const C_FILL     = BRAND;           // progress fill
-  const C_PLAN     = '#b3124a';       // planned pings
-  const C_ACTUAL   = '#e27aa3';       // actual pings
 
-  const width  = Math.max(320, Math.floor(slot.clientWidth || 720));
-  const height = 140;
-  const padX   = 24;
-  const padY   = 26;
-  const trackR = 10;
+  // ---- sizing
+  const W = Math.max(680, Math.floor(slot.clientWidth || 980));
+  const H = Math.max(160, opts.height || 180);
+  const P = { l: 32, r: 32, t: 28, b: 42 };
+  const CX = W - P.l - P.r;
+  const CY = H - P.t - P.b;
+  const railY = P.t + Math.floor(CY * 0.48);
 
-  const ws = m.ws;
-  const we = m.we;
+  // ---- svg root
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('width', W);
+  svg.setAttribute('height', H);
+  svg.setAttribute('role', 'img');
+  svg.style.display = 'block';
 
-  // Planned dates
-  const planned_planned    = _businessDaysBack(ws, 7); // "Planned" baseline = Monday minus 7 business days
-  const planned_inventory  = ws;                       // Inventory Received planned = Monday
-  const planned_processing = (function(){ const d=_toDate(ws); d.setDate(d.getDate()+4); return d.toISOString().slice(0,10); })(); // Friday
-  const planned_dispatch   = we; // anytime in week → use week end as plan anchor
+  // ---- helpers
+  const parseYMD = (s) => new Date(`${s}T00:00:00`);
+  const addDays  = (d, n) => { const x = new Date(d); x.setDate(x.getDate()+n); return x; };
+  const clamp    = (v,a,b)=>Math.max(a,Math.min(b,v));
 
-  // Actuals can be provided/overridden by Ops in state.execTimelineActuals as ISO strings
-  const a = (window.execTimelineActuals || {});
-  // Derive from records as fallback
-  const sRecs = Array.isArray(window.state?.records) ? window.state.records : [];
-  const wkRecs = sRecs.filter(r=>{
-    const ymd = (typeof window.bizYMDFromRecord==='function' ? window.bizYMDFromRecord(r) : (r.date_local||'')).trim();
-    return ymd && ymd >= ws && ymd <= we;
+  const ws = parseYMD(m.ws);                 // Monday
+  const we = parseYMD(m.we);                 // Sunday
+  const rangeEnd = addDays(we, 1);           // exclusive end for scale
+  const t0 = ws.getTime();
+  const t1 = rangeEnd.getTime();
+
+  const xScale = (d) => P.l + ((d - t0) / (t1 - t0)) * CX;
+
+  // ---- rail: white with subtle border (no pink fill)
+  const R = 9;
+  const rail = document.createElementNS(svg.namespaceURI, 'rect');
+  rail.setAttribute('x', P.l);
+  rail.setAttribute('y', railY - 10);
+  rail.setAttribute('width', CX);
+  rail.setAttribute('height', 20);
+  rail.setAttribute('rx', R);
+  rail.setAttribute('fill', '#ffffff');
+  rail.setAttribute('stroke', '#e5e7eb');
+  rail.setAttribute('stroke-width', '2');
+  svg.appendChild(rail);
+
+  // ---- day ticks (Mon..Sun), labels with thinning & collision guard
+  const dayNames = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  let lastLabelX = -1e9;
+  for (let i=0;i<7;i++){
+    const d = addDays(ws, i);
+    const x = xScale(d.getTime());
+    // tick
+    const tick = document.createElementNS(svg.namespaceURI, 'line');
+    tick.setAttribute('x1', x); tick.setAttribute('x2', x);
+    tick.setAttribute('y1', railY - 18); tick.setAttribute('y2', railY - 10);
+    tick.setAttribute('stroke', '#d1d5db');
+    tick.setAttribute('stroke-width', '1');
+    svg.appendChild(tick);
+
+    // label only for Mon / Wed / Fri / Sun
+    const shouldLabel = (i === 0 || i === 2 || i === 4 || i === 6);
+    if (shouldLabel) {
+      // basic collision guard (min 42px apart)
+      if (x - lastLabelX >= 42) {
+        const t = document.createElementNS(svg.namespaceURI, 'text');
+        t.setAttribute('x', x);
+        t.setAttribute('y', railY - 22);
+        t.setAttribute('text-anchor', 'middle');
+        t.setAttribute('font-size', '11');
+        t.setAttribute('fill', '#6b7280');
+        t.textContent = dayNames[i];
+        svg.appendChild(t);
+        lastLabelX = x;
+      }
+    }
+  }
+
+  // ---- planned processing window (Mon..Fri) as a thin line overlay
+  const px0 = xScale(ws.getTime());
+  const px1 = xScale(addDays(ws, 5).getTime()); // Fri start
+  const planLine = document.createElementNS(svg.namespaceURI, 'line');
+  planLine.setAttribute('x1', px0);
+  planLine.setAttribute('x2', px1);
+  planLine.setAttribute('y1', railY);
+  planLine.setAttribute('y2', railY);
+  planLine.setAttribute('stroke', BRAND);
+  planLine.setAttribute('stroke-opacity', '0.25'); // subtle
+  planLine.setAttribute('stroke-width', '4');
+  planLine.setAttribute('stroke-linecap', 'round');
+  svg.appendChild(planLine);
+
+  // ---- actual throughput progress (deep brand), based on planned/applied
+  // If you have more precise start/end times (inventory/dispatch), wire them in here.
+  const planned = Number(m.plannedTotal || 0);
+  const applied = Number(m.appliedTotal || 0);
+  const pctDone = planned > 0 ? clamp(applied / planned, 0, 1) : 0;
+  const actualStartX = px0;
+  const actualEndX   = px0 + (px1 - px0) * pctDone;
+
+  if (pctDone > 0) {
+    const prog = document.createElementNS(svg.namespaceURI, 'line');
+    prog.setAttribute('x1', actualStartX);
+    prog.setAttribute('x2', actualEndX);
+    prog.setAttribute('y1', railY);
+    prog.setAttribute('y2', railY);
+    prog.setAttribute('stroke', BRAND);
+    prog.setAttribute('stroke-width', '10');
+    prog.setAttribute('stroke-linecap', 'round');
+    svg.appendChild(prog);
+  }
+
+  // ---- milestone helper (two lanes: planned above, actual below)
+  const lane = { planned: railY - 34, actual: railY + 34 };
+  const makeDot = (x,y,color) => {
+    const c = document.createElementNS(svg.namespaceURI, 'circle');
+    c.setAttribute('cx', x); c.setAttribute('cy', y);
+    c.setAttribute('r', 5);
+    c.setAttribute('fill', color);
+    c.setAttribute('stroke', '#fff');
+    c.setAttribute('stroke-width', '2');
+    return c;
+  };
+  const makeText = (x,y,txt,color,anchor='middle') => {
+    const t = document.createElementNS(svg.namespaceURI, 'text');
+    t.setAttribute('x', x); t.setAttribute('y', y);
+    t.setAttribute('text-anchor', anchor);
+    t.setAttribute('font-size', '11');
+    t.setAttribute('font-weight', '600');
+    t.setAttribute('fill', color);
+    t.textContent = txt;
+    return t;
+  };
+
+  // colors
+  const BRAND_LIGHT = '#d66a90';  // planned marker
+  const BRAND_DEEP  = BRAND;      // actual marker
+
+  // ---- planned milestones (static baseline assumptions)
+  // Planned: “ready to process” target = Fri (Mon..Fri work window)
+  const planInvX  = xScale(ws.getTime());               // Inventory planned (Mon)
+  const planProcX = xScale(addDays(ws, 4).getTime());   // Processing planned (Fri)
+  const planDispX = xScale(addDays(ws, 6).getTime());   // Dispatch planned (Sun)
+
+  // Place planned markers
+  [
+    { x: planInvX,  label: 'Inventory (Plan)' },
+    { x: planProcX, label: 'Processing (Plan)' },
+    { x: planDispX, label: 'Dispatched (Plan)' },
+  ].forEach((p, idx) => {
+    const x = clamp(p.x, P.l, P.l + CX);
+    const y = lane.planned;
+    svg.appendChild(makeDot(x, y, BRAND_LIGHT));
+    const t = makeText(x, y - 8, p.label, '#6b7280');
+    // avoid edge clipping
+    if (x < P.l + 30) t.setAttribute('text-anchor','start');
+    if (x > P.l + CX - 30) t.setAttribute('text-anchor','end');
+    svg.appendChild(t);
   });
-  const recDates = wkRecs.map(r=>(typeof window.bizYMDFromRecord==='function' ? window.bizYMDFromRecord(r) : (r.date_local||'')).trim()).filter(Boolean).sort();
 
-  const actual_planned    = a.planned_date || null;                // optional
-  const actual_inventory  = a.inventory_received || recDates[0] || null;
-  const actual_processingStart = a.processing_start || recDates[0] || null;
-  const actual_processingEnd   = a.processing_complete || recDates[recDates.length-1] || null;
-  const actual_dispatched = a.dispatched_date || null;
+  // ---- actual milestones (use what you have; otherwise hide gracefully)
+  // You can pass m.actualInventoryYMD / m.actualDispatchedYMD if available.
+  const actualInvYMD  = m.inventoryActualYMD || m.ws;   // default Mon
+  const actualProcPct = pctDone;                         // derives from throughput
+  const actualDispYMD = m.dispatchedActualYMD || m.we;  // default Sun
 
-  // Map YMD → 0..1 position across the week
-  const t0 = _toDate(ws).getTime();
-  const t1 = _toDate(we).getTime();
-  const span = Math.max(1, (t1 - t0));
-  const toT = (ymd) => _clamp01((_toDate(ymd).getTime() - t0) / span);
+  const actInvX  = xScale(parseYMD(actualInvYMD).getTime());
+  const actProcX = px0 + (px1 - px0) * actualProcPct;  // mid-progress marker
+  const actDispX = xScale(parseYMD(actualDispYMD).getTime());
 
-  // Track geometry
-  const x0 = padX, x1 = width - padX, y = Math.round(height/2) - 6;
-  const trackW = x1 - x0;
-
-  // Fill percent from completion
-  const pFill = _clamp01((m.completionPct||0) / 100);
-
-  // Build SVG
-  const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
-  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-  svg.setAttribute('width', String(width));
-  svg.setAttribute('height', String(height));
-  svg.setAttribute('role','img');
-  svg.setAttribute('aria-label','Timeline planned vs actual');
-
-  // Track
-  const track = document.createElementNS(svg.namespaceURI,'rect');
-  track.setAttribute('x', x0); track.setAttribute('y', y);
-  track.setAttribute('rx', trackR); track.setAttribute('ry', trackR);
-  track.setAttribute('width', trackW); track.setAttribute('height', 16);
-  track.setAttribute('fill', C_TRACK);
-  svg.appendChild(track);
-
-  // Fill
-  const fill = document.createElementNS(svg.namespaceURI,'rect');
-  fill.setAttribute('x', x0); fill.setAttribute('y', y);
-  fill.setAttribute('rx', trackR); fill.setAttribute('ry', trackR);
-  fill.setAttribute('width', Math.max(0.0001, trackW * pFill)); fill.setAttribute('height', 16);
-  fill.setAttribute('fill', C_FILL);
-  svg.appendChild(fill);
-
-  // Milestones (plan + actual)
-  const milestones = [
-    { key:'Planned',   plan: planned_planned,   actual: actual_planned },
-    { key:'Inventory', plan: planned_inventory, actual: actual_inventory },
-    { key:'Processing',plan: planned_processing,actual: actual_processingEnd }, // show end as the main actual
-    { key:'Dispatched',plan: planned_dispatch,  actual: actual_dispatched },
+  const actuals = [
+    { x: actInvX,  label: 'Inventory (Actual)' },
+    { x: actProcX, label: 'Processing (Actual)' },
+    { x: actDispX, label: 'Dispatched (Actual)' },
   ];
 
-  const labelY = y + 36;
+  // simple de-overlap in the actual lane (nudges if too close)
+  actuals.sort((a,b)=>a.x-b.x);
+  for (let i=1;i<actuals.length;i++){
+    if (actuals[i].x - actuals[i-1].x < 46){
+      actuals[i].x = actuals[i-1].x + 46;
+    }
+  }
 
-  milestones.forEach(ms=>{
-    // Plan ping (diamond)
-    if (ms.plan) {
-      const px = _mix(x0, x1, toT(ms.plan));
-      const g = document.createElementNS(svg.namespaceURI,'g');
-      const dia = document.createElementNS(svg.namespaceURI,'rect');
-      dia.setAttribute('x', px-6); dia.setAttribute('y', y+8-6);
-      dia.setAttribute('width', 12); dia.setAttribute('height', 12);
-      dia.setAttribute('transform', `rotate(45 ${px} ${y+8})`);
-      dia.setAttribute('fill', C_PLAN);
-      g.appendChild(dia);
-      const t = document.createElementNS(svg.namespaceURI,'text');
-      t.setAttribute('x', px); t.setAttribute('y', labelY);
-      t.setAttribute('text-anchor','middle'); t.setAttribute('font-size','12'); t.setAttribute('fill','#4b5563');
-      t.textContent = `${ms.key} (Plan)`;
-      g.appendChild(t);
-      svg.appendChild(g);
-    }
-    // Actual ping (circle)
-    if (ms.actual) {
-      const ax = _mix(x0, x1, toT(ms.actual));
-      const g = document.createElementNS(svg.namespaceURI,'g');
-      const c = document.createElementNS(svg.namespaceURI,'circle');
-      c.setAttribute('cx', ax); c.setAttribute('cy', y+8);
-      c.setAttribute('r', 6); c.setAttribute('fill', C_ACTUAL); c.setAttribute('stroke', '#ffffff'); c.setAttribute('stroke-width', '2');
-      g.appendChild(c);
-      const t = document.createElementNS(svg.namespaceURI,'text');
-      t.setAttribute('x', ax); t.setAttribute('y', labelY+16);
-      t.setAttribute('text-anchor','middle'); t.setAttribute('font-size','12'); t.setAttribute('fill','#6b7280');
-      t.textContent = `${ms.key} (Actual)`;
-      g.appendChild(t);
-      svg.appendChild(g);
-    }
+  actuals.forEach(p => {
+    const x = clamp(p.x, P.l, P.l + CX);
+    const y = lane.actual;
+    svg.appendChild(makeDot(x, y, BRAND_DEEP));
+    const t = makeText(x, y + 16, p.label, '#374151');
+    if (x < P.l + 30) t.setAttribute('text-anchor','start');
+    if (x > P.l + CX - 30) t.setAttribute('text-anchor','end');
+    svg.appendChild(t);
   });
 
-  // Axis ticks (Mon..Sun)
-  const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-  for (let i=0;i<7;i++){
-    const d = _toDate(ws); d.setDate(d.getDate()+i);
-    const ymd = d.toISOString().slice(0,10);
-    const tx = _mix(x0, x1, toT(ymd));
-    const tick = document.createElementNS(svg.namespaceURI,'line');
-    tick.setAttribute('x1', tx); tick.setAttribute('y1', y-6);
-    tick.setAttribute('x2', tx); tick.setAttribute('y2', y-12);
-    tick.setAttribute('stroke', '#d1d5db'); tick.setAttribute('stroke-width', '1');
-    svg.appendChild(tick);
-    const tl = document.createElementNS(svg.namespaceURI,'text');
-    tl.setAttribute('x', tx); tl.setAttribute('y', y-16);
-    tl.setAttribute('text-anchor', 'middle'); tl.setAttribute('font-size','11'); tl.setAttribute('fill','#6b7280');
-    tl.textContent = days[i];
-    svg.appendChild(tl);
-  }
+  // ---- legend (small, top-left)
+  const legendY = P.t - 6;
+  const lg = (x, txt, color) => {
+    const r = document.createElementNS(svg.namespaceURI,'rect');
+    r.setAttribute('x', x); r.setAttribute('y', legendY - 9);
+    r.setAttribute('width', 14); r.setAttribute('height', 4);
+    r.setAttribute('rx', 2); r.setAttribute('fill', color);
+    svg.appendChild(r);
+    const t = makeText(x + 20, legendY - 2, txt, '#6b7280','start');
+    svg.appendChild(t);
+  };
+  lg(P.l, 'Actual', BRAND_DEEP);
+  lg(P.l + 110, 'Planned', BRAND_LIGHT);
 
   slot.appendChild(svg);
 }
-
 
 
 
@@ -849,8 +914,37 @@ const radarSize = 420;  // px canvas for radar
     for (const v of counts){ if (v < lo) dips++; else if (v > hi) spikes++; }
     $('#anom-badges').textContent = `Dips: ${dips} · Spikes: ${spikes}`;
 
+
 renderDonutWithBaseline(donutSlot, m.plannedTotal, m.appliedTotal, { size: donutSize });
 renderRadarWithBaseline(radarSlot, axes, [55,50,45,60,50,40], values, { size: radarSize });
+
+
+// ---- Feed actual dates for the timeline (preferred: Ops overrides; fallback: records)
+{
+  // Optional overrides if Ops provides them (exact names can be adjusted to your schema)
+  const invOverride = window.state?.milestones?.inventory_actual_ymd
+                   || window.state?.inventory_actual_ymd
+                   || window.state?.inventoryActualYMD;
+  const dispOverride = window.state?.milestones?.dispatched_actual_ymd
+                    || window.state?.dispatched_actual_ymd
+                    || window.state?.dispatchedActualYMD;
+
+  // We already have wkRecords in this scope (built a few lines above for Heavy Bins / anomalies).
+  // If not, you can rebuild it using the same predicate you used earlier.
+  const ymds = (Array.isArray(wkRecords) ? wkRecords : [])
+    .map(r => bizYMDFromRecord(r))
+    .filter(Boolean)
+    .sort(); // lexicographic works for YYYY-MM-DD
+
+  // Fallbacks if overrides are missing
+  const invFromRecs  = ymds.length ? ymds[0] : m.ws;           // earliest in-week scan
+  const dispFromRecs = ymds.length ? ymds[ymds.length - 1] : m.we; // latest in-week scan
+
+  // Set the fields used by renderExecTimeline(...)
+  m.inventoryActualYMD  = invOverride  || invFromRecs;
+  m.dispatchedActualYMD = dispOverride || dispFromRecs;
+}
+
 
 // Timeline (planned vs actual)
 const timelineSlot = document.getElementById('timeline-slot');
