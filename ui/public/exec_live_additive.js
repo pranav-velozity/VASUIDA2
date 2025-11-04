@@ -328,7 +328,7 @@ function renderDonutWithBaseline(slot, planned, applied, opts = {}) {
     (slot.parentElement?.clientHeight || 9999)
   ) * 0.75;
 
-  const size = Math.max(140, Math.min(opts.size ?? auto || 180, 240));
+  const size = Math.max(140, Math.min(opts.size ?. auto || 180, 240));
   const r    = Math.round(size * 0.41);
   const cx = size / 2, cy = size / 2;
   const CIRC = 2 * Math.PI * r;
