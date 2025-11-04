@@ -938,7 +938,6 @@ if (timelineSlot) renderExecTimeline(timelineSlot, m);
 const timelineSlot = document.getElementById('timeline-slot');
 if (timelineSlot) renderExecTimeline(timelineSlot, m);
 
-}
 
   // Render when Exec page is shown
   function onHash(){
