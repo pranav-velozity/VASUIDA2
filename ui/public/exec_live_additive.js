@@ -488,6 +488,15 @@ function renderExecTimeline(slot, m) {
   if (!slot) return;
 slot.innerHTML = '';
 
+const monthShort = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const shortDate = (ymd) => {
+  const d = parseYMD(ymd);
+  return `${monthShort[d.getMonth()]} ${String(d.getDate()).padStart(1,'0')}`;
+};
+const sameDay = (a,b) => a && b && compareYMD(a,b) === 0;
+
+
+
   // ---------- tiny helpers (local to avoid globals)
   const parseYMD = (s) => {
     const [y, mo, d] = String(s).split('-').map(Number);
@@ -549,10 +558,10 @@ slot.innerHTML = '';
     processingActual = addDaysYMD(ws, 2); // Wed fallback
   }
 
-  // ---------- domain & scale (calendar-accurate spacing)
-  const axisMin = (compareYMD(plannedBaseline, ws) < 0) ? plannedBaseline : ws;
-  const axisMaxCandidate = dispatchedActual || dispatchedPlanned || we;
-  const axisMax = (compareYMD(axisMaxCandidate, we) > 0) ? axisMaxCandidate : we;
+// Domain = planned baseline thru the end of this week (don’t extend view for baseline week)
+const axisMin = plannedBaseline;
+const axisMax = we;
+
 
   const minT = parseYMD(axisMin).getTime();
   const maxT = parseYMD(axisMax).getTime();
@@ -563,6 +572,11 @@ const w0 = slot.clientWidth || slot.parentElement?.clientWidth || 0;
 const width = Math.max(720, w0 || 720);
 const height = 120;
 const pad = 28;
+// Use only a portion of the available width and center it
+const spanFactor = 0.82;                 // 82% of inner width — tweak if you want shorter/longer
+const inner = width - pad * 2;
+const span  = Math.round(inner * spanFactor);
+const originX = pad + Math.round((inner - span) / 2);  // centered left edge for drawing
 
 
 
@@ -571,11 +585,11 @@ const pad = 28;
     width, height, style: 'display:block'
   });
 
-  const scaleX = (ymd) => {
-    const t = parseYMD(ymd).getTime();
-    const p = (t - minT) / Math.max(1, (maxT - minT));
-    return pad + Math.round(p * (width - pad * 2));
-  };
+const scaleX = (ymd) => {
+  const t = parseYMD(ymd).getTime();
+  const p = (t - minT) / Math.max(1, (maxT - minT));
+  return originX + Math.round(p * span);
+};
 
 // base bar (soft grey so it’s visible on white cards)
 const barY = 72, barH = 12;
@@ -616,42 +630,35 @@ svg.appendChild(_el('rect', {
   }));
 
   // milestones (planned above, actuals below)
-  const dots = [
-    { ymd: plannedBaseline,   label: 'Planned (Baseline)',  color: '#7A0A2A', where: 'above' },
-    { ymd: inventoryPlanned,  label: 'Inventory (Plan)',    color: '#B73A5C', where: 'above' },
-    { ymd: processingPlanned, label: 'Processing (Plan)',   color: '#B73A5C', where: 'above' },
-    { ymd: dispatchedPlanned, label: 'Dispatched (Plan)',   color: '#B73A5C', where: 'above' },
-    ...(inventoryActual  ? [{ ymd: inventoryActual,  label: 'Inventory (Actual)',  color: '#990033', where: 'below' }] : []),
-    ...(processingActual ? [{ ymd: processingActual, label: 'Processing (Actual)', color: '#990033', where: 'below' }] : []),
-    ...(dispatchedActual ? [{ ymd: dispatchedActual, label: 'Dispatched (Actual)', color: '#990033', where: 'below' }] : []),
-  ];
+const dots = [
+  { ymd: plannedBaseline,   label: `Planned (Baseline) — ${shortDate(plannedBaseline)}`,  color: '#7A0A2A', where: 'above' },
+  { ymd: inventoryPlanned,  label: `Inventory (Plan) — ${shortDate(inventoryPlanned)}`,   color: '#B73A5C', where: 'above' },
+  { ymd: processingPlanned, label: `Processing (Plan) — ${shortDate(processingPlanned)}`, color: '#B73A5C', where: 'above' },
+  { ymd: dispatchedPlanned, label: `Dispatched (Plan) — ${shortDate(dispatchedPlanned)}`, color: '#B73A5C', where: 'above' },
+  // Actuals below, but skip label if it’s the same day as the plan to avoid crowding
+  ...(inventoryActual  ? [{ ymd: inventoryActual,  label: sameDay(inventoryActual,  inventoryPlanned)  ? '' : 'Inventory (Actual)',  color: '#990033', where: 'below' }] : []),
+  ...(processingActual ? [{ ymd: processingActual, label: sameDay(processingActual, processingPlanned) ? '' : 'Processing (Actual)', color: '#990033', where: 'below' }] : []),
+  ...(dispatchedActual ? [{ ymd: dispatchedActual, label: sameDay(dispatchedActual, dispatchedPlanned) ? '' : 'Dispatched (Actual)', color: '#990033', where: 'below' }] : []),
+];
+
 
   dots.forEach(d => {
     const x  = scaleX(d.ymd);
     const cy = d.where === 'above' ? (barY - 18) : (barY + barH + 18);
 
-    // dot
-    svg.appendChild(_el('circle', {
-      cx: x, cy: d.where === 'above' ? (barY - 6) : (barY + barH + 6), r: 4, fill: d.color
-    }));
-    // label
-    const labelEl = _el('text', {
-      x, y: cy, 'text-anchor': 'middle', 'font-size': '11', fill: '#374151'
-    });
-    labelEl.textContent = d.label;
-    svg.appendChild(labelEl);
+// dot
+svg.appendChild(_el('circle', {
+  cx: x, cy: d.where === 'above' ? (barY - 6) : (barY + barH + 6), r: 4, fill: d.color
+}));
+// label
+if (d.label) {
+  const labelEl = _el('text', {
+    x, y: cy, 'text-anchor': 'middle', 'font-size': '11', fill: '#374151'
   });
-
-  // Mon..Sun ticks for current week
-  const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-  for (let i = 0; i < 7; i++) {
-    const dayYMD = addDaysYMD(ws, i);
-    const x = scaleX(dayYMD);
-    svg.appendChild(_el('line', { x1:x, y1: barY - 6, x2:x, y2: barY - 2, stroke: '#CBD5E1', 'stroke-width': 1 }));
-    const t = _el('text', { x, y: barY - 12, 'text-anchor':'middle', 'font-size':'10', fill:'#6B7280' });
-    t.textContent = days[i];
-    svg.appendChild(t);
-  }
+  labelEl.textContent = d.label;
+  svg.appendChild(labelEl);
+}
+  });
 
   slot.appendChild(svg);
 }  // end renderExecTimeline
