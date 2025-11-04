@@ -908,29 +908,22 @@ renderRadarWithBaseline(radarSlot, axes, [55,50,45,60,50,40], values, { size: ra
                     || window.state?.dispatched_actual_ymd
                     || window.state?.dispatchedActualYMD;
 
+// (optional) pre-seed
+
   if (invOverride)  m.inventoryActualYMD  = invOverride;
   if (dispOverride) m.dispatchedActualYMD = dispOverride;
-}
 
-// Render the timeline (after overrides are set)
-const timelineSlot = document.getElementById('timeline-slot');
-if (timelineSlot) renderExecTimeline(timelineSlot, m);
+// Build fallbacks from in-week records
+   const wkRecords = (window.state?.records||[]).filter(/* same predicate already used */);
+   const ymds = Array.from(new Set(wkRecords.map(r => bizYMDFromRecord(r)).filter(Boolean))).sort();
+   const invFromRecs  = ymds.length ? ymds[0] : m.ws;
+   const dispFromRecs = ymds.length ? ymds[ymds.length - 1] : m.we;
 
+   // Final values used by timeline (override wins, else fallback)
+   m.inventoryActualYMD  = invOverride  || invFromRecs;
+   m.dispatchedActualYMD = dispOverride || dispFromRecs;
+ }
 
-  // We already have wkRecords in this scope (built a few lines above for Heavy Bins / anomalies).
-  // If not, you can rebuild it using the same predicate you used earlier.
-  const ymds = (Array.isArray(wkRecords) ? wkRecords : [])
-    .map(r => bizYMDFromRecord(r))
-    .filter(Boolean)
-    .sort(); // lexicographic works for YYYY-MM-DD
-
-  // Fallbacks if overrides are missing
-  const invFromRecs  = ymds.length ? ymds[0] : m.ws;           // earliest in-week scan
-  const dispFromRecs = ymds.length ? ymds[ymds.length - 1] : m.we; // latest in-week scan
-
-  // Set the fields used by renderExecTimeline(...)
-  m.inventoryActualYMD  = invOverride  || invFromRecs;
-  m.dispatchedActualYMD = dispOverride || dispFromRecs;
 }
 
 
