@@ -1161,6 +1161,25 @@ m._opsDisplayPct = (m._opsCompletionPct != null)
 {
   const ms = window.state?.milestones || {};
 
+  // Merge cached timeline actuals from localStorage (only if server/state didn't supply them)
+  try {
+    const wk = m.ws || window.state?.weekStart;
+    if (wk) {
+      const raw = localStorage.getItem(`exec:timeline:${wk}`);
+      if (raw) {
+        const cached = JSON.parse(raw);
+        if (cached && typeof cached === 'object') {
+          ms.baseline_actual_ymd   = ms.baseline_actual_ymd   ?? cached.baseline_actual_ymd   ?? undefined;
+          ms.inventory_actual_ymd  = ms.inventory_actual_ymd  ?? cached.inventory_actual_ymd  ?? undefined;
+          ms.processing_actual_ymd = ms.processing_actual_ymd ?? cached.processing_actual_ymd ?? undefined;
+          ms.dispatched_actual_ymd = ms.dispatched_actual_ymd ?? cached.dispatched_actual_ymd ?? undefined;
+        }
+      }
+    }
+  } catch (_) {
+    // ignore cache errors
+  }
+
   const invOverride  =
     ms.inventory_actual_ymd  ||
     window.state?.inventory_actual_ymd ||
@@ -1258,6 +1277,24 @@ ms.baseline_actual_ymd = vBa || undefined;
     ms.inventory_actual_ymd  = vIn || undefined;
     ms.processing_actual_ymd = vPr || undefined;
     ms.dispatched_actual_ymd = vDi || undefined;
+
+  // Persist ONLY timeline actuals per week (no other state)
+  try {
+    const wk = s.weekStart;
+    if (wk) {
+      const cache = {
+        baseline_actual_ymd:  ms.baseline_actual_ymd || null,
+        inventory_actual_ymd: ms.inventory_actual_ymd || null,
+        processing_actual_ymd:ms.processing_actual_ymd || null,
+        dispatched_actual_ymd:ms.dispatched_actual_ymd || null
+      };
+      localStorage.setItem(`exec:timeline:${wk}`, JSON.stringify(cache));
+    }
+  } catch (_) {
+    // non-fatal; continue
+  }
+
+
 
     if (vPct !== '' && vPct != null) {
       const n = Math.round(Math.max(0, Math.min(100, Number(vPct))));
