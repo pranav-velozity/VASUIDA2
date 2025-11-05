@@ -1059,6 +1059,10 @@ if (!window.__execDebugOnce) {
 
     const m = computeExecMetrics(); if (!m) return;
 
+// cache for use outside this scope (e.g., PDF click handler)
+window.__execLastMetrics = m;
+
+
 const donutStatsEl = document.getElementById('donut-stats');
 if (donutStatsEl) {
   donutStatsEl.textContent = `Planned ${fmt(m.plannedTotal)} · Applied ${fmt(m.appliedTotal)}`;
@@ -1760,18 +1764,26 @@ if (!(hasPlan || hasRecs)) {
     renderExec();
 
     // Add header "Download summary" and wire it to the PDF builder
-    ensureSummaryBtn(async () => {
-      try {
-        await __ensurePdfLibs();
-        const doc = await __buildExecSummaryPDF(m);
-        const ws = (m.ws || '').replaceAll('-', '');
-        const fname = `VAS_Execution_Summary_${ws || 'week'}.pdf`;
-        doc.save(fname);
-      } catch (e) {
-        console.error('[PDF] export failed:', e);
-        alert('Sorry, failed to build the PDF. See console for details.');
-      }
-    });
+ensureSummaryBtn(async () => {
+  try {
+    // use cached metrics or recompute as a fallback
+    const metrics = window.__execLastMetrics || computeExecMetrics();
+    if (!metrics) {
+      alert('Sorry, metrics are not ready yet.');
+      return;
+    }
+
+    await __ensurePdfLibs();
+    const doc = await __buildExecSummaryPDF(metrics);
+    const ws = (metrics.ws || window.state?.weekStart || '').replaceAll?.('-', '') || '';
+    const fname = `VAS_Execution_Summary_${ws || 'week'}.pdf`;
+    doc.save(fname);
+  } catch (e) {
+    console.error('[PDF] export failed:', e);
+    alert('Sorry, failed to build the PDF. See console for details.');
+  }
+});
+
   } catch (e) {
     console.error('[Exec render error]', e);
   }
@@ -1788,19 +1800,26 @@ if (!(hasPlan || hasRecs)) {
 try {
   renderExec();
 
-  // Add header "Download summary" and wire it to the PDF builder
-  ensureSummaryBtn(async () => {
-    try {
-      await __ensurePdfLibs();
-      const doc = await __buildExecSummaryPDF(m);
-      const ws = (m?.ws || window.state?.weekStart || '').replaceAll?.('-', '') || '';
-      const fname = `VAS_Execution_Summary_${ws || 'week'}.pdf`;
-      doc.save(fname);
-    } catch (e) {
-      console.error('[PDF] export failed:', e);
-      alert('Sorry, failed to build the PDF. See console for details.');
+ensureSummaryBtn(async () => {
+  try {
+    // use cached metrics or recompute as a fallback
+    const metrics = window.__execLastMetrics || computeExecMetrics();
+    if (!metrics) {
+      alert('Sorry, metrics are not ready yet.');
+      return;
     }
-  });
+
+    await __ensurePdfLibs();
+    const doc = await __buildExecSummaryPDF(metrics);
+    const ws = (metrics.ws || window.state?.weekStart || '').replaceAll?.('-', '') || '';
+    const fname = `VAS_Execution_Summary_${ws || 'week'}.pdf`;
+    doc.save(fname);
+  } catch (e) {
+    console.error('[PDF] export failed:', e);
+    alert('Sorry, failed to build the PDF. See console for details.');
+  }
+});
+
 } catch (e) {
   console.error('[Exec render error]', e);
 }
