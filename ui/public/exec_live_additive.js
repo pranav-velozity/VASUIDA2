@@ -1408,8 +1408,8 @@ function __serializeSvgToPngDataUrl(svgEl, scale = 2){
 }
 
 async function __buildExecSummaryPDF(m){
-  const { jsPDF } = window.jspdf;
-  const doc = new jsPDF({ unit: 'pt', format: 'a4' }); // 595×842pt
+const { jsPDF } = window.jspdf;
+const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' }); // 842×595pt
   const margin = { l: 48, r: 48, t: 64, b: 64 };
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
@@ -1461,62 +1461,131 @@ async function __buildExecSummaryPDF(m){
   ];
   indexLines.forEach((line, i) => { doc.text(`${line}`, margin.l, y); y += 16; });
 
-  // ----- Page 2: Executive Summary -----
-  doc.addPage(); addFooter();
-  y = margin.t;
-  doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
-  doc.text('1. Executive Summary', margin.l, y); y += 22;
+// ----- Page 2: Executive Summary (single-page dashboard) -----
+doc.addPage(); addFooter();
 
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
-  const ws = m.ws || '';
-  const we = m.we || '';
-  doc.text(`Week: ${ws} to ${we}`, margin.l, y); y += 16;
-  doc.text(`Planned total: ${Number(m.plannedTotal||0).toLocaleString()}`, margin.l, y); y += 16;
-  doc.text(`Applied total: ${Number(m.appliedTotal||0).toLocaleString()}`, margin.l, y); y += 16;
-  doc.text(`Completion: ${m.completionPct ?? 0}%`, margin.l, y); y += 24;
+const ws = m.ws || '';
+const we = m.we || '';
+let yTop = margin.t;
 
-  // Donut chart snapshot (if present)
-  const donutSvg = document.querySelector('#card-donut svg');
-  if (donutSvg) {
-    try {
-      const durl = await __serializeSvgToPngDataUrl(donutSvg, 2);
-      const imgW = 220, imgH = 220;
-      doc.addImage(durl, 'PNG', margin.l, y, imgW, imgH);
-    } catch (e) { console.warn('[PDF] donut capture failed', e); }
-  }
+// Title row
+doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
+doc.text('1. Executive Summary', margin.l, yTop);
+doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
+doc.text(`Week: ${ws} to ${we}`, pageW - margin.r, yTop, { align: 'right' });
+yTop += 16;
+
+// KPI tiles (right half)
+const kpiLeft  = pageW * 0.48;
+const kpiTop   = yTop + 2;
+const kpiH     = 18;
+const tiles = [
+  ['Completion %', `${m.completionPct ?? 0}%`],
+  ['Planned',      Number(m.plannedTotal||0).toLocaleString()],
+  ['Applied',      Number(m.appliedTotal||0).toLocaleString()],
+  ['Dup UIDs',     String(m.dupScanCount||0)],
+  ['Avg SKU %Δ',   `${m.avgSkuDiscPct ?? 0}%`],
+  ['Avg PO %Δ',    `${m.avgPoDiscPct ?? 0}%`],
+  ['Heavy bins',   String(m.heavyCount||0)],
+  ['Late appliers',`${m.lateCount||0} (${m.lateRatePct||0}%)`],
+];
+doc.setFont('helvetica','bold'); doc.setFontSize(10);
+let x = kpiLeft, y = kpiTop;
+const colW = (pageW - margin.r - kpiLeft);
+const cellW = Math.floor(colW / 2);
+tiles.forEach(([k,v], i) => {
+  doc.text(k, x, y);
+  doc.setFont('helvetica','normal'); doc.text(String(v), x + cellW - 6, y, { align: 'right' });
+  doc.setFont('helvetica','bold');
+  y += kpiH;
+  if ((i+1) % 6 === 0) { x += cellW; y = kpiTop; }
+});
+
+// Charts area (left half): donut (top-left) + radar (bottom-left)
+const chartsLeft = margin.l;
+const chartsW    = pageW * 0.44;
+let chartsY      = yTop + 6;
+
+const donutSvg = document.querySelector('#card-donut svg');
+if (donutSvg) {
+  try {
+    const durl = await __serializeSvgToPngDataUrl(donutSvg, 2);
+    doc.addImage(durl, 'PNG', chartsLeft, chartsY, chartsW, chartsW*0.72);
+    chartsY += chartsW*0.72 + 8;
+  } catch (e) { console.warn('[PDF] donut capture failed', e); }
+}
+
+const radarSvg = document.querySelector('#card-radar svg');
+if (radarSvg) {
+  try {
+    const rurl = await __serializeSvgToPngDataUrl(radarSvg, 2);
+    doc.addImage(rurl, 'PNG', chartsLeft, chartsY, chartsW, chartsW*0.8);
+  } catch (e) { console.warn('[PDF] radar capture failed', e); }
+}
+
+// “Top Gap Drivers” table (beneath tiles, right side)
+try {
+  const rows = (Array.isArray(m.topGap) ? m.topGap : []).map(g => ([
+    g.po || '', g.sku || '', g.planned ?? '', g.applied ?? '', g.gap ?? ''
+  ]));
+  const head = [['PO', 'SKU', 'Planned', 'Applied', 'Gap']];
+  doc.autoTable({
+    startY: chartsY + 6,
+    margin: { left: kpiLeft, right: margin.r },
+    head, body: rows,
+    styles: { fontSize: 9 }
+  });
+} catch (e) {
+  console.warn('[PDF] AutoTable(top gaps) failed', e);
+}
+
+
 
   // ----- Page 3: Exception Summary -----
-  doc.addPage(); addFooter();
-  y = margin.t;
-  doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
-  doc.text('2. Exception Summary', margin.l, y); y += 22;
+// ----- Page 3: Week Timeline — Planned vs Actual & Delays -----
+doc.addPage(); addFooter();
+y = margin.t;
 
-  // Radar snapshot (if present)
-  const radarSvg = document.querySelector('#card-radar svg');
-  if (radarSvg) {
-    try {
-      const rurl = await __serializeSvgToPngDataUrl(radarSvg, 2);
-      const imgW = 280, imgH = 280;
-      doc.addImage(rurl, 'PNG', margin.l, y, imgW, imgH);
-    } catch (e) { console.warn('[PDF] radar capture failed', e); }
-  }
+doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
+doc.text('2. Week Timeline — Planned vs Actual & Delays', margin.l, y); y += 12;
+doc.setFont('helvetica','normal'); doc.setFontSize(11);
+doc.text(`Week: ${ws} to ${we}`, margin.l, y); y += 10;
 
-  // Top gaps table (PO × SKU) — use AutoTable if available
+// Full-width timeline image
+const timelineSvg = document.querySelector('#timeline-slot svg');
+if (timelineSvg) {
   try {
-    const rows = (Array.isArray(m.topGap) ? m.topGap : []).map(g => ([
-      g.po || '', g.sku || '', g.planned ?? '', g.applied ?? '', g.gap ?? ''
-    ]));
-    const head = [['PO', 'SKU', 'Planned', 'Applied', 'Gap']];
-    doc.autoTable({
-      startY: y,
-      margin: { left: margin.l, right: margin.r },
-      head, body: rows,
-      styles: { fontSize: 9 }
-    });
-  } catch (e) {
-    console.warn('[PDF] AutoTable for top gaps failed:', e);
-  }
+    const turl = await __serializeSvgToPngDataUrl(timelineSvg, 2);
+    const imgW = pageW - margin.l - margin.r;
+    const intrinsicW = timelineSvg.viewBox?.baseVal?.width || timelineSvg.clientWidth || 900;
+    const intrinsicH = timelineSvg.viewBox?.baseVal?.height || timelineSvg.clientHeight || 150;
+    const imgH = Math.min(220, (imgW * intrinsicH) / intrinsicW);
+    doc.addImage(turl, 'PNG', margin.l, y, imgW, imgH);
+    y += imgH + 12;
+  } catch (e) { console.warn('[PDF] timeline capture failed', e); }
+}
 
+// Simple helpers
+const toDate = s => new Date(String(s)+'T00:00:00');
+const fmtYMD = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+const addDays = (ymd, n) => { const d = toDate(ymd); d.setDate(d.getDate()+n); return fmtYMD(d); };
+
+// Planned dates (same idea as UI; adjust if you prefer biz-days for baseline)
+const plannedBaseline   = addDays(ws, -1);
+const inventoryPlanned  = ws;
+const processingPlanned = addDays(ws, 4);
+const dispatchedPlanned = we;
+
+// Δ days (positive = late, negative = early)
+const diffDays = (a,b) => Math.round((toDate(a)-toDate(b)) / (1000*60*60*24));
+const rowsDelay = [
+  ['Baseline (Plan)',   plannedBaseline,   'Baseline (Actual)',   window.state?.milestones?.baseline_actual_ymd || '—'],
+  ['Inventory (Plan)',  inventoryPlanned,  'Inventory (Actual)',  m.inventoryActualYMD  || '—'],
+  ['Processing (Plan)', processingPlanned, 'Processing (Actual)', m.processingActualYMD || '—'],
+  ['Dispatched (Plan)', dispatchedPlanned, 'Dispatched (Actual)', m.dispatchedActualYMD || '—'],
+].map(([plLabel, pl, acLabel, ac]) => {
+  const delta = (ac && ac !== '—') ? diffDays(ac, pl) : null;
+  const deltaText = delta==null ? '' : (delta>0 ?
   // ----- Page 4: Week Timeline -----
   doc.addPage(); addFooter();
   y = margin.t;
@@ -1548,16 +1617,7 @@ async function __buildExecSummaryPDF(m){
   if (m._opsCompletionPct != null) dateLines.push(`Completion % (Ops): ${m._opsCompletionPct}%`);
   dateLines.forEach(line => { doc.text(line, margin.l, y); y += 16; });
 
-  // ----- Page 5: Planned vs Applied -----
-  doc.addPage(); addFooter();
-  y = margin.t;
-  doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
-  doc.text('4. Planned vs Applied', margin.l, y); y += 22;
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
-  doc.text(`Planned: ${Number(m.plannedTotal||0).toLocaleString()}`, margin.l, y); y += 16;
-  doc.text(`Applied: ${Number(m.appliedTotal||0).toLocaleString()}`, margin.l, y); y += 16;
-  doc.text(`Completion %: ${m.completionPct ?? 0}%`, margin.l, y); y += 16;
-
+  
   // ----- Page 6+: Data Appendix (UID / PO / Bin / weight / qty) -----
   doc.addPage(); addFooter();
   y = margin.t;
