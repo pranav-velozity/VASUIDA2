@@ -628,9 +628,10 @@ svg.appendChild(_el('line', {
   // Priority: 1) Ops override %; 2) latest actual date among Dispatched/Processing/Inventory; 3) none -> no fill
   const fillStartX = scaleX(baselineActual || inventoryPlanned);
  
-  // Case 1: Ops % override
-  if (m._opsCompletionPct != null) {
-    const pct01 = Math.max(0, Math.min(100, m._opsCompletionPct)) / 100;
+  // Case 1: Ops % override (uses display pct which falls back to the tile)
+  if (m._opsDisplayPct != null) {
+    const pct01 = Math.max(0, Math.min(100, m._opsDisplayPct)) / 100;
+
     // fill only the Mon→Sun segment by percentage
     const endX = rightStartX + Math.round(rightSpan * pct01);
     const x = Math.min(fillStartX, endX);
@@ -658,6 +659,32 @@ svg.appendChild(_el('line', {
     }
     // Else: no fill (cylinder stays grey)
   }
+
+// % Complete label at progress end (default from tile; override if provided)
+if (m._opsDisplayPct != null) {
+  const pct01 = Math.max(0, Math.min(100, m._opsDisplayPct)) / 100;
+
+  // position at end of Mon→Sun segment by percentage
+  const labelX = rightStartX + Math.round(rightSpan * pct01);
+
+  // keep inside the bar edges
+  const minX = originX + 8;
+  const maxX = originX + span - 8;
+  const xClamped = Math.max(minX, Math.min(maxX, labelX));
+
+  const t = _el('text', {
+    x: xClamped,
+    y: barY + barH + 30,            // sits a bit higher so it won’t clip
+    'text-anchor': 'middle',
+    'dominant-baseline': 'middle',
+    'font-size': '11',
+    fill: '#374151'
+  });
+  t.textContent = `Completion — ${Math.round(m._opsDisplayPct)}%`;
+  svg.appendChild(t);
+}
+
+
 
 // % Complete label at progress end (only if Ops % provided)
 if (m._opsCompletionPct != null) {
@@ -1113,17 +1140,21 @@ renderRadarWithBaseline(radarSlot, axes, [55,50,45,60,50,40], values, { size: ra
 /// m.dispatchedActualYMD = '2025-11-09'; // example
 
 
-// ---- Ops completion % (if provided) + actuals snapshot -------------
-m._opsCompletionPct =
-  (window.state?.ops?.completion_pct ?? 
-   window.state?.completion_pct ?? 
-   window.state?.milestones?.completion_pct);
+// ---- Ops completion % (override) + display default from tile -------------
+const _opsOverrideRaw =
+  (window.state?.ops?.completion_pct ??
+   window.state?.milestones?.completion_pct ??
+   window.state?.completion_pct);
 
-// normalize to 0..100 if present
-if (m._opsCompletionPct != null) {
-  const v = Number(m._opsCompletionPct);
-  m._opsCompletionPct = Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : null;
-}
+m._opsCompletionPct =
+  (Number.isFinite(Number(_opsOverrideRaw))
+    ? Math.max(0, Math.min(100, Number(_opsOverrideRaw)))
+    : null);
+
+// What we show on the timeline label by default (override wins, else tile %)
+m._opsDisplayPct = (m._opsCompletionPct != null)
+  ? m._opsCompletionPct
+  : m.completionPct;  // from tiles
 
 
 // ---- Feed actual dates for the timeline (Ops-entered only; no inference) ----
@@ -1195,6 +1226,10 @@ baAct.value = (ms.baseline_actual_ymd || m.baselineActualYMD || '').slice(0,10);
     window.state?.ops?.completion_pct ??
     ms.completion_pct ?? ''
   );
+
+// Show the computed tile % as a hint if no override is set
+if (!opsPct.value) opsPct.placeholder = String(m.completionPct);
+
 
   btn.onclick = (e) => {
     e?.preventDefault?.();
