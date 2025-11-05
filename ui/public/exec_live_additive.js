@@ -1406,239 +1406,261 @@ function __serializeSvgToPngDataUrl(svgEl, scale = 2){
 }
 
 async function __buildExecSummaryPDF(m){
-const { jsPDF } = window.jspdf;
-const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' }); // 842×595pt
-  const margin = { l: 48, r: 48, t: 64, b: 64 };
+  const { jsPDF } = window.jspdf;
+
+  // A4 landscape: 842 x 595 pt
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+  const margin = { l: 40, r: 40, t: 56, b: 48 };
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
 
-  // ----- Header (logo + title) -----
-  const hasLogo = !!window.PINPOINT_LOGO_URL;
-  const headerY = margin.t - 24;
-  if (hasLogo) {
-    try {
-      // preloaded dataURL is ideal; fallback: draw external (might be blocked by CORS)
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        try { /* noop: addImage below */ } catch {}
-      };
-      // We add with addImage directly; jsPDF handles the drawing
-      doc.addImage(window.PINPOINT_LOGO_URL, 'PNG', margin.l, headerY - 12, 120, 28);
-    } catch {}
-  }
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
-  doc.text('VAS Execution Summary (Powered by Pinpoint)', hasLogo ? (margin.l + 140) : margin.l, headerY);
+  const ws = m.ws || '';
+  const we = m.we || '';
 
-  // ----- Footer (confidential + page numbers) -----
-  const footerTextLeft  = 'Confidential — For internal use only';
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9);
-  const addFooter = () => {
+  // ---------- helpers ----------
+  function footer(pageLabel='') {
+    doc.setFont('helvetica','normal'); doc.setFontSize(9);
     doc.setDrawColor(220);
-    doc.line(margin.l, pageH - margin.b + 14, pageW - margin.r, pageH - margin.b + 14);
-    doc.text(footerTextLeft, margin.l, pageH - margin.b + 30);
-    const pageNo = `${doc.getCurrentPageInfo().pageNumber}`;
-    doc.text(`Page ${pageNo}`, pageW - margin.r, pageH - margin.b + 30, { align: 'right' });
-  };
-  addFooter();
+    doc.line(margin.l, pageH - margin.b + 12, pageW - margin.r, pageH - margin.b + 12);
+    doc.text('Confidential — For internal use only', margin.l, pageH - margin.b + 28);
+    if (pageLabel) doc.text(pageLabel, pageW - margin.r, pageH - margin.b + 28, { align: 'right' });
+  }
+  async function addSvg(svgEl, x, y, w, h) {
+    if (!svgEl) return;
+    try {
+      const url = await __serializeSvgToPngDataUrl(svgEl, 2);
+      doc.addImage(url, 'PNG', x, y, w, h);
+    } catch (e) { console.warn('[PDF] svg capture failed', e); }
+  }
 
-  // ----- Cover / Index page -----
-  let y = margin.t + 16;
-  doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
-  doc.text('Index', margin.l, y); y += 18;
+  // ============= 1) COVER =============
+  {
+    const hasLogo = !!window.PINPOINT_LOGO_URL;
+    if (hasLogo) {
+      try { doc.addImage(window.PINPOINT_LOGO_URL, 'PNG', margin.l, margin.t - 32, 120, 28); } catch {}
+    }
+    doc.setFont('helvetica','bold'); doc.setFontSize(22);
+    doc.text('VAS Processing Summary', margin.l, margin.t + 12);
 
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(12);
-const indexLines = [
-  '1. Executive Summary',
-  '2. Week Timeline — Planned vs Actual & Delays',
-  '3. Data Appendix'
-];
+    const now = new Date();
+    const pad2 = (n)=>String(n).padStart(2,'0');
+    const downloaded = `${now.getFullYear()}-${pad2(now.getMonth()+1)}-${pad2(now.getDate())}`;
 
-  indexLines.forEach((line, i) => { doc.text(`${line}`, margin.l, y); y += 16; });
+    doc.setFont('helvetica','normal'); doc.setFontSize(12);
+    doc.text(`Date of download: ${downloaded}`, margin.l, margin.t + 42);
+    doc.text(`Week of execution: ${ws} to ${we}`, margin.l, margin.t + 62);
 
-// ----- Page 2: Executive Summary (single-page dashboard) -----
-doc.addPage(); addFooter();
+    footer('Page 1');
+  }
 
-const ws = m.ws || '';
-const we = m.we || '';
-let yTop = margin.t;
+  // ============= 2) INDEX =============
+  {
+    doc.addPage();
+    const hasLogo = !!window.PINPOINT_LOGO_URL;
+    if (hasLogo) {
+      try { doc.addImage(window.PINPOINT_LOGO_URL, 'PNG', margin.l, margin.t - 32, 120, 28); } catch {}
+    }
+    doc.setFont('helvetica','bold'); doc.setFontSize(16);
+    doc.text('Index', hasLogo ? (margin.l + 140) : margin.l, margin.t - 12);
 
-// Title row
-doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
-doc.text('1. Executive Summary', margin.l, yTop);
-doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
-doc.text(`Week: ${ws} to ${we}`, pageW - margin.r, yTop, { align: 'right' });
-yTop += 16;
+    doc.setFont('helvetica','normal'); doc.setFontSize(12);
+    const items = [
+      '1. Executive Summary',
+      '2. Exceptions Detail',
+      '3. Data Appendix'
+    ];
+    let y = margin.t + 10;
+    items.forEach((t)=>{ doc.text(t, margin.l, y); y += 18; });
 
-// KPI tiles (right half)
-const kpiLeft  = pageW * 0.48;
-const kpiTop   = yTop + 2;
-const kpiH     = 18;
-const tiles = [
-  ['Completion %', `${m.completionPct ?? 0}%`],
-  ['Planned',      Number(m.plannedTotal||0).toLocaleString()],
-  ['Applied',      Number(m.appliedTotal||0).toLocaleString()],
-  ['Dup UIDs',     String(m.dupScanCount||0)],
-  ['Avg SKU %Δ',   `${m.avgSkuDiscPct ?? 0}%`],
-  ['Avg PO %Δ',    `${m.avgPoDiscPct ?? 0}%`],
-  ['Heavy bins',   String(m.heavyCount||0)],
-  ['Late appliers',`${m.lateCount||0} (${m.lateRatePct||0}%)`],
-];
-doc.setFont('helvetica','bold'); doc.setFontSize(10);
-let x = kpiLeft, yKpi = kpiTop;
-const colW = (pageW - margin.r - kpiLeft);
-const cellW = Math.floor(colW / 2);
-tiles.forEach(([k,v], i) => {
-doc.text(k, x, yKpi);
-doc.setFont('helvetica','normal'); doc.text(String(v), x + cellW - 6, yKpi, { align: 'right' });
-doc.setFont('helvetica','bold');
-yKpi += kpiH;
-if ((i+1) % 6 === 0) { x += cellW; yKpi = kpiTop; }
+    footer('Page 2');
+  }
 
-});
+  // ============= 3) ONE-PAGE EXEC SNAPSHOT =============
+  {
+    doc.addPage();
+    const hasLogo = !!window.PINPOINT_LOGO_URL;
+    if (hasLogo) {
+      try { doc.addImage(window.PINPOINT_LOGO_URL, 'PNG', margin.l, margin.t - 32, 120, 28); } catch {}
+    }
 
-// Charts area (left half): donut (top-left) + radar (bottom-left)
-const chartsLeft = margin.l;
-const chartsW    = pageW * 0.44;
-let chartsY      = yTop + 6;
+    // Title + daterange
+    doc.setFont('helvetica','bold'); doc.setFontSize(14);
+    doc.text('1. Executive Summary', margin.l, margin.t - 12);
+    doc.setFont('helvetica','normal'); doc.setFontSize(11);
+    doc.text(`Week: ${ws} to ${we}`, pageW - margin.r, margin.t - 12, { align: 'right' });
 
-const donutSvg = document.querySelector('#card-donut svg');
-if (donutSvg) {
-  try {
-    const durl = await __serializeSvgToPngDataUrl(donutSvg, 2);
-    doc.addImage(durl, 'PNG', chartsLeft, chartsY, chartsW, chartsW*0.72);
-    chartsY += chartsW*0.72 + 8;
-  } catch (e) { console.warn('[PDF] donut capture failed', e); }
-}
+    // Tiles (2 rows × 4)
+    const tiles = [
+      ['Completion %', `${m.completionPct ?? 0}%`],
+      ['Planned',      Number(m.plannedTotal||0).toLocaleString()],
+      ['Applied',      Number(m.appliedTotal||0).toLocaleString()],
+      ['Dup UIDs',     String(m.dupScanCount||0)],
+      ['Avg SKU %Δ',   `${m.avgSkuDiscPct ?? 0}%`],
+      ['Avg PO %Δ',    `${m.avgPoDiscPct ?? 0}%`],
+      ['Heavy bins',   String(m.heavyCount||0)],
+      ['Late appliers',`${m.lateCount||0} (${m.lateRatePct||0}%)`],
+    ];
 
-const radarSvg = document.querySelector('#card-radar svg');
-if (radarSvg) {
-  try {
-    const rurl = await __serializeSvgToPngDataUrl(radarSvg, 2);
-    doc.addImage(rurl, 'PNG', chartsLeft, chartsY, chartsW, chartsW*0.8);
-  } catch (e) { console.warn('[PDF] radar capture failed', e); }
-}
+    let y = margin.t + 6;
+    const cols = 4, gutter = 8, cardH = 44;
+    const cardW = (pageW - margin.l - margin.r - gutter*(cols-1)) / cols;
+    const cardX = (i) => margin.l + (i % cols) * (cardW + gutter);
+    const cardY = (i) => y + Math.floor(i / cols) * (cardH + gutter);
 
-// “Top Gap Drivers” table (beneath tiles, right side)
-try {
-  const rows = (Array.isArray(m.topGap) ? m.topGap : []).map(g => ([
-    g.po || '', g.sku || '', g.planned ?? '', g.applied ?? '', g.gap ?? ''
-  ]));
-  const head = [['PO', 'SKU', 'Planned', 'Applied', 'Gap']];
-  doc.autoTable({
-    startY: chartsY + 6,
-    margin: { left: kpiLeft, right: margin.r },
-    head, body: rows,
-    styles: { fontSize: 9 }
-  });
-} catch (e) {
-  console.warn('[PDF] AutoTable(top gaps) failed', e);
-}
-
-
-
-  // ----- Page 3: Exception Summary -----
-// ----- Page 3: Week Timeline — Planned vs Actual & Delays -----
-doc.addPage(); addFooter();
-y = margin.t;
-
-doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
-doc.text('2. Week Timeline — Planned vs Actual & Delays', margin.l, y); y += 12;
-doc.setFont('helvetica','normal'); doc.setFontSize(11);
-doc.text(`Week: ${ws} to ${we}`, margin.l, y); y += 10;
-
-// Full-width timeline image
-const timelineSvg = document.querySelector('#timeline-slot svg');
-if (timelineSvg) {
-  try {
-    const turl = await __serializeSvgToPngDataUrl(timelineSvg, 2);
-    const imgW = pageW - margin.l - margin.r;
-    const intrinsicW = timelineSvg.viewBox?.baseVal?.width || timelineSvg.clientWidth || 900;
-    const intrinsicH = timelineSvg.viewBox?.baseVal?.height || timelineSvg.clientHeight || 150;
-    const imgH = Math.min(220, (imgW * intrinsicH) / intrinsicW);
-    doc.addImage(turl, 'PNG', margin.l, y, imgW, imgH);
-    y += imgH + 12;
-  } catch (e) { console.warn('[PDF] timeline capture failed', e); }
-}
-
-// Simple helpers
-const toDate = s => new Date(String(s)+'T00:00:00');
-const fmtYMD = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-const addDays = (ymd, n) => { const d = toDate(ymd); d.setDate(d.getDate()+n); return fmtYMD(d); };
-
-// Planned dates (same idea as UI; adjust if you prefer biz-days for baseline)
-const plannedBaseline   = addDays(ws, -1);
-const inventoryPlanned  = ws;
-const processingPlanned = addDays(ws, 4);
-const dispatchedPlanned = we;
-
-// Δ days (positive = late, negative = early)
-const diffDays = (a,b) => Math.round((toDate(a)-toDate(b)) / (1000*60*60*24));
-const rowsDelay = [
-  ['Baseline (Plan)',   plannedBaseline,   'Baseline (Actual)',   window.state?.milestones?.baseline_actual_ymd || '—'],
-  ['Inventory (Plan)',  inventoryPlanned,  'Inventory (Actual)',  m.inventoryActualYMD  || '—'],
-  ['Processing (Plan)', processingPlanned, 'Processing (Actual)', m.processingActualYMD || '—'],
-  ['Dispatched (Plan)', dispatchedPlanned, 'Dispatched (Actual)', m.dispatchedActualYMD || '—'],
-].map(([plLabel, pl, acLabel, ac]) => {
-  const delta = (ac && ac !== '—') ? diffDays(ac, pl) : null;
-  const deltaText = (delta == null)
-    ? ''
-    : (delta > 0 ? `+${delta} days late` : (delta < 0 ? `${delta} days early` : 'on time'));
-  return [plLabel, pl, acLabel, ac, deltaText];
-});
-
-doc.autoTable({
-  startY: y,
-  margin: { left: margin.l, right: margin.r },
-  head: [['Planned', 'Date', 'Actual', 'Date', 'Δ']],
-  body: rowsDelay,
-  styles: { fontSize: 10 },
-  headStyles: { fillColor: [153, 0, 51] }
-});
-y = doc.lastAutoTable.finalY + 10;
-
-if (m._opsCompletionPct != null) {
-  doc.text(`Ops completion override: ${m._opsCompletionPct}%`, margin.l, y);
-}
-  
-  // ----- Page 6+: Data Appendix (UID / PO / Bin / weight / qty) -----
-  doc.addPage(); addFooter();
-  y = margin.t;
-  doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
-  doc.text('5. Data Appendix', margin.l, y); y += 18;
-
-  try {
-    const records = Array.isArray(window.state?.records) ? window.state.records : [];
-    const rows = records.map(r => ([
-      r.uid || '',
-      r.po_number || '',
-      r.sku_code || '',
-      r.mobile_bin || '',
-      (r.weight_kg != null ? String(r.weight_kg) : ''),
-      (r.qty ?? r.quantity ?? ''),
-      (r.status || ''),
-      (r.date_local || '')
-    ]));
-    doc.autoTable({
-      startY: y,
-      margin: { left: margin.l, right: margin.r },
-      head: [['UID','PO','SKU','Mobile Bin','Weight (kg)','Qty','Status','Date(Local)']],
-      body: rows,
-      styles: { fontSize: 9, cellPadding: 3 },
-      bodyStyles: { textColor: [40,40,40] },
-      headStyles: { fillColor: [153,0,51] } // Pinpoint deep rose
+    tiles.forEach((t, i) => {
+      const x = cardX(i), yy = cardY(i);
+      doc.setDrawColor(235); doc.roundedRect(x, yy, cardW, cardH, 6, 6, 'S');
+      doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(107);
+      doc.text(t[0], x + 10, yy + 16);
+      doc.setFont('helvetica','bold'); doc.setFontSize(14); doc.setTextColor(17);
+      doc.text(String(t[1]), x + cardW - 10, yy + 16, { align: 'right' });
+      doc.setTextColor(0);
     });
-  } catch (e) {
-    console.warn('[PDF] AutoTable for Data Appendix failed:', e);
-    doc.setFont('helvetica', 'italic'); doc.setFontSize(11);
-    doc.text('Data appendix unavailable.', margin.l, y + 16);
+    y += 2 * (cardH + gutter) + 12;
+
+    // Charts row
+    const donutSvg = document.querySelector('#card-donut svg');
+    const radarSvg = document.querySelector('#card-radar svg');
+    const chartH = 180;
+    const chartW = (pageW - margin.l - margin.r - 12) / 2;
+    await addSvg(donutSvg, margin.l, y, chartW, chartH);
+    await addSvg(radarSvg, margin.l + chartW + 12, y, chartW, chartH);
+    y += chartH + 14;
+
+    // Timeline (full width, capped height)
+    const timelineSvg = document.querySelector('#timeline-slot svg');
+    if (timelineSvg) {
+      const tW = pageW - margin.l - margin.r;
+      const vbW = timelineSvg.viewBox?.baseVal?.width  || timelineSvg.clientWidth  || 900;
+      const vbH = timelineSvg.viewBox?.baseVal?.height || timelineSvg.clientHeight || 150;
+      const tH = Math.min(120, (tW * vbH) / vbW);
+      await addSvg(timelineSvg, margin.l, y, tW, tH);
+    }
+
+    footer('Page 3');
+  }
+
+  // ============= 4) EXCEPTIONS DETAIL =============
+  {
+    doc.addPage();
+    doc.setFont('helvetica','bold'); doc.setFontSize(14);
+    doc.text('2. Exceptions Detail', margin.l, margin.t - 12);
+
+    let y = margin.t + 2;
+
+    // Top Gap Drivers (PO × SKU) — first 8 rows
+    try {
+      const head = [['PO','SKU','Planned','Applied','Gap']];
+      const rows = (Array.isArray(m.topGap) ? m.topGap.slice(0,8) : []).map(g => [
+        g.po || '', g.sku || '', String(g.planned ?? ''), String(g.applied ?? ''), String(g.gap ?? '')
+      ]);
+      doc.autoTable({
+        startY: y,
+        margin: { left: margin.l, right: margin.r },
+        head, body: rows,
+        styles: { fontSize: 9, cellPadding: 3 },
+        headStyles: { fillColor: [153,0,51] }
+      });
+      y = doc.lastAutoTable.finalY + 12;
+    } catch (e) { console.warn('[PDF] gaps table failed', e); }
+
+    // Heavy Bins Snapshot — top 6
+    try {
+      const bins = Array.isArray(window.state?.bins) ? window.state.bins : [];
+      const heavy = bins.filter(b => Number(b.weight_kg||0) > 12).slice(0,6);
+      // compute units and sku diversity from week records
+      const wkRecords = (window.state?.records || []).filter(r=>{
+        const ymd = (function(r){
+          if (r?.date_local) return String(r.date_local).trim();
+          if (r?.date) return String(r.date).trim();
+          if (r?.completed_at && typeof window.ymdFromCompletedAtInTZ==='function')
+            return window.ymdFromCompletedAtInTZ(r.completed_at, document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai');
+          return '';
+        })(r);
+        return ymd && ymd >= ws && ymd <= we;
+      });
+      const unitsByBin = new Map(), skuSetByBin = new Map();
+      for (const r of wkRecords) {
+        const bin = String(r.mobile_bin||'').trim(); if (!bin) continue;
+        unitsByBin.set(bin, (unitsByBin.get(bin)||0) + 1);
+        const sku = String(r.sku_code||'').trim();
+        if (sku) { if (!skuSetByBin.has(bin)) skuSetByBin.set(bin, new Set()); skuSetByBin.get(bin).add(sku); }
+      }
+      const head = [['Bin','Units','kg','SKU div.']];
+      const rows = heavy.map(b => {
+        const id = String(b.mobile_bin||'').trim();
+        return [id || '—', String(unitsByBin.get(id)||0), String(Number(b.weight_kg||0).toFixed(1)), String(skuSetByBin.get(id)?.size || 0)];
+      });
+      doc.autoTable({
+        startY: y,
+        margin: { left: margin.l, right: margin.r },
+        head, body: rows,
+        styles: { fontSize: 9, cellPadding: 3 },
+        headStyles: { fillColor: [153,0,51] }
+      });
+      y = doc.lastAutoTable.finalY + 12;
+    } catch (e) { console.warn('[PDF] heavy bins table failed', e); }
+
+    // Intake Anomalies — simple summary
+    try {
+      const sparkSvg = document.querySelector('#anom-spark svg');
+      if (sparkSvg) {
+        const imgW = (pageW - margin.l - margin.r) * 0.45;
+        const vbW = sparkSvg.viewBox?.baseVal?.width || 280;
+        const vbH = sparkSvg.viewBox?.baseVal?.height || 60;
+        const imgH = Math.min(80, (imgW * vbH) / vbW);
+        await addSvg(sparkSvg, margin.l, y, imgW, imgH);
+      }
+      const dipsSpikes = document.getElementById('anom-badges')?.textContent || '';
+      doc.setFont('helvetica','normal'); doc.setFontSize(11);
+      doc.text(dipsSpikes ? `Anomaly summary: ${dipsSpikes}` : 'Anomaly summary: —', margin.l, y + 95);
+    } catch (e) { console.warn('[PDF] anomalies section failed', e); }
+
+    footer('Page 4');
+  }
+
+  // ============= 5) DATA APPENDIX =============
+  {
+    doc.addPage();
+    doc.setFont('helvetica','bold'); doc.setFontSize(14);
+    doc.text('3. Data Appendix', margin.l, margin.t - 12);
+
+    try {
+      const records = Array.isArray(window.state?.records) ? window.state.records : [];
+      const body = records.map(r => ([
+        r.uid || '',
+        r.po_number || '',
+        r.sku_code || '',
+        r.mobile_bin || '',
+        (r.weight_kg != null ? String(r.weight_kg) : ''),
+        (r.qty ?? r.quantity ?? ''),
+        (r.status || ''),
+        (r.date_local || r.date || '')
+      ]));
+      doc.autoTable({
+        startY: margin.t + 6,
+        margin: { left: margin.l, right: margin.r },
+        head: [['UID','PO','SKU','Mobile Bin','Weight (kg)','Qty','Status','Date(Local)']],
+        body,
+        styles: { fontSize: 9, cellPadding: 3 },
+        bodyStyles: { textColor: [40,40,40] },
+        headStyles: { fillColor: [153,0,51] }, // deep rose
+        pageBreak: 'auto'
+      });
+    } catch (e) {
+      console.warn('[PDF] AutoTable appendix failed:', e);
+      doc.setFont('helvetica','italic'); doc.setFontSize(11);
+      doc.text('Data appendix unavailable.', margin.l, margin.t + 24);
+    }
+
+    // show final page number
+    const n = doc.getNumberOfPages();
+    doc.setPage(n);
+    footer(`Page ${n}`);
   }
 
   return doc;
 }
-
 
 
   // Render when Exec page is shown
