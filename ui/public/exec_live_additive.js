@@ -839,6 +839,41 @@ plannedDots.forEach(renderDot);
   slot.appendChild(svg);
 }  // end renderExecTimeline
 
+// === Inject "Download summary" next to the top "Download .doc" ===
+function ensureSummaryBtn(clickHandler) {
+  // Find the existing "Download .doc" button (works for <button> or <a>)
+  const docBtn = Array.from(document.querySelectorAll('button, a'))
+    .find(el => el.textContent.trim().toLowerCase().includes('download .doc'));
+
+  // Retry gently if the header isn't mounted yet (idempotent)
+  if (!docBtn) {
+    if (!ensureSummaryBtn.__retryTimer) {
+      ensureSummaryBtn.__retryTimer = setTimeout(() => {
+        ensureSummaryBtn.__retryTimer = null;
+        try { ensureSummaryBtn(clickHandler); } catch {}
+      }, 300);
+    }
+    return;
+  }
+
+  // Already added?
+  if (document.getElementById('export-summary-btn')) return;
+
+  const b = document.createElement('button');
+  b.id = 'export-summary-btn';
+  b.type = 'button';
+  b.className = 'ml-3 px-3 py-1 rounded-full bg-rose-700 text-white text-xs hover:bg-rose-800';
+  b.textContent = 'Download summary';
+  b.addEventListener('click', (e) => {
+    e.preventDefault();
+    try { clickHandler?.(); } catch (err) { console.error(err); }
+  });
+
+  // Insert right after the ".doc" button
+  docBtn.parentNode.insertBefore(b, docBtn.nextSibling);
+}
+
+
 
 
 
@@ -892,9 +927,6 @@ plannedDots.forEach(renderDot);
   <button id="timeline-edit-btn" class="text-xs px-2 py-1 rounded-full border text-gray-600 hover:bg-gray-50">
     Edit actuals
   </button>
-<button id="export-pdf-btn" class="ml-2 text-xs px-2 py-1 rounded-full border text-gray-600 hover:bg-gray-50">
-      Download summary
-    </button>
   </div>
 
 </div>
@@ -1217,26 +1249,6 @@ if (timelineSlot) renderExecTimeline(timelineSlot, m);
 wireTimelineEditor(m);
 }
 
-// (re)wire the PDF export button idempotently
-(function wirePdfExport(){
-  const btn = document.getElementById('export-pdf-btn');
-  if (!btn || btn.dataset.bound === '1') return;
-  btn.dataset.bound = '1';
-
-  btn.addEventListener('click', async () => {
-    try {
-      await __ensurePdfLibs();                     // make sure libs are loaded
-      const doc = await __buildExecSummaryPDF(m);  // build the PDF
-      const ws = (m.ws || '').replaceAll('-', '');
-      const fname = `VAS_Execution_Summary_${ws || 'week'}.pdf`;
-      doc.save(fname);
-    } catch (e) {
-      console.error('[PDF] export failed:', e);
-      alert('Sorry, failed to build the PDF. See console for details.');
-    }
-  });
-})();
-
 // ===== Inline editor for actuals / Ops % =====
 // ===== Inline editor for actuals / Ops % =====
 function wireTimelineEditor(m) {
@@ -1336,6 +1348,247 @@ ms.baseline_actual_ymd = vBa || undefined;
   };
 }
 
+
+// ===== PDF helpers (jsPDF + AutoTable + SVG capture) =====
+async function __loadScript(src){
+  await new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.async = true;
+    s.onload = res;
+    s.onerror = rej;
+    document.head.appendChild(s);
+  });
+}
+
+async function __ensurePdfLibs(){
+  // already present?
+  if (window.jspdf?.jsPDF && window.jspdf?.autoTable) return;
+
+  // Load jsPDF UMD
+  if (!window.jspdf?.jsPDF) {
+    await __loadScript('https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js');
+  }
+  // Load AutoTable plugin
+  if (!window.jspdf?.autoTable && !window.autoTable) {
+    await __loadScript('https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.3/dist/jspdf.plugin.autotable.min.js');
+  }
+}
+
+function __serializeSvgToPngDataUrl(svgEl, scale = 2){
+  return new Promise((resolve, reject) => {
+    try {
+      const xml = new XMLSerializer().serializeToString(svgEl);
+      const svgBlob = new Blob([xml], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(svgBlob);
+
+      const img = new Image();
+      img.onload = () => {
+        const w = svgEl.viewBox?.baseVal?.width  || svgEl.clientWidth  || 800;
+        const h = svgEl.viewBox?.baseVal?.height || svgEl.clientHeight || 200;
+        const canvas = document.createElement('canvas');
+        canvas.width  = Math.max(1, Math.floor(w * scale));
+        canvas.height = Math.max(1, Math.floor(h * scale));
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        URL.revokeObjectURL(url);
+        resolve(canvas.toDataURL('image/png'));
+      };
+      img.onerror = (e) => {
+        URL.revokeObjectURL(url);
+        reject(e);
+      };
+      img.src = url;
+    } catch (err) { reject(err); }
+  });
+}
+
+async function __buildExecSummaryPDF(m){
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'a4' }); // 595×842pt
+  const margin = { l: 48, r: 48, t: 64, b: 64 };
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+
+  // ----- Header (logo + title) -----
+  const hasLogo = !!window.PINPOINT_LOGO_URL;
+  const headerY = margin.t - 24;
+  if (hasLogo) {
+    try {
+      // preloaded dataURL is ideal; fallback: draw external (might be blocked by CORS)
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        try { /* noop: addImage below */ } catch {}
+      };
+      // We add with addImage directly; jsPDF handles the drawing
+      doc.addImage(window.PINPOINT_LOGO_URL, 'PNG', margin.l, headerY - 12, 120, 28);
+    } catch {}
+  }
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(16);
+  doc.text('VAS Execution Summary (Powered by Pinpoint)', hasLogo ? (margin.l + 140) : margin.l, headerY);
+
+  // ----- Footer (confidential + page numbers) -----
+  const footerTextLeft  = 'Confidential — For internal use only';
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  const addFooter = () => {
+    doc.setDrawColor(220);
+    doc.line(margin.l, pageH - margin.b + 14, pageW - margin.r, pageH - margin.b + 14);
+    doc.text(footerTextLeft, margin.l, pageH - margin.b + 30);
+    const pageNo = `${doc.getCurrentPageInfo().pageNumber}`;
+    doc.text(`Page ${pageNo}`, pageW - margin.r, pageH - margin.b + 30, { align: 'right' });
+  };
+  addFooter();
+
+  // ----- Cover / Index page -----
+  let y = margin.t + 16;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
+  doc.text('Index', margin.l, y); y += 18;
+
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(12);
+  const indexLines = [
+    '1. Executive Summary',
+    '2. Exception Summary',
+    '3. Week Timeline (Planned vs Actual)',
+    '4. Planned vs Applied',
+    '5. Data Appendix'
+  ];
+  indexLines.forEach((line, i) => { doc.text(`${line}`, margin.l, y); y += 16; });
+
+  // ----- Page 2: Executive Summary -----
+  doc.addPage(); addFooter();
+  y = margin.t;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
+  doc.text('1. Executive Summary', margin.l, y); y += 22;
+
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
+  const ws = m.ws || '';
+  const we = m.we || '';
+  doc.text(`Week: ${ws} to ${we}`, margin.l, y); y += 16;
+  doc.text(`Planned total: ${Number(m.plannedTotal||0).toLocaleString()}`, margin.l, y); y += 16;
+  doc.text(`Applied total: ${Number(m.appliedTotal||0).toLocaleString()}`, margin.l, y); y += 16;
+  doc.text(`Completion: ${m.completionPct ?? 0}%`, margin.l, y); y += 24;
+
+  // Donut chart snapshot (if present)
+  const donutSvg = document.querySelector('#card-donut svg');
+  if (donutSvg) {
+    try {
+      const durl = await __serializeSvgToPngDataUrl(donutSvg, 2);
+      const imgW = 220, imgH = 220;
+      doc.addImage(durl, 'PNG', margin.l, y, imgW, imgH);
+    } catch (e) { console.warn('[PDF] donut capture failed', e); }
+  }
+
+  // ----- Page 3: Exception Summary -----
+  doc.addPage(); addFooter();
+  y = margin.t;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
+  doc.text('2. Exception Summary', margin.l, y); y += 22;
+
+  // Radar snapshot (if present)
+  const radarSvg = document.querySelector('#card-radar svg');
+  if (radarSvg) {
+    try {
+      const rurl = await __serializeSvgToPngDataUrl(radarSvg, 2);
+      const imgW = 280, imgH = 280;
+      doc.addImage(rurl, 'PNG', margin.l, y, imgW, imgH);
+    } catch (e) { console.warn('[PDF] radar capture failed', e); }
+  }
+
+  // Top gaps table (PO × SKU) — use AutoTable if available
+  try {
+    const rows = (Array.isArray(m.topGap) ? m.topGap : []).map(g => ([
+      g.po || '', g.sku || '', g.planned ?? '', g.applied ?? '', g.gap ?? ''
+    ]));
+    const head = [['PO', 'SKU', 'Planned', 'Applied', 'Gap']];
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin.l, right: margin.r },
+      head, body: rows,
+      styles: { fontSize: 9 }
+    });
+  } catch (e) {
+    console.warn('[PDF] AutoTable for top gaps failed:', e);
+  }
+
+  // ----- Page 4: Week Timeline -----
+  doc.addPage(); addFooter();
+  y = margin.t;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
+  doc.text('3. Week Timeline (Planned vs Actual)', margin.l, y); y += 22;
+
+  // Timeline snapshot (if present)
+  const timelineSvg = document.querySelector('#timeline-slot svg');
+  if (timelineSvg) {
+    try {
+      const turl = await __serializeSvgToPngDataUrl(timelineSvg, 2);
+      const imgW = pageW - margin.l - margin.r;
+      const intrinsicW = timelineSvg.viewBox?.baseVal?.width || timelineSvg.clientWidth || 900;
+      const intrinsicH = timelineSvg.viewBox?.baseVal?.height || timelineSvg.clientHeight || 150;
+      const imgH = (imgW * intrinsicH) / intrinsicW;
+      doc.addImage(turl, 'PNG', margin.l, y, imgW, imgH);
+      y += imgH + 12;
+    } catch (e) { console.warn('[PDF] timeline capture failed', e); }
+  }
+
+  // Planned vs Actual dates (if available)
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
+  const dateLines = [];
+  dateLines.push(`Planned Baseline: ${m.ws ? (window.state?.weekStart ? ( (()=>{ const d=new Date(m.ws); const dd=d.getDate().toString().padStart(2,'0'); const mm=(d.getMonth()+1).toString().padStart(2,'0'); const yy=d.getFullYear(); return `${yy}-${mm}-${dd}`; })() ) : m.ws) : ''}`);
+  if (window.state?.milestones?.baseline_actual_ymd)  dateLines.push(`Baseline (Actual): ${window.state.milestones.baseline_actual_ymd}`);
+  if (m.inventoryActualYMD)  dateLines.push(`Inventory (Actual): ${m.inventoryActualYMD}`);
+  if (m.processingActualYMD) dateLines.push(`Processing (Actual): ${m.processingActualYMD}`);
+  if (m.dispatchedActualYMD) dateLines.push(`Dispatched (Actual): ${m.dispatchedActualYMD}`);
+  if (m._opsCompletionPct != null) dateLines.push(`Completion % (Ops): ${m._opsCompletionPct}%`);
+  dateLines.forEach(line => { doc.text(line, margin.l, y); y += 16; });
+
+  // ----- Page 5: Planned vs Applied -----
+  doc.addPage(); addFooter();
+  y = margin.t;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
+  doc.text('4. Planned vs Applied', margin.l, y); y += 22;
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
+  doc.text(`Planned: ${Number(m.plannedTotal||0).toLocaleString()}`, margin.l, y); y += 16;
+  doc.text(`Applied: ${Number(m.appliedTotal||0).toLocaleString()}`, margin.l, y); y += 16;
+  doc.text(`Completion %: ${m.completionPct ?? 0}%`, margin.l, y); y += 16;
+
+  // ----- Page 6+: Data Appendix (UID / PO / Bin / weight / qty) -----
+  doc.addPage(); addFooter();
+  y = margin.t;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
+  doc.text('5. Data Appendix', margin.l, y); y += 18;
+
+  try {
+    const records = Array.isArray(window.state?.records) ? window.state.records : [];
+    const rows = records.map(r => ([
+      r.uid || '',
+      r.po_number || '',
+      r.sku_code || '',
+      r.mobile_bin || '',
+      (r.weight_kg != null ? String(r.weight_kg) : ''),
+      (r.qty ?? r.quantity ?? ''),
+      (r.status || ''),
+      (r.date_local || '')
+    ]));
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin.l, right: margin.r },
+      head: [['UID','PO','SKU','Mobile Bin','Weight (kg)','Qty','Status','Date(Local)']],
+      body: rows,
+      styles: { fontSize: 9, cellPadding: 3 },
+      bodyStyles: { textColor: [40,40,40] },
+      headStyles: { fillColor: [153,0,51] } // Pinpoint deep rose
+    });
+  } catch (e) {
+    console.warn('[PDF] AutoTable for Data Appendix failed:', e);
+    doc.setFont('helvetica', 'italic'); doc.setFontSize(11);
+    doc.text('Data appendix unavailable.', margin.l, y + 16);
+  }
+
+  return doc;
+}
 
 
 
@@ -1502,7 +1755,28 @@ const hasRecs = Array.isArray(s.records) && s.records.length > 0;
 if (!(hasPlan || hasRecs)) {
   if (EXEC_USE_NETWORK) {
     _execEnsureStateLoaded(s.weekStart)
-      .then(() => { try { renderExec(); } catch (e) { console.error('[Exec render error]', e); } })
+      .then(() => {
+  try {
+    renderExec();
+
+    // Add header "Download summary" and wire it to the PDF builder
+    ensureSummaryBtn(async () => {
+      try {
+        await __ensurePdfLibs();
+        const doc = await __buildExecSummaryPDF(m);
+        const ws = (m.ws || '').replaceAll('-', '');
+        const fname = `VAS_Execution_Summary_${ws || 'week'}.pdf`;
+        doc.save(fname);
+      } catch (e) {
+        console.error('[PDF] export failed:', e);
+        alert('Sorry, failed to build the PDF. See console for details.');
+      }
+    });
+  } catch (e) {
+    console.error('[Exec render error]', e);
+  }
+})
+
       .catch(e  => console.error('[Exec fetch error]', e));
   } else {
     // No network on Exec: render immediately with empty arrays (UI still shows baseline)
@@ -1511,7 +1785,26 @@ if (!(hasPlan || hasRecs)) {
   return;
 }
  
-try { renderExec(); } catch (e) { console.error('[Exec render error]', e); }
+try {
+  renderExec();
+
+  // Add header "Download summary" and wire it to the PDF builder
+  ensureSummaryBtn(async () => {
+    try {
+      await __ensurePdfLibs();
+      const doc = await __buildExecSummaryPDF(m);
+      const ws = (m?.ws || window.state?.weekStart || '').replaceAll?.('-', '') || '';
+      const fname = `VAS_Execution_Summary_${ws || 'week'}.pdf`;
+      doc.save(fname);
+    } catch (e) {
+      console.error('[PDF] export failed:', e);
+      alert('Sorry, failed to build the PDF. See console for details.');
+    }
+  });
+} catch (e) {
+  console.error('[Exec render error]', e);
+}
+
 
 }
 
