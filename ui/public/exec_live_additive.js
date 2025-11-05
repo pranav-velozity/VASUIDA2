@@ -537,18 +537,19 @@ const baselineActual = m.baselineActualYMD
       ? clampYMD(window.state.milestones.baseline_actual_ymd, minusBusinessDaysFrom(ws, 30), ws)
       : null);
 
-  // actuals (if you feed them in m.* they will show, else fallbacks)
-  const inventoryActual   = m.inventoryActualYMD  ? clampYMD(m.inventoryActualYMD, plannedBaseline, we) : null;
-  const dispatchedActual  = m.dispatchedActualYMD ? clampYMD(m.dispatchedActualYMD, plannedBaseline, addDaysYMD(we, 3)) : null;
+  // actuals (NO inference; only show if provided)
+const inventoryActual  = m.inventoryActualYMD
+  ? clampYMD(m.inventoryActualYMD, plannedBaseline, we)
+  : null;
 
-  // processing actual: choose mid of week record dates if available, else Wed fallback
-  let processingActual = null;
-  if (Array.isArray(m._wkDatesSorted) && m._wkDatesSorted.length) {
-    const mid = Math.floor(m._wkDatesSorted.length / 2);
-    processingActual = m._wkDatesSorted[mid];
-  } else {
-    processingActual = addDaysYMD(ws, 2); // Wed fallback
-  }
+const processingActual = m.processingActualYMD
+  ? clampYMD(m.processingActualYMD, plannedBaseline, we)
+  : null;
+
+const dispatchedActual = m.dispatchedActualYMD
+  ? clampYMD(m.dispatchedActualYMD, plannedBaseline, addDaysYMD(we, 3))
+  : null;
+
 
   // ---------- draw prelude (short, centered bar + piece-wise scale)
   const w0    = slot.clientWidth || slot.parentElement?.clientWidth || 0;
@@ -591,10 +592,10 @@ const baselineActual = m.baselineActualYMD
 // base bar (soft grey so it’s visible on white cards)
 const barY = 72, barH = 12;
 // Colors
-const PLANNED_STROKE = '#B73A5C';  // planned line
+const PLANNED_STROKE = '#EEC7D6';  // planned line
 const ACTUAL_FILL    = BRAND;      // actual fill & dots
 const ACTUAL_DOT     = BRAND;
-const PLANNED_DOT    = '#B73A5C';
+const PLANNED_DOT    = '#EEC7D6';
 
 svg.appendChild(_el('rect', {
   x: pad,
@@ -614,7 +615,7 @@ svg.appendChild(_el('rect', {
   const plannedEndX   = scaleX(dispatchedPlanned);
   svg.appendChild(_el('line', {
   x1: plannedStartX, y1: barY + barH / 2, x2: plannedEndX, y2: barY + barH / 2,
-  stroke: PLANNED_STROKE, 'stroke-width': 4, 'stroke-linecap': 'round'
+  stroke: PLANNED_STROKE, 'stroke-width': 3, 'stroke-linecap': 'round'
 }));
 
 
@@ -654,24 +655,65 @@ svg.appendChild(_el('rect', {
   }
 
 
-  // milestones (planned above, actuals below)
-const dots = [
-  // Planned (top)
-  { ymd: plannedBaseline,   label: `Planned (Baseline) — ${shortDate(plannedBaseline)}`,  color: PLANNED_DOT, where: 'above' },
-  { ymd: inventoryPlanned,  label: `Inventory (Plan) — ${shortDate(inventoryPlanned)}`,   color: PLANNED_DOT, where: 'above' },
-  { ymd: processingPlanned, label: `Processing (Plan) — ${shortDate(processingPlanned)}`, color: PLANNED_DOT, where: 'above' },
-  { ymd: dispatchedPlanned, label: `Dispatched (Plan) — ${shortDate(dispatchedPlanned)}`, color: PLANNED_DOT, where: 'above' },
-
-  // Actuals (bottom) — always label with date
-  ...(baselineActual  ? [{ ymd: baselineActual,  label: `Baseline (Actual) — ${shortDate(baselineActual)}`,  color: ACTUAL_DOT, where: 'below' }] : []),
-  ...(inventoryActual ? [{ ymd: inventoryActual, label: `Inventory (Actual) — ${shortDate(inventoryActual)}`, color: ACTUAL_DOT, where: 'below' }] : []),
-  ...(processingActual? [{ ymd: processingActual,label: `Processing (Actual) — ${shortDate(processingActual)}`,color: ACTUAL_DOT, where: 'below' }] : []),
-  ...(dispatchedActual? [{ ymd: dispatchedActual,label: `Dispatched (Actual) — ${shortDate(dispatchedActual)}`,color: ACTUAL_DOT, where: 'below' }] : []),
+// milestones (planned above, actuals below) — render ACTUALS first (under), PLANS last (on top)
+const plannedDots = [
+  {
+    key: 'baselinePlan',
+    ymd: plannedBaseline,
+    label: `Planned (Baseline) — ${shortDate(plannedBaseline)}`,
+    color: '#EEC7D6',
+    where: 'above'
+  },
+  {
+    key: 'inventoryPlan',
+    ymd: inventoryPlanned,
+    label: `Inventory (Plan) — ${shortDate(inventoryPlanned)}`,
+    color: '#EEC7D6',
+    where: 'above'
+  },
+  {
+    key: 'processingPlan',
+    ymd: processingPlanned,
+    label: `Processing (Plan) — ${shortDate(processingPlanned)}`,
+    color: '#EEC7D6',
+    where: 'above'
+  },
+  {
+    key: 'dispatchedPlan',
+    ymd: dispatchedPlanned,
+    label: `Dispatched (Plan) — ${shortDate(dispatchedPlanned)}`,
+    color: '#EEC7D6',
+    where: 'above'
+  }
 ];
 
+const actualDots = [
+  inventoryActual  ? {
+    key: 'inventoryActual',
+    ymd: inventoryActual,
+    // suppress ONLY the actual label if it falls on the same day as plan
+    label: sameDay(inventoryActual, inventoryPlanned) ? '' : 'Inventory (Actual)',
+    color: '#990033',
+    where: 'below'
+  } : null,
+  processingActual ? {
+    key: 'processingActual',
+    ymd: processingActual,
+    label: sameDay(processingActual, processingPlanned) ? '' : 'Processing (Actual)',
+    color: '#990033',
+    where: 'below'
+  } : null,
+  dispatchedActual ? {
+    key: 'dispatchedActual',
+    ymd: dispatchedActual,
+    label: sameDay(dispatchedActual, dispatchedPlanned) ? '' : 'Dispatched (Actual)',
+    color: '#990033',
+    where: 'below'
+  } : null
+].filter(Boolean);
 
-
-dots.forEach(d => {
+// Common renderer (kept identical to your current one)
+function renderDot(d) {
   if (!d.ymd) return;
 
   const x  = scaleX(d.ymd);
@@ -684,8 +726,8 @@ dots.forEach(d => {
 
   // Gentle left/right nudges to avoid crowding near week end
   let xLabel = xClamped;
-  if (d.label && /Processing \(Plan\)/.test(d.label)) xLabel -= 10;  // nudge left
-  if (d.label && /Dispatched \(Plan\)/.test(d.label)) xLabel += 10;  // nudge right
+  if (d.key === 'processingPlan') xLabel -= 10;  // nudge left
+  if (d.key === 'dispatchedPlan') xLabel += 10;  // nudge right
 
   const yDot = d.where === 'above' ? (barY - 6) : (barY + barH + 6);
 
@@ -705,8 +747,11 @@ dots.forEach(d => {
     labelEl.textContent = d.label;
     svg.appendChild(labelEl);
   }
-});
+}
 
+// Draw order: actuals first (under), planned last (on top so they never “disappear”)
+actualDots.forEach(renderDot);
+plannedDots.forEach(renderDot);
 
   slot.appendChild(svg);
 }  // end renderExecTimeline
@@ -1025,38 +1070,32 @@ if (m._opsCompletionPct != null) {
 }
 
 
-// ---- Feed actual dates for the timeline (preferred: Ops overrides; fallback: records)
+// ---- Feed actual dates for the timeline (Ops-entered only; no inference) ----
 {
-const invOverride  = window.state?.milestones?.inventory_actual_ymd
-                  || window.state?.inventory_actual_ymd
-                  || window.state?.inventoryActualYMD;
+  const ms = window.state?.milestones || {};
 
-const procOverride = window.state?.milestones?.processing_actual_ymd
-                  || window.state?.processing_actual_ymd
-                  || window.state?.processingActualYMD;
+  const invOverride  =
+    ms.inventory_actual_ymd  ||
+    window.state?.inventory_actual_ymd ||
+    window.state?.inventoryActualYMD ||
+    null;
 
-const dispOverride = window.state?.milestones?.dispatched_actual_ymd
-                  || window.state?.dispatched_actual_ymd
-                  || window.state?.dispatchedActualYMD;
+  const procOverride =
+    ms.processing_actual_ymd ||
+    window.state?.processing_actual_ymd ||
+    window.state?.processingActualYMD ||
+    null;
 
-const baseOverride = window.state?.milestones?.baseline_actual_ymd
-                  || window.state?.baseline_actual_ymd
-                  || window.state?.baselineActualYMD;
+  const dispOverride =
+    ms.dispatched_actual_ymd ||
+    window.state?.dispatched_actual_ymd ||
+    window.state?.dispatchedActualYMD ||
+    null;
 
-
-// (optional) pre-seed
-if (invOverride)  m.inventoryActualYMD  = invOverride;
-if (procOverride) m.processingActualYMD = procOverride;
-if (dispOverride) m.dispatchedActualYMD = dispOverride;
-if (baseOverride) m.baselineActualYMD = baseOverride;
-
-
-  // Fallbacks from week record dates if overrides absent
-  const ymds = Array.isArray(m._wkDatesSorted) ? m._wkDatesSorted : [];
-  const invFromRecs  = ymds.length ? ymds[0] : m.ws;
-  const dispFromRecs = ymds.length ? ymds[ymds.length - 1] : m.we;
-  if (!m.inventoryActualYMD)  m.inventoryActualYMD  = invFromRecs;
-  if (!m.dispatchedActualYMD) m.dispatchedActualYMD = dispFromRecs;
+  // Assign only Ops-entered values; otherwise keep null so the bar stays grey.
+  m.inventoryActualYMD  = invOverride;
+  m.processingActualYMD = procOverride;
+  m.dispatchedActualYMD = dispOverride;
 }
 
 // Timeline (planned vs actual) — render once, here
