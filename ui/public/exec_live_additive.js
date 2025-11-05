@@ -1452,13 +1452,12 @@ const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' }); /
   doc.text('Index', margin.l, y); y += 18;
 
   doc.setFont('helvetica', 'normal'); doc.setFontSize(12);
-  const indexLines = [
-    '1. Executive Summary',
-    '2. Exception Summary',
-    '3. Week Timeline (Planned vs Actual)',
-    '4. Planned vs Applied',
-    '5. Data Appendix'
-  ];
+const indexLines = [
+  '1. Executive Summary',
+  '2. Week Timeline — Planned vs Actual & Delays',
+  '3. Data Appendix'
+];
+
   indexLines.forEach((line, i) => { doc.text(`${line}`, margin.l, y); y += 16; });
 
 // ----- Page 2: Executive Summary (single-page dashboard) -----
@@ -1490,15 +1489,16 @@ const tiles = [
   ['Late appliers',`${m.lateCount||0} (${m.lateRatePct||0}%)`],
 ];
 doc.setFont('helvetica','bold'); doc.setFontSize(10);
-let x = kpiLeft, y = kpiTop;
+let x = kpiLeft, yKpi = kpiTop;
 const colW = (pageW - margin.r - kpiLeft);
 const cellW = Math.floor(colW / 2);
 tiles.forEach(([k,v], i) => {
-  doc.text(k, x, y);
-  doc.setFont('helvetica','normal'); doc.text(String(v), x + cellW - 6, y, { align: 'right' });
-  doc.setFont('helvetica','bold');
-  y += kpiH;
-  if ((i+1) % 6 === 0) { x += cellW; y = kpiTop; }
+doc.text(k, x, yKpi);
+doc.setFont('helvetica','normal'); doc.text(String(v), x + cellW - 6, yKpi, { align: 'right' });
+doc.setFont('helvetica','bold');
+yKpi += kpiH;
+if ((i+1) % 6 === 0) { x += cellW; yKpi = kpiTop; }
+
 });
 
 // Charts area (left half): donut (top-left) + radar (bottom-left)
@@ -1585,38 +1585,25 @@ const rowsDelay = [
   ['Dispatched (Plan)', dispatchedPlanned, 'Dispatched (Actual)', m.dispatchedActualYMD || '—'],
 ].map(([plLabel, pl, acLabel, ac]) => {
   const delta = (ac && ac !== '—') ? diffDays(ac, pl) : null;
-  const deltaText = delta==null ? '' : (delta>0 ?
-  // ----- Page 4: Week Timeline -----
-  doc.addPage(); addFooter();
-  y = margin.t;
-  doc.setFont('helvetica', 'bold'); doc.setFontSize(14);
-  doc.text('3. Week Timeline (Planned vs Actual)', margin.l, y); y += 22;
+  const deltaText = (delta == null)
+    ? ''
+    : (delta > 0 ? `+${delta} days late` : (delta < 0 ? `${delta} days early` : 'on time'));
+  return [plLabel, pl, acLabel, ac, deltaText];
+});
 
-  // Timeline snapshot (if present)
-  const timelineSvg = document.querySelector('#timeline-slot svg');
-  if (timelineSvg) {
-    try {
-      const turl = await __serializeSvgToPngDataUrl(timelineSvg, 2);
-      const imgW = pageW - margin.l - margin.r;
-      const intrinsicW = timelineSvg.viewBox?.baseVal?.width || timelineSvg.clientWidth || 900;
-      const intrinsicH = timelineSvg.viewBox?.baseVal?.height || timelineSvg.clientHeight || 150;
-      const imgH = (imgW * intrinsicH) / intrinsicW;
-      doc.addImage(turl, 'PNG', margin.l, y, imgW, imgH);
-      y += imgH + 12;
-    } catch (e) { console.warn('[PDF] timeline capture failed', e); }
-  }
+doc.autoTable({
+  startY: y,
+  margin: { left: margin.l, right: margin.r },
+  head: [['Planned', 'Date', 'Actual', 'Date', 'Δ']],
+  body: rowsDelay,
+  styles: { fontSize: 10 },
+  headStyles: { fillColor: [153, 0, 51] }
+});
+y = doc.lastAutoTable.finalY + 10;
 
-  // Planned vs Actual dates (if available)
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
-  const dateLines = [];
-  dateLines.push(`Planned Baseline: ${m.ws ? (window.state?.weekStart ? ( (()=>{ const d=new Date(m.ws); const dd=d.getDate().toString().padStart(2,'0'); const mm=(d.getMonth()+1).toString().padStart(2,'0'); const yy=d.getFullYear(); return `${yy}-${mm}-${dd}`; })() ) : m.ws) : ''}`);
-  if (window.state?.milestones?.baseline_actual_ymd)  dateLines.push(`Baseline (Actual): ${window.state.milestones.baseline_actual_ymd}`);
-  if (m.inventoryActualYMD)  dateLines.push(`Inventory (Actual): ${m.inventoryActualYMD}`);
-  if (m.processingActualYMD) dateLines.push(`Processing (Actual): ${m.processingActualYMD}`);
-  if (m.dispatchedActualYMD) dateLines.push(`Dispatched (Actual): ${m.dispatchedActualYMD}`);
-  if (m._opsCompletionPct != null) dateLines.push(`Completion % (Ops): ${m._opsCompletionPct}%`);
-  dateLines.forEach(line => { doc.text(line, margin.l, y); y += 16; });
-
+if (m._opsCompletionPct != null) {
+  doc.text(`Ops completion override: ${m._opsCompletionPct}%`, margin.l, y);
+}
   
   // ----- Page 6+: Data Appendix (UID / PO / Bin / weight / qty) -----
   doc.addPage(); addFooter();
