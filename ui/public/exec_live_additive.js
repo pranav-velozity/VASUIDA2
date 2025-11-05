@@ -839,13 +839,23 @@ plannedDots.forEach(renderDot);
   slot.appendChild(svg);
 }  // end renderExecTimeline
 
-// === Inject "Download summary" next to the top "Download .doc" ===
+// === Inject "Download summary" next to the old buttons, style like toolbar pill,
+// === and hide "Download .doc" + "PO×SKU CSV" on the Exec page
 function ensureSummaryBtn(clickHandler) {
-  // Find the existing "Download .doc" button (works for <button> or <a>)
-  const docBtn = Array.from(document.querySelectorAll('button, a'))
-    .find(el => el.textContent.trim().toLowerCase().includes('download .doc'));
+  // Helper: find a button/anchor by text (case-insensitive, flexible spacing)
+  function findBtnByText(txt) {
+    const norm = (s) => String(s || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    const target = norm(txt);
+    return Array.from(document.querySelectorAll('button, a')).find(el => norm(el.textContent).includes(target));
+  }
 
-  // Retry gently if the header isn't mounted yet (idempotent)
+  // We use the existing ".doc" button as an anchor point (as before)
+  const docBtn = findBtnByText('download .doc');
+
+  // Retry gently if header isn't mounted yet
   if (!docBtn) {
     if (!ensureSummaryBtn.__retryTimer) {
       ensureSummaryBtn.__retryTimer = setTimeout(() => {
@@ -856,20 +866,54 @@ function ensureSummaryBtn(clickHandler) {
     return;
   }
 
+  // Hide legacy buttons on Exec page only
+  if ((location.hash || '#dashboard') === '#exec') {
+    // 1) "Download .doc"
+    docBtn.style.display = 'none';
+
+    // 2) "PO×SKU CSV" (sometimes rendered as POxSKU)
+    const csvBtn = (
+      findBtnByText('po×sku csv') ||
+      findBtnByText('poxsku csv') ||
+      findBtnByText('po sku csv')
+    );
+    if (csvBtn) csvBtn.style.display = 'none';
+  }
+
   // Already added?
   if (document.getElementById('export-summary-btn')) return;
 
+  // Build "Download summary" in the toolbar-pill style with a small icon
   const b = document.createElement('button');
   b.id = 'export-summary-btn';
   b.type = 'button';
-  b.className = 'ml-3 px-3 py-1 rounded-full bg-rose-700 text-white text-xs hover:bg-rose-800';
-  b.textContent = 'Download summary';
+  b.className = [
+    // pill look, matching your other pages
+    'inline-flex items-center gap-2',
+    'px-3 py-1 rounded-full',
+    'border shadow-sm',
+    'text-gray-700 hover:bg-gray-50',
+    'bg-white'
+  ].join(' ');
+
+  // small download icon (stroke matches toolbar icons)
+  b.innerHTML = `
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+         aria-hidden="true" class="opacity-80">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <path d="M7 10l5 5 5-5"/>
+      <path d="M12 15V3"/>
+    </svg>
+    <span>Download Summary</span>
+  `;
+
   b.addEventListener('click', (e) => {
     e.preventDefault();
     try { clickHandler?.(); } catch (err) { console.error(err); }
   });
 
-  // Insert right after the ".doc" button
+  // Insert right after where ".doc" used to be
   docBtn.parentNode.insertBefore(b, docBtn.nextSibling);
 }
 
@@ -1410,6 +1454,18 @@ async function __buildExecSummaryPDF(m){
 
   // A4 landscape: 842 x 595 pt
   const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+
+// page frame (thin border on every page)
+function drawFrame() {
+  const w = doc.internal.pageSize.getWidth();
+  const h = doc.internal.pageSize.getHeight();
+  doc.setDrawColor(220);         // light grey
+  doc.setLineWidth(0.8);
+  doc.roundedRect(24, 24, w-48, h-48, 6, 6); // 24pt margin frame
+}
+
+
+
   const margin = { l: 40, r: 40, t: 56, b: 48 };
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
@@ -1450,12 +1506,14 @@ async function __buildExecSummaryPDF(m){
     doc.text(`Date of download: ${downloaded}`, margin.l, margin.t + 42);
     doc.text(`Week of execution: ${ws} to ${we}`, margin.l, margin.t + 62);
 
+drawFrame();
+
     footer('Page 1');
   }
 
   // ============= 2) INDEX =============
   {
-    doc.addPage();
+    doc.addPage(); drawFrame();
     const hasLogo = !!window.PINPOINT_LOGO_URL;
     if (hasLogo) {
       try { doc.addImage(window.PINPOINT_LOGO_URL, 'PNG', margin.l, margin.t - 32, 120, 28); } catch {}
@@ -1477,7 +1535,7 @@ async function __buildExecSummaryPDF(m){
 
   // ============= 3) ONE-PAGE EXEC SNAPSHOT =============
   {
-    doc.addPage();
+    doc.addPage(); drawFrame();
     const hasLogo = !!window.PINPOINT_LOGO_URL;
     if (hasLogo) {
       try { doc.addImage(window.PINPOINT_LOGO_URL, 'PNG', margin.l, margin.t - 32, 120, 28); } catch {}
@@ -1518,14 +1576,38 @@ async function __buildExecSummaryPDF(m){
     });
     y += 2 * (cardH + gutter) + 12;
 
-    // Charts row
-    const donutSvg = document.querySelector('#card-donut svg');
-    const radarSvg = document.querySelector('#card-radar svg');
-    const chartH = 180;
-    const chartW = (pageW - margin.l - margin.r - 12) / 2;
-    await addSvg(donutSvg, margin.l, y, chartW, chartH);
-    await addSvg(radarSvg, margin.l + chartW + 12, y, chartW, chartH);
-    y += chartH + 14;
+// --- helper: keep SVG aspect ratio and cap height
+function fitSvg(svgEl, targetW, maxH) {
+  if (!svgEl) return { w: targetW, h: 0 };
+  const vbW = svgEl.viewBox?.baseVal?.width  || svgEl.clientWidth  || 800;
+  const vbH = svgEl.viewBox?.baseVal?.height || svgEl.clientHeight || 400;
+  const h = Math.min(maxH, (targetW * vbH) / vbW);
+  return { w: targetW, h };
+}
+
+// Charts row (two side-by-side)
+const donutSvg = document.querySelector('#card-donut svg');
+const radarSvg = document.querySelector('#card-radar svg');
+
+const gap = 12;
+const halfW = (pageW - margin.l - margin.r - gap) / 2;
+
+// cap heights so nothing looks stretched or overflows
+const donutDims = fitSvg(donutSvg, halfW, 165);
+await addSvg(donutSvg, margin.l, y, donutDims.w, donutDims.h);
+
+const radarDims = fitSvg(radarSvg, halfW, 165);
+await addSvg(radarSvg, margin.l + halfW + gap, y, radarDims.w, radarDims.h);
+
+y += Math.max(donutDims.h, radarDims.h) + 14;
+
+// Timeline (full width, with height cap)
+const timelineSvg = document.querySelector('#timeline-slot svg');
+if (timelineSvg) {
+  const tDims = fitSvg(timelineSvg, pageW - margin.l - margin.r, 110);
+  await addSvg(timelineSvg, margin.l, y, tDims.w, tDims.h);
+}
+
 
     // Timeline (full width, capped height)
     const timelineSvg = document.querySelector('#timeline-slot svg');
@@ -1542,7 +1624,7 @@ async function __buildExecSummaryPDF(m){
 
   // ============= 4) EXCEPTIONS DETAIL =============
   {
-    doc.addPage();
+    doc.addPage(); drawFrame();
     doc.setFont('helvetica','bold'); doc.setFontSize(14);
     doc.text('2. Exceptions Detail', margin.l, margin.t - 12);
 
@@ -1621,7 +1703,7 @@ async function __buildExecSummaryPDF(m){
 
   // ============= 5) DATA APPENDIX =============
   {
-    doc.addPage();
+    doc.addPage(); drawFrame();
     doc.setFont('helvetica','bold'); doc.setFontSize(14);
     doc.text('3. Data Appendix', margin.l, margin.t - 12);
 
