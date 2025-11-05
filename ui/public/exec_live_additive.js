@@ -654,6 +654,30 @@ svg.appendChild(_el('rect', {
     // Else: no fill (cylinder stays grey)
   }
 
+// % Complete label at progress end (only if Ops % provided)
+if (m._opsCompletionPct != null) {
+  const pct01 = Math.max(0, Math.min(100, m._opsCompletionPct)) / 100;
+  // label position is the end of Mon→Sun segment by percentage
+  const labelX = rightStartX + Math.round(rightSpan * pct01);
+
+  // keep label inside edges
+  const minX = originX + 8;
+  const maxX = originX + span - 8;
+  const xClamped = Math.max(minX, Math.min(maxX, labelX));
+
+  const labelEl = _el('text', {
+    x: xClamped,
+    y: barY + barH + 34,                   // below the bar
+    'text-anchor': 'middle',
+    'dominant-baseline': 'middle',
+    'font-size': '11',
+    fill: '#374151'
+  });
+  labelEl.textContent = `Completion — ${Math.round(m._opsCompletionPct)}%`;
+  svg.appendChild(labelEl);
+}
+
+
 
 // milestones (planned above, actuals below) — render ACTUALS first (under), PLANS last (on top)
 const plannedDots = [
@@ -688,29 +712,36 @@ const plannedDots = [
 ];
 
 const actualDots = [
-  inventoryActual  ? {
+  baselineActual ? {
+    key: 'baselineActual',
+    ymd: baselineActual,
+    label: `Baseline (Actual) — ${shortDate(baselineActual)}`,
+    color: ACTUAL_DOT,
+    where: 'below'
+  } : null,
+  inventoryActual ? {
     key: 'inventoryActual',
     ymd: inventoryActual,
-    // suppress ONLY the actual label if it falls on the same day as plan
-    label: sameDay(inventoryActual, inventoryPlanned) ? '' : 'Inventory (Actual)',
-    color: '#990033',
+    label: `Inventory (Actual) — ${shortDate(inventoryActual)}`,
+    color: ACTUAL_DOT,
     where: 'below'
   } : null,
   processingActual ? {
     key: 'processingActual',
     ymd: processingActual,
-    label: sameDay(processingActual, processingPlanned) ? '' : 'Processing (Actual)',
-    color: '#990033',
+    label: `Processing (Actual) — ${shortDate(processingActual)}`,
+    color: ACTUAL_DOT,
     where: 'below'
   } : null,
   dispatchedActual ? {
     key: 'dispatchedActual',
     ymd: dispatchedActual,
-    label: sameDay(dispatchedActual, dispatchedPlanned) ? '' : 'Dispatched (Actual)',
-    color: '#990033',
+    label: `Dispatched (Actual) — ${shortDate(dispatchedActual)}`,
+    color: ACTUAL_DOT,
     where: 'below'
   } : null
 ].filter(Boolean);
+
 
 // Common renderer (kept identical to your current one)
 function renderDot(d) {
