@@ -614,13 +614,14 @@ svg.appendChild(_el('rect', {
 }));
 
 
-  // planned span (thin stroke over planned window)
-  const plannedStartX = scaleX(inventoryPlanned);
-  const plannedEndX   = scaleX(dispatchedPlanned);
-  svg.appendChild(_el('line', {
+// planned span (thin stroke) — START at Planned Baseline (left stub) and run to Dispatched (Plan)
+const plannedStartX = scaleX(plannedBaseline);      // <-- changed
+const plannedEndX   = scaleX(dispatchedPlanned);
+svg.appendChild(_el('line', {
   x1: plannedStartX, y1: barY + barH / 2, x2: plannedEndX, y2: barY + barH / 2,
   stroke: PLANNED_STROKE, 'stroke-width': 3, 'stroke-linecap': 'round'
 }));
+
 
 
     // ===== Actual progress fill =====
@@ -746,6 +747,12 @@ const actualDots = [
   } : null
 ].filter(Boolean);
 
+// --- simple collision registry to stack labels that share (nearly) the same x
+const labelBuckets = { above: [], below: [] };
+const NEAR_PX = 14;   // how close before we treat as "same x"
+const ROW_PX  = 12;   // vertical offset per stacked row
+
+
 
 // Common renderer (kept identical to your current one)
 function renderDot(d) {
@@ -764,6 +771,20 @@ function renderDot(d) {
   if (d.key === 'processingPlan') xLabel -= 10;  // nudge left
   if (d.key === 'dispatchedPlan') xLabel += 10;  // nudge right
 
+// --- stack labels when multiple land on (nearly) the same x
+let row = 0;
+const bucket = labelBuckets[d.where];
+for (const prevX of bucket) {
+  if (Math.abs(prevX - xClamped) < NEAR_PX) row++;
+}
+bucket.push(xClamped);
+
+// push labels away from each other vertically; keep dots on the rail
+const cyStacked = d.where === 'above'
+  ? (cy - row * ROW_PX)  // stack upwards above the bar
+  : (cy + row * ROW_PX); // stack downwards below the bar
+
+
   const yDot = d.where === 'above' ? (barY - 6) : (barY + barH + 6);
 
   // dot (use clamped x)
@@ -773,7 +794,7 @@ function renderDot(d) {
   if (d.label) {
     const labelEl = _el('text', {
       x: xLabel,
-      y: cy,
+      y: cyStacked,
       'text-anchor': 'middle',
       'dominant-baseline': 'middle',
       'font-size': '11',
