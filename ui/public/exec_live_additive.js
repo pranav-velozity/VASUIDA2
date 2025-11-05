@@ -892,6 +892,11 @@ plannedDots.forEach(renderDot);
   <button id="timeline-edit-btn" class="text-xs px-2 py-1 rounded-full border text-gray-600 hover:bg-gray-50">
     Edit actuals
   </button>
+<button id="export-pdf-btn" class="ml-2 text-xs px-2 py-1 rounded-full border text-gray-600 hover:bg-gray-50">
+      Download summary
+    </button>
+  </div>
+
 </div>
 
 <div id="timeline-editor" class="hidden mt-2">
@@ -1212,6 +1217,25 @@ if (timelineSlot) renderExecTimeline(timelineSlot, m);
 wireTimelineEditor(m);
 }
 
+// (re)wire the PDF export button idempotently
+(function wirePdfExport(){
+  const btn = document.getElementById('export-pdf-btn');
+  if (!btn || btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
+
+  btn.addEventListener('click', async () => {
+    try {
+      await __ensurePdfLibs();                     // make sure libs are loaded
+      const doc = await __buildExecSummaryPDF(m);  // build the PDF
+      const ws = (m.ws || '').replaceAll('-', '');
+      const fname = `VAS_Execution_Summary_${ws || 'week'}.pdf`;
+      doc.save(fname);
+    } catch (e) {
+      console.error('[PDF] export failed:', e);
+      alert('Sorry, failed to build the PDF. See console for details.');
+    }
+  });
+})();
 
 // ===== Inline editor for actuals / Ops % =====
 // ===== Inline editor for actuals / Ops % =====
