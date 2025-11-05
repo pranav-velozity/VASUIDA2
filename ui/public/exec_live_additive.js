@@ -918,7 +918,7 @@ function ensureSummaryBtn(clickHandler) {
       </div>
 
       <!-- Timeline -->
-      <div class="bg-white rounded-2xl border shadow p-3" id="card-timeline">
+      <div class="bg-white rounded-2xl border shadow p-3 overflow-hidden" id="card-timeline">
 <div class="flex items-center justify-between">
   <div>
     <div class="text-base font-semibold">Week Timeline</div>
@@ -927,11 +927,9 @@ function ensureSummaryBtn(clickHandler) {
   <button id="timeline-edit-btn" class="text-xs px-2 py-1 rounded-full border text-gray-600 hover:bg-gray-50">
     Edit actuals
   </button>
-  </div>
+    </div>
+  <div id="timeline-editor" class="hidden mt-2">
 
-</div>
-
-<div id="timeline-editor" class="hidden mt-2">
   <div class="grid grid-cols-2 md:grid-cols-6 gap-2">
 
     <label class="text-xs text-gray-600">
