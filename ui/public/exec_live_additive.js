@@ -337,7 +337,11 @@ function renderDonutWithBaseline(slot, planned, applied, opts = {}) {
   slot.style.justifyContent = 'center';
   slot.style.position = 'relative';
 
-  const r = Math.round(size * 0.41);
+  // Thicker ring but same outer footprint
+const BASE_STROKE   = 22; // was 16
+const APPLIED_STROKE= 22; // was 16
+const r = Math.round(size * 0.41) - Math.floor((BASE_STROKE - 16) / 2);
+
   const cx = size / 2, cy = size / 2;
   const CIRC = 2 * Math.PI * r;
 
@@ -348,7 +352,7 @@ function renderDonutWithBaseline(slot, planned, applied, opts = {}) {
     cx, cy, r,
     fill: 'none',
     stroke: GREY,
-    'stroke-width': 16
+    'stroke-width': BASE_STROKE
   }));
 
   // applied ring
@@ -356,7 +360,7 @@ function renderDonutWithBaseline(slot, planned, applied, opts = {}) {
     cx, cy, r,
     fill: 'none',
     stroke: BRAND,
-    'stroke-width': 16,
+    'stroke-width': APPLIED_STROKE,
     'stroke-linecap': 'round',
     transform: `rotate(-90 ${cx} ${cy})`,
     'stroke-dasharray': CIRC,
@@ -667,10 +671,10 @@ if (m._opsCompletionPct != null) {
 
   const labelEl = _el('text', {
     x: xClamped,
-    y: barY + barH + 34,                   // below the bar
+    y: barY + barH + 20,                   // below the bar
     'text-anchor': 'middle',
     'dominant-baseline': 'middle',
-    'font-size': '11',
+    'font-size': '14',
     fill: '#374151'
   });
   labelEl.textContent = `Completion — ${Math.round(m._opsCompletionPct)}%`;
