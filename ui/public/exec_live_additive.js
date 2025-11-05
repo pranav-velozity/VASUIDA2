@@ -1608,17 +1608,6 @@ if (timelineSvg) {
   await addSvg(timelineSvg, margin.l, y, tDims.w, tDims.h);
 }
 
-
-    // Timeline (full width, capped height)
-    const timelineSvg = document.querySelector('#timeline-slot svg');
-    if (timelineSvg) {
-      const tW = pageW - margin.l - margin.r;
-      const vbW = timelineSvg.viewBox?.baseVal?.width  || timelineSvg.clientWidth  || 900;
-      const vbH = timelineSvg.viewBox?.baseVal?.height || timelineSvg.clientHeight || 150;
-      const tH = Math.min(120, (tW * vbH) / vbW);
-      await addSvg(timelineSvg, margin.l, y, tW, tH);
-    }
-
     footer('Page 3');
   }
 
