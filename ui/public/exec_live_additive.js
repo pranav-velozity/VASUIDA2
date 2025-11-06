@@ -1282,6 +1282,7 @@ m._opsDisplayPct = (m._opsCompletionPct != null)
     null;
 
   // Assign only Ops-entered values; otherwise keep null so the bar stays grey.
+m.baselineActualYMD   = ms.baseline_actual_ymd || null;   
   m.inventoryActualYMD  = invOverride;
   m.processingActualYMD = procOverride;
   m.dispatchedActualYMD = dispOverride;
@@ -1312,6 +1313,25 @@ const baAct = document.getElementById('ba-act');
 function hydrateInputs() {
   const s  = window.state || {};
   const ms = s.milestones || {};
+
+// 🔹 pull cached timeline edits for this week once, if state doesn’t have them
+  try {
+    const wk = s.weekStart || m.ws;
+    if (wk) {
+      const raw = localStorage.getItem(`exec:timeline:${wk}`);
+      if (raw) {
+        const cached = JSON.parse(raw);
+        if (cached && typeof cached === 'object') {
+          ms.baseline_actual_ymd   = ms.baseline_actual_ymd   ?? cached.baseline_actual_ymd   ?? undefined;
+          ms.inventory_actual_ymd  = ms.inventory_actual_ymd  ?? cached.inventory_actual_ymd  ?? undefined;
+          ms.processing_actual_ymd = ms.processing_actual_ymd ?? cached.processing_actual_ymd ?? undefined;
+          ms.dispatched_actual_ymd = ms.dispatched_actual_ymd ?? cached.dispatched_actual_ymd ?? undefined;
+          // (optional) ms.completion_pct = ms.completion_pct ?? cached.completion_pct ?? undefined;
+        }
+      }
+    }
+  } catch (_) {}
+
 
   baAct.value = (ms.baseline_actual_ymd   || m.baselineActualYMD   || '').slice(0, 10);
   inAct.value = (ms.inventory_actual_ymd  || m.inventoryActualYMD  || '').slice(0, 10);
@@ -1623,45 +1643,37 @@ const maxW  = (pageW - margin.l - margin.r - gap) / 2;
 const maxH  = 165;
 
 const donutDims = fitSvg(donutSvg, maxW, maxH);
-await addSvg(donutSvg, margin.l, y, donutDims.w, donutDims.h);
-
 const radarDims = fitSvg(radarSvg, maxW, maxH);
-await addSvg(radarSvg, margin.l + maxW + gap, y, radarDims.w, radarDims.h);
 
-y += Math.max(donutDims.h, radarDims.h) + 14;
+const chartsTopY = y; // 🔹 keep the top before we advance y
 
-const timelineSvg = document.querySelector('#timeline-slot svg');
-if (timelineSvg) {
-  const tDims = fitSvg(timelineSvg, pageW - margin.l - margin.r, 110);
-  await addSvg(timelineSvg, margin.l, y, tDims.w, tDims.h);
-}
+await addSvg(donutSvg, margin.l, chartsTopY, donutDims.w, donutDims.h);
+await addSvg(radarSvg, margin.l + maxW + gap, chartsTopY, radarDims.w, radarDims.h);
 
-// --- after addSvg(...) for donut & radar on Page 3:
-doc.setFont('helvetica','normal');
+// ---- captions under each chart (use maxW, not halfW)
+doc.setFont('helvetica', 'normal');
 doc.setFontSize(11);
 doc.setTextColor(60);
 
-// Centered caption under the donut
+// centered under donut
 doc.text(
   `Completion — ${Math.round(m.completionPct || 0)}%`,
-  margin.l + donutDims.w / 2,           // center of donut block
-  y + donutDims.h + 12,
+  margin.l + donutDims.w / 2,
+  chartsTopY + donutDims.h + 12,
   { align: 'center' }
 );
 
-// Centered caption under the radar
+// centered under radar
 doc.text(
   'Exceptions Radar (0–100 risk scale)',
-  margin.l + halfW + gap + radarDims.w / 2,
-  y + radarDims.h + 12,
+  margin.l + maxW + gap + (radarDims.w / 2),
+  chartsTopY + radarDims.h + 12,
   { align: 'center' }
 );
 
-y += 28; // give the captions breathing room before the timeline
+// now advance y for the timeline section, with extra breathing room
+y = chartsTopY + Math.max(donutDims.h, radarDims.h) + 28;
 doc.setTextColor(0);
-
-
-
     footer('Page 3');
   }
 
