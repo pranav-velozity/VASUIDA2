@@ -1772,23 +1772,19 @@ try {
 // ============= 4) WEEKLY EXECUTION SUMMARY (POs & Mobile Bins) =============
 {
   doc.addPage(); drawFrame();
-  const hasLogo = !!window.PINPOINT_LOGO_URL;
-  if (hasLogo) {
-    try { doc.addImage(window.PINPOINT_LOGO_URL, 'PNG', margin.l, margin.t - 32, 120, 28); } catch {}
-  }
+  const hasLogo = !!window.PPINPOINT_LOGO_URL;
+  if (hasLogo) { try { doc.addImage(window.PINPOINT_LOGO_URL, 'PNG', margin.l, margin.t - 32, 120, 28); } catch {} }
 
   doc.setFont('helvetica','bold'); doc.setFontSize(14);
   doc.text('3. Weekly Execution Summary', margin.l, margin.t - 12);
-
-  const ws = m.ws, we = m.we;
 
   // ---------- Aggregate by PO ----------
   const plan = Array.isArray(window.state?.plan) ? window.state.plan : [];
   const recs = Array.isArray(window.state?.records) ? window.state.records : [];
 
   const toNum = window.toNum || (x => Number(String(x||0).replace(/[, ]/g,'')));
+  const ws = m.ws, we = m.we;
   const inWeek = (r) => {
-    // reuse the same YMD selector you use in the app
     const ymd = (function(r){
       if (r?.date_local) return String(r.date_local).trim();
       if (r?.date) return String(r.date).trim();
@@ -1801,7 +1797,6 @@ try {
     return ymd && ymd >= ws && ymd <= we;
   };
 
-  // Planned by PO
   const plannedByPO = new Map();
   for (const p of plan) {
     const po = String(p.po_number || '').trim();
@@ -1809,7 +1804,6 @@ try {
     plannedByPO.set(po, (plannedByPO.get(po) || 0) + toNum(p.target_qty));
   }
 
-  // Applied by PO (sum qty/quantity; fallback = 1)
   const appliedByPO = new Map();
   for (const r of recs) {
     if (!inWeek(r)) continue;
@@ -1819,7 +1813,6 @@ try {
     appliedByPO.set(po, (appliedByPO.get(po) || 0) + Math.max(0, q));
   }
 
-  // Table rows (all POs in plan; include extra POs that only appear in records)
   const allPOs = new Set([...plannedByPO.keys(), ...appliedByPO.keys()]);
   const poRows = [];
   for (const po of Array.from(allPOs).sort()) {
@@ -1829,145 +1822,97 @@ try {
     poRows.push([po, pl.toLocaleString(), ap.toLocaleString(), gp.toLocaleString()]);
   }
 
-// ---------- AutoTable: PO summary (guarded) ----------
-let y = margin.t + 6;
-
-const renderPOFallback = () => {
-  doc.setFont('helvetica','bold'); doc.setFontSize(11);
-  doc.text('PO Summary (table unavailable)', margin.l, y); y += 14;
-  doc.setFont('helvetica','normal'); doc.setFontSize(10);
-  const maxRows = 20;
-  for (const row of poRows.slice(0, maxRows)) {
-    doc.text(`${row[0]}   P:${row[1]}   A:${row[2]}   Gap:${row[3]}`, margin.l, y);
-    y += 12;
-    if (y > pageH - margin.b - 40) break;
-  }
-};
-
-if (doc.autoTable) {
-  try {
-    doc.autoTable({
-      startY: y,
-      margin: { left: margin.l, right: margin.r },
-      head: [['PO','Planned','Applied','Gap']],
-      body: poRows,
-      styles: { fontSize: 9, cellPadding: 3 },
-      headStyles: { fillColor: [48,48,48], textColor: [255,255,255] },
-    });
-    y = doc.lastAutoTable.finalY + 14;
-  } catch (e) {
-    console.warn('[PDF] PO summary table failed', e);
-    renderPOFallback();
-  }
-} else {
-  renderPOFallback();
-}
-
+  // ---------- AutoTable: PO summary ----------
+  let y = margin.t + 6;
+  const renderPOFallback = () => {
+    doc.setFont('helvetica','bold'); doc.setFontSize(11);
+    doc.text('PO Summary (table unavailable)', margin.l, y); y += 14;
+    doc.setFont('helvetica','normal'); doc.setFontSize(10);
+    for (const row of poRows.slice(0, 20)) { doc.text(`${row[0]}   P:${row[1]}   A:${row[2]}   Gap:${row[3]}`, margin.l, y); y += 12; }
+  };
+  if (doc.autoTable) {
+    try {
+      doc.autoTable({
+        startY: y,
+        margin: { left: margin.l, right: margin.r },
+        head: [['PO','Planned','Applied','Gap']],
+        body: poRows,
+        styles: { fontSize: 9, cellPadding: 3 },
+        headStyles: { fillColor: [48,48,48], textColor: [255,255,255] },
+      });
+      y = doc.lastAutoTable.finalY + 14;
+    } catch { renderPOFallback(); }
+  } else { renderPOFallback(); }
 
   // ---------- Aggregate by Mobile Bin ----------
-const bins  = Array.isArray(window.state?.bins) ? window.state.bins : [];
-const recs  = Array.isArray(window.state?.records) ? window.state.records : [];
+  const bins = Array.isArray(window.state?.bins) ? window.state.bins : [];
 
-// Same week bounds used elsewhere on this page:
-const ws = m.ws, we = m.we;
+  // bins may or may not have dates—helper to read one if present
+  const binYMD = (b) => {
+    const s = String(b?.created_at_local || b?.created_at || b?.date || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    if (/^\d{2}-\d{2}-\d{4}$/.test(s)) { const [d,m,y]=s.split('-'); return `${y}-${m}-${d}`; }
+    return '';
+  };
 
-// Your existing inWeek(r) should already be in scope. If not, uncomment this:
-// const inWeek = (r) => {
-//   const ymd = (r?.date_local || r?.date || '');
-//   return ymd && ymd >= ws && ymd <= we;
-// };
+  const wkRecs = recs.filter(inWeek);
+  const binsReferencedThisWeek = new Set(
+    wkRecs.map(r => String(r.mobile_bin || '').trim()).filter(Boolean)
+  );
 
-// Bins may or may not have dates—helper to read one if present
-const binYMD = (b) => {
-  const s = String(b?.created_at_local || b?.created_at || b?.date || '').trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  if (/^\d{2}-\d{2}-\d{4}$/.test(s)) { const [d,m,y]=s.split('-'); return `${y}-${m}-${d}`; }
-  return '';
-};
+  const binsInWeek = bins.filter(b => {
+    const ymd = binYMD(b);
+    if (ymd) return (ymd >= ws && ymd <= we);
+    const id = String(b.mobile_bin || '').trim();
+    return id && binsReferencedThisWeek.has(id);
+  });
 
-// Which bins were referenced by this week’s records?
-const wkRecs = recs.filter(inWeek);
-const binsReferencedThisWeek = new Set(
-  wkRecs.map(r => String(r.mobile_bin || '').trim()).filter(Boolean)
-);
-
-// Keep bins that (a) fall in week by their own date OR (b) have no date but were referenced
-const binsInWeek = bins.filter(b => {
-  const ymd = binYMD(b);
-  if (ymd) return (ymd >= ws && ymd <= we);
-  const id = String(b.mobile_bin || '').trim();
-  return id && binsReferencedThisWeek.has(id);
-});
-
-// Build weight map from bins (prefer non-zero values)
-const weightByBin = new Map();
-for (const b of binsInWeek) {
-  const id = String(b.mobile_bin || '').trim();
-  if (!id) continue;
-  const kg = Number(b.weight_kg || 0);
-  if (!weightByBin.has(id) || (kg > 0 && (weightByBin.get(id) || 0) === 0)) {
-    weightByBin.set(id, Number.isFinite(kg) ? kg : 0);
+  const weightByBin = new Map();
+  for (const b of binsInWeek) {
+    const id = String(b.mobile_bin || '').trim(); if (!id) continue;
+    const kg = Number(b.weight_kg || 0);
+    if (!weightByBin.has(id) || (kg > 0 && (weightByBin.get(id) || 0) === 0)) {
+      weightByBin.set(id, Number.isFinite(kg) ? kg : 0);
+    }
   }
-}
 
-// Units per bin from records
-const unitsByBin = new Map();
-for (const r of wkRecs) {
-  const id = String(r.mobile_bin || '').trim();
-  if (!id) continue;
-  unitsByBin.set(id, (unitsByBin.get(id) || 0) + 1);
-}
-
-// Compose rows
-const binIds = Array.from(new Set([
-  ...weightByBin.keys(), ...unitsByBin.keys()
-])).sort();
-
-const binRows = binIds.map(id => {
-  const units = unitsByBin.get(id) || 0;
-  const kg    = weightByBin.get(id) || 0;
-  const avg   = units > 0 ? (kg / units) : 0;
-  return [id, String(units), kg.toFixed(1), avg.toFixed(2)];
-});
-
-// ---------- AutoTable: Mobile bins (guarded) ----------
-const renderBinsFallback = () => {
-  doc.setFont('helvetica','bold'); doc.setFontSize(11);
-  doc.text('Mobile Bins (table unavailable)', margin.l, y); y += 14;
-  doc.setFont('helvetica','normal'); doc.setFontSize(10);
-  const maxRows = 24;
-  for (const row of binRows.slice(0, maxRows)) {
-    doc.text(`${row[0]}   Units:${row[1]}   kg:${row[2]}   Avg:${row[3]}`, margin.l, y);
-    y += 12;
-    if (y > pageH - margin.b - 40) break;
+  const unitsByBin = new Map();
+  for (const r of wkRecs) {
+    const id = String(r.mobile_bin || '').trim(); if (!id) continue;
+    unitsByBin.set(id, (unitsByBin.get(id) || 0) + 1);
   }
-};
 
-if (doc.autoTable) {
-  try {
-    doc.autoTable({
-      startY: y,
-      margin: { left: margin.l, right: margin.r },
-      head: [['Mobile Bin','Units','Total kg','Avg kg/unit']],
-      body: binRows,
-      styles: { fontSize: 9, cellPadding: 3 },
-      headStyles: { fillColor: [48,48,48], textColor: [255,255,255] } // #303030
-    });
-    y = doc.lastAutoTable.finalY + 10;
-  } catch (e) {
-    console.warn('[PDF] mobile bins table failed', e);
-    renderBinsFallback();
-  }
-} else {
-  renderBinsFallback();
-}
+  const binIds = Array.from(new Set([...weightByBin.keys(), ...unitsByBin.keys()])).sort();
+  const binRows = binIds.map(id => {
+    const units = unitsByBin.get(id) || 0;
+    const kg    = weightByBin.get(id) || 0;
+    const avg   = units > 0 ? (kg / units) : 0;
+    return [id, String(units), kg.toFixed(1), avg.toFixed(2)];
+  });
 
+  // ---------- AutoTable: Mobile bins ----------
+  const renderBinsFallback = () => {
+    doc.setFont('helvetica','bold'); doc.setFontSize(11);
+    doc.text('Mobile Bins (table unavailable)', margin.l, y); y += 14;
+    doc.setFont('helvetica','normal'); doc.setFontSize(10);
+    for (const row of binRows.slice(0, 24)) { doc.text(`${row[0]}   Units:${row[1]}   kg:${row[2]}   Avg:${row[3]}`, margin.l, y); y += 12; }
+  };
+  if (doc.autoTable) {
+    try {
+      doc.autoTable({
+        startY: y,
+        margin: { left: margin.l, right: margin.r },
+        head: [['Mobile Bin','Units','Total kg','Avg kg/unit']],
+        body: binRows,
+        styles: { fontSize: 9, cellPadding: 3 },
+        headStyles: { fillColor: [48,48,48], textColor: [255,255,255] } // #303030
+      });
+      y = doc.lastAutoTable.finalY + 10;
+    } catch { renderBinsFallback(); }
+  } else { renderBinsFallback(); }
 
-
-  // Footer: dynamic page number
   footer(`Page ${doc.getNumberOfPages()}`);
 }
-
 
   // ============= 5) EXCEPTIONS DETAIL =============
   {
