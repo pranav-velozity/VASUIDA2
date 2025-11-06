@@ -1130,12 +1130,22 @@ const radarSize = 420;  // px canvas for radar
       {label:'Late appliers', value: `${fmt(m.lateCount)} (${m.lateRatePct}%)`},
     ];
     const tilesWrap = $('#exec-tiles');
-    tilesWrap.innerHTML = tiles.map(t=>
-      `<div class="bg-white rounded-2xl border shadow p-4">
-        <div class="text-xs text-gray-500">${t.label}</div>
-        <div class="text-xl font-bold tabular-nums">${t.value}</div>
-      </div>`
-    ).join('');
+const tileHelp = {
+  'Completion %': 'Applied units ÷ planned units for the week. If planned = 0: 100% when applied > 0, else 0%.',
+  'Duplicate UIDs': 'Same SKU+UID scanned more than once during the week.',
+  'Avg SKU %Δ': 'Avg absolute % diff per SKU: |applied − planned| ÷ planned.',
+  'Avg PO %Δ': 'Avg absolute % diff per PO: |applied − planned| ÷ planned.',
+  'Heavy bins >12kg': 'Distinct mobile bins with weight_kg > 12 this week.',
+  'Late appliers': 'Applied after earliest PO due date (count and rate).'
+};
+
+tilesWrap.innerHTML = tiles.map(t=>
+  `<div class="bg-white rounded-2xl border shadow p-4" title="${tileHelp[t.label] || ''}">
+    <div class="text-xs text-gray-500">${t.label}</div>
+    <div class="text-xl font-bold tabular-nums">${t.value}</div>
+  </div>`
+).join('');
+
 
     // Radar (normalize to risk index)
     const targets = {
@@ -1555,27 +1565,79 @@ drawFrame();
     footer('Page 1');
   }
 
-  // ============= 2) INDEX =============
-  {
-    doc.addPage(); drawFrame();
-    const hasLogo = !!window.PINPOINT_LOGO_URL;
-    if (hasLogo) {
-      try { doc.addImage(window.PINPOINT_LOGO_URL, 'PNG', margin.l, margin.t - 32, 120, 28); } catch {}
-    }
-    doc.setFont('helvetica','bold'); doc.setFontSize(16);
-    doc.text('Index', hasLogo ? (margin.l + 140) : margin.l, margin.t - 12);
 
-    doc.setFont('helvetica','normal'); doc.setFontSize(12);
-    const items = [
-      '1. Executive Summary',
-      '2. Exceptions Detail',
-      '3. Data Appendix'
-    ];
-    let y = margin.t + 10;
-    items.forEach((t)=>{ doc.text(t, margin.l, y); y += 18; });
-
-    footer('Page 2');
+// ============= 2) INDEX =============
+{
+  doc.addPage(); drawFrame();
+  const hasLogo = !!window.PINPOINT_LOGO_URL;
+  if (hasLogo) {
+    try { doc.addImage(window.PINPOINT_LOGO_URL, 'PNG', margin.l, margin.t - 32, 120, 28); } catch {}
   }
+  doc.setFont('helvetica','bold'); doc.setFontSize(16);
+  doc.text('Index', hasLogo ? (margin.l + 140) : margin.l, margin.t - 12);
+
+  // ---- left column: section list
+  doc.setFont('helvetica','normal'); doc.setFontSize(12);
+  const items = [
+    '1. Executive Summary',
+    '2. Weekly Execution Summary',
+    '3. Exceptions Detail',
+    '4. Data Appendix'
+  ];
+  let y = margin.t + 10;
+  items.forEach((t)=>{ doc.text(t, margin.l, y); y += 18; });
+
+  // ---- right column: Tile definitions legend
+  const boxX = margin.l + 300;         // place to the right of the list
+  const boxW = (pageW - margin.r) - boxX;
+  const boxY = margin.t - 6;
+  const boxH = 220;
+
+  // container
+  doc.setDrawColor(230); doc.setFillColor(252,252,253);
+  doc.roundedRect(boxX, boxY, boxW, boxH, 6, 6, 'S');
+
+  // title
+  doc.setFont('helvetica','bold'); doc.setFontSize(12);
+  doc.text('Tile definitions', boxX + 10, boxY + 18);
+
+  // copy
+  const defs = [
+    ['Completion %',   'Applied units ÷ planned units for the week. If planned = 0: show 100% when applied > 0, otherwise 0%.'],
+    ['Duplicate UIDs', 'Count of scans where the same SKU+UID pair appears more than once during the week.'],
+    ['Avg SKU %Δ',     'Average absolute % difference per SKU: |applied − planned| ÷ planned, averaged across SKUs in plan.'],
+    ['Avg PO %Δ',      'Average absolute % difference per PO: |applied − planned| ÷ planned, averaged across POs in plan.'],
+    ['Heavy bins >12kg','Distinct mobile bins with weight_kg > 12 observed in the week.'],
+    ['Late appliers',  'Records where the applied date (business TZ) is later than the earliest due date of the record’s PO. Shows count and rate.']
+  ];
+
+  // two-column text layout inside the box
+  doc.setFont('helvetica','normal'); doc.setFontSize(11);
+  const colGap = 16;
+  const colW   = Math.floor((boxW - 20 - colGap) / 2); // padding 10 on each side + gap
+  let cx = boxX + 10, cy = boxY + 36;
+  defs.forEach((row, i) => {
+    const [k, v] = row;
+    // key
+    doc.setFont('helvetica','bold'); doc.text(k, cx, cy);
+    // value (wrapped)
+    doc.setFont('helvetica','normal');
+    const wrapped = doc.splitTextToSize(v, colW);
+    doc.text(wrapped, cx, cy + 14);
+    // advance cursor
+    const used = 14 + (wrapped.length * 13);
+    cy += used + 8;
+
+    // start second column at half way through the list
+    if (i === Math.floor(defs.length / 2) - 1) {
+      cx = boxX + 10 + colW + colGap;
+      cy = boxY + 36;
+    }
+  });
+
+  footer('Page 2');
+}
+
 
   // ============= 3) ONE-PAGE EXEC SNAPSHOT =============
   {
@@ -1645,12 +1707,12 @@ const maxH  = 165;
 const donutDims = fitSvg(donutSvg, maxW, maxH);
 const radarDims = fitSvg(radarSvg, maxW, maxH);
 
-const chartsTopY = y; // 🔹 keep the top before we advance y
+const chartsTopY = y;  // keep a stable top
 
 await addSvg(donutSvg, margin.l, chartsTopY, donutDims.w, donutDims.h);
 await addSvg(radarSvg, margin.l + maxW + gap, chartsTopY, radarDims.w, radarDims.h);
 
-// ---- captions under each chart (use maxW, not halfW)
+// ---- captions under each chart
 doc.setFont('helvetica', 'normal');
 doc.setFontSize(11);
 doc.setTextColor(60);
@@ -1671,13 +1733,184 @@ doc.text(
   { align: 'center' }
 );
 
-// now advance y for the timeline section, with extra breathing room
+// advance y for timeline (after captions)
 y = chartsTopY + Math.max(donutDims.h, radarDims.h) + 28;
 doc.setTextColor(0);
+
+// ---- timeline capture (force-render offscreen so we always get an SVG)
+const tmp = document.createElement('div');
+tmp.style.position = 'absolute';
+tmp.style.left = '-99999px';
+document.body.appendChild(tmp);
+try {
+  renderExecTimeline(tmp, m);                 // <- always render a fresh SVG for the PDF
+  const svg = tmp.querySelector('svg');
+  if (svg) {
+    const tDims = fitSvg(svg, pageW - margin.l - margin.r, 110);
+    await addSvg(svg, margin.l, y, tDims.w, tDims.h);
+    y += tDims.h + 10;
+  }
+} finally {
+  tmp.remove();
+}
     footer('Page 3');
   }
 
-  // ============= 4) EXCEPTIONS DETAIL =============
+// ============= 4) WEEKLY EXECUTION SUMMARY (POs & Mobile Bins) =============
+{
+  doc.addPage(); drawFrame();
+  const hasLogo = !!window.PINPOINT_LOGO_URL;
+  if (hasLogo) {
+    try { doc.addImage(window.PINPOINT_LOGO_URL, 'PNG', margin.l, margin.t - 32, 120, 28); } catch {}
+  }
+
+  doc.setFont('helvetica','bold'); doc.setFontSize(14);
+  doc.text('3. Weekly Execution Summary', margin.l, margin.t - 12);
+
+  const ws = m.ws, we = m.we;
+
+  // ---------- Aggregate by PO ----------
+  const plan = Array.isArray(window.state?.plan) ? window.state.plan : [];
+  const recs = Array.isArray(window.state?.records) ? window.state.records : [];
+
+  const toNum = window.toNum || (x => Number(String(x||0).replace(/[, ]/g,'')));
+  const inWeek = (r) => {
+    // reuse the same YMD selector you use in the app
+    const ymd = (function(r){
+      if (r?.date_local) return String(r.date_local).trim();
+      if (r?.date) return String(r.date).trim();
+      if (r?.completed_at && typeof window.ymdFromCompletedAtInTZ==='function') {
+        const tz = document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai';
+        return window.ymdFromCompletedAtInTZ(r.completed_at, tz);
+      }
+      return '';
+    })(r);
+    return ymd && ymd >= ws && ymd <= we;
+  };
+
+  // Planned by PO
+  const plannedByPO = new Map();
+  for (const p of plan) {
+    const po = String(p.po_number || '').trim();
+    if (!po) continue;
+    plannedByPO.set(po, (plannedByPO.get(po) || 0) + toNum(p.target_qty));
+  }
+
+  // Applied by PO (sum qty/quantity; fallback = 1)
+  const appliedByPO = new Map();
+  for (const r of recs) {
+    if (!inWeek(r)) continue;
+    const po = String(r.po_number || '').trim();
+    if (!po) continue;
+    const q = Number.isFinite(Number(r.qty ?? r.quantity)) ? Number(r.qty ?? r.quantity) : 1;
+    appliedByPO.set(po, (appliedByPO.get(po) || 0) + Math.max(0, q));
+  }
+
+  // Table rows (all POs in plan; include extra POs that only appear in records)
+  const allPOs = new Set([...plannedByPO.keys(), ...appliedByPO.keys()]);
+  const poRows = [];
+  for (const po of Array.from(allPOs).sort()) {
+    const pl = plannedByPO.get(po)  || 0;
+    const ap = appliedByPO.get(po)  || 0;
+    const gp = pl - ap;
+    poRows.push([po, pl.toLocaleString(), ap.toLocaleString(), gp.toLocaleString()]);
+  }
+
+// ---------- AutoTable: PO summary (guarded) ----------
+let y = margin.t + 6;
+
+const renderPOFallback = () => {
+  doc.setFont('helvetica','bold'); doc.setFontSize(11);
+  doc.text('PO Summary (table unavailable)', margin.l, y); y += 14;
+  doc.setFont('helvetica','normal'); doc.setFontSize(10);
+  const maxRows = 20;
+  for (const row of poRows.slice(0, maxRows)) {
+    doc.text(`${row[0]}   P:${row[1]}   A:${row[2]}   Gap:${row[3]}`, margin.l, y);
+    y += 12;
+    if (y > pageH - margin.b - 40) break;
+  }
+};
+
+if (doc.autoTable) {
+  try {
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin.l, right: margin.r },
+      head: [['PO','Planned','Applied','Gap']],
+      body: poRows,
+      styles: { fontSize: 9, cellPadding: 3 },
+      headStyles: { fillColor: [153,0,51] },
+    });
+    y = doc.lastAutoTable.finalY + 14;
+  } catch (e) {
+    console.warn('[PDF] PO summary table failed', e);
+    renderPOFallback();
+  }
+} else {
+  renderPOFallback();
+}
+
+
+  // ---------- Aggregate by Mobile Bin ----------
+  const binUnits = new Map();     // count of records
+  const binKgSum = new Map();     // sum of weight_kg
+  for (const r of recs) {
+    if (!inWeek(r)) continue;
+    const bin = String(r.mobile_bin || '').trim();
+    if (!bin) continue;
+    binUnits.set(bin, (binUnits.get(bin)||0) + 1);
+    const kg = Number(r.weight_kg || 0);
+    binKgSum.set(bin, (binKgSum.get(bin)||0) + (Number.isFinite(kg) ? kg : 0));
+  }
+
+  const binRows = Array.from(binUnits.keys()).sort().map(bin => {
+    const units = binUnits.get(bin) || 0;
+    const totKg = binKgSum.get(bin) || 0;
+    const avgKg = units > 0 ? (totKg / units) : 0;
+    return [bin, String(units), totKg.toFixed(1), avgKg.toFixed(2)];
+  });
+
+  // ---------- AutoTable: Mobile bins ----------
+// ---------- AutoTable: Mobile bins (guarded) ----------
+const renderBinsFallback = () => {
+  doc.setFont('helvetica','bold'); doc.setFontSize(11);
+  doc.text('Mobile Bins (table unavailable)', margin.l, y); y += 14;
+  doc.setFont('helvetica','normal'); doc.setFontSize(10);
+  const maxRows = 24;
+  for (const row of binRows.slice(0, maxRows)) {
+    // row = [bin, units, totalKg, avgKgPerUnit]
+    doc.text(`${row[0]}   Units:${row[1]}   kg:${row[2]}   Avg:${row[3]}`, margin.l, y);
+    y += 12;
+    if (y > pageH - margin.b - 40) break;
+  }
+};
+
+if (doc.autoTable) {
+  try {
+    doc.autoTable({
+      startY: y,
+      margin: { left: margin.l, right: margin.r },
+      head: [['Mobile Bin','Units','Total kg','Avg kg/unit']],
+      body: binRows,
+      styles: { fontSize: 9, cellPadding: 3 },
+      headStyles: { fillColor: [153,0,51] },
+    });
+    y = doc.lastAutoTable.finalY + 10;
+  } catch (e) {
+    console.warn('[PDF] mobile bins table failed', e);
+    renderBinsFallback();
+  }
+} else {
+  renderBinsFallback();
+}
+
+
+  // Footer: dynamic page number
+  footer(`Page ${doc.getNumberOfPages()}`);
+}
+
+
+  // ============= 5) EXCEPTIONS DETAIL =============
   {
     doc.addPage(); drawFrame();
     doc.setFont('helvetica','bold'); doc.setFontSize(14);
@@ -1756,7 +1989,7 @@ doc.setTextColor(0);
     footer('Page 4');
   }
 
-  // ============= 5) DATA APPENDIX =============
+  // ============= 6) DATA APPENDIX =============
   {
     doc.addPage(); drawFrame();
     doc.setFont('helvetica','bold'); doc.setFontSize(14);
