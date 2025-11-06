@@ -1576,37 +1576,41 @@ drawFrame();
     });
     y += 2 * (cardH + gutter) + 12;
 
-// --- helper: keep SVG aspect ratio and cap height
-function fitSvg(svgEl, targetW, maxH) {
-  if (!svgEl) return { w: targetW, h: 0 };
-  const vbW = svgEl.viewBox?.baseVal?.width  || svgEl.clientWidth  || 800;
-  const vbH = svgEl.viewBox?.baseVal?.height || svgEl.clientHeight || 400;
-  const h = Math.min(maxH, (targetW * vbH) / vbW);
-  return { w: targetW, h };
+// Replace the old fitSvg with this:
+function fitSvg(svgEl, maxW, maxH) {
+  if (!svgEl) return { w: maxW, h: maxH };
+
+  const vbW = svgEl.viewBox?.baseVal?.width  || svgEl.clientWidth  || parseFloat(svgEl.getAttribute('width'))  || 800;
+  const vbH = svgEl.viewBox?.baseVal?.height || svgEl.clientHeight || parseFloat(svgEl.getAttribute('height')) || 800;
+
+  // uniform scale to fit inside maxW × maxH
+  const scale = Math.max(1e-6, Math.min(maxW / vbW, maxH / vbH));
+  return { w: vbW * scale, h: vbH * scale };
 }
+
 
 // Charts row (two side-by-side)
 const donutSvg = document.querySelector('#card-donut svg');
 const radarSvg = document.querySelector('#card-radar svg');
 
-const gap = 12;
-const halfW = (pageW - margin.l - margin.r - gap) / 2;
+const gap   = 12;
+const maxW  = (pageW - margin.l - margin.r - gap) / 2;
+const maxH  = 165;
 
-// cap heights so nothing looks stretched or overflows
-const donutDims = fitSvg(donutSvg, halfW, 165);
+const donutDims = fitSvg(donutSvg, maxW, maxH);
 await addSvg(donutSvg, margin.l, y, donutDims.w, donutDims.h);
 
-const radarDims = fitSvg(radarSvg, halfW, 165);
-await addSvg(radarSvg, margin.l + halfW + gap, y, radarDims.w, radarDims.h);
+const radarDims = fitSvg(radarSvg, maxW, maxH);
+await addSvg(radarSvg, margin.l + maxW + gap, y, radarDims.w, radarDims.h);
 
 y += Math.max(donutDims.h, radarDims.h) + 14;
 
-// Timeline (full width, with height cap)
 const timelineSvg = document.querySelector('#timeline-slot svg');
 if (timelineSvg) {
   const tDims = fitSvg(timelineSvg, pageW - margin.l - margin.r, 110);
   await addSvg(timelineSvg, margin.l, y, tDims.w, tDims.h);
 }
+
 
     footer('Page 3');
   }
