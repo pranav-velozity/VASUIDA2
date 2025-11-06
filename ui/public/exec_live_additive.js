@@ -1564,8 +1564,6 @@ drawFrame();
 
     footer('Page 1');
   }
-
-
 // ============= 2) INDEX =============
 {
   doc.addPage(); drawFrame();
@@ -1573,10 +1571,12 @@ drawFrame();
   if (hasLogo) {
     try { doc.addImage(window.PINPOINT_LOGO_URL, 'PNG', margin.l, margin.t - 32, 120, 28); } catch {}
   }
+
+  // Title
   doc.setFont('helvetica','bold'); doc.setFontSize(16);
   doc.text('Index', hasLogo ? (margin.l + 140) : margin.l, margin.t - 12);
 
-  // ---- left column: section list
+  // ---- Left-aligned section list
   doc.setFont('helvetica','normal'); doc.setFontSize(12);
   const items = [
     '1. Executive Summary',
@@ -1587,57 +1587,70 @@ drawFrame();
   let y = margin.t + 10;
   items.forEach((t)=>{ doc.text(t, margin.l, y); y += 18; });
 
-  // ---- right column: Tile definitions legend
-  const boxX = margin.l + 300;         // place to the right of the list
-  const boxW = (pageW - margin.r) - boxX;
-  const boxY = margin.t - 6;
-  const boxH = 220;
+  // ---- FULL-WIDTH, LEFT-ALIGNED Tile definitions (below the list)
+  // Box geometry
+  const boxX = margin.l;
+  const boxY = y + 12;                               // just under the list
+  const boxW = pageW - margin.l - margin.r;          // full printable width
+  const innerPad = 10;                                // padding inside the box
 
-  // container
-  doc.setDrawColor(230); doc.setFillColor(252,252,253);
-  doc.roundedRect(boxX, boxY, boxW, boxH, 6, 6, 'S');
-
-  // title
+  // Title + content we will render first to measure height
   doc.setFont('helvetica','bold'); doc.setFontSize(12);
-  doc.text('Tile definitions', boxX + 10, boxY + 18);
+  doc.text('Tile definitions', boxX + innerPad, boxY + 18);
 
-  // copy
+  // Definitions (ASCII only to avoid glyph issues)
   const defs = [
-    ['Completion %',   'Applied units ÷ planned units for the week. If planned = 0: show 100% when applied > 0, otherwise 0%.'],
-    ['Duplicate UIDs', 'Count of scans where the same SKU+UID pair appears more than once during the week.'],
-    ['Avg SKU %Δ',     'Average absolute % difference per SKU: |applied − planned| ÷ planned, averaged across SKUs in plan.'],
-    ['Avg PO %Δ',      'Average absolute % difference per PO: |applied − planned| ÷ planned, averaged across POs in plan.'],
+    ['Completion %',    'Applied units ÷ planned units for the week. If planned = 0: show 100% when applied > 0, otherwise 0%.'],
+    ['Duplicate UIDs',  'Count of scans where the same SKU+UID pair appears more than once during the week.'],
+    ['Avg SKU % delta', 'Average absolute % difference per SKU: |applied − planned| ÷ planned, averaged across SKUs in plan.'],
+    ['Avg PO % delta',  'Average absolute % difference per PO: |applied − planned| ÷ planned, averaged across POs in plan.'],
     ['Heavy bins >12kg','Distinct mobile bins with weight_kg > 12 observed in the week.'],
-    ['Late appliers',  'Records where the applied date (business TZ) is later than the earliest due date of the record’s PO. Shows count and rate.']
+    ['Late appliers',   'Records where the applied date (business TZ) is later than the earliest due date of the record’s PO. Shows count and rate.']
   ];
 
-  // two-column text layout inside the box
+  // Two columns inside the box
   doc.setFont('helvetica','normal'); doc.setFontSize(11);
   const colGap = 16;
-  const colW   = Math.floor((boxW - 20 - colGap) / 2); // padding 10 on each side + gap
-  let cx = boxX + 10, cy = boxY + 36;
+  const colW   = Math.floor((boxW - innerPad*2 - colGap) / 2);
+
+  // Render into two columns and track final Y to size the box
+  let cx = boxX + innerPad;
+  let cy = boxY + 36;
+  let maxY = cy;
+
   defs.forEach((row, i) => {
     const [k, v] = row;
+
     // key
-    doc.setFont('helvetica','bold'); doc.text(k, cx, cy);
+    doc.setFont('helvetica','bold');
+    doc.text(k, cx, cy);
+
     // value (wrapped)
     doc.setFont('helvetica','normal');
     const wrapped = doc.splitTextToSize(v, colW);
-    doc.text(wrapped, cx, cy + 14);
-    // advance cursor
-    const used = 14 + (wrapped.length * 13);
-    cy += used + 8;
+    const valueTop = cy + 14;
+    doc.text(wrapped, cx, valueTop);
 
-    // start second column at half way through the list
+    // advance cursor within the column
+    const used = 14 + (wrapped.length * 13);
+    cy = valueTop + (wrapped.length * 13) + 8;
+    maxY = Math.max(maxY, cy);
+
+    // jump to second column halfway through the list
     if (i === Math.floor(defs.length / 2) - 1) {
-      cx = boxX + 10 + colW + colGap;
+      cx = boxX + innerPad + colW + colGap;
       cy = boxY + 36;
     }
   });
 
+  // Draw the container AFTER measuring content, so it hugs the text
+  const boxH = (maxY - (boxY + 6)) + innerPad;       // nice bottom padding
+doc.setDrawColor(255); // invisible
+doc.roundedRect(boxX, boxY, boxW, Math.max(120, boxH), 6, 6, 'S');
+
+
   footer('Page 2');
 }
-
 
   // ============= 3) ONE-PAGE EXEC SNAPSHOT =============
   {
@@ -1839,7 +1852,7 @@ if (doc.autoTable) {
       head: [['PO','Planned','Applied','Gap']],
       body: poRows,
       styles: { fontSize: 9, cellPadding: 3 },
-      headStyles: { fillColor: [153,0,51] },
+      headStyles: { fillColor: [48,48,48], textColor: [255,255,255] },
     });
     y = doc.lastAutoTable.finalY + 14;
   } catch (e) {
@@ -1852,25 +1865,71 @@ if (doc.autoTable) {
 
 
   // ---------- Aggregate by Mobile Bin ----------
-  const binUnits = new Map();     // count of records
-  const binKgSum = new Map();     // sum of weight_kg
-  for (const r of recs) {
-    if (!inWeek(r)) continue;
-    const bin = String(r.mobile_bin || '').trim();
-    if (!bin) continue;
-    binUnits.set(bin, (binUnits.get(bin)||0) + 1);
-    const kg = Number(r.weight_kg || 0);
-    binKgSum.set(bin, (binKgSum.get(bin)||0) + (Number.isFinite(kg) ? kg : 0));
+const bins  = Array.isArray(window.state?.bins) ? window.state.bins : [];
+const recs  = Array.isArray(window.state?.records) ? window.state.records : [];
+
+// Same week bounds used elsewhere on this page:
+const ws = m.ws, we = m.we;
+
+// Your existing inWeek(r) should already be in scope. If not, uncomment this:
+// const inWeek = (r) => {
+//   const ymd = (r?.date_local || r?.date || '');
+//   return ymd && ymd >= ws && ymd <= we;
+// };
+
+// Bins may or may not have dates—helper to read one if present
+const binYMD = (b) => {
+  const s = String(b?.created_at_local || b?.created_at || b?.date || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (/^\d{2}-\d{2}-\d{4}$/.test(s)) { const [d,m,y]=s.split('-'); return `${y}-${m}-${d}`; }
+  return '';
+};
+
+// Which bins were referenced by this week’s records?
+const wkRecs = recs.filter(inWeek);
+const binsReferencedThisWeek = new Set(
+  wkRecs.map(r => String(r.mobile_bin || '').trim()).filter(Boolean)
+);
+
+// Keep bins that (a) fall in week by their own date OR (b) have no date but were referenced
+const binsInWeek = bins.filter(b => {
+  const ymd = binYMD(b);
+  if (ymd) return (ymd >= ws && ymd <= we);
+  const id = String(b.mobile_bin || '').trim();
+  return id && binsReferencedThisWeek.has(id);
+});
+
+// Build weight map from bins (prefer non-zero values)
+const weightByBin = new Map();
+for (const b of binsInWeek) {
+  const id = String(b.mobile_bin || '').trim();
+  if (!id) continue;
+  const kg = Number(b.weight_kg || 0);
+  if (!weightByBin.has(id) || (kg > 0 && (weightByBin.get(id) || 0) === 0)) {
+    weightByBin.set(id, Number.isFinite(kg) ? kg : 0);
   }
+}
 
-  const binRows = Array.from(binUnits.keys()).sort().map(bin => {
-    const units = binUnits.get(bin) || 0;
-    const totKg = binKgSum.get(bin) || 0;
-    const avgKg = units > 0 ? (totKg / units) : 0;
-    return [bin, String(units), totKg.toFixed(1), avgKg.toFixed(2)];
-  });
+// Units per bin from records
+const unitsByBin = new Map();
+for (const r of wkRecs) {
+  const id = String(r.mobile_bin || '').trim();
+  if (!id) continue;
+  unitsByBin.set(id, (unitsByBin.get(id) || 0) + 1);
+}
 
-  // ---------- AutoTable: Mobile bins ----------
+// Compose rows
+const binIds = Array.from(new Set([
+  ...weightByBin.keys(), ...unitsByBin.keys()
+])).sort();
+
+const binRows = binIds.map(id => {
+  const units = unitsByBin.get(id) || 0;
+  const kg    = weightByBin.get(id) || 0;
+  const avg   = units > 0 ? (kg / units) : 0;
+  return [id, String(units), kg.toFixed(1), avg.toFixed(2)];
+});
+
 // ---------- AutoTable: Mobile bins (guarded) ----------
 const renderBinsFallback = () => {
   doc.setFont('helvetica','bold'); doc.setFontSize(11);
@@ -1878,7 +1937,6 @@ const renderBinsFallback = () => {
   doc.setFont('helvetica','normal'); doc.setFontSize(10);
   const maxRows = 24;
   for (const row of binRows.slice(0, maxRows)) {
-    // row = [bin, units, totalKg, avgKgPerUnit]
     doc.text(`${row[0]}   Units:${row[1]}   kg:${row[2]}   Avg:${row[3]}`, margin.l, y);
     y += 12;
     if (y > pageH - margin.b - 40) break;
@@ -1893,7 +1951,7 @@ if (doc.autoTable) {
       head: [['Mobile Bin','Units','Total kg','Avg kg/unit']],
       body: binRows,
       styles: { fontSize: 9, cellPadding: 3 },
-      headStyles: { fillColor: [153,0,51] },
+      headStyles: { fillColor: [48,48,48], textColor: [255,255,255] } // #303030
     });
     y = doc.lastAutoTable.finalY + 10;
   } catch (e) {
@@ -1903,6 +1961,7 @@ if (doc.autoTable) {
 } else {
   renderBinsFallback();
 }
+
 
 
   // Footer: dynamic page number
@@ -1929,7 +1988,8 @@ if (doc.autoTable) {
         margin: { left: margin.l, right: margin.r },
         head, body: rows,
         styles: { fontSize: 9, cellPadding: 3 },
-        headStyles: { fillColor: [153,0,51] }
+        headStyles: { fillColor: [48,48,48], textColor: [255,255,255] } // #303030
+
       });
       y = doc.lastAutoTable.finalY + 12;
     } catch (e) { console.warn('[PDF] gaps table failed', e); }
@@ -1966,7 +2026,8 @@ if (doc.autoTable) {
         margin: { left: margin.l, right: margin.r },
         head, body: rows,
         styles: { fontSize: 9, cellPadding: 3 },
-        headStyles: { fillColor: [153,0,51] }
+        headStyles: { fillColor: [48,48,48], textColor: [255,255,255] } // #303030
+
       });
       y = doc.lastAutoTable.finalY + 12;
     } catch (e) { console.warn('[PDF] heavy bins table failed', e); }
@@ -1989,45 +2050,66 @@ if (doc.autoTable) {
     footer('Page 4');
   }
 
-  // ============= 6) DATA APPENDIX =============
-  {
-    doc.addPage(); drawFrame();
-    doc.setFont('helvetica','bold'); doc.setFontSize(14);
-    doc.text('3. Data Appendix', margin.l, margin.t - 12);
+// ============= 6) DATA APPENDIX =============
+{
+  doc.addPage(); drawFrame();
+  doc.setFont('helvetica','bold'); doc.setFontSize(14);
+  doc.text('3. Data Appendix', margin.l, margin.t - 12);
 
-    try {
-      const records = Array.isArray(window.state?.records) ? window.state.records : [];
-      const body = records.map(r => ([
+  try {
+    const records = Array.isArray(window.state?.records) ? window.state.records : [];
+
+    // Sort by PO then date
+    const toYMD = (r) => (r.date_local || r.date || '');
+    const sorted = [...records].sort((a,b) => {
+      const pa = String(a.po_number || ''), pb = String(b.po_number || '');
+      if (pa !== pb) return pa.localeCompare(pb);
+      return String(toYMD(a)).localeCompare(String(toYMD(b)));
+    });
+
+    // Build grouped body: a PO header row followed by its rows (no weight, no qty)
+    const body = [];
+    let lastPO = null;
+    for (const r of sorted) {
+      const po = String(r.po_number || '').trim() || '—';
+      if (po !== lastPO) {
+        body.push([
+          { content: `PO: ${po}`, colSpan: 6, styles: { fillColor: [242,242,242], fontStyle: 'bold' } }
+        ]);
+        lastPO = po;
+      }
+      body.push([
         r.uid || '',
-        r.po_number || '',
         r.sku_code || '',
         r.mobile_bin || '',
-        (r.weight_kg != null ? String(r.weight_kg) : ''),
-        (r.qty ?? r.quantity ?? ''),
         (r.status || ''),
-        (r.date_local || r.date || '')
-      ]));
-      doc.autoTable({
-        startY: margin.t + 6,
-        margin: { left: margin.l, right: margin.r },
-        head: [['UID','PO','SKU','Mobile Bin','Weight (kg)','Qty','Status','Date(Local)']],
-        body,
-        styles: { fontSize: 9, cellPadding: 3 },
-        bodyStyles: { textColor: [40,40,40] },
-        headStyles: { fillColor: [153,0,51] }, // deep rose
-        pageBreak: 'auto'
-      });
-    } catch (e) {
-      console.warn('[PDF] AutoTable appendix failed:', e);
-      doc.setFont('helvetica','italic'); doc.setFontSize(11);
-      doc.text('Data appendix unavailable.', margin.l, margin.t + 24);
+        (r.date_local || r.date || ''),
+        '' // keep total cols consistent with header colSpan
+      ]);
     }
 
-    // show final page number
-    const n = doc.getNumberOfPages();
-    doc.setPage(n);
-    footer(`Page ${n}`);
+    doc.autoTable({
+      startY: margin.t + 6,
+      margin: { left: margin.l, right: margin.r },
+      head: [['UID','SKU','Mobile Bin','Status','Date (Local)','']], // 6 columns total (last is empty to match group header colSpan)
+      body,
+      styles: { fontSize: 9, cellPadding: 3 },
+      headStyles: { fillColor: [48,48,48], textColor: [255,255,255] }, // #303030
+      bodyStyles: { textColor: [40,40,40] },
+      pageBreak: 'auto'
+    });
+  } catch (e) {
+    console.warn('[PDF] AutoTable appendix failed:', e);
+    doc.setFont('helvetica','italic'); doc.setFontSize(11);
+    doc.text('Data appendix unavailable.', margin.l, margin.t + 24);
   }
+
+  // show final page number
+  const n = doc.getNumberOfPages();
+  doc.setPage(n);
+  footer(`Page ${n}`);
+}
+
 
   return doc;
 }
