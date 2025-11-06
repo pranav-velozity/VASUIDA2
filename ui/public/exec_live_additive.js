@@ -1309,6 +1309,30 @@ function wireTimelineEditor(m) {
 const baAct = document.getElementById('ba-act');
 
 
+function hydrateInputs() {
+  const s  = window.state || {};
+  const ms = s.milestones || {};
+
+  baAct.value = (ms.baseline_actual_ymd   || m.baselineActualYMD   || '').slice(0, 10);
+  inAct.value = (ms.inventory_actual_ymd  || m.inventoryActualYMD  || '').slice(0, 10);
+  prAct.value = (ms.processing_actual_ymd || m.processingActualYMD || '').slice(0, 10);
+  diAct.value = (ms.dispatched_actual_ymd || m.dispatchedActualYMD || '').slice(0, 10);
+
+  // Prefer ops override, then milestone override; leave empty if none
+  const pctOverride =
+    (s.ops && Number.isFinite(Number(s.ops.completion_pct)) ? Number(s.ops.completion_pct) :
+     Number.isFinite(Number(ms.completion_pct)) ? Number(ms.completion_pct) :
+     null);
+
+  opsPct.value = (pctOverride == null) ? '' : String(pctOverride);
+
+  // If no override is set, show the computed tile % as a hint
+  opsPct.placeholder = (pctOverride == null)
+    ? String(m.completionPct)
+    : ''; // no placeholder when an explicit override exists
+}
+
+
   // Bind once per page life; safe across re-renders
   if (!btn || !pane || !save || !cancel) return;
   if (btn.dataset.bound === '1') return;
@@ -1316,17 +1340,8 @@ const baAct = document.getElementById('ba-act');
 
 baAct.value  = (window.state?.milestones?.baseline_actual_ymd || m.baselineActualYMD || '').slice(0,10);
 
-
-  // Hydrate fields from current state/metrics
-  const ms = window.state?.milestones || {};
-baAct.value = (ms.baseline_actual_ymd || m.baselineActualYMD || '').slice(0,10);
-  inAct.value  = (ms.inventory_actual_ymd  || m.inventoryActualYMD   || '').slice(0, 10);
-  prAct.value  = (ms.processing_actual_ymd || m.processingActualYMD  || '').slice(0, 10);
-  diAct.value  = (ms.dispatched_actual_ymd || m.dispatchedActualYMD  || '').slice(0, 10);
-  opsPct.value = String(
-    window.state?.ops?.completion_pct ??
-    ms.completion_pct ?? ''
-  );
+  // Initial fill
+  hydrateInputs();
 
 // Show the computed tile % as a hint if no override is set
 if (!opsPct.value) opsPct.placeholder = String(m.completionPct);
@@ -1334,6 +1349,7 @@ if (!opsPct.value) opsPct.placeholder = String(m.completionPct);
 
   btn.onclick = (e) => {
     e?.preventDefault?.();
+    hydrateInputs();           // <-- refresh from latest state each time
     pane.classList.toggle('hidden');
   };
 
@@ -1344,54 +1360,60 @@ if (!opsPct.value) opsPct.placeholder = String(m.completionPct);
 
 save.onclick = (e) => {
   e?.preventDefault?.();
+
   const s  = window.state || (window.state = {});
   const ms = s.milestones || (s.milestones = {});
 
+  // normalize to YYYY-MM-DD (first 10 chars)
+  const norm = (x) => (x || '').trim().slice(0, 10) || undefined;
 
-const vBa  = baAct.value?.trim();
-    const vIn  = inAct.value?.trim();
-    const vPr  = prAct.value?.trim();
-    const vDi  = diAct.value?.trim();
-    const vPct = opsPct.value?.trim();
+  const vBa  = norm(baAct.value);
+  const vIn  = norm(inAct.value);
+  const vPr  = norm(prAct.value);
+  const vDi  = norm(diAct.value);
+  const vPctRaw = (opsPct.value || '').trim();
 
+  // write to state
+  ms.baseline_actual_ymd   = vBa;
+  ms.inventory_actual_ymd  = vIn;
+  ms.processing_actual_ymd = vPr;
+  ms.dispatched_actual_ymd = vDi;
 
-ms.baseline_actual_ymd = vBa || undefined;
-    ms.inventory_actual_ymd  = vIn || undefined;
-    ms.processing_actual_ymd = vPr || undefined;
-    ms.dispatched_actual_ymd = vDi || undefined;
+  // 2) ⬇️ INSERT THIS COMPLETION-% BLOCK RIGHT HERE ⬇️
+  const valNum = Number(vPctRaw);
+  if (vPctRaw !== '' && Number.isFinite(valNum)) {
+    const n = Math.round(Math.max(0, Math.min(100, valNum)));
+    s.ops = s.ops || {};
+    s.ops.completion_pct = n;
+    ms.completion_pct    = n;
+  } else {
+    if (s.ops) delete s.ops.completion_pct;
+    delete ms.completion_pct;
+  }
+  // 2) ⬆️ END INSERT ⬆️
 
-  // Persist ONLY timeline actuals per week (no other state)
+  // Persist ONLY the timeline actuals (plus completion pct) per week
   try {
     const wk = s.weekStart;
     if (wk) {
-      const cache = {
-        baseline_actual_ymd:  ms.baseline_actual_ymd || null,
-        inventory_actual_ymd: ms.inventory_actual_ymd || null,
-        processing_actual_ymd:ms.processing_actual_ymd || null,
-        dispatched_actual_ymd:ms.dispatched_actual_ymd || null
+      const payload = {
+        baseline_actual_ymd:   ms.baseline_actual_ymd   || null,
+        inventory_actual_ymd:  ms.inventory_actual_ymd  || null,
+        processing_actual_ymd: ms.processing_actual_ymd || null,
+        dispatched_actual_ymd: ms.dispatched_actual_ymd || null,
+        completion_pct:        (ms.completion_pct ?? null)
       };
-      localStorage.setItem(`exec:timeline:${wk}`, JSON.stringify(cache));
+      localStorage.setItem(`exec:timeline:${wk}`, JSON.stringify(payload));
     }
   } catch (_) {
-    // non-fatal; continue
+    // non-fatal
   }
 
+  // Re-render and close panel
+  window.dispatchEvent(new Event('state:ready'));
+  document.getElementById('timeline-editor')?.classList.add('hidden');
+};
 
-
-    if (vPct !== '' && vPct != null) {
-      const n = Math.round(Math.max(0, Math.min(100, Number(vPct))));
-      s.ops = s.ops || {};
-      s.ops.completion_pct = n;
-      ms.completion_pct    = n;
-    } else {
-      if (s.ops) delete s.ops.completion_pct;
-      delete ms.completion_pct;
-    }
-
-    // Re-render
-    window.dispatchEvent(new Event('state:ready'));
-    pane.classList.add('hidden');
-  };
 }
 
 
@@ -1489,6 +1511,8 @@ function drawFrame() {
     } catch (e) { console.warn('[PDF] svg capture failed', e); }
   }
 
+
+
   // ============= 1) COVER =============
   {
     const hasLogo = !!window.PINPOINT_LOGO_URL;
@@ -1548,16 +1572,17 @@ drawFrame();
     doc.text(`Week: ${ws} to ${we}`, pageW - margin.r, margin.t - 12, { align: 'right' });
 
     // Tiles (2 rows × 4)
-    const tiles = [
-      ['Completion %', `${m.completionPct ?? 0}%`],
-      ['Planned',      Number(m.plannedTotal||0).toLocaleString()],
-      ['Applied',      Number(m.appliedTotal||0).toLocaleString()],
-      ['Dup UIDs',     String(m.dupScanCount||0)],
-      ['Avg SKU %Δ',   `${m.avgSkuDiscPct ?? 0}%`],
-      ['Avg PO %Δ',    `${m.avgPoDiscPct ?? 0}%`],
-      ['Heavy bins',   String(m.heavyCount||0)],
-      ['Late appliers',`${m.lateCount||0} (${m.lateRatePct||0}%)`],
-    ];
+// Replace the two labels in your Page 3 tiles array:
+const tiles = [
+  ['Completion %', `${m.completionPct ?? 0}%`],
+  ['Planned',      Number(m.plannedTotal||0).toLocaleString()],
+  ['Applied',      Number(m.appliedTotal||0).toLocaleString()],
+  ['Dup UIDs',     String(m.dupScanCount||0)],
+  ['Avg SKU % delta', `${m.avgSkuDiscPct ?? 0}%`],  // <-- changed
+  ['Avg PO % delta',  `${m.avgPoDiscPct ?? 0}%`],   // <-- changed
+  ['Heavy bins',      String(m.heavyCount||0)],
+  ['Late appliers',   `${m.lateCount||0} (${m.lateRatePct||0}%)`],
+];
 
     let y = margin.t + 6;
     const cols = 4, gutter = 8, cardH = 44;
@@ -1610,6 +1635,31 @@ if (timelineSvg) {
   const tDims = fitSvg(timelineSvg, pageW - margin.l - margin.r, 110);
   await addSvg(timelineSvg, margin.l, y, tDims.w, tDims.h);
 }
+
+// --- after addSvg(...) for donut & radar on Page 3:
+doc.setFont('helvetica','normal');
+doc.setFontSize(11);
+doc.setTextColor(60);
+
+// Centered caption under the donut
+doc.text(
+  `Completion — ${Math.round(m.completionPct || 0)}%`,
+  margin.l + donutDims.w / 2,           // center of donut block
+  y + donutDims.h + 12,
+  { align: 'center' }
+);
+
+// Centered caption under the radar
+doc.text(
+  'Exceptions Radar (0–100 risk scale)',
+  margin.l + halfW + gap + radarDims.w / 2,
+  y + radarDims.h + 12,
+  { align: 'center' }
+);
+
+y += 28; // give the captions breathing room before the timeline
+doc.setTextColor(0);
+
 
 
     footer('Page 3');
