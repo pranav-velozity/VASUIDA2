@@ -1501,6 +1501,57 @@ function __serializeSvgToPngDataUrl(svgEl, scale = 2){
   });
 }
 
+
+function _healthFromState(m) {
+  // Try common places; normalize to a simple label
+  const s = window.state || {};
+  const raw =
+    s.health?.status || s.health?.label || s.status ||
+    s.health || ''; // allow a plain string
+
+  const t = String(raw).toLowerCase();
+  if (/healthy|good|green/.test(t)) return 'Healthy';
+  if (/risk|at[\s-]?risk|red|poor|bad/.test(t)) return 'At Risk';
+  if (/warn|attention|amber|yellow|caution/.test(t)) return 'Attention';
+  // fallback: infer from completion if nothing supplied
+  if (typeof m?.completionPct === 'number') {
+    if (m.completionPct >= 90) return 'Healthy';
+    if (m.completionPct >= 70) return 'Attention';
+    return 'At Risk';
+  }
+  return ''; // don’t draw if truly unknown
+}
+
+function _drawHealthPill(doc, x, y, label) {
+  if (!label) return;
+  const styles = {
+    'Healthy':   { fg: [255,255,255], bg: [5,150,105],  light: [231,246,239] }, // #059669 / #E7F6EF
+    'Attention': { fg: [255,255,255], bg: [180,83,9],   light: [254,243,199] }, // #B45309 / #FEF3C7
+    'At Risk':   { fg: [255,255,255], bg: [185,28,28],  light: [253,226,226] }  // #B91C1C / #FDE2E2
+  }[label] || { fg: [255,255,255], bg: [107,114,128], light: [229,231,235] };
+
+  const txt = `Health — ${label}`;
+  doc.setFont('helvetica','bold'); doc.setFontSize(10);
+  const tw = doc.getTextWidth(txt);
+  const padX = 10, padY = 6, r = 12;
+  const w = tw + padX*2, h = 20;
+
+  // soft light halo
+  doc.setDrawColor(...styles.light); doc.setFillColor(...styles.light);
+  doc.roundedRect(x-2, y-2, w+4, h+4, r, r, 'F');
+
+  // main pill
+  doc.setFillColor(...styles.bg);
+  doc.roundedRect(x, y, w, h, r, r, 'F');
+
+  // text
+  doc.setTextColor(...styles.fg);
+  doc.text(txt, x + padX, y + h/2 + 3); // vertical centering nudge
+  doc.setTextColor(0);
+}
+
+
+
 async function __buildExecSummaryPDF(m){
   const { jsPDF } = window.jspdf;
 
@@ -1550,7 +1601,7 @@ function drawFrame() {
       try { doc.addImage(window.PINPOINT_LOGO_URL, 'PNG', margin.l, margin.t - 32, 120, 28); } catch {}
     }
     doc.setFont('helvetica','bold'); doc.setFontSize(22);
-    doc.text('VAS Processing Summary', margin.l, margin.t + 12);
+    doc.text('TIC - VelOZity VAS Processing Summary', margin.l, margin.t + 12);
 
     const now = new Date();
     const pad2 = (n)=>String(n).padStart(2,'0');
@@ -1559,6 +1610,10 @@ function drawFrame() {
     doc.setFont('helvetica','normal'); doc.setFontSize(12);
     doc.text(`Date of download: ${downloaded}`, margin.l, margin.t + 42);
     doc.text(`Week of execution: ${ws} to ${we}`, margin.l, margin.t + 62);
+
+// Insert health pill just below the week range
+const healthLabel = _healthFromState(m);   // use metrics for fallback inference
+_drawHealthPill(doc, margin.l, margin.t + 74, healthLabel);
 
 drawFrame();
 
@@ -1598,56 +1653,56 @@ drawFrame();
   doc.setFont('helvetica','bold'); doc.setFontSize(12);
   doc.text('Tile definitions', boxX + innerPad, boxY + 18);
 
-  // Definitions (ASCII only to avoid glyph issues)
-  const defs = [
-    ['Completion %',    'Applied units ÷ planned units for the week. If planned = 0: show 100% when applied > 0, otherwise 0%.'],
-    ['Duplicate UIDs',  'Count of scans where the same SKU+UID pair appears more than once during the week.'],
-    ['Avg SKU % delta', 'Average absolute % difference per SKU: |applied − planned| ÷ planned, averaged across SKUs in plan.'],
-    ['Avg PO % delta',  'Average absolute % difference per PO: |applied − planned| ÷ planned, averaged across POs in plan.'],
-    ['Heavy bins >12kg','Distinct mobile bins with weight_kg > 12 observed in the week.'],
-    ['Late appliers',   'Records where the applied date (business TZ) is later than the earliest due date of the record’s PO. Shows count and rate.']
-  ];
+// ---- ASCII-only definitions (avoid Unicode glyphs that jsPDF Helvetica lacks)
+const defs = [
+  ['Completion %',    'Applied units / planned units for the week. If planned = 0: show 100% when applied > 0, otherwise 0%.'],
+  ['Duplicate UIDs',  'Count of scans where the same SKU+UID pair appears more than once during the week.'],
+  ['Avg SKU % delta', 'Average absolute % difference per SKU: |applied - planned| / planned, averaged across SKUs in plan.'],
+  ['Avg PO % delta',  'Average absolute % difference per PO: |applied - planned| / planned, averaged across POs in plan.'],
+  ['Heavy bins >12kg','Distinct mobile bins with weight_kg > 12 observed in the week.'],
+  ['Late appliers',   'Records where the applied date (business TZ) is later than the earliest due date of the record’s PO. Shows count and rate.']
+];
 
-  // Two columns inside the box
-  doc.setFont('helvetica','normal'); doc.setFontSize(11);
-  const colGap = 16;
-  const colW   = Math.floor((boxW - innerPad*2 - colGap) / 2);
+// Two columns
+doc.setFont('helvetica','normal'); doc.setFontSize(11);
+const colGap = 16;
+const colW   = Math.floor((boxW - innerPad*2 - colGap) / 2);
 
-  // Render into two columns and track final Y to size the box
-  let cx = boxX + innerPad;
-  let cy = boxY + 36;
-  let maxY = cy;
+// Render into two columns with robust line-height
+let cx = boxX + innerPad;
+let cy = boxY + 36;
+let maxY = cy;
+const LINE = 13; // line height in pt
 
-  defs.forEach((row, i) => {
-    const [k, v] = row;
+defs.forEach((row, i) => {
+  const [k, v] = row;
 
-    // key
-    doc.setFont('helvetica','bold');
-    doc.text(k, cx, cy);
+  // key
+  doc.setFont('helvetica','bold');
+  doc.text(k, cx, cy);
 
-    // value (wrapped)
-    doc.setFont('helvetica','normal');
-    const wrapped = doc.splitTextToSize(v, colW);
-    const valueTop = cy + 14;
-    doc.text(wrapped, cx, valueTop);
+  // value (wrapped)
+  doc.setFont('helvetica','normal');
+  const wrapped = doc.splitTextToSize(v, colW);
+  const valueTop = cy + LINE;             // one line below the key
+  doc.text(wrapped, cx, valueTop);
 
-    // advance cursor within the column
-    const used = 14 + (wrapped.length * 13);
-    cy = valueTop + (wrapped.length * 13) + 8;
-    maxY = Math.max(maxY, cy);
+  // advance cursor
+  const usedLines = 1 + wrapped.length;   // key + value lines
+  cy = cy + usedLines * LINE + 6;         // small paragraph gap
+  maxY = Math.max(maxY, cy);
 
-    // jump to second column halfway through the list
-    if (i === Math.floor(defs.length / 2) - 1) {
-      cx = boxX + innerPad + colW + colGap;
-      cy = boxY + 36;
-    }
-  });
+  // jump to right column halfway
+  if (i === Math.floor(defs.length / 2) - 1) {
+    cx = boxX + innerPad + colW + colGap;
+    cy = boxY + 36;
+  }
+});
 
-  // Draw the container AFTER measuring content, so it hugs the text
-  const boxH = (maxY - (boxY + 6)) + innerPad;       // nice bottom padding
-doc.setDrawColor(255); // invisible
+// Draw container AFTER content so it hugs the text
+const boxH = (maxY - (boxY + 6)) + innerPad;
+doc.setDrawColor(255); // invisible box (keeps left alignment you wanted)
 doc.roundedRect(boxX, boxY, boxW, Math.max(120, boxH), 6, 6, 'S');
-
 
   footer('Page 2');
 }
