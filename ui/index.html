@@ -23,7 +23,6 @@
   padding:16px 24px;
   box-sizing:border-box;
 }
-
 #page-dashboard .cmdbar, #capsules{ min-width:0; flex-wrap:wrap; }
 
     .dot{width:.6rem;height:.6rem;border-radius:9999px;display:inline-block}
@@ -124,9 +123,20 @@
      class="seg px-3 py-1.5 rounded-lg text-sm font-medium transition select-none">
     Operations
   </a>
+
+<a href="#receiving" id="nav-receiving"
+   class="seg px-3 py-1.5 rounded-lg text-sm font-medium transition select-none">
+  Receiving
+</a>
+        
   <a href="#intake" id="nav-intake"
      class="seg px-3 py-1.5 rounded-lg text-sm font-medium transition select-none">
     Intake
+  </a>
+
+  <a href="#flow" id="nav-flow"
+     class="seg px-3 py-1.5 rounded-lg text-sm font-medium transition select-none">
+    Flow
   </a>
 </nav>
     </div>
@@ -174,12 +184,27 @@
     PO Discrepancy
   </button>
 
-  <button id="btn-exec" class="cmd" aria-label="Executive Summary" title="Generate weekly Executive Summary">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false">
-      <path d="M7 4h10a2 2 0 0 1 2 2v12l-4-2-4 2-4-2-4 2V6a2 2 0 0 1 2-2z" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
-    Executive Summary
-  </button>
+<button id="btn-ship-summary" class="cmd cmd--ghost"
+  aria-label="Shipment Summary"
+  title="Shipment summary grouped by Supplier, Zendesk, Freight, Facility">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false">
+    <path d="M3 7h13l5 5v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"
+          stroke-width="1.5" stroke-linejoin="round"/>
+    <path d="M16 7v5h5" stroke-width="1.5" stroke-linecap="round"/>
+  </svg>
+  Shipment Summary
+</button>
+
+<button id="btn-ship-detail" class="cmd cmd--ghost"
+  aria-label="Shipment Details"
+  title="Shipment detail by Supplier, Zendesk, Freight, Facility, and PO">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false">
+    <path d="M4 6h16M4 12h12M4 18h8"
+          stroke-width="1.5" stroke-linecap="round"/>
+  </svg>
+  Shipment Details
+</button>
+
 
   <button id="btn-dl-week-applied" class="cmd cmd--ghost" aria-label="Download Applied" title="Export applied UIDs for this week">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true" focusable="false">
@@ -230,33 +255,82 @@
         <div id="search-results" class="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3 hidden"></div>
       </div>
 
-<!-- Top Insights -->
-<div class="w-full basis-full min-w-0 rounded-2xl border shadow p-4 mb-3 text-white" style="background:#303030;border-color:#7a0029">
-  <div class="text-base font-semibold mb-2">Top Insights for Ops</div>
-  <ul id="insights" class="text-sm text-white list-disc pl-5 space-y-1" aria-live="polite">
-    <li>Loading…</li>
-  </ul>
-  <div id="insights-mini" class="mt-2 text-xs text-rose-100"></div>
-</div>
+<!-- Progress Tiles (This Week) -->
+<div class="w-full basis-full min-w-0 grid grid-cols-1 sm:grid-cols-4 gap-3 mb-3" id="ops-progress-tiles">
+  <!-- Supplier -->
+  <div class="bg-white rounded-2xl border shadow p-4 min-w-0"
+style="border-color:#990033;">
+    <div class="flex items-center justify-between gap-2 mb-2">
+      <div class="text-base font-semibold">Supplier</div>
+      <select id="supplier-filter" class="border rounded-md px-2 py-1 text-xs max-w-[160px]" aria-label="Filter Supplier">
+        <option value="">Loading…</option>
+      </select>
+    </div>
+    <div id="supplier-viz" class="h-[86px] flex items-center justify-center text-xs text-gray-400">
+      Graph placeholder
+    </div>
+    <div class="mt-2 flex items-end justify-between">
+      <div class="text-xs text-gray-500">Applied / Planned</div>
+      <div class="text-sm font-semibold tabular-nums" id="supplier-metric">0 / 0</div>
+    </div>
+    <div class="text-xs text-gray-500 mt-1">Progress: <span class="font-semibold tabular-nums" id="supplier-pct">0%</span></div>
+  </div>
 
-<!-- PO Progress (This Week) -->
-<div class="w-full basis-full min-w-0 bg-white rounded-2xl border shadow p-4 mb-3">
-  <div class="text-base font-semibold mb-2">PO Progress (This Week)</div>
-  <div class="overflow-auto max-h-[480px]">
-    <table class="w-full text-sm" id="po-progress">
-      <thead>
-        <tr class="text-gray-500">
-          <th scope="col" class="text-left py-1 pr-2">PO #</th>
-          <th scope="col" class="text-left py-1 pr-2">Due</th>
-          <th scope="col" class="text-right py-1 pr-2">Planned</th>
-          <th scope="col" class="text-right py-1 pr-2">Applied</th>
-          <th scope="col" class="text-right py-1">%</th>
-        </tr>
-      </thead>
-      <tbody id="po-progress-body">
-        <tr><td colspan="5" class="text-center text-xs text-gray-400 py-3">Loading…</td></tr>
-      </tbody>
-    </table>
+  <!-- Facility -->
+  <div class="bg-white rounded-2xl border shadow p-4 min-w-0"
+style="border-color:#990033;">
+    <div class="flex items-center justify-between gap-2 mb-2">
+      <div class="text-base font-semibold">Facility</div>
+      <select id="facility-filter" class="border rounded-md px-2 py-1 text-xs max-w-[160px]" aria-label="Filter Facility">
+        <option value="">Loading…</option>
+      </select>
+    </div>
+    <div id="facility-viz" class="h-[86px] flex items-center justify-center text-xs text-gray-400">
+      Graph placeholder
+    </div>
+    <div class="mt-2 flex items-end justify-between">
+      <div class="text-xs text-gray-500">Applied / Planned</div>
+      <div class="text-sm font-semibold tabular-nums" id="facility-metric">0 / 0</div>
+    </div>
+    <div class="text-xs text-gray-500 mt-1">Progress: <span class="font-semibold tabular-nums" id="facility-pct">0%</span></div>
+  </div>
+
+  <!-- Freight Type -->
+  <div class="bg-white rounded-2xl border shadow p-4 min-w-0"
+style="border-color:#990033;">
+    <div class="flex items-center justify-between gap-2 mb-2">
+      <div class="text-base font-semibold">Freight Type</div>
+      <select id="freight-filter" class="border rounded-md px-2 py-1 text-xs max-w-[160px]" aria-label="Filter Freight Type">
+        <option value="">Loading…</option>
+      </select>
+    </div>
+    <div id="freight-viz" class="h-[86px] flex items-center justify-center text-xs text-gray-400">
+      Graph placeholder
+    </div>
+    <div class="mt-2 flex items-end justify-between">
+      <div class="text-xs text-gray-500">Applied / Planned</div>
+      <div class="text-sm font-semibold tabular-nums" id="freight-metric">0 / 0</div>
+    </div>
+    <div class="text-xs text-gray-500 mt-1">Progress: <span class="font-semibold tabular-nums" id="freight-pct">0%</span></div>
+  </div>
+
+  <!-- Zendesk Ticket -->
+  <div class="bg-white rounded-2xl border shadow p-4 min-w-0"
+style="border-color:#990033;">
+    <div class="flex items-center justify-between gap-2 mb-2">
+      <div class="text-base font-semibold">Zendesk Ticket</div>
+      <select id="zendesk-filter" class="border rounded-md px-2 py-1 text-xs max-w-[160px]" aria-label="Filter Zendesk Ticket">
+        <option value="">Loading…</option>
+      </select>
+    </div>
+    <div id="zendesk-viz" class="h-[86px] flex items-center justify-center text-xs text-gray-400">
+      Graph placeholder
+    </div>
+    <div class="mt-2 flex items-end justify-between">
+      <div class="text-xs text-gray-500">Applied / Planned</div>
+      <div class="text-sm font-semibold tabular-nums" id="zendesk-metric">0 / 0</div>
+    </div>
+    <div class="text-xs text-gray-500 mt-1">Progress: <span class="font-semibold tabular-nums" id="zendesk-pct">0%</span></div>
   </div>
 </div>
 
@@ -422,6 +496,9 @@
     </div>
   </div>
 </section>
+
+<!-- ================= Flow ================= -->
+<section id="page-flow" class="hidden"></section>
   </main>
 
   <!-- Footer health pill (shows Applied this week) -->
@@ -721,19 +798,289 @@ function computeBinQA(ws, records=[], bins=[]) {
     const head=header.map(esc).join(','), body=rows.map(r=>header.map(h=>esc(r[h])).join(',')).join('\r\n');
     return '\ufeff'+head+'\r\n'+body+'\r\n';
   }
-  function buildDiscrepancyPOSKU(plan, records){
-    const byPS=new Map();
-    for(const r of records||[]){ if(r.status!=='complete') continue; const po=String(r.po_number||'').trim(), sku=String(r.sku_code||'').trim(); if(!po||!sku) continue; const k=`${po}|||${sku}`; byPS.set(k,(byPS.get(k)||0)+1); }
-    const seen=new Set(); const rows=[];
-    for(const p of plan||[]){ const po=String(p.po_number||'').trim(), sku=String(p.sku_code||'').trim(); if(!po||!sku) continue; const k=`${po}|||${sku}`; if(seen.has(k)) continue; seen.add(k);
-      const planned=toNum(p.target_qty), applied=byPS.get(k)||0;
-      rows.push({'PO':po,'SKU':sku,'Planned':planned,'Applied':applied,'Discrepancy (Applied - Planned)':applied-planned});
+function buildDiscrepancyPOSKU(plan, records){
+const byPS=new Map();
+const binsByPS=new Map();
+
+for(const r of records||[]){
+  if(r.status!=='complete') continue;
+
+  const po=String(r.po_number||'').trim();
+  const sku=String(r.sku_code||'').trim();
+  if(!po||!sku) continue;
+
+  const k=`${po}|||${sku}`;
+  byPS.set(k,(byPS.get(k)||0)+1);
+
+  const mb = String(r.mobile_bin || r.bin || '').trim();
+  if (mb) {
+    if (!binsByPS.has(k)) binsByPS.set(k, new Set());
+    binsByPS.get(k).add(mb);
+  }
+}
+
+
+  const seen=new Set(); const rows=[];
+  for(const p of plan||[]){
+    const po=String(p.po_number||'').trim(), sku=String(p.sku_code||'').trim();
+    if(!po||!sku) continue;
+    const k=`${po}|||${sku}`;
+    if(seen.has(k)) continue;
+    seen.add(k);
+
+    const planned=toNum(p.target_qty), applied=byPS.get(k)||0;
+
+const binSet = binsByPS.get(k) || new Set();
+const binList = Array.from(binSet).sort();
+
+rows.push({
+  'PO': po,
+  'SKU': sku,
+  'Supplier Name': p.supplier_name || '',
+  'Facility Name': p.facility_name || '',
+  'Freight Type': p.freight_type || '',
+  'Zendesk Ticket #': p.zendesk_ticket || '',
+  'Mobile Bin Count': binList.length,
+  'Mobile Bins': binList.join('; '),
+  'Planned': planned,
+  'Applied': applied,
+  'Discrepancy (Applied - Planned)': applied - planned
+});
+  }
+  return rows;
+}
+
+function buildDiscrepancyPO(joined, plan){
+  // pick first non-empty meta per PO from the plan
+  const metaByPO = new Map();
+  for (const p of plan || []) {
+    const po = String(p.po_number || '').trim();
+    if (!po) continue;
+    if (!metaByPO.has(po)) {
+      metaByPO.set(po, {
+        supplier_name: p.supplier_name || '',
+        facility_name: p.facility_name || '',
+        freight_type: p.freight_type || '',
+        zendesk_ticket: p.zendesk_ticket || '',
+      });
     }
-    return rows;
   }
-  function buildDiscrepancyPO(joined){
-    return (joined||[]).map(r=>({'PO':r.po,'Planned':r.planned||0,'Applied':r.applied||0,'Discrepancy (Applied - Planned)':(r.applied||0)-(r.planned||0)}));
+
+  return (joined || []).map(r => {
+    const m = metaByPO.get(r.po) || { supplier_name:'', facility_name:'', freight_type:'', zendesk_ticket:'' };
+    const planned = r.planned || 0;
+    const applied = r.applied || 0;
+
+    return {
+      'PO': r.po,
+      'Supplier Name': m.supplier_name,
+      'Facility Name': m.facility_name,
+      'Freight Type': m.freight_type,
+      'Zendesk Ticket #': m.zendesk_ticket,
+      'Planned': planned,
+      'Applied': applied,
+      'Discrepancy (Applied - Planned)': applied - planned
+    };
+  });
+}
+
+function buildShipmentSummary(plan = [], records = [], bins = []) {
+  const completed = (records || []).filter(r => r.status === 'complete');
+
+  const planByKey = new Map();
+  for (const p of plan || []) {
+    const po = String(p.po_number || '').trim();
+    const sku = String(p.sku_code || '').trim();
+    if (!po || !sku) continue;
+    planByKey.set(`${po}|||${sku}`, p);
   }
+
+  const binWeight = new Map();
+  for (const b of bins || []) {
+    const mb = String(b.mobile_bin ?? b.bin ?? '').trim();
+    if (!mb) continue;
+    const w = Number(b.gross_weight ?? b.weight ?? b.weight_kg ?? 0) || 0;
+    binWeight.set(mb, w);
+  }
+
+  const norm = (v) => {
+    const s = String(v ?? '').trim();
+    return s ? s : '(Unspecified)';
+  };
+
+  const groups = new Map();
+  const binAssignedGroup = new Map();
+
+  for (const r of completed) {
+    const po = String(r.po_number || '').trim();
+    const sku = String(r.sku_code || '').trim();
+    if (!po || !sku) continue;
+
+    const p = planByKey.get(`${po}|||${sku}`) || {};
+    const supplier = norm(p.supplier_name);
+    const zendesk  = norm(p.zendesk_ticket ?? p.zendesk_ticket_number ?? p.zendesk);
+    const freight  = norm(p.freight_type);
+    const facility = norm(p.facility_name);
+
+    const gkey = `${supplier}|||${zendesk}|||${freight}|||${facility}`;
+
+    if (!groups.has(gkey)) {
+      groups.set(gkey, {
+        'Supplier Name': supplier,
+        'Zendesk Ticket #': zendesk,
+        'Freight Type': freight,
+        'Facility Name': facility,
+        _poSet: new Set(),
+        _binSet: new Set(),
+        'Total Units Applied': 0,
+        'Gross Weight': 0
+      });
+    }
+
+    const g = groups.get(gkey);
+    g['Total Units Applied'] += 1;
+    g._poSet.add(po);
+
+    const mb = String(r.mobile_bin || r.bin || '').trim();
+    if (mb) {
+      g._binSet.add(mb);
+      const w = binWeight.get(mb) || 0;
+
+      if (!binAssignedGroup.has(mb)) {
+        binAssignedGroup.set(mb, gkey);
+        g['Gross Weight'] += w;
+      }
+    }
+  }
+
+  const out = [];
+  for (const g of groups.values()) {
+    const binCount = g._binSet.size;
+    out.push({
+      'Supplier Name': g['Supplier Name'],
+      'Zendesk Ticket #': g['Zendesk Ticket #'],
+      'Freight Type': g['Freight Type'],
+      'Facility Name': g['Facility Name'],
+      'Unique PO Count': g._poSet.size,
+      'Total Units Applied': g['Total Units Applied'],
+      'Total Mobile Bins': binCount,
+      'Gross Weight': round2(g['Gross Weight']),
+      'CBM': round3(binCount * 0.046)
+    });
+  }
+
+  out.sort((a, b) =>
+    String(a['Supplier Name']).localeCompare(String(b['Supplier Name'])) ||
+    String(a['Zendesk Ticket #']).localeCompare(String(b['Zendesk Ticket #'])) ||
+    String(a['Freight Type']).localeCompare(String(b['Freight Type'])) ||
+    String(a['Facility Name']).localeCompare(String(b['Facility Name']))
+  );
+
+  return out;
+}
+
+function buildShipmentDetail(plan = [], records = [], bins = []) {
+  const completed = (records || []).filter(r => r.status === 'complete');
+
+  const planByKey = new Map();
+  for (const p of plan || []) {
+    const po = String(p.po_number || '').trim();
+    const sku = String(p.sku_code || '').trim();
+    if (!po || !sku) continue;
+    planByKey.set(`${po}|||${sku}`, p);
+  }
+
+  const binWeight = new Map();
+  for (const b of bins || []) {
+    const mb = String(b.mobile_bin ?? b.bin ?? '').trim();
+    if (!mb) continue;
+    const w = Number(b.gross_weight ?? b.weight ?? b.weight_kg ?? 0) || 0;
+    binWeight.set(mb, w);
+  }
+
+  const norm = (v) => {
+    const s = String(v ?? '').trim();
+    return s ? s : '(Unspecified)';
+  };
+
+  const groups = new Map();
+  const binAssignedGroup = new Map();
+
+  for (const r of completed) {
+    const po = String(r.po_number || '').trim();
+    const sku = String(r.sku_code || '').trim();
+    if (!po || !sku) continue;
+
+    const p = planByKey.get(`${po}|||${sku}`) || {};
+    const supplier = norm(p.supplier_name);
+    const zendesk  = norm(p.zendesk_ticket ?? p.zendesk_ticket_number ?? p.zendesk);
+    const freight  = norm(p.freight_type);
+    const facility = norm(p.facility_name);
+
+    const gkey = `${supplier}|||${zendesk}|||${freight}|||${facility}|||${po}`;
+
+    if (!groups.has(gkey)) {
+      groups.set(gkey, {
+        'Supplier Name': supplier,
+        'Zendesk Ticket #': zendesk,
+        'Freight Type': freight,
+        'Facility Name': facility,
+        'PO': po,
+        _binSet: new Set(),
+        'Total Units Applied': 0,
+        'Gross Weight': 0
+      });
+    }
+
+    const g = groups.get(gkey);
+    g['Total Units Applied'] += 1;
+
+    const mb = String(r.mobile_bin || r.bin || '').trim();
+    if (mb) {
+      g._binSet.add(mb);
+      const w = binWeight.get(mb) || 0;
+
+      if (!binAssignedGroup.has(mb)) {
+        binAssignedGroup.set(mb, gkey);
+        g['Gross Weight'] += w;
+      } else if (binAssignedGroup.get(mb) === gkey) {
+        // same group ok
+      } else {
+        // collision: do not double-count weight
+      }
+    }
+  }
+
+  const out = [];
+  for (const g of groups.values()) {
+    const binCount = g._binSet.size;
+    out.push({
+      'Supplier Name': g['Supplier Name'],
+      'Zendesk Ticket #': g['Zendesk Ticket #'],
+      'Freight Type': g['Freight Type'],
+      'Facility Name': g['Facility Name'],
+      'PO': g['PO'],
+      'Total Units Applied': g['Total Units Applied'],
+      'Total Mobile Bins': binCount,
+      'Gross Weight': round2(g['Gross Weight']),
+      'CBM': round3(binCount * 0.046)
+    });
+  }
+
+  out.sort((a, b) =>
+    String(a['Supplier Name']).localeCompare(String(b['Supplier Name'])) ||
+    String(a['Zendesk Ticket #']).localeCompare(String(b['Zendesk Ticket #'])) ||
+    String(a['Freight Type']).localeCompare(String(b['Freight Type'])) ||
+    String(a['Facility Name']).localeCompare(String(b['Facility Name'])) ||
+    String(a['PO']).localeCompare(String(b['PO']))
+  );
+
+  return out;
+}
+
+function round2(n){ return Math.round((Number(n)||0) * 100) / 100; }
+function round3(n){ return Math.round((Number(n)||0) * 1000) / 1000; }
+
 
 async function downloadAppliedWeek() {
   const ws = state.weekStart;
@@ -933,6 +1280,285 @@ function renderPOProgress(rows){
     tbody.appendChild(tr);
   });
 }
+
+function supplierRingSVG(applied, planned) {
+  const a = toNum(applied);
+  const p = Math.max(1, toNum(planned)); // avoid divide by zero
+  const ratio = Math.min(a / p, 1);
+  const pct = Math.round((a * 100) / p);
+
+  const size = 78;
+  const stroke = 10;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const dash = ratio * c;
+
+  // Using currentColor for strokes so Tailwind text colors can control it later
+  return `
+    <div class="flex items-center justify-center w-full">
+      <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-label="Supplier progress ring">
+        <circle cx="${size/2}" cy="${size/2}" r="${r}"
+          fill="none" stroke="#E5E7EB" stroke-width="${stroke}" />
+        <circle cx="${size/2}" cy="${size/2}" r="${r}"
+          fill="none" stroke="#990033" stroke-width="${stroke}"
+          stroke-linecap="round"
+          stroke-dasharray="${dash} ${c}"
+          transform="rotate(-90 ${size/2} ${size/2})" />
+        <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle"
+          font-size="16" font-weight="700" fill="#111827">${pct}%</text>
+      </svg>
+    </div>
+  `;
+}
+
+function facilityBarHTML(applied, planned) {
+  const a = toNum(applied);
+  const p = Math.max(0, toNum(planned));
+  const ratio = p > 0 ? Math.min(a / p, 1) : 0;
+  const pct = p > 0 ? Math.round((a * 100) / p) : 0;
+
+  return `
+    <div class="w-full">
+      <div class="h-4 w-full rounded-full bg-gray-200 overflow-hidden border">
+        <div class="h-full" style="background-color:#990033;width:${(ratio * 100).toFixed(1)}%"></div>
+      </div>
+      <div class="mt-2 flex items-center justify-between text-xs text-gray-600">
+        <div class="tabular-nums">${fmtInt(a)} applied</div>
+        <div class="tabular-nums">${pct}%</div>
+      </div>
+    </div>
+  `;
+}
+
+function freightLanesHTML(plannedMap, appliedMap) {
+  // Prefer showing Air + Sea; include Other if it exists
+  const keysAll = Array.from(new Set([...(plannedMap?.keys?.() || []), ...(appliedMap?.keys?.() || [])]));
+
+  const normKey = (k) => String(k || '').toLowerCase();
+  const pick = (contains) => keysAll.find(k => normKey(k).includes(contains));
+
+  const airKey = pick('air') || 'Air';
+  const seaKey = pick('sea') || pick('ocean') || 'Sea';
+
+  // "Other" = everything not air/sea and not blank placeholder unless it’s the only thing
+  const otherKeys = keysAll.filter(k => k !== airKey && k !== seaKey);
+  const showOther = otherKeys.length > 0;
+
+  const lanes = [
+    { label: 'Air', key: airKey, icon: '✈️' },
+    { label: 'Sea', key: seaKey, icon: '🚢' },
+  ];
+
+  if (showOther) {
+    // If multiple others exist, roll them up into one lane
+    lanes.push({ label: 'Other', key: '__OTHER__', icon: '📦' });
+  }
+
+  function laneNumbers(k) {
+    if (k === '__OTHER__') {
+      const planned = otherKeys.reduce((s, kk) => s + (plannedMap.get(kk) || 0), 0);
+      const applied = otherKeys.reduce((s, kk) => s + (appliedMap.get(kk) || 0), 0);
+      return { planned, applied };
+    }
+    return { planned: plannedMap.get(k) || 0, applied: appliedMap.get(k) || 0 };
+  }
+
+  function laneRow(l) {
+    const { planned, applied } = laneNumbers(l.key);
+    const ratio = planned > 0 ? Math.min(applied / planned, 1) : 0;
+
+    return `
+      <div class="flex items-center gap-2">
+        <div class="w-7 text-center" aria-hidden="true">${l.icon}</div>
+        <div class="flex-1">
+          <div class="flex items-center justify-between text-[11px] text-gray-600">
+            <div class="font-semibold text-gray-800">${l.label}</div>
+            <div class="tabular-nums">${fmtInt(applied)} / ${fmtInt(planned)}</div>
+          </div>
+          <div class="h-2 w-full rounded-full bg-gray-200 overflow-hidden border mt-1">
+            <div class="h-full" style="background-color:#990033;width:${(ratio * 100).toFixed(1)}%"></div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="w-full flex flex-col gap-2">
+      ${lanes.map(laneRow).join('')}
+    </div>
+  `;
+}
+
+function zendeskBulletHTML(applied, planned) {
+  const a = toNum(applied);
+  const p = toNum(planned);
+
+  // scale: use max of planned/applied so marker stays in view when applied > planned
+  const max = Math.max(1, p, a);
+  const appliedPct = Math.min((a / max) * 100, 100);
+  const markerPct = Math.min((p / max) * 100, 100);
+
+  const over = a > p ? (a - p) : 0;
+
+  return `
+    <div class="w-full">
+      <div class="text-[11px] text-gray-600 mb-2">
+        Target marker = Planned
+        ${over ? `<span class="ml-2 text-gray-900 font-semibold tabular-nums">Over by ${fmtInt(over)}</span>` : ``}
+      </div>
+      <div class="relative h-4 w-full rounded-full bg-gray-200 overflow-hidden border">
+        <div class="h-full" style="background-color:#990033;width:${appliedPct.toFixed(1)}%"></div>
+        <div class="absolute top-[-2px] bottom-[-2px] w-[2px] bg-gray-700"
+             style="left:${markerPct.toFixed(1)}%"></div>
+      </div>
+      <div class="mt-2 flex items-center justify-between text-xs text-gray-600">
+        <div class="tabular-nums">${fmtInt(a)} applied</div>
+        <div class="tabular-nums">${fmtInt(p)} planned</div>
+      </div>
+    </div>
+  `;
+}
+
+// ----- Progress Tiles (Supplier / Facility / Freight / Zendesk) -----
+function renderProgressTiles(plan = [], records = []) {
+  const tilesRoot = document.getElementById('ops-progress-tiles');
+  if (!tilesRoot) return;
+
+  // Only count "applied" as completed units
+  const completed = (records || []).filter(r => r.status === 'complete');
+
+  // Index plan by PO+SKU so we can map completed records to their plan metadata
+  const planByKey = new Map();
+  for (const p of plan || []) {
+    const po = String(p.po_number || '').trim();
+    const sku = String(p.sku_code || '').trim();
+    if (!po || !sku) continue;
+    planByKey.set(`${po}|||${sku}`, p);
+  }
+
+  // Helper: normalize display values (blank -> (Unspecified))
+  const normVal = (v) => {
+    const s = String(v ?? '').trim();
+    return s ? s : '(Unspecified)';
+  };
+
+  // Build planned totals by field value
+  function plannedByField(field) {
+    const m = new Map();
+    for (const p of plan || []) {
+      const key = normVal(p?.[field]);
+      m.set(key, (m.get(key) || 0) + toNum(p.target_qty));
+    }
+    return m;
+  }
+
+  // Build applied totals by field value by looking up each completed record's plan row
+  function appliedByField(field) {
+    const m = new Map();
+    for (const r of completed) {
+      const po = String(r.po_number || '').trim();
+      const sku = String(r.sku_code || '').trim();
+      if (!po || !sku) continue;
+
+      const p = planByKey.get(`${po}|||${sku}`);
+      const key = normVal(p?.[field]); // if record not in plan, it falls into (Unspecified)
+      m.set(key, (m.get(key) || 0) + 1);
+    }
+    return m;
+  }
+
+  function pickDefault(plannedMap, appliedMap) {
+    // default = highest planned; tie-breaker = highest applied; final = alpha
+    const keys = Array.from(new Set([...plannedMap.keys(), ...appliedMap.keys()]));
+    if (!keys.length) return '';
+    keys.sort((a, b) => {
+      const pa = plannedMap.get(a) || 0, pb = plannedMap.get(b) || 0;
+      if (pb !== pa) return pb - pa;
+      const aa = appliedMap.get(a) || 0, ab = appliedMap.get(b) || 0;
+      if (ab !== aa) return ab - aa;
+      return a.localeCompare(b);
+    });
+    return keys[0];
+  }
+
+  function fillSelect(selectId, keys, selected) {
+    const sel = document.getElementById(selectId);
+    if (!sel) return null;
+
+    sel.innerHTML = '';
+    if (!keys.length) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No values';
+      sel.appendChild(opt);
+      return sel;
+    }
+
+    for (const k of keys) {
+      const opt = document.createElement('option');
+      opt.value = k;
+      opt.textContent = k;
+      sel.appendChild(opt);
+    }
+
+    sel.value = selected || keys[0];
+    return sel;
+  }
+
+  function updateTile(field, selectId, metricId, pctId, vizId) {
+    const plannedMap = plannedByField(field);
+    const appliedMap = appliedByField(field);
+
+    const keys = Array.from(new Set([...plannedMap.keys(), ...appliedMap.keys()]));
+    keys.sort((a, b) => a.localeCompare(b));
+
+    const defaultKey = pickDefault(plannedMap, appliedMap);
+    const sel = fillSelect(selectId, keys, defaultKey);
+
+    const metricEl = document.getElementById(metricId);
+    const pctEl = document.getElementById(pctId);
+    const vizEl = document.getElementById(vizId);
+
+    const render = () => {
+      const k = sel ? sel.value : defaultKey;
+      const planned = plannedMap.get(k) || 0;
+      const applied = appliedMap.get(k) || 0;
+      const pct = planned > 0 ? Math.round((applied * 100) / planned) : (plan.length ? 0 : 100);
+
+      if (metricEl) metricEl.textContent = `${fmtInt(applied)} / ${fmtInt(planned)}`;
+      if (pctEl) pctEl.textContent = `${pct}%`;
+
+     // Supplier gets a circular progress ring; others stay as text for now
+if (vizEl) {
+  if (!planned) {
+    vizEl.textContent = 'No plan for selection';
+} else if (field === 'supplier_name') {
+  vizEl.innerHTML = supplierRingSVG(applied, planned);
+} else if (field === 'facility_name') {
+  vizEl.innerHTML = facilityBarHTML(applied, planned);
+} else if (field === 'freight_type') {
+  vizEl.innerHTML = freightLanesHTML(plannedMap, appliedMap);
+} else if (field === 'zendesk_ticket') {
+  vizEl.innerHTML = zendeskBulletHTML(applied, planned);
+} else {
+  vizEl.textContent = `Applied ${fmtInt(applied)} of ${fmtInt(planned)}`;
+}
+}
+
+    };
+
+    if (sel) sel.onchange = render;
+    render();
+  }
+
+  updateTile('supplier_name',  'supplier-filter', 'supplier-metric', 'supplier-pct', 'supplier-viz');
+  updateTile('facility_name',  'facility-filter', 'facility-metric', 'facility-pct', 'facility-viz');
+  updateTile('freight_type',   'freight-filter',  'freight-metric',  'freight-pct',  'freight-viz');
+  updateTile('zendesk_ticket', 'zendesk-filter',  'zendesk-metric',  'zendesk-pct',  'zendesk-viz');
+}
+
+
 
 // ----- Risk tables (PO / SKU) -----
 function renderRisk(list, selector){
@@ -1256,7 +1882,7 @@ renderCapsules(ws, plannedTotal, appliedTotal, totalsByWeek);
     setFooterHealth(pct, appliedTotal);
 
     const poRows = joinPOProgress(state.plan, agg.byPO);
-    renderPOProgress(poRows);
+    renderProgressTiles(state.plan, state.records);
 
     const riskPO = computeRisk(poRows.map(r=>({po:r.po,due:r.due,planned:r.planned,applied:r.applied})));
     // build per SKU progress
@@ -1280,16 +1906,73 @@ renderInsights(state.records, state.plan, state.weekStart);
     // download buttons
     $('#btn-dl-posku').onclick=()=>{
       const rows=buildDiscrepancyPOSKU(state.plan, state.records);
-      const csv=toCSV(['PO','SKU','Planned','Applied','Discrepancy (Applied - Planned)'], rows);
+      const csv=toCSV(
+  ['PO','SKU','Supplier Name','Facility Name','Freight Type','Zendesk Ticket #','Planned','Applied','Discrepancy (Applied - Planned)'],
+  rows
+);
+
       const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download=`po_sku_discrepancy_${ws}.csv`; a.click();
       setTimeout(()=>URL.revokeObjectURL(a.href),250);
     };
     $('#btn-dl-po').onclick=()=>{
-      const rows=buildDiscrepancyPO(poRows);
-      const csv=toCSV(['PO','Planned','Applied','Discrepancy (Applied - Planned)'], rows);
+      const rows=buildDiscrepancyPO(poRows, state.plan);
+const csv=toCSV(
+  ['PO','SKU','Supplier Name','Facility Name','Freight Type','Zendesk Ticket #','Mobile Bin Count','Mobile Bins','Planned','Applied','Discrepancy (Applied - Planned)'],
+  rows
+);
       const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download=`po_discrepancy_${ws}.csv`; a.click();
       setTimeout(()=>URL.revokeObjectURL(a.href),250);
     };
+
+$('#btn-ship-summary').onclick = () => {
+  const rows = buildShipmentSummary(state.plan, state.records, state.bins);
+
+  const csv = toCSV(
+    [
+      'Supplier Name',
+      'Zendesk Ticket #',
+      'Freight Type',
+      'Facility Name',
+      'Unique PO Count',
+      'Total Units Applied',
+      'Total Mobile Bins',
+      'Gross Weight',
+      'CBM'
+    ],
+    rows
+  );
+
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+  a.download=`shipment_report_summary_${ws}.csv`;
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),250);
+};
+
+$('#btn-ship-detail').onclick = () => {
+  const rows = buildShipmentDetail(state.plan, state.records, state.bins);
+
+  const csv = toCSV(
+    [
+      'Supplier Name',
+      'Zendesk Ticket #',
+      'Freight Type',
+      'Facility Name',
+      'PO',
+      'Total Units Applied',
+      'Total Mobile Bins',
+      'Gross Weight',
+      'CBM'
+    ],
+    rows
+  );
+
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+  a.download=`shipment_report_detail_${ws}.csv`;
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),250);
+};
 
 $('#btn-dl-week-applied').onclick = downloadAppliedWeek;
 
@@ -1455,15 +2138,22 @@ for (const k in r) {
   console.log('[plan-upload] parsed rows:', raw.length);
 
   const items = raw
-    .map(r => ({
-po_number: String(r.po_number ?? r.po ?? '').trim(),
-sku_code:  String(r.sku_code  ?? r.sku  ?? '').trim(),
-      start_date: weekStart,
-      due_date: toISODate(r.due_date ?? r.due ?? ''),
-      target_qty: toNum(r.target_qty ?? r.planned)
-    }))
-    // keep rows that at least have PO + SKU (server can validate due_date)
-    .filter(r => r.po_number && r.sku_code);
+  .map(r => ({
+    po_number: String(r.po_number ?? r.po ?? '').trim(),
+    sku_code:  String(r.sku_code  ?? r.sku  ?? '').trim(),
+    start_date: weekStart,
+    due_date: toISODate(r.due_date ?? r.due ?? ''),
+    target_qty: toNum(r.target_qty ?? r.planned),
+
+    // NEW fields (pulled from spreadsheet columns)
+    supplier_name:  String(r.supplier_name ?? r.supplier ?? '').trim() || undefined,
+    facility_name:  String(r.facility_name ?? r.facility ?? '').trim() || undefined,
+    freight_type:   String(r.freight_type ?? r.freight ?? '').trim() || undefined,
+
+    // accept either "zendesk_ticket" or "zendesk_ticket_number" column name
+    zendesk_ticket: String(r.zendesk_ticket ?? r.zendesk_ticket_number ?? r.zendesk ?? '').trim() || undefined,
+  }))
+  .filter(r => r.po_number && r.sku_code);
 
   console.log('[plan-upload] valid rows (PO+SKU):', items.length);
   console.log('[plan-upload] rows with due_date:', items.filter(r => r.due_date).length);
@@ -2064,45 +2754,60 @@ function syncNav() {
   const dash   = document.getElementById('nav-dash');
   const intake = document.getElementById('nav-intake');
   const exec   = document.getElementById('nav-exec');
-  if (!dash || !intake || !exec) return;
+  const recv   = document.getElementById('nav-receiving');
+  const flow   = document.getElementById('nav-flow');
+  if (!dash || !intake || !exec || !recv || !flow) return;
 
-  [dash, intake, exec].forEach(el => {
+  [dash, intake, exec, recv, flow].forEach(el => {
     el.classList.remove('active');
     el.removeAttribute('aria-current');
   });
 
-  if (hash === '#intake') {
-    intake.classList.add('active');
-    intake.setAttribute('aria-current', 'page');
-  } else if (hash === '#exec') {
-    exec.classList.add('active');
-    exec.setAttribute('aria-current', 'page');
-  } else {
-    dash.classList.add('active');
-    dash.setAttribute('aria-current', 'page');
-  }
+if (hash === '#receiving') {
+  recv.classList.add('active');
+  recv.setAttribute('aria-current', 'page');
+} else if (hash === '#intake') {
+  intake.classList.add('active');
+  intake.setAttribute('aria-current', 'page');
+} else if (hash === '#exec') {
+  exec.classList.add('active');
+  exec.setAttribute('aria-current', 'page');
+} else if (hash === '#flow') {
+  flow.classList.add('active');
+  flow.setAttribute('aria-current', 'page');
+} else {
+  dash.classList.add('active');
+  dash.setAttribute('aria-current', 'page');
+}
 }
 
   function show(hash){
   document.getElementById('page-dashboard')?.classList.add('hidden');
   document.getElementById('page-intake')?.classList.add('hidden');
   document.getElementById('page-exec')?.classList.add('hidden');
+  document.getElementById('page-receiving')?.classList.add('hidden');
+  document.getElementById('page-flow')?.classList.add('hidden');
 
-  if (hash === '#intake') {
-    document.getElementById('page-intake')?.classList.remove('hidden');
-  } else if (hash === '#exec') {
-    document.getElementById('page-exec')?.classList.remove('hidden');
-    try {
-      const ws = state.weekStart;
-      const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
-      const we = iso(weD);
-      const sub = document.getElementById('exec-sub');
-      if (sub) sub.textContent = `${ws} – ${we}`;
-    } catch {}
-  } else {
-    document.getElementById('page-dashboard')?.classList.remove('hidden');
-  }
-  syncNav();
+
+if (hash === '#receiving') {
+  document.getElementById('page-receiving')?.classList.remove('hidden');
+} else if (hash === '#intake') {
+  document.getElementById('page-intake')?.classList.remove('hidden');
+} else if (hash === '#exec') {
+  document.getElementById('page-exec')?.classList.remove('hidden');
+  try {
+    const ws = state.weekStart;
+    const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
+    const we = iso(weD);
+    const sub = document.getElementById('exec-sub');
+    if (sub) sub.textContent = `${ws} – ${we}`;
+  } catch {}
+} else if (hash === '#flow') {
+  document.getElementById('page-flow')?.classList.remove('hidden');
+} else {
+  document.getElementById('page-dashboard')?.classList.remove('hidden');
+}
+syncNav();
 }
 
   window.addEventListener('hashchange', () => show(location.hash || '#dashboard'));
@@ -2168,6 +2873,10 @@ document.getElementById('btn-delete-uids')?.addEventListener('click', deleteUIDs
 
 
 <script src="/exec_live_additive.js?v=8" defer></script>
+<script src="/receiving_live_additive.js?v=27" defer></script>
+  <script src="/flow_live_additive.js?v=8" defer></script>
 
 </body>
 </html>
+
+
