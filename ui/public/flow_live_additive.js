@@ -1,4 +1,4 @@
-/* flow_live_additive.js (v41)
+/* flow_live_additive.js (v51)
    - Additive "Flow" page module for VelOzity Pinpoint
    - Receiving + VAS are data-driven from existing endpoints
    - International Transit + Last Mile are lightweight manual (localStorage)
@@ -7,6 +7,62 @@
 
 (function () {
   'use strict';
+
+
+  // ------------------------- PATCH (v51.1) -------------------------
+  // Guardrails to keep other modules from breaking Flow.
+  // NOTE: Scripts load order is exec -> receiving -> flow (defer). Some helpers are expected globally.
+  window.__FLOW_BUILD__ = 'v51.1-flow-patch-' + new Date().toISOString();
+
+  // Receiving module expects this helper; if missing it throws and can interrupt week load flows.
+  if (typeof window.computeCartonsOutByPOFromState !== 'function') {
+    window.computeCartonsOutByPOFromState = function computeCartonsOutByPOFromState(ws) {
+      const m = new Map();
+      if (!ws) return m;
+
+      // Accept several possible shapes (Map, object, array).
+      const src =
+        ws.cartonsOutByPO ||
+        ws.cartons_out_by_po ||
+        ws.receiving?.cartonsOutByPO ||
+        ws.receiving?.cartons_out_by_po ||
+        ws.receiving?.cartonsOut ||
+        ws.receiving?.cartons_out;
+
+      if (src instanceof Map) return src;
+
+      if (Array.isArray(src)) {
+        for (const r of src) {
+          if (!r) continue;
+          const po = r.po ?? r.PO ?? r.po_number ?? r.PO_Number;
+          const v = r.cartonsOut ?? r.cartons_out ?? r.value ?? r.count ?? r.qty ?? 0;
+          if (po != null) m.set(String(po), Number(v) || 0);
+        }
+        return m;
+      }
+
+      if (src && typeof src === 'object') {
+        for (const [k, v] of Object.entries(src)) m.set(String(k), Number(v) || 0);
+      }
+      return m;
+    };
+  }
+
+  // Footer health pill can run before the footer exists on some navigations.
+  if (typeof window.setFooterHealth === 'function' && !window.__FLOW_WRAPPED_FOOTER_HEALTH__) {
+    window.__FLOW_WRAPPED_FOOTER_HEALTH__ = true;
+    const __origSetFooterHealth = window.setFooterHealth;
+    window.setFooterHealth = function (...args) {
+      try {
+        return __origSetFooterHealth.apply(this, args);
+      } catch (e) {
+        // Keep going; this is non-critical UI.
+        console.warn('setFooterHealth suppressed', e);
+        return null;
+      }
+    };
+  }
+
 
   // ------------------------- Config (editable) -------------------------
   // Baseline is relative to the business week (Asia/Shanghai by default).
@@ -54,6 +110,16 @@
     const y = d.getFullYear();
     const m = pad2(d.getMonth() + 1);
     const da = pad2(d.getDate());
+    return `${y}-${m}-${da}`;
+  }
+
+  // IMPORTANT: Week navigation uses UTC-midnight anchors (YYYY-MM-DDT00:00:00Z).
+  // In non-UTC local timezones, isoDate() (local getters) can shift the day backward.
+  // Use UTC getters for any weekStart computations.
+  function isoDateUTC(d) {
+    const y = d.getUTCFullYear();
+    const m = pad2(d.getUTCMonth() + 1);
+    const da = pad2(d.getUTCDate());
     return `${y}-${m}-${da}`;
   }
 
@@ -119,6 +185,38 @@
     d.setUTCDate(d.getUTCDate() + days);
     return d;
   }
+
+  function shiftWeekStart(ws, deltaWeeks) {
+    try {
+      // Always navigate by week starts anchored on **Monday**.
+      // If the stored ws drifts (e.g., user navigated from a non-Monday),
+      // normalize to the Monday of that week before shifting.
+      const base = new Date(`${ws}T00:00:00Z`);
+      if (isNaN(base)) return ws;
+
+      // 0=Sun..6=Sat in UTC
+      const dow = base.getUTCDay();
+      const sinceMon = (dow + 6) % 7; // days since Monday
+      const monday = addDays(base, -sinceMon);
+
+      const next = addDays(monday, (Number(deltaWeeks) || 0) * 7);
+      return isoDateUTC(next);
+    } catch { return ws; }
+  }
+
+  function normalizeWeekStartToMonday(ws) {
+    try {
+      const base = new Date(`${ws}T00:00:00Z`);
+      if (isNaN(base)) return ws;
+      const dow = base.getUTCDay();
+      const sinceMon = (dow + 6) % 7;
+      const monday = addDays(base, -sinceMon);
+      return isoDateUTC(monday);
+    } catch {
+      return ws;
+    }
+  }
+
 
   function daysBetween(a, b) {
     return (b.getTime() - a.getTime()) / (1000 * 60 * 60 * 24);
@@ -598,6 +696,10 @@ function computeCartonStatsFromRecords(records) {
     return s || '';
   }
 
+  function uniqNonEmpty(arr) {
+    return Array.from(new Set((arr || []).map(x => String(x || '').trim()).filter(Boolean)));
+  }
+
   function laneKey(supplier, ticket, freight) {
     return `${normalizeSupplier(supplier || 'Unknown')}||${String(ticket || 'NO_TICKET').trim() || 'NO_TICKET'}||${String(freight || 'Sea').trim() || 'Sea'}`;
   }
@@ -609,6 +711,183 @@ function computeCartonStatsFromRecords(records) {
 
   function intlStorageKey(ws, key) {
     return `flow:intl:${ws}:${key}`;
+  }
+
+  // Week-level containers store (independent of selected lane)
+  function intlWeekContainersKey(ws) {
+    return `flow:intl_weekcontainers:${ws}`;
+  }
+
+  // Safe conversion for <input type="datetime-local"> values.
+  // Returns '' if blank or invalid instead of throwing.
+  function safeISO(v) {
+    const s = String(v || '').trim();
+    if (!s) return '';
+    const d = new Date(s);
+    if (!d || Number.isNaN(d.getTime())) return '';
+    try { return d.toISOString(); } catch { return ''; }
+  }
+
+  // Convert an ISO timestamp into a value suitable for <input type="datetime-local">.
+  // We render in the browser's local timezone to match datetime-local semantics.
+  function toLocalDT(iso) {
+    const s = String(iso || '').trim();
+    if (!s) return '';
+    const d = new Date(s);
+    if (!d || Number.isNaN(d.getTime())) return '';
+    const y = d.getFullYear();
+    const m = pad2(d.getMonth() + 1);
+    const da = pad2(d.getDate());
+    const hh = pad2(d.getHours());
+    const mi = pad2(d.getMinutes());
+    return `${y}-${m}-${da}T${hh}:${mi}`;
+  }
+
+  // Current time formatted for <input type="datetime-local"> (browser local timezone).
+  function nowLocalDT() {
+    const d = new Date();
+    if (!d || Number.isNaN(d.getTime())) return '';
+    const y = d.getFullYear();
+    const m = pad2(d.getMonth() + 1);
+    const da = pad2(d.getDate());
+    const hh = pad2(d.getHours());
+    const mi = pad2(d.getMinutes());
+    return `${y}-${m}-${da}T${hh}:${mi}`;
+  }
+
+  function _uid(prefix) {
+    const pfx = prefix ? String(prefix) : 'id';
+    return `${pfx}_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+  }
+
+  function loadIntlWeekContainers(ws) {
+    const k = intlWeekContainersKey(ws);
+    let state = { containers: [], _v: 1 };
+    try {
+      const raw = localStorage.getItem(k);
+      if (raw) state = JSON.parse(raw) || state;
+    } catch { /* ignore */ }
+
+    // One-time migration from legacy lane-level containers:
+    // flow:intl:<ws>:<laneKey> { containers: [...] }
+    // We merge into week store and preserve last-mile fields.
+    try {
+      const alreadyMigrated = !!state._migratedFromLaneContainers;
+      if (!alreadyMigrated) {
+        const merged = [];
+        const seen = new Map(); // uid -> container
+        for (let i = 0; i < localStorage.length; i++) {
+          const lk = localStorage.key(i);
+          if (!lk || !lk.startsWith(`flow:intl:${ws}:`)) continue;
+          let laneKeyStr = lk.slice(`flow:intl:${ws}:`.length);
+          let laneObj = {};
+          try { laneObj = JSON.parse(localStorage.getItem(lk) || '{}') || {}; } catch { laneObj = {}; }
+          const arr = Array.isArray(laneObj.containers) ? laneObj.containers : [];
+          for (const c of arr) {
+            const uid = String(c.container_uid || c.uid || '').trim() || _uid('c');
+            const prior = seen.get(uid) || {};
+            const lane_keys = Array.isArray(c.lane_keys) ? c.lane_keys : (prior.lane_keys || []);
+            const nextLaneKeys = Array.from(new Set([...(lane_keys || []), laneKeyStr].filter(Boolean)));
+            const mergedC = {
+              ...prior,
+              ...c,
+              container_uid: uid,
+              container_id: String(c.container_id || c.container || prior.container_id || '').trim(),
+              vessel: String(c.vessel || prior.vessel || '').trim(),
+              size_ft: String(c.size_ft || prior.size_ft || '40').trim(),
+              pos: String(c.pos || prior.pos || '').trim(),
+              lane_keys: nextLaneKeys,
+            };
+            seen.set(uid, mergedC);
+          }
+        }
+        merged.push(...seen.values());
+        state = {
+          ...state,
+          containers: merged.length ? merged : (Array.isArray(state.containers) ? state.containers : []),
+          _migratedFromLaneContainers: true,
+          _v: 1,
+        };
+        localStorage.setItem(k, JSON.stringify(state));
+      }
+    } catch { /* ignore */ }
+
+
+    // Ensure every container has a stable uid (repair older records)
+    try {
+      let changed = false;
+      state.containers = (Array.isArray(state.containers) ? state.containers : []).map(c => {
+        const uid = String(c.container_uid || c.uid || '').trim() || _uid('c');
+        if (!String(c.container_uid || '').trim()) changed = true;
+        return { ...c, container_uid: uid, container_id: String(c.container_id || c.container || '').trim() };
+      });
+      if (changed) {
+        localStorage.setItem(k, JSON.stringify({ ...state, _v: 1 }));
+      }
+    } catch { /* ignore */ }
+
+    if (!Array.isArray(state.containers)) state.containers = [];
+    return state;
+  }
+
+  function saveIntlWeekContainers(ws, containers) {
+    const k = intlWeekContainersKey(ws);
+    let prev = { containers: [] };
+    try { prev = JSON.parse(localStorage.getItem(k) || '{}') || prev; } catch { prev = { containers: [] }; }
+
+    const prevByUid = new Map();
+    const prevById = new Map();
+    (Array.isArray(prev.containers) ? prev.containers : []).forEach(c => {
+      const uid = String(c.container_uid || c.uid || '').trim();
+      const id = String(c.container_id || c.container || '').trim();
+      if (uid) prevByUid.set(uid, c);
+      if (id) prevById.set(id, c);
+    });
+
+    const next = (Array.isArray(containers) ? containers : []).map(c => {
+      const uid = String(c.container_uid || c.uid || '').trim() || _uid('c');
+      const id = String(c.container_id || c.container || '').trim();
+      const prior = prevByUid.get(uid) || (id && prevById.get(id)) || {};
+      return {
+        ...prior,
+        ...c,
+        container_uid: uid,
+        container_id: id,
+        size_ft: String(c.size_ft || prior.size_ft || '40').trim(),
+        vessel: String(c.vessel || prior.vessel || '').trim(),
+        pos: String(c.pos || prior.pos || '').trim(),
+        lane_keys: Array.from(new Set((Array.isArray(c.lane_keys) ? c.lane_keys : (prior.lane_keys || [])).filter(Boolean))),
+        _updatedAt: new Date().toISOString(),
+      };
+    });
+
+    const state = { ...(prev || {}), containers: next, _v: 1, _migratedFromLaneContainers: true };
+    try { localStorage.setItem(k, JSON.stringify(state)); } catch { /* ignore */ }
+    return state;
+  }
+
+  // ------------------------- Last Mile receipts (week-scoped) -------------------------
+  // We store Last Mile "receiving" fields separately from Intl week-containers.
+  // This avoids any accidental overwrite/derivation issues and keeps Last Mile updates
+  // deterministic.
+  function lastMileReceiptsKey(ws) {
+    return `flow:lastmile_receipts:${ws}`;
+  }
+
+  function loadLastMileReceipts(ws) {
+    const k = lastMileReceiptsKey(ws);
+    try {
+      const raw = localStorage.getItem(k);
+      const obj = raw ? JSON.parse(raw) : {};
+      return (obj && typeof obj === 'object') ? obj : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveLastMileReceipts(ws, receipts) {
+    const k = lastMileReceiptsKey(ws);
+    try { localStorage.setItem(k, JSON.stringify(receipts || {})); } catch { /* ignore */ }
   }
 
   function loadIntlLaneManual(ws, key) {
@@ -626,18 +905,29 @@ function computeCartonStatsFromRecords(records) {
       let prev = {};
       try { prev = JSON.parse(localStorage.getItem(k) || '{}') || {}; } catch { prev = {}; }
 
-      // Merge containers by container_id to preserve downstream fields (e.g., last-mile delivery tracking)
+      // Merge containers by stable container_uid (fallback: container_id) to preserve downstream fields
+      // (e.g., last-mile delivery tracking)
       const next = { ...(prev || {}), ...(obj || {}) };
       if (obj && Array.isArray(obj.containers)) {
+        const prevByUid = new Map();
         const prevById = new Map();
         (Array.isArray(prev.containers) ? prev.containers : []).forEach(c => {
+          const uid = String(c.container_uid || c.uid || '').trim();
           const id = String(c.container_id || c.container || '').trim();
+          if (uid) prevByUid.set(uid, c);
           if (id) prevById.set(id, c);
         });
+
         next.containers = obj.containers.map(c => {
+          const uid = String(c.container_uid || c.uid || '').trim();
           const id = String(c.container_id || c.container || '').trim();
-          const prior = id ? (prevById.get(id) || {}) : {};
-          return { ...prior, ...c, container_id: id || (c.container_id || '') };
+          const prior = (uid && prevByUid.get(uid)) || (id && prevById.get(id)) || {};
+          return {
+            ...prior,
+            ...c,
+            container_uid: uid || prior.container_uid || prior.uid || '',
+            container_id: id || (c.container_id || ''),
+          };
         });
       }
 
@@ -649,12 +939,19 @@ function computeCartonStatsFromRecords(records) {
     // Build PO -> lane mapping from plan
     const poToLane = new Map();
     const lanes = new Map(); // laneKey -> {supplier,ticket,freight, plannedUnits, plannedPOs:Set}
+    const ticketsBySupMode = new Map(); // `${supplier}||${freight}` -> Set(ticket)
     for (const r of (planRows || [])) {
       const po = getPO(r);
       if (!po) continue;
       const supplier = getSupplier(r) || 'Unknown';
       const freight = getFreightType(r) || 'Sea';
       const ticket = getZendeskTicket(r) || 'NO_TICKET';
+
+      // Collect all tickets available from Upload Plan for this supplier+mode.
+      const smk = `${normalizeSupplier(supplier)}||${freight}`;
+      if (!ticketsBySupMode.has(smk)) ticketsBySupMode.set(smk, new Set());
+      if (ticket && ticket !== 'NO_TICKET') ticketsBySupMode.get(smk).add(String(ticket).trim());
+
       const key = laneKey(supplier, ticket, freight);
       poToLane.set(po, key);
       if (!lanes.has(key)) lanes.set(key, { key, supplier: normalizeSupplier(supplier), ticket, freight, plannedUnits: 0, plannedPOs: new Set() });
@@ -779,6 +1076,8 @@ function computeCartonStatsFromRecords(records) {
         plannedUnits,
         appliedUnits,
         cartonsOut,
+        // For container assignment: list of Zendesk tickets available from Upload Plan for this supplier+mode.
+        availableTickets: uniqNonEmpty(Array.from((ticketsBySupMode.get(`${normalizeSupplier(lane.supplier)}||${lane.freight}`) || new Set()).values())),
         manual,
         level,
         originReadyAt,
@@ -914,37 +1213,58 @@ function computeManualNodeStatuses(ws, tz) {
           <div id="flow-sub" class="text-sm text-gray-500 mt-0.5"></div>
         </div>
         <div class="flex items-center gap-2">
+          <button id="flow-prev-week" class="px-3 py-1.5 rounded-lg text-sm border bg-white hover:bg-gray-50" title="Previous week">←</button>
+          <button id="flow-next-week" class="px-3 py-1.5 rounded-lg text-sm border bg-white hover:bg-gray-50" title="Next week">→</button>
           <button id="flow-reset" class="px-3 py-1.5 rounded-lg text-sm border bg-white hover:bg-gray-50">Reset view</button>
+          <button id="flow-download-pdf" class="px-3 py-1.5 rounded-lg text-sm border bg-white hover:bg-gray-50">Download PDF</button>
         </div>
       </div>
 
       <div class="grid grid-cols-1 gap-3">
-        <!-- Top tile -->
-        <div class="rounded-2xl border bg-white shadow-sm p-3">
-          <div class="flex items-center justify-between mb-2">
-            <div class="text-sm font-semibold text-gray-700">End-to-end nodes</div>
-            <div id="flow-day" class="text-xs text-gray-500"></div>
+        <!-- Top row: Journey map (2/3) + Insights (1/3) -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-3">
+          <!-- Journey map tile -->
+          <div id="flow-top-tile" class="rounded-2xl border bg-white shadow-sm p-3 flow-tile--nodes lg:col-span-2">
+            <div class="flex items-center justify-between mb-2">
+              <div class="text-sm font-semibold text-gray-700">End-to-end nodes</div>
+              <div id="flow-day" class="text-xs text-gray-500"></div>
+            </div>
+            <div id="flow-journey" class="w-full"></div>
           </div>
-          <!-- Process rail sits above the cards to avoid overlap -->
-          <div id="flow-rail" class="hidden md:block mt-0 mb-2 pointer-events-none"></div>
-          <div id="flow-nodes" class="grid grid-cols-1 md:grid-cols-5 gap-2"></div>
+          <!-- Insights tile moved to right 1/3 -->
+          <div class="rounded-2xl border bg-white shadow-sm p-3 min-h-[320px] lg:col-span-1">
+            <div id="flow-footer"></div>
+          </div>
+        </div>
         </div>
 
-        <!-- Bottom tile -->
-        <div class="rounded-2xl border bg-white shadow-sm p-3 min-h-[320px]">
+        <!-- Detail tile moved to bottom (full width) -->
+        <div class="rounded-2xl border bg-white shadow-sm p-3 min-h-[360px]">
           <div id="flow-detail" class="h-full"></div>
-        </div>
-
-        <!-- Footer tile (light trends) -->
-        <div class="rounded-2xl border bg-white shadow-sm p-3">
-          <div id="flow-footer"></div>
         </div>
       </div>
 
       <div class="mt-3 text-xs text-gray-500">
+
         Baseline is editable in <code>flow_live_additive.js</code>. Receiving + VAS are data-driven; International Transit + Last Mile are lightweight manual (stored locally per week).
       </div>
     `;
+
+    // Journey map CSS (additive; never breaks if duplicated)
+    try {
+      if (!document.getElementById('flow-journey-style')) {
+        const st = document.createElement('style');
+        st.id = 'flow-journey-style';
+        st.textContent = `
+          /* Journey map sizing + crispness */
+          #flow-journey svg { width: 100%; height: 240px; display: block; }
+          @media (min-width: 1024px) { #flow-journey svg { height: 260px; } }
+          .flow-journey-hit { cursor: pointer; }
+          .flow-journey-hit:focus { outline: none; }
+        `;
+        document.head.appendChild(st);
+      }
+    } catch {}
   }
 
   function setSubheader(ws) {
@@ -967,7 +1287,7 @@ function computeManualNodeStatuses(ws, tz) {
       return `<button data-sub="${b.sub || ''}" class="text-xs px-2 py-0.5 rounded-full border ${cls} hover:opacity-95">${b.label}</button>`;
     }).join(' ');
     return `
-      <div data-node="${id}" class="rounded-xl border p-3 hover:bg-gray-50 cursor-pointer ${dis}">
+      <div data-node="${id}" data-flow-node="${id}" class="rounded-xl border p-3 hover:bg-gray-50 cursor-pointer ${dis}">
         <div class="flex items-start justify-between gap-2">
           <div>
             <div class="text-sm font-semibold flex items-center gap-2"><span class="inline-flex items-center justify-center w-8 h-8 rounded-full border bg-white text-gray-700">${iconSvg(id)}</span><span>${title}</span></div>
@@ -1019,7 +1339,7 @@ function computeManualNodeStatuses(ws, tz) {
     }
 
     const draw = () => {
-      const root = document.getElementById('ops-progress-tiles');
+      const root = document.getElementById('flow-nodes');
       if (!root) return;
 
       const cards = Array.from(root.querySelectorAll('[data-flow-node]'));
@@ -1033,6 +1353,8 @@ function computeManualNodeStatuses(ws, tz) {
       }
 
       const rr = rail.getBoundingClientRect();
+
+      if (!rr || rr.width < 80) return;
 
       const x = (id) => {
         const c = centers.get(id);
@@ -1075,6 +1397,21 @@ function computeManualNodeStatuses(ws, tz) {
         return map[id] || '';
       };
 
+      const spineIcon = (id) => {
+        try {
+          const raw = (typeof NODE_ICONS !== 'undefined' && NODE_ICONS && NODE_ICONS[id]) ? String(NODE_ICONS[id]) : '';
+          if (!raw) return '';
+          // Force an explicit size for use inside the spine SVG (ignore Tailwind classes)
+          // Keep original viewBox/path/stroke etc.
+          return raw
+            .replace(/class="[^"]*"/g, 'width="24" height="24"')
+            .replace('<svg ', '<svg x="0" y="0" ');
+        } catch (e) {
+          return '';
+        }
+      };
+      const USE_SPINE_ICONS = true;
+
       // Build segments
       let segs = '';
       for (let i = 0; i < order.length - 1; i++) {
@@ -1094,8 +1431,8 @@ function computeManualNodeStatuses(ws, tz) {
         const n = nodeById.get(id) || { level:'gray', upcoming:true };
         dots += `
           <g>
-            <circle cx="${xi}" cy="16" r="6" fill="${dotFillForLevel(n.level, n.upcoming)}" stroke="${strokeForLevel(n.level, n.upcoming)}" stroke-width="2"></circle>
-            <text x="${xi}" y="6" text-anchor="middle" font-size="10" fill="rgba(55,65,81,0.55)">${label(id)}</text>
+            <!-- icon replaces connector marker (no dot) -->
+            ${(USE_SPINE_ICONS && spineIcon(id)) ? `<g transform="translate(${xi - 12},${-12})">${spineIcon(id)}</g>` : `<text x="${xi}" y="7" text-anchor="middle" font-size="12" font-weight="600" fill="rgba(55,65,81,0.70)">${label(id)}</text>`}
           </g>
         `;
       }
@@ -1106,7 +1443,7 @@ function computeManualNodeStatuses(ws, tz) {
       const ongoing = (xo == null) ? '' : `
         <g>
           <line x1="${xo}" y1="2" x2="${xo}" y2="30" stroke="rgba(17,24,39,0.35)" stroke-width="1"></line>
-          <text x="${xo}" y="40" text-anchor="middle" font-size="10" fill="rgba(17,24,39,0.55)">ongoing</text>
+          <text x="${xo}" y="40" text-anchor="middle" font-size="11" font-weight="600" fill="rgba(17,24,39,0.60)">ongoing</text>
         </g>
       `;
 
@@ -1123,6 +1460,291 @@ function computeManualNodeStatuses(ws, tz) {
       setTimeout(draw, 0);
     });
   }
+
+
+function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
+    const root = document.getElementById('flow-journey');
+    if (!root) return;
+
+    const now = new Date();
+
+    // Determine operational "ongoing" index (same logic as before)
+    let ongoingIdx = 2; // default VAS
+    if ((receiving.receivedPOs || 0) < (receiving.plannedPOs || 0)) {
+      ongoingIdx = 1;
+    } else {
+      const intlInWindow = (intl.originMin instanceof Date) ? (now >= intl.originMin) : false;
+      ongoingIdx = intlInWindow ? 3 : 2;
+    }
+
+    // Node model (milk disabled)
+    const nodes = [
+      { id:'milk', label:'Milk Run', short:'MR', level:'gray', upcoming:true, disabled:true },
+      { id:'receiving', label:'Receiving', short:'RCV', level: receiving.level, upcoming: now < receiving.due },
+      { id:'vas', label:'VAS', short:'VAS', level: vas.level, upcoming: now < vas.due },
+      { id:'intl', label:'Transit & Clearing', short:'T&C', level: intl.level, upcoming: now < intl.originMax },
+      { id:'lastmile', label:'Last Mile', short:'LM', level: manual.levels.lastMile, upcoming: false },
+    ];
+
+    const matte = (hex, alpha) => {
+      const h = (hex || '#9ca3af').replace('#','');
+      const r = parseInt(h.slice(0,2),16) || 156;
+      const g = parseInt(h.slice(2,4),16) || 163;
+      const b = parseInt(h.slice(4,6),16) || 175;
+      return `rgba(${r},${g},${b},${alpha})`;
+    };
+    // Journey/status color palette
+    // - green: on track
+    // - red: delayed
+    // - gray: At-Risk (yellow-ish tone per spec)
+    // - upcoming: distinct from At-Risk (cool neutral)
+    // - future: capability not yet live
+    const levelColor = (level) => ({
+      green: '#34d399',
+      red: '#fb7185',
+      upcoming: '#cbd5e1',
+      yellow: '#e6b800',
+      gray: '#f6d365',
+      future: '#e5e7eb',
+    }[level] || '#9ca3af');
+    const segStroke = (level, upcoming) => upcoming ? matte(levelColor(level), 0.28) : matte(levelColor(level), 0.50);
+    const statusText = (n) => {
+      if (!n) return '—';
+      if (n.disabled) return 'Future';
+      if (n.upcoming) return 'Upcoming';
+      if (n.level === 'green') return 'On Track';
+      if (n.level === 'red') return 'Delayed';
+      return 'At-Risk';
+    };
+    const statusLevel = (n) => {
+      if (!n) return 'gray';
+      if (n.disabled) return 'future';
+      if (n.upcoming) return 'upcoming';
+      return n.level || 'gray';
+    };
+
+
+    const iconSvgFor = (id) => {
+      try {
+        const raw = (typeof NODE_ICONS !== 'undefined' && NODE_ICONS && NODE_ICONS[id]) ? String(NODE_ICONS[id]) : '';
+        if (!raw) return '';
+        return raw
+          .replace(/class="[^"]*"/g, 'width="26" height="26"')
+          .replace('<svg ', '<svg x="0" y="0" ');
+      } catch { return ''; }
+    };
+
+    // Journey path geometry (viewBox units) - inverted S road
+    const road = {
+      A: { x: 80,  y: 70 },   // start
+      B: { x: 920, y: 70 },   // top-right corner
+      C: { x: 920, y: 185 },  // mid-right corner
+      D: { x: 120, y: 185 },  // mid-left corner
+      E: { x: 120, y: 315 },  // bottom-left corner
+      F: { x: 920, y: 315 },  // end
+    };
+    const rad = 40;
+
+    // Node placement on the road (per your reference layout)
+    const pts = {
+      milk:      { x: road.A.x,                         y: road.A.y },        // start of the journey
+      receiving: { x: Math.round((road.A.x + road.B.x) / 2), y: road.A.y },    // middle of first straight
+      vas:       { x: Math.round((road.C.x + road.D.x) / 2), y: road.C.y },    // middle of second straight
+      intl:      { x: Math.round((road.D.x + rad + road.F.x) / 2), y: road.E.y }, // middle of third straight
+      lastmile:  { x: road.F.x,                         y: road.F.y },        // end point
+    };
+
+    const order = ['milk','receiving','vas','intl','lastmile'];
+
+    // Road path (inverted S; straight segments with rounded joins)
+    // Road path (inverted S with rounded corners)
+    const roadPath = `
+  M ${road.A.x} ${road.A.y}
+  H ${road.B.x - rad}
+  A ${rad} ${rad} 0 0 1 ${road.B.x} ${road.A.y + rad}
+  V ${road.C.y - rad}
+  A ${rad} ${rad} 0 0 1 ${road.B.x - rad} ${road.C.y}
+  H ${road.D.x + rad}
+  A ${rad} ${rad} 0 0 0 ${road.D.x} ${road.C.y + rad}
+  V ${road.E.y - rad}
+  A ${rad} ${rad} 0 0 0 ${road.D.x + rad} ${road.E.y}
+  H ${road.F.x}
+`;
+
+// Colored segments along the road between milestones (keeps visuals consistent with the path)
+    let segs = '';
+    const segPathBetween = (fromId, toId) => {
+      // Paths follow the same rounded road geometry so colors sit on the “asphalt”.
+      if (fromId === 'milk' && toId === 'receiving') {
+        return `M ${pts.milk.x} ${pts.milk.y} L ${pts.receiving.x} ${pts.receiving.y}`;
+      }
+      if (fromId === 'receiving' && toId === 'vas') {
+        return `
+          M ${pts.receiving.x} ${pts.receiving.y}
+          L ${road.B.x - rad} ${road.A.y}
+          A ${rad} ${rad} 0 0 1 ${road.B.x} ${road.A.y + rad}
+          L ${road.B.x} ${road.C.y - rad}
+          A ${rad} ${rad} 0 0 1 ${road.B.x - rad} ${road.C.y}
+          L ${pts.vas.x} ${road.C.y}
+        `;
+      }
+      if (fromId === 'vas' && toId === 'intl') {
+        // second straight -> left curve -> bottom straight to Transit & Clearing (mid of bottom line)
+        const x1 = road.D.x + rad;
+        return `
+          M ${pts.vas.x} ${road.C.y}
+          L ${x1} ${road.C.y}
+          A ${rad} ${rad} 0 0 0 ${road.D.x} ${road.C.y + rad}
+          L ${road.D.x} ${road.E.y - rad}
+          A ${rad} ${rad} 0 0 0 ${x1} ${road.E.y}
+          L ${pts.intl.x} ${pts.intl.y}
+        `;
+      }
+      if (fromId === 'intl' && toId === 'lastmile') {
+        // bottom line straight to Last Mile
+        return `
+          M ${pts.intl.x} ${pts.intl.y}
+          L ${pts.lastmile.x} ${pts.lastmile.y}
+        `;
+      }
+      // Fallback: straight
+      const a = pts[fromId], b = pts[toId];
+      if (!a || !b) return '';
+      return `M ${a.x} ${a.y} L ${b.x} ${b.y}`;
+    };
+
+    for (let i = 0; i < order.length - 1; i++) {
+      const fromId = order[i];
+      const toId = order[i+1];
+      // Segment color follows the destination node status, except Milk Run → Receiving which is always "future" (gray road).
+      const nb = (fromId === 'milk') ? { level:'gray', upcoming:true } : (nodes[i+1] || { level:'gray', upcoming:true });
+      const d = segPathBetween(fromId, toId);
+      if (!d) continue;
+      segs += `<path d="${d}" fill="none" stroke="${segStroke(nb.level, nb.upcoming)}" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" />`;
+    }
+
+    // Ghost/base road behind colored segments (thicker, subtle)
+    const baseRoad = `<path d="${roadPath}" fill="none" stroke="rgba(148,163,184,0.45)" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" />`;
+
+    // Center dashed line
+    const dashed = `<path d="${roadPath}" fill="none" stroke="rgba(255,255,255,0.65)" stroke-width="2.5" stroke-dasharray="7 7" stroke-linecap="round" stroke-linejoin="round" />`;
+
+    // Milestones (icons in white circles)
+    let milestones = '';
+    for (let i = 0; i < order.length; i++) {
+      const id = order[i];
+      const p = pts[id];
+      const n = nodes[i];
+      if (!p || !n) continue;
+      const icon = iconSvgFor(id);
+      const isOngoing = (i === ongoingIdx);
+      const ring = isOngoing ? 'rgba(17,24,39,0.25)' : 'rgba(17,24,39,0.12)';
+      const labelX = p.x;
+      const labelAnchor = 'middle';
+      // Node name above icon
+      const nameY = p.y - 34;
+
+      const st = statusText(n);
+      const stLevel = statusLevel(n);
+      const stBg = matte(levelColor(stLevel), 0.14);
+      const stFg = matte(levelColor(stLevel), 0.92);
+
+      // Status pill below icon
+      const pillW = Math.max(58, 14 + (String(st).length * 7));
+      const pillH = 18;
+      const pillY = p.y + 22;
+      const pillX = p.x - (pillW / 2);
+      const pillTextX = p.x;
+
+
+      milestones += `
+        <g class="flow-journey-hit" data-node="${id}" data-journey-node="${id}">
+          <circle cx="${p.x}" cy="${p.y}" r="24" fill="white" stroke="${ring}" stroke-width="${isOngoing ? 2 : 1.2}"></circle>
+          ${icon ? `<g transform="translate(${p.x - 13},${p.y - 13})">${icon}</g>` :
+                   `<text x="${p.x}" y="${p.y + 4}" text-anchor="middle" font-size="12" font-weight="700" fill="rgba(55,65,81,0.75)">${n.short}</text>`}
+          <text x="${labelX}" y="${nameY}" text-anchor="${labelAnchor}" font-size="12" font-weight="700" fill="rgba(17,24,39,0.70)">${n.label}</text>
+          <g>
+            <rect x="${pillX}" y="${pillY}" width="${pillW}" height="${pillH}" rx="${pillH/2}" fill="${stBg}" stroke="rgba(17,24,39,0.06)" stroke-width="1"></rect>
+            <text x="${pillTextX}" y="${pillY + 13}" text-anchor="middle" font-size="11" font-weight="700" fill="${stFg}">${st}</text>
+          </g>
+        </g>
+      `;
+    }
+
+    const ongoingId = order[Math.max(0, Math.min(order.length - 1, ongoingIdx))];
+    const op = pts[ongoingId];
+    const ongoing = (!op) ? '' : `
+      <g>
+        <line x1="${op.x}" y1="${op.y + 28}" x2="${op.x}" y2="${op.y + 70}" stroke="rgba(17,24,39,0.25)" stroke-width="1" />
+        <text x="${op.x}" y="${op.y + 86}" text-anchor="middle" font-size="11" font-weight="600" fill="rgba(17,24,39,0.55)">ongoing</text>
+      </g>
+    `;
+
+    // Compact stats blocks under the journey (wow factor but stable)
+    const stat = (title, a, b, n) => {
+      const st = statusText(n);
+      const stLevel = statusLevel(n);
+      const bg = matte(levelColor(stLevel), 0.14);
+      const fg = matte(levelColor(stLevel), 0.92);
+      return `
+        <div class="rounded-xl border bg-white p-2">
+          <div class="flex items-center justify-between gap-2">
+            <div class="text-xs font-semibold text-gray-700">${title}</div>
+            <span style="background:${bg};color:${fg};border:1px solid rgba(17,24,39,0.06);" class="text-[11px] font-bold px-2 py-[2px] rounded-full whitespace-nowrap">${st}</span>
+          </div>
+          <div class="text-xs text-gray-500 mt-0.5">${a || ''}</div>
+          ${b ? `<div class="text-xs text-gray-500">${b}</div>` : ''}
+        </div>
+      `;
+    };
+
+    // Use existing computed values; never assume presence
+    const recA = `${(receiving.receivedPOs||0)}/${(receiving.plannedPOs||0)} POs`;
+    const recB = `${(receiving.cartonsOutTotal||0)} out • ${(receiving.latePOs||0)} late`;
+    const vasA = `${Math.round((vas.completion||0)*100)}% complete`;
+    const vasB = `${(vas.appliedUnits||0)}/${(vas.plannedUnits||0)} units`;
+    const intlA = `${(intl.lanes||[]).length} lanes`;
+    const intlB = `${(intl.missingDocs||0)} docs missing • ${(intl.holds||0)} hold`;
+    const lmA = `${(manual.manual?.last_mile_open||0)}/${(manual.manual?.last_mile_total||0)} open`;
+    const lmB = manual.manual?.delivered_at ? `Delivered set` : `Delivered (set)`;
+
+    root.innerHTML = `
+      <div class="w-full overflow-hidden">
+        <svg viewBox="0 0 1000 380" preserveAspectRatio="xMidYMid meet" aria-label="Journey map" style="height:320px; width:100%;">
+
+          <!-- road shadow (subtle) -->
+          <path d="${roadPath}" fill="none" stroke="rgba(148,163,184,0.25)" stroke-width="20" stroke-linecap="round" stroke-linejoin="round" transform="translate(2,3)"></path>
+          <!-- road base -->
+          <path d="${roadPath}" fill="none" stroke="rgba(148,163,184,0.45)" stroke-width="44" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="${roadPath}" fill="none" stroke="rgba(107,114,128,0.20)" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" />
+          ${baseRoad}
+          ${segs}
+          ${dashed}
+          ${milestones}
+          ${ongoing}
+        </svg>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2">
+        ${stat('Receiving', recA, recB, nodes[1])}
+        ${stat('VAS applied', vasA, vasB, nodes[2])}
+        ${stat('Transit & Clearing', intlA, intlB, nodes[3])}
+        ${stat('Last Mile', lmA, lmB, nodes[4])}
+      </div>
+    `;
+
+    // Click handlers (use existing selection + detail render; never assume)
+    try {
+      root.querySelectorAll('[data-journey-node]').forEach(el => {
+        el.addEventListener('click', () => {
+          const node = el.getAttribute('data-node');
+          UI.selection = { node, sub: null };
+          renderDetail(ws, tz, receiving, vas, intl, manual);
+          highlightSelection();
+        });
+      });
+    } catch {}
+  }
+
 
 function renderTopNodes(ws, tz, receiving, vas, intl, manual) {
     // use a single 'now' reference for all upcoming/past comparisons
@@ -1237,11 +1859,24 @@ function renderTopNodes(ws, tz, receiving, vas, intl, manual) {
   }
 
   function highlightSelection() {
-    const { node } = UI.selection;
+    const { node } = UI.selection || {};
+    // Legacy cards (if present)
     $$('#flow-nodes [data-node]').forEach(el => {
       if (el.getAttribute('data-node') === node) el.classList.add('ring-2', 'ring-[#990033]');
       else el.classList.remove('ring-2', 'ring-[#990033]');
     });
+    // Journey map milestones (SVG groups)
+    try {
+      const root = document.getElementById('flow-journey');
+      if (root) {
+        root.querySelectorAll('[data-journey-node]').forEach(el => {
+          // We can't "ring" SVG groups with Tailwind, so we toggle a data attr and let stroke width handle it via re-render.
+          // Best-effort: add a class for potential CSS hooks.
+          if (el.getAttribute('data-node') === node) el.classList.add('is-selected');
+          else el.classList.remove('is-selected');
+        });
+      }
+    } catch {}
   }
 
   function renderDetail(ws, tz, receiving, vas, intl, manual) {
@@ -1250,6 +1885,9 @@ function renderTopNodes(ws, tz, receiving, vas, intl, manual) {
 
     const now = new Date();
     const sel = UI.selection;
+
+    // Last Mile receipt overlay store (delivery date/POD/note) keyed by container_uid.
+    const lmReceipts = loadLastMileReceipts(ws);
 
     // "upcoming" is optional and controls muted styling for phases that
     // haven't started yet. Must be passed explicitly.
@@ -1394,6 +2032,8 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
     if (sel.node === 'intl') {
       const lanes = (intl.lanes || []).slice();
       const subtitle = `Origin ready window ${fmtInTZ(intl.originMin, tz)} – ${fmtInTZ(intl.originMax, tz)}`;
+      const wcState = loadIntlWeekContainers(ws);
+      const weekContainers = (wcState && Array.isArray(wcState.containers)) ? wcState.containers : [];
 
       const totalPlanned = lanes.reduce((a, r) => a + (r.plannedUnits || 0), 0);
       const totalApplied = lanes.reduce((a, r) => a + (r.appliedUnits || 0), 0);
@@ -1434,7 +2074,14 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
       const rows = lanes.map(l => {
         const st = `<span class="text-xs px-2 py-0.5 rounded-full border ${pill(l.level)} whitespace-nowrap">${statusLabel(l.level)}</span>`;
         const ticket = l.ticket && l.ticket !== 'NO_TICKET' ? escapeHtml(l.ticket) : '<span class="text-gray-400">—</span>';
-        const containers = (l.manual && Array.isArray(l.manual.containers)) ? l.manual.containers.filter(c => (c && String(c.container_id||c.container||'').trim())).length : 0;
+        const containers = weekContainers
+          .filter(c => Array.isArray(c?.lane_keys) && c.lane_keys.includes(l.key))
+          .filter(c => {
+            const cid = String(c?.container_id || c?.container || '').trim();
+            const ves = String(c?.vessel || '').trim();
+            const pos = String(c?.pos || '').trim();
+            return !!(cid || ves || pos);
+          }).length;
         return [
           `<button class="text-left hover:underline" data-lane="${escapeAttr(l.key)}">${escapeHtml(l.supplier)}</button>`,
           ticket,
@@ -1472,39 +2119,59 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
       const { baselines } = manual;
       const subtitle = `Delivery window ${fmtInTZ(baselines.lastMileMin, tz)} – ${fmtInTZ(baselines.lastMileMax, tz)}`;
 
-      // Build container rows from Intl lanes (Supplier × Zendesk × Freight), using the same lane manual store.
+      // Build container rows from week-level Intl containers.
       const lanes = (intl && Array.isArray(intl.lanes)) ? intl.lanes : [];
+      const laneByKey = {};
+      for (const l of lanes) laneByKey[l.key] = l;
+
+      const wcState = loadIntlWeekContainers(ws);
+      const weekContainers = (wcState && Array.isArray(wcState.containers)) ? wcState.containers : [];
+
       const contRows = [];
-      for (const l of lanes) {
-        const ticket = l.ticket && l.ticket !== 'NO_TICKET' ? l.ticket : '';
-        const list = (l.manual && Array.isArray(l.manual.containers)) ? l.manual.containers : [];
-        for (let i = 0; i < list.length; i++) {
-          const c = list[i] || {};
-          const cid = String(c.container_id || c.container || '').trim();
-          const key = `${l.key}::${cid || i}`;
-          if (!cid && !c.vessel && !c.pos) continue;
-          contRows.push({
-            key,
-            laneKey: l.key,
-            supplier: l.supplier,
-            ticket,
-            freight: l.freight,
-            container_id: cid || '—',
-            size_ft: String(c.size_ft || '').trim(),
-            vessel: String(c.vessel || '').trim(),
-            delivery_at: c.delivery_at ? String(c.delivery_at).slice(0, 16) : '',
-            pod_received: !!c.pod_received,
-            note: String(c.last_mile_note || ''),
-          });
-        }
+      for (let i = 0; i < weekContainers.length; i++) {
+        const c = weekContainers[i] || {};
+        const uid = String(c.container_uid || c.uid || '').trim() || `idx${i}`;
+        const cid = String(c.container_id || c.container || '').trim();
+        const vessel = String(c.vessel || '').trim();
+        const pos = String(c.pos || '').trim();
+        const lane_keys = Array.isArray(c.lane_keys) ? c.lane_keys : [];
+
+        if (!cid && !vessel && !pos && !lane_keys.length) continue;
+
+        const laneInfos = lane_keys.map(k => laneByKey[k]).filter(Boolean);
+        const suppliers = uniqNonEmpty(laneInfos.map(x => x.supplier));
+        const freights = uniqNonEmpty(laneInfos.map(x => x.freight));
+        const tickets = uniqNonEmpty(laneInfos.map(x => (x.ticket && x.ticket !== 'NO_TICKET') ? x.ticket : ''));
+
+        const supplierDisplay = suppliers.length ? (suppliers[0] + (suppliers.length > 1 ? ` (+${suppliers.length - 1})` : '')) : '—';
+        const freightDisplay = freights.length ? freights.join(', ') : (laneInfos[0]?.freight || '');
+        const ticketDisplay = tickets.join(', ');
+
+        const rcp = (uid && lmReceipts && lmReceipts[uid]) ? lmReceipts[uid] : null;
+        contRows.push({
+          key: `wc::${uid}`,
+          uid,
+          src_idx: i,
+          supplier: supplierDisplay,
+          ticket: ticketDisplay,
+          freight: freightDisplay,
+          container_id: cid,
+          container_id_display: cid || '—',
+          size_ft: String(c.size_ft || '').trim(),
+          vessel,
+          delivery_local: String((rcp && rcp.delivery_local) || '').trim(),
+          pod_received: !!((rcp && rcp.pod_received) || false),
+          note: String((rcp && rcp.last_mile_note) || ''),
+          laneCount: lane_keys.length,
+        });
       }
 
-      // Status
-      const level = contRows.some(r => !r.delivery_at) ? 'yellow' : 'green';
+// Status
+      const level = contRows.some(r => !r.delivery_local) ? 'yellow' : 'green';
 
       const insights = [
         'Track delivery per container / AWB (derived from Intl lanes).',
-        contRows.length ? `${contRows.filter(r => r.delivery_at).length}/${contRows.length} containers have a delivery date.` : 'Add containers under Transit & Clearing to start tracking Last Mile.',
+        contRows.length ? `${contRows.filter(r => r.delivery_local).length}/${contRows.length} containers have a delivery date.` : 'Add containers under Transit & Clearing to start tracking Last Mile.',
       ];
 
       const kpis = `
@@ -1515,7 +2182,7 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
           </div>
           <div class="rounded-lg border p-2">
             <div class="text-[11px] text-gray-500">Delivered dates set</div>
-            <div class="text-sm font-semibold">${contRows.filter(r => r.delivery_at).length}</div>
+            <div class="text-sm font-semibold">${contRows.filter(r => r.delivery_local).length}</div>
           </div>
           <div class="rounded-lg border p-2">
             <div class="text-[11px] text-gray-500">POD received</div>
@@ -1523,28 +2190,30 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
           </div>
           <div class="rounded-lg border p-2">
             <div class="text-[11px] text-gray-500">Open</div>
-            <div class="text-sm font-semibold">${contRows.filter(r => !r.delivery_at).length}</div>
+            <div class="text-sm font-semibold">${contRows.filter(r => !r.delivery_local).length}</div>
           </div>
         </div>
       `;
 
       const rows = contRows.map(r => {
-        const st = r.delivery_at ? `<span class="text-xs px-2 py-0.5 rounded-full border ${pill('green')} whitespace-nowrap">Scheduled</span>`
+        const st = r.delivery_local ? `<span class="text-xs px-2 py-0.5 rounded-full border ${pill('green')} whitespace-nowrap">Scheduled</span>`
                                  : `<span class="text-xs px-2 py-0.5 rounded-full border ${pill('yellow')} whitespace-nowrap">Open</span>`;
         return [
           `<button class="text-left hover:underline" data-cont="${escapeAttr(r.key)}">${escapeHtml(r.supplier)}</button>`,
           r.ticket ? escapeHtml(r.ticket) : '<span class="text-gray-400">—</span>',
           escapeHtml(r.freight || ''),
-          escapeHtml(r.container_id || ''),
+          escapeHtml(r.container_id_display || ''),
           escapeHtml(r.size_ft ? (r.size_ft + 'ft') : '—'),
           escapeHtml(r.vessel || '—'),
-          r.delivery_at ? escapeHtml(r.delivery_at.replace('T',' ')) : '<span class="text-gray-400">—</span>',
-          r.pod_received ? 'Yes' : 'No',
+          r.delivery_local ? escapeHtml(String(r.delivery_local).replace('T',' ')) : '<span class="text-gray-400">—</span>',
           st,
+          r.delivery_local
+            ? '<span class="text-gray-400">—</span>'
+            : `<button data-lm-deliver="1" data-ws="${escapeAttr(ws)}" data-uid="${escapeAttr(r.uid)}" class="px-2 py-1 rounded-lg text-xs border bg-emerald-50 hover:bg-emerald-100">Receive</button>`,
         ];
       });
 
-      const selectedKey = (sel.sub && String(sel.sub).includes('::')) ? sel.sub : (contRows[0]?.key || null);
+      const selectedKey = sel.sub ? String(sel.sub) : (contRows[0]?.key || null);
       const selected = selectedKey ? contRows.find(x => x.key === selectedKey) : null;
 
       const editor = selected ? lastMileEditor(ws, tz, selected) : `
@@ -1557,7 +2226,7 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
         kpis,
         `<div class="mt-3 rounded-xl border p-3">
           <div class="text-sm font-semibold text-gray-700">Containers</div>
-          ${table(['Supplier', 'Zendesk', 'Freight', 'Container / AWB', 'Size', 'Vessel', 'Delivery date', 'POD', 'Status'], rows)}
+          ${table(['Supplier', 'Zendesk', 'Freight', 'Container / AWB', 'Size', 'Vessel', 'Delivered at', 'Status', 'Action'], rows)}
         </div>`,
         editor,
       ].join('');
@@ -1579,9 +2248,8 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
   function intlLaneEditor(ws, tz, intl, lane) {
     const manual = lane.manual || {};
     const ticket = lane.ticket && lane.ticket !== 'NO_TICKET' ? lane.ticket : '';
-    const isAir = /air/i.test(String(lane.freight || ''));
 
-    const v = (iso) => (iso ? String(iso).slice(0, 16) : '');
+    const v = (iso) => toLocalDT(iso);
 
     const pack = v(manual.packing_list_ready_at);
     const originClr = v(manual.origin_customs_cleared_at);
@@ -1592,41 +2260,72 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
     const hold = !!manual.customs_hold;
     const note = String(manual.note || '');
 
-    const containers = Array.isArray(manual.containers) ? manual.containers : [];
-    const rows = (containers.length ? containers : [{ container_id: '', size_ft: '40', vessel: '', pos: '' }])
-      .map((c, idx) => {
-        const id = String(c.container_id || c.container || '').trim();
-        const size = String(c.size_ft || '40').trim();
-        const vessel = String(c.vessel || '').trim();
-        const pos = String(c.pos || c.po_list || '').trim();
-        return `
-          <div class="flow-cont-row grid grid-cols-12 gap-2 items-end border rounded-lg p-2" data-idx="${idx}">
-            <label class="col-span-12 sm:col-span-4 text-xs">
-              <div class="text-[11px] text-gray-500 mb-1">${isAir ? 'AWB / Shipment Ref (free text)' : 'Container (free text)'}</div>
-              <input class="flow-cont-id w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(id)}" placeholder="${isAir ? 'e.g. 176-12345678' : 'e.g. TGHU1234567'}"/>
-            </label>
-            <label class="col-span-6 sm:col-span-2 text-xs ${isAir ? 'hidden' : ''}">
-              <div class="text-[11px] text-gray-500 mb-1">Size</div>
-              <select class="flow-cont-size w-full px-2 py-1.5 border rounded-lg bg-white">
-                <option value="20" ${size === '20' ? 'selected' : ''}>20ft</option>
-                <option value="40" ${size === '40' ? 'selected' : ''}>40ft</option>
-              </select>
-            </label>
-            </label>
-            <label class="col-span-6 sm:col-span-6 text-xs">
-              <div class="text-[11px] text-gray-500 mb-1">Vessel</div>
-              <input class="flow-cont-vessel w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(vessel)}" placeholder="e.g. MAERSK XYZ"/>
-            </label>
-            <label class="col-span-12 text-xs">
-              <div class="text-[11px] text-gray-500 mb-1">POs in this container (comma-separated)</div>
-              <input class="flow-cont-pos w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(pos)}" placeholder="WADA002089, WAAE002227"/>
-            </label>
-            <div class="col-span-12 flex justify-end">
-              <button class="flow-cont-remove text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Remove</button>
-            </div>
+    // Week-level containers (independent of selected lane)
+    const weekState = loadIntlWeekContainers(ws);
+    const weekContainers = (weekState && Array.isArray(weekState.containers)) ? weekState.containers : [];
+    const lanes = Array.isArray(intl?.lanes) ? intl.lanes : [];
+    const laneOptions = lanes.map(l => ({
+      key: l.key,
+      label: `${l.supplier} • ${(l.ticket && l.ticket !== 'NO_TICKET') ? l.ticket : '—'} • ${l.freight}`
+    }));
+
+    const contRows = (weekContainers.length ? weekContainers : [{
+      container_uid: _uid('c'),
+      container_id: '',
+      size_ft: '40',
+      vessel: '',
+      pos: '',
+      lane_keys: [lane.key],
+    }]).map((c) => {
+      const uid = String(c.container_uid || c.uid || '').trim() || _uid('c');
+      const cid = String(c.container_id || '').trim();
+      const size_ft = String(c.size_ft || '').trim() || '40';
+      const vessel = String(c.vessel || '').trim();
+      const pos = String(c.pos || '').trim();
+      const lane_keys = Array.isArray(c.lane_keys) ? c.lane_keys : [];
+
+      return `
+        <div class="flow-wc-row grid grid-cols-12 gap-2 items-end border rounded-lg p-2" data-uid="${escapeAttr(uid)}">
+          <label class="col-span-12 sm:col-span-5 text-xs">
+            <div class="text-[11px] text-gray-500 mb-1">Lanes on this container</div>
+            <select class="flow-wc-lanes w-full px-2 py-1.5 border rounded-lg bg-white" multiple>
+              ${laneOptions.map(o => {
+                const sel = lane_keys.includes(o.key) ? 'selected' : '';
+                return `<option value="${escapeAttr(o.key)}" ${sel}>${escapeHtml(o.label)}</option>`;
+              }).join('')}
+            </select>
+            <div class="text-[11px] text-gray-500 mt-1">Tip: hold Ctrl/⌘ to select multiple</div>
+          </label>
+
+          <label class="col-span-12 sm:col-span-4 text-xs">
+            <div class="text-[11px] text-gray-500 mb-1">Container / AWB (free text)</div>
+            <input class="flow-wc-id w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(cid)}" placeholder="e.g. TGHU1234567 / 176-12345678"/>
+          </label>
+
+          <label class="col-span-6 sm:col-span-1 text-xs">
+            <div class="text-[11px] text-gray-500 mb-1">Size</div>
+            <select class="flow-wc-size w-full px-2 py-1.5 border rounded-lg bg-white">
+              <option value="20" ${size_ft === '20' ? 'selected' : ''}>20</option>
+              <option value="40" ${size_ft === '40' ? 'selected' : ''}>40</option>
+            </select>
+          </label>
+
+          <label class="col-span-6 sm:col-span-2 text-xs">
+            <div class="text-[11px] text-gray-500 mb-1">Vessel</div>
+            <input class="flow-wc-vessel w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(vessel)}" placeholder="e.g. MAERSK XYZ"/>
+          </label>
+
+          <label class="col-span-12 text-xs">
+            <div class="text-[11px] text-gray-500 mb-1">POs (optional, comma-separated)</div>
+            <input class="flow-wc-pos w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(pos)}" placeholder="WADA002089, WAAE002227"/>
+          </label>
+
+          <div class="col-span-12 flex justify-end">
+            <button class="flow-wc-remove text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Remove</button>
           </div>
-        `;
-      }).join('');
+        </div>
+      `;
+    }).join('');
 
     return `
       <div class="mt-3 rounded-xl border p-3">
@@ -1645,10 +2344,8 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
 
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
           <div class="rounded-xl border p-3">
-            <div class="text-sm font-semibold text-gray-700 flex items-center gap-2">
-              ${iconDoc()} <span>Milestones</span>
-            </div>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+            <div class="text-sm font-semibold text-gray-700">Docs & customs milestones</div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
               <label class="text-sm">
                 <div class="text-xs text-gray-500 mb-1">Packing list ready</div>
                 <input id="flow-intl-pack" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${pack}"/>
@@ -1669,8 +2366,10 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
                 <div class="text-xs text-gray-500 mb-1">Destination customs cleared</div>
                 <input id="flow-intl-destclr" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${destClr}"/>
               </label>
+            </div>
 
-              <label class="text-sm flex items-center gap-2 mt-6">
+            <div class="flex items-center gap-3 mt-3">
+              <label class="text-sm flex items-center gap-2">
                 <input id="flow-intl-hold" type="checkbox" class="h-4 w-4" ${hold ? 'checked' : ''}/>
                 <span>Customs hold</span>
               </label>
@@ -1680,25 +2379,31 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
               <div class="text-xs text-gray-500 mb-1">Note (optional)</div>
               <textarea id="flow-intl-note" rows="2" class="w-full px-2 py-1.5 border rounded-lg" placeholder="Quick update for the team...">${escapeHtml(note)}</textarea>
             </label>
+
+            <div class="flex items-center justify-between mt-3">
+              <div id="flow-intl-save-msg" class="text-xs text-gray-500"></div>
+              <button id="flow-intl-save" data-lane="${escapeAttr(lane.key)}" class="px-3 py-1.5 rounded-lg text-sm border bg-white hover:bg-gray-50">Save lane</button>
+            </div>
           </div>
 
           <div class="rounded-xl border p-3">
             <div class="flex items-center justify-between">
               <div class="text-sm font-semibold text-gray-700 flex items-center gap-2">
-                ${iconContainer()} <span>Containers & Vessel</span>
+                ${iconContainer()} <span>Containers (week-level)</span>
               </div>
-              <button id="flow-cont-add" class="text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Add container</button>
+              <div class="flex items-center gap-2">
+                <button id="flow-wc-add" class="text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Add</button>
+                <button id="flow-wc-save" class="text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Save containers</button>
+              </div>
             </div>
-            <div id="flow-cont-list" class="mt-3 flex flex-col gap-2">
-              ${rows}
+            <div id="flow-wc-list" class="mt-3 flex flex-col gap-2">
+              ${contRows}
             </div>
-            <div class="text-[11px] text-gray-500 mt-2">Tip: for Air, use AWB / Shipment Ref. Vessel is free text. Add POs if helpful.</div>
+            <div id="flow-wc-save-msg" class="text-xs text-gray-500 mt-2"></div>
+            <div class="text-[11px] text-gray-500 mt-2">
+              One container can map to multiple lanes. These containers feed Last Mile immediately.
+            </div>
           </div>
-        </div>
-
-        <div class="flex items-center justify-between mt-3">
-          <div id="flow-intl-save-msg" class="text-xs text-gray-500"></div>
-          <button id="flow-intl-save" data-lane="${escapeAttr(lane.key)}" class="px-3 py-1.5 rounded-lg text-sm border bg-white hover:bg-gray-50">Save</button>
         </div>
       </div>
     `;
@@ -1720,58 +2425,141 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
     });
 
 
-    // Containers UI (add/remove)
-    const addBtn = detail.querySelector('#flow-cont-add');
-    if (addBtn && !addBtn.dataset.bound) {
-      addBtn.dataset.bound = '1';
-      addBtn.addEventListener('click', () => {
-        const list = detail.querySelector('#flow-cont-list');
+    // Week-level Containers UI (add/remove/save)
+    const wcAdd = detail.querySelector('#flow-wc-add');
+    if (wcAdd && !wcAdd.dataset.bound) {
+      wcAdd.dataset.bound = '1';
+      wcAdd.addEventListener('click', () => {
+        const list = detail.querySelector('#flow-wc-list');
         if (!list) return;
+
+        // Clone lane options from the first existing multi-select (rendered from data) to keep UX stable.
+        const protoSelect = detail.querySelector('.flow-wc-lanes');
+        const optionsHtml = protoSelect ? protoSelect.innerHTML : '';
+
+        const uid = (typeof crypto !== 'undefined' && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : _uid('c');
+
         const wrap = document.createElement('div');
-        wrap.className = 'flow-cont-row grid grid-cols-12 gap-2 items-end border rounded-lg p-2';
+        wrap.className = 'flow-wc-row grid grid-cols-12 gap-2 items-end border rounded-lg p-2';
+        wrap.dataset.uid = uid;
+
         wrap.innerHTML = `
-          <label class="col-span-12 sm:col-span-4 text-xs">
-            <div class="text-[11px] text-gray-500 mb-1">${isAir ? 'AWB / Shipment Ref (free text)' : 'Container (free text)'}</div>
-            <input class="flow-cont-id w-full px-2 py-1.5 border rounded-lg" value="" placeholder="${isAir ? 'e.g. 176-12345678' : 'e.g. TGHU1234567'}"/>
+          <label class="col-span-12 sm:col-span-5 text-xs">
+            <div class="text-[11px] text-gray-500 mb-1">Lanes on this container</div>
+            <select class="flow-wc-lanes w-full px-2 py-1.5 border rounded-lg bg-white" multiple></select>
+            <div class="text-[11px] text-gray-500 mt-1">Tip: hold Ctrl/⌘ to select multiple</div>
           </label>
-          <label class="col-span-6 sm:col-span-2 text-xs">
+          <label class="col-span-12 sm:col-span-4 text-xs">
+            <div class="text-[11px] text-gray-500 mb-1">Container / AWB (free text)</div>
+            <input class="flow-wc-id w-full px-2 py-1.5 border rounded-lg" value="" placeholder="e.g. TGHU1234567 / 176-12345678"/>
+          </label>
+          <label class="col-span-6 sm:col-span-1 text-xs">
             <div class="text-[11px] text-gray-500 mb-1">Size</div>
-            <select class="flow-cont-size w-full px-2 py-1.5 border rounded-lg bg-white">
-              <option value="20">20ft</option>
-              <option value="40" selected>40ft</option>
+            <select class="flow-wc-size w-full px-2 py-1.5 border rounded-lg bg-white">
+              <option value="20">20</option>
+              <option value="40" selected>40</option>
             </select>
           </label>
-          <label class="col-span-6 sm:col-span-6 text-xs">
+          <label class="col-span-6 sm:col-span-2 text-xs">
             <div class="text-[11px] text-gray-500 mb-1">Vessel</div>
-            <input class="flow-cont-vessel w-full px-2 py-1.5 border rounded-lg" value="" placeholder="e.g. MAERSK XYZ"/>
+            <input class="flow-wc-vessel w-full px-2 py-1.5 border rounded-lg" value="" placeholder="e.g. MAERSK XYZ"/>
           </label>
           <label class="col-span-12 text-xs">
-            <div class="text-[11px] text-gray-500 mb-1">POs in this container (comma-separated)</div>
-            <input class="flow-cont-pos w-full px-2 py-1.5 border rounded-lg" value="" placeholder="WADA002089, WAAE002227"/>
+            <div class="text-[11px] text-gray-500 mb-1">POs (optional, comma-separated)</div>
+            <input class="flow-wc-pos w-full px-2 py-1.5 border rounded-lg" value="" placeholder="WADA002089, WAAE002227"/>
           </label>
           <div class="col-span-12 flex justify-end">
-            <button class="flow-cont-remove text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Remove</button>
+            <button class="flow-wc-remove text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Remove</button>
           </div>
         `;
         list.appendChild(wrap);
+        const sel = wrap.querySelector('.flow-wc-lanes');
+        if (sel && optionsHtml) sel.innerHTML = optionsHtml;
       });
     }
 
-    detail.querySelectorAll('.flow-cont-remove').forEach(btn => {
+    detail.querySelectorAll('.flow-wc-remove').forEach(btn => {
       if (btn.dataset.bound) return;
       btn.dataset.bound = '1';
       btn.addEventListener('click', (e) => {
         e.preventDefault();
-        const row = btn.closest('.flow-cont-row');
-        if (row) row.remove();
+        const row = btn.closest('.flow-wc-row');
+	      if (row) {
+	        // Track explicit removals so Save containers can delete them from the week store.
+	        try {
+	          const uid = String(row.dataset.uid || '').trim();
+	          if (uid) {
+	            window.__flowWcRemovedUids = window.__flowWcRemovedUids || new Set();
+	            window.__flowWcRemovedUids.add(uid);
+	          }
+	        } catch { /* ignore */ }
+	        row.remove();
+	      }
       });
     });
+
+    const wcSave = detail.querySelector('#flow-wc-save');
+    if (wcSave && !wcSave.dataset.bound) {
+      wcSave.dataset.bound = '1';
+      wcSave.addEventListener('click', () => {
+	        const state = loadIntlWeekContainers(ws);
+	        const updates = Array.from(detail.querySelectorAll('.flow-wc-row')).map(row => {
+          const uid = String(row.dataset.uid || '').trim() || _uid('c');
+          const container_id = String(row.querySelector('.flow-wc-id')?.value || '').trim();
+          const size_ft = String(row.querySelector('.flow-wc-size')?.value || '').trim();
+          const vessel = String(row.querySelector('.flow-wc-vessel')?.value || '').trim();
+          const pos = String(row.querySelector('.flow-wc-pos')?.value || '').trim();
+          const sel = row.querySelector('.flow-wc-lanes');
+          const lane_keys = sel && sel.options
+            ? uniqNonEmpty(Array.from(sel.options).filter(o => o.selected).map(o => o.value))
+            : [];
+          return {
+	            ...(state.containers || []).find(c => String(c.container_uid || c.uid || '').trim() === uid) || {},
+            container_uid: uid,
+            container_id,
+            size_ft,
+            vessel,
+            pos,
+            lane_keys,
+          };
+	        }).filter(c => c.container_id || c.vessel || (c.lane_keys && c.lane_keys.length) || c.pos);
+
+	        // Merge updates into prior week containers to avoid accidental overwrites.
+	        const prior = (state && Array.isArray(state.containers)) ? state.containers.slice() : [];
+	        const priorByUid = new Map(prior.map(c => [String(c.container_uid || c.uid || '').trim(), c]));
+	        const removed = (window.__flowWcRemovedUids instanceof Set) ? window.__flowWcRemovedUids : new Set();
+	        const next = [];
+	        // Keep existing containers unless explicitly removed.
+	        for (const c of prior) {
+	          const uid = String(c.container_uid || c.uid || '').trim();
+	          if (uid && removed.has(uid)) continue;
+	          next.push(c);
+	        }
+	        // Apply updates (replace existing by uid, else append)
+	        for (const u of updates) {
+	          const uid = String(u.container_uid || u.uid || '').trim();
+	          if (!uid) continue;
+	          const idx = next.findIndex(c => String(c.container_uid || c.uid || '').trim() === uid);
+	          if (idx >= 0) next[idx] = { ...(next[idx] || {}), ...u, container_uid: uid };
+	          else next.push(u);
+	        }
+
+	        saveIntlWeekContainers(ws, next);
+	        try { if (window.__flowWcRemovedUids instanceof Set) window.__flowWcRemovedUids.clear(); } catch { /* ignore */ }
+        const msg = detail.querySelector('#flow-wc-save-msg');
+        if (msg) msg.textContent = 'Saved';
+        setTimeout(() => refresh(), 10);
+      });
+    }
 
 
     const saveBtn = detail.querySelector('#flow-intl-save');
     if (saveBtn && !saveBtn.dataset.bound) {
       saveBtn.dataset.bound = '1';
       saveBtn.addEventListener('click', () => {
+        const wsNow = String(saveBtn.getAttribute('data-ws') || ws || '').trim() || ws;
         const key = saveBtn.getAttribute('data-lane') || selectedKey;
         if (!key) return;
         const pack = detail.querySelector('#flow-intl-pack')?.value || '';
@@ -1782,31 +2570,14 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
 
         const hold = !!detail.querySelector('#flow-intl-hold')?.checked;
         const note = detail.querySelector('#flow-intl-note')?.value || '';
-
-        // Containers & vessel (free text)
-        const containers = Array.from(detail.querySelectorAll('.flow-cont-row')).map(row => {
-          const container_id = row.querySelector('.flow-cont-id')?.value || '';
-          const size_ft = row.querySelector('.flow-cont-size')?.value || '';
-          const vessel = row.querySelector('.flow-cont-vessel')?.value || '';
-          const pos = row.querySelector('.flow-cont-pos')?.value || '';
-          // Preserve last mile fields if present on existing objects (merged in saveIntlLaneManual)
-          return {
-            container_id: String(container_id || '').trim(),
-            size_ft: String(size_ft || '').trim(),
-            vessel: String(vessel || '').trim(),
-            pos: String(pos || '').trim(),
-          };
-        }).filter(c => c.container_id || c.vessel || c.pos);
-
         const obj = {
-          packing_list_ready_at: pack ? new Date(pack).toISOString() : '',
-          origin_customs_cleared_at: originClr ? new Date(originClr).toISOString() : '',
-          departed_at: departed ? new Date(departed).toISOString() : '',
-          arrived_at: arrived ? new Date(arrived).toISOString() : '',
-          dest_customs_cleared_at: destClr ? new Date(destClr).toISOString() : '',
+          packing_list_ready_at: safeISO(pack),
+          origin_customs_cleared_at: safeISO(originClr),
+          departed_at: safeISO(departed),
+          arrived_at: safeISO(arrived),
+          dest_customs_cleared_at: safeISO(destClr),
           customs_hold: hold,
           note: String(note || ''),
-          containers,
         };
         saveIntlLaneManual(ws, key, obj);
         const msg = detail.querySelector('#flow-intl-save-msg');
@@ -1819,37 +2590,31 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
 
 
 
+  
   function lastMileEditor(ws, tz, r) {
-    const v = (iso) => (iso ? String(iso).slice(0, 16) : '');
-    const delivery = v(r.delivery_at);
-    const pod = !!r.pod_received;
+    const deliveredAt = r.delivery_local ? String(r.delivery_local).replace('T',' ') : '';
     const note = String(r.note || '');
+    const canReceive = !r.delivery_local;
 
     return `
       <div class="mt-3 rounded-xl border p-3">
         <div class="flex items-start justify-between gap-3">
           <div>
-            <div class="text-sm font-semibold text-gray-700">Delivery</div>
-            <div class="text-xs text-gray-500 mt-0.5">
-              <b>${escapeHtml(r.supplier)}</b> • ${r.ticket ? `Zendesk <b>${escapeHtml(r.ticket)}</b> • ` : ''}${escapeHtml(r.freight)} •
-              <b>${escapeHtml(r.container_id)}</b>${r.vessel ? ` • ${escapeHtml(r.vessel)}` : ''}
-            </div>
+            <div class="text-sm font-semibold text-gray-700">Selected container</div>
+            <div class="text-xs text-gray-500 mt-0.5">${escapeHtml(r.container_id || '—')} • ${escapeHtml(r.vessel || '—')}</div>
           </div>
-          <div class="flex items-center gap-2">
-            <span class="dot ${dot(delivery ? 'green' : 'yellow')}"></span>
-            <span class="text-xs px-2 py-0.5 rounded-full border ${pill(delivery ? 'green' : 'yellow')} whitespace-nowrap">${delivery ? 'Scheduled' : 'Open'}</span>
-          </div>
+          <div class="text-xs ${canReceive ? 'text-amber-700' : 'text-emerald-700'}">${canReceive ? 'Open' : 'Complete'}</div>
         </div>
 
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-          <label class="text-sm">
-            <div class="text-xs text-gray-500 mb-1">Delivery date (Sydney WH)</div>
-            <input id="flow-lm-delivery" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${delivery}"/>
-          </label>
-          <label class="text-sm flex items-center gap-2 mt-6">
-            <input id="flow-lm-pod" type="checkbox" class="h-4 w-4" ${pod ? 'checked' : ''}/>
-            <span>POD received</span>
-          </label>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-3 text-sm">
+          <div class="rounded-lg border p-2">
+            <div class="text-[11px] text-gray-500">Delivered at</div>
+            <div class="font-medium">${deliveredAt ? escapeHtml(deliveredAt) : '<span class="text-gray-400">—</span>'}</div>
+          </div>
+          <div class="rounded-lg border p-2">
+            <div class="text-[11px] text-gray-500">POD</div>
+            <div class="font-medium">${r.pod_received ? 'Yes' : (canReceive ? '<span class="text-gray-400">—</span>' : 'No')}</div>
+          </div>
         </div>
 
         <label class="text-sm mt-3 block">
@@ -1859,7 +2624,20 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
 
         <div class="flex items-center justify-between mt-3">
           <div id="flow-lm-save-msg" class="text-xs text-gray-500"></div>
-          <button id="flow-lm-save" data-cont="${escapeAttr(r.key)}" data-lane="${escapeAttr(r.laneKey)}" class="px-3 py-1.5 rounded-lg text-sm border bg-white hover:bg-gray-50">Save</button>
+          <div class="flex items-center gap-2">
+            ${canReceive ? `
+              <button data-lm-deliver="1"
+                data-ws="${escapeAttr(ws)}"
+                data-uid="${escapeAttr(r.uid)}"
+                class="px-3 py-1.5 rounded-lg text-sm border bg-emerald-50 hover:bg-emerald-100">Receive (now)</button>
+            ` : `
+              <button disabled class="px-3 py-1.5 rounded-lg text-sm border bg-gray-50 text-gray-400 cursor-not-allowed">Received</button>
+            `}
+            <button data-lm-note-save="1"
+              data-ws="${escapeAttr(ws)}"
+              data-uid="${escapeAttr(r.uid)}"
+              class="px-3 py-1.5 rounded-lg text-sm border bg-white hover:bg-gray-50">Save note</button>
+          </div>
         </div>
       </div>
     `;
@@ -1869,50 +2647,101 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
     const detail = document.getElementById('flow-detail');
     if (!detail) return;
 
-    // container row clicks
+    // container row clicks (selection)
+// NOTE: do NOT bind selection behavior to action buttons inside the row (Receive / Save note).
     detail.querySelectorAll('[data-cont]').forEach(btn => {
       if (btn.dataset.bound) return;
+      // Skip action buttons that may also carry data-cont in older builds.
+      if (btn.hasAttribute('data-lm-deliver') || btn.hasAttribute('data-lm-note-save')) return;
+
       btn.dataset.bound = '1';
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', (e) => {
+        // If the click originated from an action button nested inside, ignore it.
+        if (e && e.target && e.target.closest && e.target.closest('[data-lm-deliver], [data-lm-note-save]')) return;
+
         const k = btn.getAttribute('data-cont');
         UI.selection = { node: 'lastmile', sub: k };
         refresh();
       });
     });
 
-    const saveBtn = detail.querySelector('#flow-lm-save');
-    if (saveBtn && !saveBtn.dataset.bound) {
-      saveBtn.dataset.bound = '1';
-      saveBtn.addEventListener('click', () => {
-        const contKey = saveBtn.getAttribute('data-cont') || selectedKey;
-        const laneKey = saveBtn.getAttribute('data-lane') || '';
-        if (!contKey || !laneKey) return;
+    const bindDeliver = (btn) => {
+      if (!btn || btn.dataset.bound) return;
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        e.stopPropagation();
 
-        const delivery = detail.querySelector('#flow-lm-delivery')?.value || '';
-        const pod = !!detail.querySelector('#flow-lm-pod')?.checked;
-        const note = detail.querySelector('#flow-lm-note')?.value || '';
-
-        // Load lane manual, patch container entry by id
-        const prev = loadIntlLaneManual(ws, laneKey) || {};
-        const containers = Array.isArray(prev.containers) ? prev.containers.slice() : [];
-        const idPart = String(contKey).split('::')[1] || '';
-        const idx = containers.findIndex(c => String(c.container_id || c.container || '').trim() === idPart);
-        if (idx >= 0) {
-          containers[idx] = {
-            ...(containers[idx] || {}),
-            delivery_at: delivery ? new Date(delivery).toISOString() : '',
-            pod_received: pod,
-            last_mile_note: String(note || ''),
-          };
-        }
-
-        saveIntlLaneManual(ws, laneKey, { ...prev, containers });
+        const wsNow = String(btn.getAttribute('data-ws') || ws || '').trim() || ws;
+        const contKey = btn.getAttribute('data-cont') || selectedKey;
+        const uid = String(btn.getAttribute('data-uid') || (String(contKey).split('::')[1] || '')).trim();
 
         const msg = detail.querySelector('#flow-lm-save-msg');
-        if (msg) msg.textContent = 'Saved';
-        setTimeout(() => refresh(), 10);
+
+        if (!uid) {
+          if (msg) { msg.textContent = 'Update failed: missing container uid'; msg.className = 'text-xs text-red-600'; }
+          return;
+        }
+
+        const receipts = loadLastMileReceipts(wsNow);
+        const now = nowLocalDT();
+        const note = String(detail.querySelector('#flow-lm-note')?.value || '');
+
+        receipts[uid] = {
+          ...(receipts[uid] || {}),
+          delivery_local: now,
+          pod_received: true,
+          last_mile_note: note,
+          _updatedAt: new Date().toISOString(),
+        };
+        saveLastMileReceipts(wsNow, receipts);
+
+        if (msg) { msg.textContent = 'Received ✓'; msg.className = 'text-xs text-emerald-700'; }
+
+        // Keep selection on the same container and do a full deterministic re-render.
+        UI.selection = { node: 'lastmile', sub: contKey };
+        refresh();
       });
-    }
+    };
+
+    const bindNoteSave = (btn) => {
+      if (!btn || btn.dataset.bound) return;
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+
+        const wsNow = String(btn.getAttribute('data-ws') || ws || '').trim() || ws;
+        const contKey = btn.getAttribute('data-cont') || selectedKey;
+        const uid = String(btn.getAttribute('data-uid') || (String(contKey).split('::')[1] || '')).trim();
+
+        const msg = detail.querySelector('#flow-lm-save-msg');
+        const note = String(detail.querySelector('#flow-lm-note')?.value || '');
+
+        if (!uid) {
+          if (msg) { msg.textContent = 'Save failed: missing container uid'; msg.className = 'text-xs text-red-600'; }
+          return;
+        }
+
+        const receipts = loadLastMileReceipts(wsNow);
+        receipts[uid] = {
+          ...(receipts[uid] || {}),
+          last_mile_note: note,
+          _updatedAt: new Date().toISOString(),
+        };
+        saveLastMileReceipts(wsNow, receipts);
+
+        if (msg) { msg.textContent = 'Note saved ✓'; msg.className = 'text-xs text-emerald-700'; }
+
+        UI.selection = { node: 'lastmile', sub: contKey };
+        refresh();
+      });
+    };
+
+    detail.querySelectorAll('[data-lm-deliver="1"]').forEach(bindDeliver);
+    detail.querySelectorAll('[data-lm-note-save="1"]').forEach(bindNoteSave);
   }
 
 function manualFormIntl(ws, tz, manual) {
@@ -2047,84 +2876,300 @@ function manualFormIntl(ws, tz, manual) {
 
   // ------------------------- Mount / Refresh -------------------------
   
-  function renderFooterTrends(ws, tz, records) {
-    const el = document.getElementById('flow-footer');
-    if (!el) return;
+  
+function severityRank(level){
+  // Higher number = worse (red > yellow/gray > green)
+  const band = _bandFromColor(level);
+  if (band === 'red') return 3;
+  if (band === 'yellow' || band === 'gray') return 2;
+  if (band === 'green') return 1;
+  return 0;
+}
 
-    const recs = Array.isArray(records)
-      ? records
-      : (records && Array.isArray(records.records) ? records.records
-        : (records && Array.isArray(records.rows) ? records.rows
-          : (records && Array.isArray(records.data) ? records.data : [])));
+function colorToStatus(color){
+  const c = String(color||"").toLowerCase();
+  if(c==="red") return "At-Risk";
+  if(c==="yellow" || c==="amber") return "Watch";
+  if(c==="gray" || c==="grey") return "Future";
+  if(c==="green") return "Ahead-of-Plan";
+  return "";
+}
 
-    // Build day buckets for business week (Mon..Sun) in business TZ
-    const wsDate = new Date(`${ws}T00:00:00Z`);
-    const days = Array.from({ length: 7 }, (_, i) => isoDate(addDays(wsDate, i)));
-    const byDay = new Map(days.map(d => [d, 0]));
+function _bandFromColor(color){
+  const c = String(color||"").toLowerCase().trim();
+  // semantic words
+  if (c === "red") return "red";
+  if (c === "green") return "green";
+  if (c === "yellow" || c === "amber") return "yellow";
+  if (c === "gray" || c === "grey") return "gray";
+  // hex and rgb hints
+  if (c.includes("#ef4444") || c.includes("239,68,68")) return "red";          // red-500
+  if (c.includes("#f59e0b") || c.includes("#fbbf24") || c.includes("245,158,11") || c.includes("251,191,36")) return "yellow"; // amber-500/400
+  if (c.includes("#10b981") || c.includes("#22c55e") || c.includes("16,185,129") || c.includes("34,197,94")) return "green";   // emerald-500 / green-500
+  if (c.includes("#9ca3af") || c.includes("#d1d5db") || c.includes("156,163,175") || c.includes("209,213,219")) return "gray"; // gray-400/300
+  return "gray";
+}
 
-    const tsFields = ['completed_at', 'completedAt', 'applied_at', 'appliedAt', 'updated_at', 'updatedAt', 'created_at', 'createdAt', 'timestamp', 'ts', 'scanned_at', 'scan_time'];
+function statusBg(color){
+  const band = _bandFromColor(color);
+  if (band === "red") return "rgba(239,68,68,0.14)";
+  if (band === "yellow") return "rgba(245,158,11,0.18)";
+  if (band === "green") return "rgba(16,185,129,0.14)";
+  return "rgba(156,163,175,0.18)";
+}
 
-    const bizISO = (dateObj) => {
-      try {
-        const parts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(dateObj);
-        const y = parts.find(p => p.type === 'year')?.value;
-        const m = parts.find(p => p.type === 'month')?.value;
-        const d = parts.find(p => p.type === 'day')?.value;
-        return (y && m && d) ? `${y}-${m}-${d}` : null;
-      } catch {
-        // fallback: UTC date
-        return isoDate(new Date(Date.UTC(dateObj.getUTCFullYear(), dateObj.getUTCMonth(), dateObj.getUTCDate())));
-      }
-    };
-    for (const r of recs || []) {
-      if (!r) continue;
-      if (r.status && String(r.status).toLowerCase() !== 'complete') continue;
-      let ts = null;
-      for (const f of tsFields) {
-        if (r[f]) { ts = r[f]; break; }
-      }
-      const d = ts ? new Date(ts) : null;
-      if (!d || isNaN(d)) continue;
-      // map to YYYY-MM-DD in business timezone so the bars feel intuitive
-      const dayIso = bizISO(d);
-      if (!byDay.has(dayIso)) continue;
+function statusStroke(color){
+  const band = _bandFromColor(color);
+  if (band === "red") return "#ef4444";
+  if (band === "yellow") return "#f59e0b";
+  if (band === "green") return "#10b981";
+  return "#9ca3af";
+}
 
-      const qty = num(
-        r.applied_qty ?? r.appliedQty ?? r.applied_units ?? r.appliedUnits ?? r.applied ??
-        r.target_qty ?? r.targetQty ?? r.planned_qty ?? r.plannedQty ??
-        r.qty ?? r.quantity ?? r.units ?? 0
-      );
-      byDay.set(dayIso, (byDay.get(dayIso) || 0) + qty);
+
+function renderFooterTrends(el, nodes, weekKey) {
+    // Backwards-compatible overload:
+    // Some builds call renderFooterTrends(weekKey, tz, records, receiving, vas, intl, lm).
+    if (typeof el === 'string') {
+      const wk = el;
+      const receiving = arguments[3] || null;
+      const vas = arguments[4] || null;
+      const intl = arguments[5] || null;
+      const lm = arguments[6] || null;
+
+      const footerEl = document.getElementById('vo-footer');
+      const n = [
+        { id: 'receiving', label: 'Receiving', color: (receiving && receiving.color) || '#10b981' },
+        { id: 'vas', label: 'VAS', color: (vas && vas.color) || '#10b981' },
+        { id: 'intl', label: 'Transit', color: (intl && intl.color) || '#10b981' },
+        { id: 'lm', label: 'Last Mile', color: (lm && lm.color) || '#10b981' },
+      ];
+      return renderFooterTrends(footerEl, n, wk);
     }
 
-    const vals = days.map(d => byDay.get(d) || 0);
-    const maxV = Math.max(1, ...vals);
-    const total = vals.reduce((a, b) => a + b, 0);
+    // Normal signature: (el: HTMLElement, nodes: [{label,color}], weekKey: string)
+    if (!el || typeof el !== 'object' || typeof el.innerHTML === 'undefined') return;
 
-    const bars = days.map((d, i) => {
-      const v = vals[i];
-      const h = Math.round((v / maxV) * 42); // px
-      const label = new Date(`${d}T00:00:00Z`).toLocaleDateString('en-US', { weekday: 'short' });
-      return `
-        <div class="flex flex-col items-center justify-end gap-1">
-          <div class="w-6 rounded-md bg-gray-200 border" style="height:46px; display:flex; align-items:flex-end; justify-content:center;">
-            <div class="w-full rounded-md bg-gray-800/20" style="height:${h}px;"></div>
-          </div>
-          <div class="text-[10px] text-gray-500">${label}</div>
-        </div>
-      `;
-    }).join('');
+    const applied = (typeof getAppliedThisWeek === 'function') ? getAppliedThisWeek(weekKey) : 0;
+    const worst = (Array.isArray(nodes) && nodes.length)
+      ? nodes.reduce((acc, n) => severityRank(n.color) > severityRank(acc.color) ? n : acc, nodes[0])
+      : { label: 'Health', color: '#10b981' };
 
+    const pill = (colorToStatus(worst.color) || 'On Track');
     el.innerHTML = `
-      <div class="flex items-start justify-between gap-3">
-        <div>
-          <div class="text-sm font-semibold text-gray-700">This week trend (light)</div>
-          <div class="text-xs text-gray-500 mt-0.5">Applied units per day (from completed records)</div>
-        </div>
-        <div class="text-sm font-semibold">${Math.round(total).toLocaleString()}</div>
+      <div class="flex items-center gap-2">
+        <span class="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs"
+              style="background:${statusBg(worst.color)}; border-color:${statusStroke(worst.color)};">
+          <span class="inline-block h-2 w-2 rounded-full" style="background:${worst.color};"></span>
+          <span class="font-semibold">Health:</span>
+          <span>${pill}</span>
+        </span>
+        <span class="text-xs text-gray-700">Applied this week: <span class="font-semibold">${fmtInt(applied)}</span></span>
       </div>
-      <div class="mt-3 flex gap-2 items-end">${bars}</div>
     `;
+  }
+
+
+
+  // ------------------------- PDF Reporting (Print-to-PDF) -------------------------
+  // Generates a multi-page printable report in a new window and triggers the browser print dialog.
+  // This avoids external PDF libraries and is resilient to undefined data.
+  function escHtml(s) {
+    return String(s ?? '')
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;')
+      .replace(/'/g,'&#39;');
+  }
+
+  function pct(n, d) {
+    const nn = Number(n) || 0;
+    const dd = Number(d) || 0;
+    if (!dd) return '0%';
+    return `${Math.round((nn / dd) * 100)}%`;
+  }
+
+  function fmtDateLocal(d, tz) {
+    try {
+      if (!d) return '—';
+      const dt = (d instanceof Date) ? d : new Date(d);
+      if (isNaN(dt)) return '—';
+      return fmtInTZ(dt, tz);
+    } catch { return '—'; }
+  }
+
+  function weekRangeText(ws, tz) {
+    try {
+      const start = makeBizLocalDate(ws, '00:00', tz);
+      const end = new Date(start.getTime()); end.setDate(end.getDate() + 5); // Mon..Sat-ish for display
+      return `${fmtInTZ(start, tz)} – ${fmtInTZ(end, tz)}`;
+    } catch { return String(ws || ''); }
+  }
+
+  function buildReportHTML(cache) {
+    const ws = cache?.ws || '';
+    const tz = cache?.tz || getBizTZ();
+    const receiving = cache?.receiving || {};
+    const vas = cache?.vas || {};
+    const intl = cache?.intl || {};
+    const manual = cache?.manual || {};
+
+    const suppliers = Array.isArray(receiving.suppliers) ? receiving.suppliers : [];
+
+    const execRows = [
+      ['Week', escHtml(String(ws))],
+      ['Receiving', `${escHtml(pct(receiving.receivedPOs, receiving.plannedPOs))} (${escHtml(receiving.receivedPOs)}/${escHtml(receiving.plannedPOs)} POs)`],
+      ['Cartons out', escHtml(receiving.cartonsOutTotal ?? 0)],
+      ['VAS applied', `${escHtml(pct(vas.appliedUnits, vas.plannedUnits))} (${escHtml(vas.appliedUnits ?? 0)}/${escHtml(vas.plannedUnits ?? 0)} units)`],
+      ['Transit lanes', escHtml(intl.lanesTotal ?? (manual?.intl?.lanes ?? 0) ?? 0)],
+      ['Docs missing', escHtml(intl.docsMissing ?? (manual?.intl?.docsMissing ?? 0) ?? 0)],
+      ['Last Mile open', `${escHtml(manual?.lastmile?.open ?? manual?.lastMile?.open ?? 0)}/${escHtml(manual?.lastmile?.total ?? manual?.lastMile?.total ?? 0)}`],
+    ];
+
+    const supplierTable = suppliers.length ? `
+      <table>
+        <thead>
+          <tr><th>Supplier</th><th>POs received</th><th>Planned units</th><th>Cartons in</th><th>Cartons out</th></tr>
+        </thead>
+        <tbody>
+          ${suppliers.map(s => `
+            <tr>
+              <td>${escHtml(s.supplier)}</td>
+              <td>${escHtml(s.receivedPOs)}/${escHtml(s.poCount)}</td>
+              <td>${escHtml(s.units)}</td>
+              <td>${escHtml(s.cartonsIn)}</td>
+              <td>${escHtml(s.cartonsOut)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    ` : `<div class="muted">No supplier breakdown available for this week.</div>`;
+
+    const nodePage = (title, bodyHtml) => `
+      <section class="page">
+        <div class="hdr">
+          <div class="h1">${escHtml(title)}</div>
+          <div class="muted">Week start: ${escHtml(ws)} • Generated: ${escHtml(new Date().toLocaleString())}</div>
+        </div>
+        ${bodyHtml}
+      </section>
+    `;
+
+    const execPage = `
+      <section class="page">
+        <div class="hdr">
+          <div class="h1">Flow — Executive summary</div>
+          <div class="muted">${escHtml(weekRangeText(ws, tz))} • Week start: ${escHtml(ws)}</div>
+        </div>
+
+        <div class="grid2">
+          ${execRows.map(([k,v]) => `<div class="kv"><div class="k">${escHtml(k)}</div><div class="v">${v}</div></div>`).join('')}
+        </div>
+
+        <div class="spacer"></div>
+        <div class="h2">Notes</div>
+        <div class="muted">Ongoing state is based on the current process node (not date math).</div>
+      </section>
+    `;
+
+    const receivingPage = nodePage('Receiving', `
+      <div class="grid2">
+        <div class="kv"><div class="k">Due</div><div class="v">${escHtml(fmtDateLocal(receiving.due, tz))}</div></div>
+        <div class="kv"><div class="k">Last received</div><div class="v">${escHtml(fmtDateLocal(receiving.lastReceived, tz))}</div></div>
+        <div class="kv"><div class="k">POs received</div><div class="v">${escHtml(receiving.receivedPOs)}/${escHtml(receiving.plannedPOs)}</div></div>
+        <div class="kv"><div class="k">Late POs</div><div class="v">${escHtml(receiving.latePOs ?? 0)}</div></div>
+        <div class="kv"><div class="k">Cartons in</div><div class="v">${escHtml(receiving.cartonsInTotal ?? 0)}</div></div>
+        <div class="kv"><div class="k">Cartons out</div><div class="v">${escHtml(receiving.cartonsOutTotal ?? 0)}</div></div>
+      </div>
+      <div class="spacer"></div>
+      <div class="h2">Supplier breakdown</div>
+      ${supplierTable}
+    `);
+
+    const vasPage = nodePage('VAS Processing', `
+      <div class="grid2">
+        <div class="kv"><div class="k">Due</div><div class="v">${escHtml(fmtDateLocal(vas.due, tz))}</div></div>
+        <div class="kv"><div class="k">Applied</div><div class="v">${escHtml(vas.appliedUnits ?? 0)} / ${escHtml(vas.plannedUnits ?? 0)} units (${escHtml(pct(vas.appliedUnits, vas.plannedUnits))})</div></div>
+        <div class="kv"><div class="k">Completion</div><div class="v">${escHtml(pct(vas.completedPOs, vas.plannedPOs))} (${escHtml(vas.completedPOs ?? 0)}/${escHtml(vas.plannedPOs ?? 0)} POs)</div></div>
+      </div>
+      <div class="spacer"></div>
+      <div class="muted">Source: completed production records aggregated for the selected week.</div>
+    `);
+
+    const intlPage = nodePage('Transit & Clearing', `
+      <div class="grid2">
+        <div class="kv"><div class="k">Origin window</div><div class="v">${escHtml(intl.windowText ?? '—')}</div></div>
+        <div class="kv"><div class="k">Lanes</div><div class="v">${escHtml(intl.lanesTotal ?? 0)}</div></div>
+        <div class="kv"><div class="k">Mode split</div><div class="v">${escHtml(intl.modeText ?? '—')}</div></div>
+        <div class="kv"><div class="k">Docs missing</div><div class="v">${escHtml(intl.docsMissing ?? 0)}</div></div>
+        <div class="kv"><div class="k">Holds</div><div class="v">${escHtml(intl.holds ?? 0)}</div></div>
+      </div>
+      <div class="spacer"></div>
+      <div class="muted">International Transit is lightweight manual data stored locally per week (unless data-driven fields are present).</div>
+    `);
+
+    const lm = manual?.lastmile || manual?.lastMile || {};
+    const lastMilePage = nodePage('Last Mile', `
+      <div class="grid2">
+        <div class="kv"><div class="k">Delivery window</div><div class="v">${escHtml((intl && intl.lastMileWindowText) || lm.windowText || '—')}</div></div>
+        <div class="kv"><div class="k">Open</div><div class="v">${escHtml(lm.open ?? 0)}</div></div>
+        <div class="kv"><div class="k">Total</div><div class="v">${escHtml(lm.total ?? 0)}</div></div>
+        <div class="kv"><div class="k">Status</div><div class="v">${escHtml(lm.statusText || '—')}</div></div>
+      </div>
+      <div class="spacer"></div>
+      <div class="muted">Last Mile is lightweight manual data stored locally per week.</div>
+    `);
+
+    const style = `
+      <style>
+        :root { color-scheme: light; }
+        body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 0; padding: 0; color: #111827; }
+        .page { padding: 24px 28px; page-break-after: always; }
+        .page:last-child { page-break-after: auto; }
+        .hdr { margin-bottom: 14px; }
+        .h1 { font-size: 18px; font-weight: 700; }
+        .h2 { font-size: 13px; font-weight: 700; margin: 10px 0 8px; }
+        .muted { color: rgba(17,24,39,0.65); font-size: 11px; }
+        .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .kv { border: 1px solid rgba(17,24,39,0.10); border-radius: 10px; padding: 10px; }
+        .k { font-size: 10px; color: rgba(17,24,39,0.60); margin-bottom: 4px; }
+        .v { font-size: 12px; font-weight: 600; }
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 11px; }
+        th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid rgba(17,24,39,0.10); }
+        th { font-size: 10px; color: rgba(17,24,39,0.60); font-weight: 700; }
+        .spacer { height: 10px; }
+        @media print {
+          body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        }
+      </style>
+    `;
+
+    return `<!doctype html><html><head><meta charset="utf-8">${style}<title>Flow report</title></head><body>
+      ${execPage}
+      ${receivingPage}
+      ${vasPage}
+      ${intlPage}
+      ${lastMilePage}
+    </body></html>`;
+  }
+
+  function downloadFlowReportPdf(cache) {
+    try {
+      const html = buildReportHTML(cache || {});
+      const w = window.open('', '_blank');
+      if (!w) return;
+      w.document.open();
+      w.document.write(html);
+      w.document.close();
+      // Give the browser a moment to render before printing.
+      w.focus();
+      setTimeout(() => {
+        try { w.print(); } catch(e) {}
+      }, 250);
+    } catch (e) {
+      console.warn('[flow] report build failed', e);
+    }
   }
 
 async function refresh() {
@@ -2139,8 +3184,16 @@ async function refresh() {
       const dow = d.getDay(); // 0=Sun
       const delta = (dow + 6) % 7; // days since Monday
       d.setDate(d.getDate() - delta);
-      ws = isoDate(new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())));
+      ws = isoDateUTC(new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())));
     }
+    // Enforce Monday week-starts. This prevents silent drift that can make
+    // the week appear to "lose" data when users navigate.
+    ws = normalizeWeekStartToMonday(ws);
+    if (!window.state) window.state = {};
+    window.state.weekStart = ws;
+    const wkInp = document.getElementById('week-start');
+    if (wkInp) wkInp.value = ws;
+
     UI.currentWs = ws;
     const tz = getBizTZ();
 
@@ -2164,6 +3217,46 @@ async function refresh() {
       };
     }
 
+    // PDF report download (Flow-local). Opens print dialog for Save-as-PDF.
+    const pdfBtn = document.getElementById('flow-download-pdf');
+    if (pdfBtn && !pdfBtn.dataset.bound) {
+      pdfBtn.dataset.bound = '1';
+      pdfBtn.onclick = () => {
+        try { downloadFlowReportPdf(UI.reportCache || { ws: UI.currentWs || ws, tz }); }
+        catch (e) { console.warn('[flow] pdf failed', e); }
+      };
+    }
+
+
+
+
+    // Week navigation (Flow-local). Never breaks if state/input missing.
+    const prevBtn = document.getElementById('flow-prev-week');
+    const nextBtn = document.getElementById('flow-next-week');
+    const bindWeekBtn = (btn, delta) => {
+      if (!btn || btn.dataset.bound) return;
+      btn.dataset.bound = '1';
+      btn.onclick = () => {
+        try {
+          // Shift and re-normalize to Monday (defensive even if stored ws drifts)
+          const nextWs = normalizeWeekStartToMonday(shiftWeekStart(UI.currentWs || ws, delta));
+          // Update both global state and any week input, but do not broadcast.
+          if (!window.state) window.state = {};
+          window.state.weekStart = nextWs;
+          const inp = document.getElementById('week-start');
+          if (inp) inp.value = nextWs;
+          UI.currentWs = nextWs;
+          // Keep selection stable but safe
+          if (!UI.selection?.node) UI.selection = { node: 'receiving', sub: null };
+          refresh();
+        } catch (e) {
+          console.warn('[flow] week nav failed', e);
+        }
+      };
+    };
+    bindWeekBtn(prevBtn, -1);
+    bindWeekBtn(nextBtn, +1);
+
     // Load datasets
     let planRows = [];
     let receivingRows = [];
@@ -2186,12 +3279,19 @@ async function refresh() {
     const intl = computeInternationalTransit(ws, tz, planRows, records, vas.due);
     const manual = computeManualNodeStatuses(ws, tz);
 
-    renderTopNodes(ws, tz, receiving, vas, intl, manual);
+    // Cache for PDF reporting (best-effort; never required for UI rendering)
+    try {
+      UI.reportCache = { ws, tz, receiving, vas, intl, manual, records: Array.isArray(records) ? records : (records?.records || records?.rows || records?.data || []) };
+    } catch (e) {
+      UI.reportCache = { ws, tz, receiving, vas, intl, manual, records: [] };
+    }
+
+    renderJourneyTop(ws, tz, receiving, vas, intl, manual);
     // default selection if invalid
     if (!UI.selection?.node || UI.selection.node === 'milk') UI.selection = { node: 'receiving', sub: null };
     renderDetail(ws, tz, receiving, vas, intl, manual);
     // Footer trend uses the same completed records dataset.
-    renderFooterTrends(ws, tz, Array.isArray(records) ? records : (records?.records || records?.rows || records?.data || []));
+    renderFooterTrends(ws, tz, Array.isArray(records) ? records : (records?.records || records?.rows || records?.data || []), receiving, vas, intl, manual);
     highlightSelection();
     } catch (e) {
       console.warn('[flow] refresh failed', e);
@@ -2258,3 +3358,27 @@ async function refresh() {
   ensureFlowPageExists();
   showHideByHash();
 })();
+
+
+
+(function(){
+  try{
+    if (document.getElementById('flow-ui-polish-style')) return;
+    var style=document.createElement('style');
+    style.id='flow-ui-polish-style';
+    style.type='text/css';
+    style.appendChild(document.createTextNode(`
+/* ===== UI POLISH (SAFE, ADDITIVE) ===== */
+/* Top tile subtle contrast */
+#flow-top-tile.flow-tile--nodes{
+  background:#F9FAFB;
+  border-color:#EEF0F3;
+}
+/* ===== END UI POLISH ===== */
+`));
+    document.head.appendChild(style);
+  }catch(e){}
+})();
+
+// PATCH: swallow setFooterHealth errors (null DOM) so setWeek() continues.
+;(function(){var _sfh=window.setFooterHealth;if(typeof _sfh!=='function')return;window.setFooterHealth=function(){try{return _sfh.apply(this,arguments);}catch(e){console.warn('setFooterHealth suppressed',e);}};})();
