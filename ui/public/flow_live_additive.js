@@ -226,6 +226,19 @@
 
   function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
 
+  // UI helper: compact progress bar (pct: 0..100)
+  function progressBar(pct, opts) {
+    const p = clamp(Number(pct) || 0, 0, 100);
+    const w = (opts && opts.w) ? opts.w : 'w-32';
+    const h = (opts && opts.h) ? opts.h : 'h-2';
+    const bg = (opts && opts.bg) ? opts.bg : 'bg-gray-100';
+    const fill = (opts && opts.fill) ? opts.fill : 'bg-emerald-400';
+    return `
+      <div class="${w} ${h} ${bg} rounded-full overflow-hidden border" title="${Math.round(p)}%">
+        <div class="h-full ${fill}" style="width:${p}%;"></div>
+      </div>
+    `;
+  }
   function statusFromDue(due, actual, now) {
     // Soft cutoffs:
     // - if actual exists, compare actual to due
@@ -1391,6 +1404,453 @@ function computeManualNodeStatuses(ws, tz) {
     // Default focus on Milk Run on initial load (right tile + journey highlight)
     selection: { node: 'milk', sub: null },
   };
+
+  // ------------------------- Lane modal (Transit & Clearing) -------------------------
+  function ensureLaneModal() {
+    let root = document.getElementById('flow-lane-modal');
+    if (root) return root;
+
+    root = document.createElement('div');
+    root.id = 'flow-lane-modal';
+    root.className = 'fixed inset-0 z-[9999] hidden';
+
+    root.innerHTML = `
+      <div class="absolute inset-0 bg-black/40" data-flow-modal-close="1"></div>
+      <div class="absolute inset-3 md:inset-6 bg-white rounded-2xl shadow-xl border overflow-hidden flex flex-col">
+        <div class="p-3 border-b flex items-center justify-between gap-3">
+          <div>
+            <div id="flow-lane-modal-title" class="text-base font-semibold text-gray-800"></div>
+            <div id="flow-lane-modal-sub" class="text-xs text-gray-500 mt-0.5"></div>
+          </div>
+          <div class="flex items-center gap-2">
+            <div id="flow-lane-modal-status"></div>
+            <button class="px-2.5 py-1.5 rounded-lg border bg-white hover:bg-gray-50 text-sm" data-flow-modal-close="1">Close</button>
+          </div>
+        </div>
+        <div id="flow-lane-modal-body" class="p-3 overflow-auto flex-1"></div>
+      </div>
+    `;
+    document.body.appendChild(root);
+
+    // close handlers
+    root.querySelectorAll('[data-flow-modal-close]').forEach(el => {
+      el.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeLaneModal();
+      });
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        const r = document.getElementById('flow-lane-modal');
+        if (r && !r.classList.contains('hidden')) closeLaneModal();
+      }
+    });
+
+    return root;
+  }
+
+  function closeLaneModal() {
+    const root = document.getElementById('flow-lane-modal');
+    if (!root) return;
+    root.classList.add('hidden');
+    root.setAttribute('aria-hidden', 'true');
+  }
+
+  function openLaneModal(ws, tz, laneKey) {
+    const ctx = window.__FLOW_INTL_CTX__ || null;
+    if (!ctx || !ctx.lanes || !ctx.weekContainers) return;
+
+    const lane = (ctx.lanes || []).find(l => l && l.key === laneKey);
+    if (!lane) return;
+
+    const manual = loadIntlLaneManual(ws, laneKey) || {};
+    const root = ensureLaneModal();
+
+    const ticket = lane.ticket && lane.ticket !== 'NO_TICKET' ? String(lane.ticket) : '';
+    const title = `${lane.supplier} • ${lane.freight}${ticket ? ` • Zendesk ${ticket}` : ''}`;
+    const subtitle = `Lane key: ${lane.key}`;
+
+    const statusHtml = `
+      <span class="dot ${dot(lane.level)}"></span>
+      <span class="text-xs px-2 py-0.5 rounded-full border ${pill(lane.level)} whitespace-nowrap ml-2">${statusLabel(lane.level)}</span>
+    `;
+
+    root.querySelector('#flow-lane-modal-title').textContent = title;
+    root.querySelector('#flow-lane-modal-sub').textContent = subtitle;
+    root.querySelector('#flow-lane-modal-status').innerHTML = statusHtml;
+
+    // Containers derived from week-level containers
+    const conts = (ctx.weekContainers || [])
+      .filter(c => Array.isArray(c?.lane_keys) && c.lane_keys.includes(lane.key))
+      .filter(c => {
+        const cid = String(c?.container_id || c?.container || '').trim();
+        const ves = String(c?.vessel || '').trim();
+        const ft = String(c?.size_ft || '').trim();
+        return !!(cid || ves || ft);
+      });
+
+    const contRows = conts.length ? `
+      <div class="rounded-xl border p-3">
+        <div class="text-sm font-semibold text-gray-700 flex items-center gap-2">${iconContainer()} <span>Containers</span></div>
+        <div class="mt-2 overflow-auto">
+          <table class="w-full text-sm">
+            <thead><tr>
+              <th class="th text-left py-2 pr-2">Container #</th>
+              <th class="th text-left py-2 pr-2">Size</th>
+              <th class="th text-left py-2 pr-2">Vessel</th>
+            </tr></thead>
+            <tbody>
+              ${(conts || []).map(c => {
+                const cid = escapeHtml(String(c.container_id || c.container || '').trim() || '—');
+                const ft = escapeHtml(String(c.size_ft || '').trim() ? (String(c.size_ft).trim() + 'ft') : '—');
+                const ves = escapeHtml(String(c.vessel || '').trim() || '—');
+                return `<tr class="border-t"><td class="py-3 pr-4">${cid}</td><td class="py-3 pr-4">${ft}</td><td class="py-3 pr-4">${ves}</td></tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    ` : `
+      <div class="rounded-xl border p-3 text-sm text-gray-500">
+        No containers mapped to this lane yet (week-level containers).
+      </div>
+    `;
+
+    const dateVal = (v) => String(v || '').trim();
+
+    // Modal body: reuse the same lane fields pattern + new IDs
+    root.querySelector('#flow-lane-modal-body').innerHTML = `
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <div class="rounded-xl border p-3">
+          <div class="text-sm font-semibold text-gray-700">Lane dates & documents</div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
+            <label class="text-sm">
+              <div class="text-xs text-gray-500 mb-1">Packing list ready</div>
+              <input data-lm-field="pack" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(dateVal(manual.pack))}"/>
+            </label>
+            <label class="text-sm">
+              <div class="text-xs text-gray-500 mb-1">Origin customs cleared</div>
+              <input data-lm-field="originClr" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(dateVal(manual.originClr))}"/>
+            </label>
+            <label class="text-sm">
+              <div class="text-xs text-gray-500 mb-1">Departed origin</div>
+              <input data-lm-field="departed" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(dateVal(manual.departed))}"/>
+            </label>
+            <label class="text-sm">
+              <div class="text-xs text-gray-500 mb-1">Arrived destination</div>
+              <input data-lm-field="arrived" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(dateVal(manual.arrived))}"/>
+            </label>
+            <label class="text-sm">
+              <div class="text-xs text-gray-500 mb-1">Destination customs cleared</div>
+              <input data-lm-field="destClr" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(dateVal(manual.destClr))}"/>
+            </label>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+            <label class="text-sm">
+              <div class="text-xs text-gray-500 mb-1">Shipment #</div>
+              <input data-lm-field="shipmentNumber" type="text" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(String(manual.shipmentNumber || manual.shipment || ''))}" placeholder="Free text"/>
+            </label>
+            <label class="text-sm">
+              <div class="text-xs text-gray-500 mb-1">HBL</div>
+              <input data-lm-field="hbl" type="text" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(String(manual.hbl || ''))}" placeholder="Free text"/>
+            </label>
+            <label class="text-sm">
+              <div class="text-xs text-gray-500 mb-1">MBL</div>
+              <input data-lm-field="mbl" type="text" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(String(manual.mbl || ''))}" placeholder="Free text"/>
+            </label>
+          </div>
+
+          <div class="flex items-center gap-3 mt-3">
+            <label class="text-sm flex items-center gap-2">
+              <input data-lm-field="hold" type="checkbox" class="h-4 w-4" ${manual.hold ? 'checked' : ''}/>
+              <span>Customs hold</span>
+            </label>
+          </div>
+
+          <label class="text-sm mt-3 block">
+            <div class="text-xs text-gray-500 mb-1">Note (optional)</div>
+            <textarea data-lm-field="note" rows="2" class="w-full px-2 py-1.5 border rounded-lg" placeholder="Quick update for the team...">${escapeHtml(String(manual.note || ''))}</textarea>
+          </label>
+
+          <div class="flex items-center justify-end mt-3">
+            <button id="flow-lane-modal-save" class="px-3 py-1.5 rounded-lg text-sm border bg-white hover:bg-gray-50">Save lane</button>
+          </div>
+          <div id="flow-lane-modal-msg" class="text-xs text-gray-500 mt-2"></div>
+        </div>
+
+        <div class="flex flex-col gap-3">
+          ${contRows}
+        </div>
+      </div>
+    `;
+
+    // Wire save button (dates + hold + note + ids)
+    const body = root.querySelector('#flow-lane-modal-body');
+    const saveBtn = body.querySelector('#flow-lane-modal-save');
+    const msg = body.querySelector('#flow-lane-modal-msg');
+
+    const readFields = () => {
+      const q = (sel) => body.querySelector(sel);
+      const get = (k) => {
+        const el = body.querySelector(`[data-lm-field="${k}"]`);
+        if (!el) return '';
+        if (el.type === 'checkbox') return !!el.checked;
+        return String(el.value || '').trim();
+      };
+      return {
+        pack: get('pack'),
+        originClr: get('originClr'),
+        departed: get('departed'),
+        arrived: get('arrived'),
+        destClr: get('destClr'),
+        hold: !!get('hold'),
+        note: get('note'),
+        shipmentNumber: get('shipmentNumber'),
+        hbl: get('hbl'),
+        mbl: get('mbl'),
+      };
+    };
+
+    const doSave = () => {
+      try {
+        const vals = readFields();
+        saveIntlLaneManual(ws, laneKey, vals);
+        if (msg) msg.textContent = 'Saved.';
+      } catch (e) {
+        if (msg) msg.textContent = 'Save failed.';
+      }
+    };
+
+    if (saveBtn) saveBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); doSave(); };
+
+    // Background persist for IDs only (blur/Enter)
+    const idKeys = new Set(['shipmentNumber','hbl','mbl']);
+    body.querySelectorAll('[data-lm-field]').forEach(el => {
+      const key = el.getAttribute('data-lm-field');
+      if (!idKeys.has(key)) return;
+
+      const saveOne = () => {
+        const v = (el.type === 'checkbox') ? !!el.checked : String(el.value || '').trim();
+        const patch = {};
+        patch[key] = v;
+        saveIntlLaneManual(ws, laneKey, patch);
+        if (msg) msg.textContent = 'Saved.';
+      };
+
+      el.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          saveOne();
+          el.blur();
+        }
+      });
+      el.addEventListener('blur', () => saveOne());
+    });
+
+    root.classList.remove('hidden');
+    root.setAttribute('aria-hidden', 'false');
+  }
+
+
+  function openIntlOverviewModal(ws, tz) {
+    const ctx = window.__FLOW_INTL_CTX__ || null;
+    if (!ctx || !ctx.lanes) return;
+
+    const lanes = Array.isArray(ctx.lanes) ? ctx.lanes.slice() : [];
+    const weekContainers = Array.isArray(ctx.weekContainers) ? ctx.weekContainers : [];
+    const intl = ctx.intl || null;
+
+    // Sort same as lanes tile: holds/red first, then highest remaining units
+    const rank = { red: 3, yellow: 2, green: 1, gray: 0 };
+    lanes.sort((a, b) => (rank[b.level] - rank[a.level]) || ((b.plannedUnits - b.appliedUnits) - (a.plannedUnits - a.appliedUnits)));
+
+    const root = ensureLaneModal();
+    root.querySelector('#flow-lane-modal-title').textContent = 'Transit & Clearing — Lanes (Full screen)';
+    root.querySelector('#flow-lane-modal-sub').textContent = 'All lanes for this week • Click a supplier to open the lane editor.';
+    root.querySelector('#flow-lane-modal-status').innerHTML = '';
+
+    const fmtDT = (v) => {
+      const s = String(v || '').trim();
+      if (!s) return '—';
+      try { return fmtInTZ(s, tz); } catch { return s; }
+    };
+
+    // Planned fallback baselines for a lane (derived from Intl window + freight mode).
+    // We intentionally do NOT store these in backend; UI recomputes them.
+    const plannedForLane = (lane) => {
+      const originMin = (intl && intl.originMin instanceof Date) ? intl.originMin : null;
+      const originMax = (intl && intl.originMax instanceof Date) ? intl.originMax : null;
+      if (!originMin || !originMax) return { pack: null, originClr: null, departed: null, arrived: null, destClr: null };
+      const pack = originMin;
+      const originClr = originMax;
+      const departed = addDays(originClr, 1);
+      const transitDays = (lane && lane.freight === 'Air') ? BASELINE.transit_days_air : BASELINE.transit_days_sea;
+      const arrived = addDays(departed, transitDays);
+      const destClr = addDays(arrived, 2);
+      return { pack, originClr, departed, arrived, destClr };
+    };
+
+    // Resolve actual lane dates from any known schema (backend-synced + back-compat), else planned.
+    const fmtDateOnly = (val) => {
+      try {
+        const d = (val instanceof Date) ? val : new Date(val);
+        if (!d || isNaN(d)) return '';
+        return new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: '2-digit' }).format(d);
+      } catch (e) { return ''; }
+    };
+
+    const laneDateCell = (manualObj, plannedDate, keys) => {
+      const tryKey = (k) => {
+        const v = manualObj && (manualObj[k] != null) ? String(manualObj[k]).trim() : '';
+        return v ? v : '';
+      };
+      const actualRaw = (keys || []).map(tryKey).find(Boolean) || '';
+      if (actualRaw) {
+        const d = fmtDateOnly(actualRaw);
+        return d ? `<span class="whitespace-nowrap font-semibold" style="color:#334155">${escapeHtml(d)}</span>` : '<span class="text-gray-400">—</span>';
+      }
+      if (plannedDate && !isNaN(plannedDate)) {
+        const d = fmtDateOnly(plannedDate);
+        return d ? `<span class="whitespace-nowrap" style="color:#7a1f33">${escapeHtml(d)} <span class="text-[10px]" style="color:#7a1f33">planned</span></span>` : '<span class="text-gray-400">—</span>';
+      }
+      return '<span class="text-gray-400">—</span>';
+    };
+
+    const latestActualStatusText = (manualObj) => {
+      const getRaw = (keys) => {
+        for (const k of keys) {
+          const v = manualObj && (manualObj[k] != null) ? String(manualObj[k]).trim() : '';
+          if (v) return v;
+        }
+        return '';
+      };
+      const stages = [
+        { label: 'Packing list ready', keys: ['packing_list_ready_at','packingListReadyAt','pack','packing_list_ready'] },
+        { label: 'Origin customs cleared', keys: ['origin_customs_cleared_at','originClearedAt','originClr','origin_customs_cleared'] },
+        { label: 'Departed origin', keys: ['departed_at','departedAt','departed'] },
+        { label: 'Arrived destination', keys: ['arrived_at','arrivedAt','arrived'] },
+        { label: 'Destination customs cleared', keys: ['dest_customs_cleared_at','destClearedAt','destClr','dest_customs_cleared'] },
+      ];
+      let best = null;
+      for (const st of stages) {
+        const raw = getRaw(st.keys);
+        if (!raw) continue;
+        const d = new Date(raw);
+        if (!d || isNaN(d)) continue;
+        if (!best || d > best.date) best = { date: d, label: st.label };
+      }
+      return best ? best.label : '';
+    };
+
+    const contListForLane = (laneKey) => {
+      const ids = (weekContainers || [])
+        .filter(c => Array.isArray(c?.lane_keys) && c.lane_keys.includes(laneKey))
+        .map(c => String(c?.container_id || c?.container || '').trim())
+        .filter(Boolean);
+      return uniqNonEmpty(ids);
+    };
+
+    // Summary strip for quick scan
+    const counts = lanes.reduce((acc, l) => {
+      acc.total++;
+      acc[l.level] = (acc[l.level] || 0) + 1;
+      const m = String(l.freight || '').toLowerCase();
+      if (m === 'air') acc.air++; else if (m === 'sea') acc.sea++;
+      return acc;
+    }, { total: 0, red: 0, yellow: 0, green: 0, gray: 0, sea: 0, air: 0 });
+
+    const rows = lanes.map(l => {
+      const manual = (l && l.manual && typeof l.manual === 'object') ? l.manual : (loadIntlLaneManual(ws, l.key) || {});
+      const ticket = l.ticket && l.ticket !== 'NO_TICKET' ? escapeHtml(l.ticket) : '—';
+      const containers = contListForLane(l.key);
+      const st = `<span class="text-xs px-2 py-0.5 rounded-full border ${pill(l.level)} whitespace-nowrap">${statusLabel(l.level)}</span>`;
+      const pl = plannedForLane(l);
+      const freightLower = String(l.freight || '').toLowerCase();
+      const freightCls = freightLower === 'air' ? 'text-sky-700' : (freightLower === 'sea' ? 'text-emerald-700' : 'text-gray-700');
+      const stageTxt = latestActualStatusText(manual);
+      const holdFlag = !!(manual.hold || manual.customs_hold || manual.customsHold || manual.customsHoldFlag);
+      return `
+        <tr class="border-t align-top hover:bg-gray-50">
+          <td class="py-3 pr-4">
+            <button class="text-left hover:underline" data-open-lane="${escapeAttr(l.key)}">${escapeHtml(l.supplier)}</button>
+            <div class="text-xs font-medium mt-0.5 ${freightCls}">${escapeHtml(l.freight || '')}</div>
+            <div class="text-xs font-semibold mt-0.5 tracking-wide" style="color:#e90076; text-transform:uppercase">${escapeHtml(stageTxt || 'No actual updates')}</div>
+          </td>
+          <td class="py-3 px-4 text-center">${ticket}</td>
+          <td class="py-3 px-4 text-center">${st}</td>
+          <td class="py-3 px-4 text-center">${escapeHtml(String(manual.shipmentNumber || manual.shipment || '').trim() || '—')}</td>
+          <td class="py-3 px-4 text-center">${escapeHtml(String(manual.hbl || '').trim() || '—')}</td>
+          <td class="py-3 px-4 text-center">${escapeHtml(String(manual.mbl || '').trim() || '—')}</td>
+          <td class="py-3 px-4 text-center">${holdFlag ? '✓' : '—'}</td>
+          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.pack, ['packing_list_ready_at','packingListReadyAt','pack','packing_list_ready'])}</td>
+          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.originClr, ['origin_customs_cleared_at','originClearedAt','originClr','origin_customs_cleared'])}</td>
+          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.departed, ['departed_at','departedAt','departed'])}</td>
+          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.arrived, ['arrived_at','arrivedAt','arrived'])}</td>
+          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.destClr, ['dest_customs_cleared_at','destClearedAt','destClr','dest_customs_cleared'])}</td>
+          <td class="py-3 pl-4 pr-4 text-left">${containers.length ? containers.map(c=>escapeHtml(c)).join('<br/>') : '—'}</td>
+        </tr>
+      `;
+    }).join('');
+
+    root.querySelector('#flow-lane-modal-body').innerHTML = `
+      <div class="rounded-xl border p-3">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <div class="text-sm font-semibold text-gray-700">Lanes</div>
+            <div class="text-xs text-gray-500 mt-1">Dates show <b>Actual</b> when entered; otherwise fall back to <b>Planned</b>.</div>
+          </div>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+            <div class="rounded-lg border px-2 py-1 bg-white"><span class="text-gray-500">Sea</span> <b>${counts.sea}</b></div>
+            <div class="rounded-lg border px-2 py-1 bg-white"><span class="text-gray-500">Air</span> <b>${counts.air}</b></div>
+            <div class="rounded-lg border px-2 py-1 bg-white"><span class="text-gray-500">Delayed</span> <b>${counts.red}</b></div>
+            <div class="rounded-lg border px-2 py-1 bg-white"><span class="text-gray-500">At risk</span> <b>${counts.yellow}</b></div>
+          </div>
+        </div>
+        <div class="mt-5 overflow-auto">
+          <table class="w-full text-sm min-w-[1500px]">
+            <thead class="sticky top-0 bg-white">
+              <tr class="text-[13px] text-gray-600 border-b">
+                <th class="text-left py-3 pr-4">Supplier / Freight</th>
+                <th class="text-center py-3 px-4">Zendesk</th>
+                <th class="text-center py-3 px-4">Status</th>
+                <th class="text-center py-3 px-4">Shipment #</th>
+                <th class="text-center py-3 px-4">HBL</th>
+                <th class="text-center py-3 px-4">MBL</th>
+                <th class="text-center py-3 px-4">Hold</th>
+                <th class="text-center py-3 px-4">📄 Pack List</th>
+                <th class="text-center py-3 px-4">🛃 Origin Customs</th>
+                <th class="text-center py-3 px-4">🚚 Departed</th>
+                <th class="text-center py-3 px-4">📍 Arrived</th>
+                <th class="text-center py-3 px-4">🛃 Dest Customs</th>
+                <th class="text-left py-2 pr-2">Container #</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows || '<tr><td class="py-2 text-gray-500" colspan="13">No lanes found.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    root.querySelectorAll('[data-open-lane]').forEach(btn => {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const k = btn.getAttribute('data-open-lane');
+        if (!k) return;
+        openLaneModal(ws, tz, k);
+      });
+    });
+
+    root.classList.remove('hidden');
+    root.setAttribute('aria-hidden', 'false');
+  }
 
   function ensureFlowPageExists() {
     // 1) page section
@@ -2603,7 +3063,9 @@ function renderTopNodes(ws, tz, receiving, vas, intl, manual) {
 
     // ---------------- Node-specific details ----------------
     if (sel.node === 'receiving') {
-  const title = sel.sub === 'late' ? 'Receiving • Late POs' : sel.sub === 'missing' ? 'Receiving • Missing POs' : 'Receiving';
+  const overallPct = (num(receiving.plannedPOs) || 0) ? (num(receiving.receivedPOs || 0) / num(receiving.plannedPOs || 1)) * 100 : 0;
+  const titleBase = sel.sub === 'late' ? 'Receiving • Late POs' : sel.sub === 'missing' ? 'Receiving • Missing POs' : 'Receiving';
+  const title = `${titleBase} <span class="inline-flex align-middle ml-2">${progressBar(overallPct, { w: 'w-36', h: 'h-2' })}</span>`;
   const subtitle = `Due ${fmtInTZ(receiving.due, tz)} • Last received ${receiving.lastReceived ? fmtInTZ(receiving.lastReceived, tz) : '—'}`;
 
   const insights = [
@@ -2631,19 +3093,24 @@ function renderTopNodes(ws, tz, receiving, vas, intl, manual) {
   const supRows = (receiving.suppliers || [])
     .sort((a, b) => (b.cartonsOut || 0) - (a.cartonsOut || 0))
     .slice(0, 30)
-    .map(s => [
-      s.supplier,
-      `${s.receivedPOs}/${s.poCount}`,
-      `${Math.round(s.units)}`,
-      `${s.cartonsIn || 0}`,
-      `${s.cartonsOut || 0}`,
-    ]);
+    .map(s => {
+      const denom = num(s.poCount || 0) || 0;
+      const pct = denom ? (num(s.receivedPOs || 0) / denom) * 100 : 0;
+      return [
+        s.supplier,
+        progressBar(pct, { w: 'w-28', h: 'h-2' }),
+        `${s.receivedPOs}/${s.poCount}`,
+        `${Math.round(s.units)}`,
+        `${s.cartonsIn || 0}`,
+        `${s.cartonsOut || 0}`,
+      ];
+    });
 
   detail.innerHTML = [
     header(title, receiving.level, subtitle),
     bullets(insights),
     kpis,
-    table(['Supplier', 'POs received', 'Planned units', 'Cartons In', 'Cartons Out'], supRows),
+    table(['Supplier', 'Progress', 'POs received', 'Planned units', 'Cartons In', 'Cartons Out'], supRows),
   ].join('');
   return;
 }
@@ -2685,16 +3152,21 @@ const vasMixHtml = (vasObj) => {
     : `<div class="mt-3 text-xs text-gray-500">No remaining POs — on track.</div>`;
   return bar + legend + tbl;
 };
-const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN(x.planned), fmtN(x.applied), `${x.pct}%`]);
+const supRows = (vas.supplierRows || []).slice(0, 12).map(x => {
+  const planned = num(x.planned || 0) || 0;
+  const applied = num(x.applied || 0) || 0;
+  const pct = planned ? (applied / planned) * 100 : 0;
+  return [x.supplier, progressBar(pct, { w: 'w-28', h: 'h-2' }), fmtN(planned), fmtN(applied), `${Math.round(pct)}%`];
+});
 
 
       detail.innerHTML = [
-        header('VAS Processing', vas.level, subtitle),
+        header(`VAS Processing <span class="inline-flex align-middle ml-2">${progressBar((num(vas.completion)||0)*100, { w: 'w-36', h: 'h-2' })}</span>`, vas.level, subtitle),
         bullets(insights),
         `<div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
           <div class="rounded-xl border p-3">
             <div class="text-sm font-semibold text-gray-700">Suppliers (planned vs applied)</div>
-            ${table(['Supplier', 'Planned', 'Applied', '%'], supRows)}
+            ${table(['Supplier', 'Progress', 'Planned', 'Applied', '%'], supRows)}
           </div>
           
 <div class="rounded-xl border p-3">
@@ -2778,12 +3250,18 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
         <div class="mt-3 rounded-xl border p-3 text-sm text-gray-500">No lanes found in the uploaded Plan for this week.</div>
       `;
 
-      detail.innerHTML = [
+            // Expose latest Intl context for UI handlers (modal, etc.)
+      try { window.__FLOW_INTL_CTX__ = { ws, tz, lanes, weekContainers, intl }; } catch {}
+
+detail.innerHTML = [
         header('Transit & Clearing', intl.level, subtitle),
         bullets(insights),
         kpis,
         `<div class="mt-3 rounded-xl border p-3">
-          <div class="text-sm font-semibold text-gray-700">Lanes</div>
+          <div class="flex items-center justify-between gap-2">
+            <div class="text-sm font-semibold text-gray-700">Lanes</div>
+            <button type="button" id="flow-lanes-fullscreen" class="text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Full screen</button>
+          </div>
           ${table(['Supplier', 'Zendesk', 'Freight', 'Applied', 'Cartons Out', 'Containers', 'Status'], rows)}
         </div>`,
         editor,
@@ -3046,12 +3524,15 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
             </div>
           </div>
           <div class="flex items-center gap-2">
+            <button type="button" id="flow-lane-collapse" class="text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Collapse</button>
             <span class="dot ${dot(lane.level)}"></span>
             <span class="text-xs px-2 py-0.5 rounded-full border ${pill(lane.level)} whitespace-nowrap">${statusLabel(lane.level)}</span>
           </div>
         </div>
 
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
+
+        <div id="flow-lane-editor-body" class="mt-3">
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
           <div class="rounded-xl border p-3">
             <div class="flex items-center justify-between">
               <div class="text-sm font-semibold text-gray-700">Docs & customs milestones</div>
@@ -3066,6 +3547,12 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
                   <button type="button" class="flow-intl-copy text-[11px] underline hover:text-gray-700" data-target="flow-intl-pack" data-val="${basePack}">Copy</button>
                 </div>
               </label>
+
+              <label class="text-sm">
+                <div class="text-xs text-gray-500 mb-1">Shipment #</div>
+                <input id="flow-intl-shipment" type="text" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(String(manual.shipmentNumber || manual.shipment || ''))}" placeholder="Free text"/>
+              </label>
+
               <label class="text-sm">
                 <div class="text-xs text-gray-500 mb-1">Origin customs cleared</div>
                 <input id="flow-intl-originclr" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${originClr}"/>
@@ -3074,6 +3561,12 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
                   <button type="button" class="flow-intl-copy text-[11px] underline hover:text-gray-700" data-target="flow-intl-originclr" data-val="${baseOriginClr}">Copy</button>
                 </div>
               </label>
+
+              <label class="text-sm">
+                <div class="text-xs text-gray-500 mb-1">HBL</div>
+                <input id="flow-intl-hbl" type="text" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(String(manual.hbl || ''))}" placeholder="Free text"/>
+              </label>
+
               <label class="text-sm">
                 <div class="text-xs text-gray-500 mb-1">Departed origin</div>
                 <input id="flow-intl-departed" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${departed}"/>
@@ -3082,6 +3575,12 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
                   <button type="button" class="flow-intl-copy text-[11px] underline hover:text-gray-700" data-target="flow-intl-departed" data-val="${baseDeparted}">Copy</button>
                 </div>
               </label>
+
+              <label class="text-sm">
+                <div class="text-xs text-gray-500 mb-1">MBL</div>
+                <input id="flow-intl-mbl" type="text" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(String(manual.mbl || ''))}" placeholder="Free text"/>
+              </label>
+
               <label class="text-sm">
                 <div class="text-xs text-gray-500 mb-1">Arrived destination</div>
                 <input id="flow-intl-arrived" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${arrived}"/>
@@ -3090,6 +3589,9 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
                   <button type="button" class="flow-intl-copy text-[11px] underline hover:text-gray-700" data-target="flow-intl-arrived" data-val="${baseArrived}">Copy</button>
                 </div>
               </label>
+
+              <div class="hidden md:block"></div>
+
               <label class="text-sm">
                 <div class="text-xs text-gray-500 mb-1">Destination customs cleared</div>
                 <input id="flow-intl-destclr" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${destClr}"/>
@@ -3098,16 +3600,16 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
                   <button type="button" class="flow-intl-copy text-[11px] underline hover:text-gray-700" data-target="flow-intl-destclr" data-val="${baseDestClr}">Copy</button>
                 </div>
               </label>
+
+              <div class="flex items-center gap-3 md:pt-6">
+                <label class="text-sm flex items-center gap-2">
+                  <input id="flow-intl-hold" type="checkbox" class="h-4 w-4" ${hold ? 'checked' : ''}/>
+                  <span>Customs hold</span>
+                </label>
+              </div>
             </div>
 
-            <div class="flex items-center gap-3 mt-3">
-              <label class="text-sm flex items-center gap-2">
-                <input id="flow-intl-hold" type="checkbox" class="h-4 w-4" ${hold ? 'checked' : ''}/>
-                <span>Customs hold</span>
-              </label>
-            </div>
-
-            <label class="text-sm mt-3 block">
+<label class="text-sm mt-3 block">
               <div class="text-xs text-gray-500 mb-1">Note (optional)</div>
               <textarea id="flow-intl-note" rows="2" class="w-full px-2 py-1.5 border rounded-lg" placeholder="Quick update for the team...">${escapeHtml(note)}</textarea>
             </label>
@@ -3136,6 +3638,7 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
               One container can map to multiple lanes. These containers feed Last Mile immediately.
             </div>
           </div>
+          </div>
         </div>
       </div>
     `;
@@ -3162,6 +3665,59 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => [x.supplier, fmtN
     });
 
 
+
+
+    // Lane details collapse/expand (UI-only)
+    const collapseBtn = detail.querySelector('#flow-lane-collapse');
+    const bodyWrap = detail.querySelector('#flow-lane-editor-body');
+    if (collapseBtn && bodyWrap && !collapseBtn.dataset.bound) {
+      collapseBtn.dataset.bound = '1';
+      collapseBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const collapsed = bodyWrap.classList.toggle('hidden');
+        collapseBtn.textContent = collapsed ? 'Expand' : 'Collapse';
+      });
+    }
+
+    // Full screen overview for all lanes (table)
+    const lanesFullBtn = detail.querySelector('#flow-lanes-fullscreen');
+    if (lanesFullBtn && !lanesFullBtn.dataset.bound) {
+      lanesFullBtn.dataset.bound = '1';
+      lanesFullBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openIntlOverviewModal(ws, getBizTZ());
+      });
+    }
+
+
+    // Background persistence for lane identifiers (Shipment/HBL/MBL)
+    const idMap = [
+      ['#flow-intl-shipment', 'shipmentNumber'],
+      ['#flow-intl-hbl', 'hbl'],
+      ['#flow-intl-mbl', 'mbl'],
+    ];
+    for (const [sel, field] of idMap) {
+      const el = detail.querySelector(sel);
+      if (!el || el.dataset.bound) continue;
+      el.dataset.bound = '1';
+      const saveOne = () => {
+        const key = selectedKey || (UI.selection && UI.selection.sub) || null;
+        if (!key) return;
+        const v = String(el.value || '').trim();
+        const patch = {}; patch[field] = v;
+        saveIntlLaneManual(ws, key, patch);
+      };
+      el.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          saveOne();
+          el.blur();
+        }
+      });
+      el.addEventListener('blur', () => saveOne());
+    }
 
     // Baseline helpers (UI-only; no persistence)
     const copyAll = detail.querySelector('#flow-intl-copy-all');
