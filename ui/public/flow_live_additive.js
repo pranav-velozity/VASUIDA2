@@ -509,7 +509,7 @@ async function primeFlowWeekFromBackend(ws) {
 
     // Use the endpoint that Receiving stabilized for carton out, but we need all statuses for progress.
     // Prefer complete for performance, but fall back to all if API supports.
-    try { const r = await api(`/records?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&status=complete&limit=50000`); return asArray(r); } catch {}
+    try { const r = await api(`/records?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&status=complete&limit=50000`); const a = asArray(r); if (a && a.length) return a; } catch {}
     try { const r = await api(`/records?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&limit=50000`); return asArray(r); } catch {}
     return [];
   }
@@ -1546,6 +1546,14 @@ function computeManualNodeStatuses(ws, tz) {
               <div class="text-xs text-gray-500 mb-1">Destination customs cleared</div>
               <input data-lm-field="destClr" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(dateVal(manual.destClr))}"/>
             </label>
+            <label class="text-sm">
+              <div class="text-xs text-gray-500 mb-1">ETA FC</div>
+              <input data-lm-field="etaFC" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(dateVal(manual.etaFC || manual.eta_fc))}"/>
+            </label>
+            <label class="text-sm">
+              <div class="text-xs text-gray-500 mb-1">Latest arrival date</div>
+              <input data-lm-field="latestArrivalDate" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(dateVal(manual.latestArrivalDate || manual.latest_arrival_date || manual.latestArrival))}"/>
+            </label>
           </div>
 
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
@@ -1606,6 +1614,8 @@ function computeManualNodeStatuses(ws, tz) {
         departed: get('departed'),
         arrived: get('arrived'),
         destClr: get('destClr'),
+        etaFC: get('etaFC'),
+        latestArrivalDate: get('latestArrivalDate'),
         hold: !!get('hold'),
         note: get('note'),
         shipmentNumber: get('shipmentNumber'),
@@ -1789,6 +1799,8 @@ function computeManualNodeStatuses(ws, tz) {
           <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.originClr, ['origin_customs_cleared_at','originClearedAt','originClr','origin_customs_cleared'])}</td>
           <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.departed, ['departed_at','departedAt','departed'])}</td>
           <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.arrived, ['arrived_at','arrivedAt','arrived'])}</td>
+                    <td class=\"py-3 px-4 text-center\">${laneDateCell(manual, null, ['eta_fc','etaFC','eta_fc_at','eta_fc_fc'])}</td>
+          <td class=\"py-3 px-4 text-center\">${laneDateCell(manual, null, ['latest_arrival_date','latestArrivalDate','latestArrival','latest_arrival'])}</td>
           <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.destClr, ['dest_customs_cleared_at','destClearedAt','destClr','dest_customs_cleared'])}</td>
           <td class="py-3 pl-4 pr-4 text-left">${containers.length ? containers.map(c=>escapeHtml(c)).join('<br/>') : '—'}</td>
         </tr>
@@ -1824,12 +1836,14 @@ function computeManualNodeStatuses(ws, tz) {
                 <th class="text-center py-3 px-4">🛃 Origin Customs</th>
                 <th class="text-center py-3 px-4">🚚 Departed</th>
                 <th class="text-center py-3 px-4">📍 Arrived</th>
+                <th class=\"text-center py-3 px-4\">🏬 ETA FC</th>
+                <th class=\"text-center py-3 px-4\">📅 Latest arrival</th>
                 <th class="text-center py-3 px-4">🛃 Dest Customs</th>
                 <th class="text-left py-2 pr-2">Container #</th>
               </tr>
             </thead>
             <tbody>
-              ${rows || '<tr><td class="py-2 text-gray-500" colspan="13">No lanes found.</td></tr>'}
+              ${rows || '<tr><td class="py-2 text-gray-500" colspan="15">No lanes found.</td></tr>'}
             </tbody>
           </table>
         </div>
@@ -2881,6 +2895,680 @@ bindSign(sVas, 'vasComplete');
 
 
 
+
+
+  // ------------------------------
+  // Receiving — Full screen modal (units-based grouped table)
+  // ------------------------------
+  function ensureReceivingFullModal() {
+    let root = document.getElementById('flow-receiving-fullscreen-modal');
+    if (root) return root;
+
+    root = document.createElement('div');
+    root.id = 'flow-receiving-fullscreen-modal';
+    root.className = 'fixed inset-0 z-[9999] hidden';
+    root.innerHTML = `
+      <div class="absolute inset-0 bg-black/40"></div>
+      <div class="absolute inset-0 p-4">
+        <div class="bg-white rounded-xl shadow-xl w-full h-full overflow-hidden flex flex-col">
+          <div class="flex items-center justify-between px-4 py-3 border-b">
+            <div>
+              <div class="text-base font-semibold">Receiving — Full screen</div>
+              <div id="flow-recvfs-sub" class="text-xs text-gray-500">Supplier drilldown • Approximate received units (planned units for received POs).</div>
+            </div>
+            <button data-flow-recvfs-close class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50">Close</button>
+          </div>
+
+          <div class="flex-1 overflow-auto p-4">
+            <div id="flow-recvfs-kpis" class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4"></div>
+
+            <div class="flex flex-col lg:flex-row gap-4">
+              <div class="lg:w-1/2">
+                <div class="text-sm font-semibold mb-2">Suppliers</div>
+                <div class="rounded-lg border overflow-hidden">
+                  <table class="w-full text-sm">
+                    <thead class="bg-gray-50">
+                      <tr>
+                        <th class="text-left px-3 py-2">Supplier</th>
+                        <th class="text-right px-3 py-2">POs received</th>
+                        <th class="text-right px-3 py-2">Approx received units</th>
+                      </tr>
+                    </thead>
+                    <tbody id="flow-recvfs-sup-rows"></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="lg:w-1/2">
+                <div class="flex items-center justify-between mb-2">
+                  <div class="text-sm font-semibold">Received POs</div>
+                  <div class="flex gap-2">
+                    <button id="flow-recvfs-dl-selected" class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50">Download selected</button>
+                    <button id="flow-recvfs-dl-all" class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50">Download all</button>
+                  </div>
+                </div>
+
+                <div class="flex items-center gap-2 mb-2">
+                  <label class="text-xs text-gray-600">Supplier</label>
+                  <select id="flow-recvfs-sel" class="text-sm border rounded-md px-2 py-1 bg-white"></select>
+                </div>
+
+                <div class="rounded-lg border overflow-hidden">
+                  <table class="w-full text-sm">
+                    <thead class="bg-gray-50">
+                      <tr>
+                        <th class="text-left px-3 py-2">PO</th>
+                        <th class="text-right px-3 py-2">Planned units</th>
+                        <th class="text-left px-3 py-2">Received at</th>
+                      </tr>
+                    </thead>
+                    <tbody id="flow-recvfs-po-rows"></tbody>
+                  </table>
+                </div>
+
+                <div id="flow-recvfs-note" class="text-xs text-gray-500 mt-2"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(root);
+
+    root.querySelector('[data-flow-recvfs-close]')?.addEventListener('click', () => {
+      root.classList.add('hidden');
+    });
+    root.addEventListener('click', (e) => {
+      if (e.target === root) root.classList.add('hidden');
+      // Click outside panel
+      if (e.target && e.target.classList && e.target.classList.contains('bg-black/40')) root.classList.add('hidden');
+    });
+
+    return root;
+  }
+
+  function _csvDownload(filename, rows) {
+    const esc = (v) => {
+      const s = (v === null || v === undefined) ? '' : String(v);
+      if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+      return s;
+    };
+    const csv = rows.map(r => r.map(esc).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  function openReceivingFullScreenModal() {
+    // NOTE: This is a UI-only enhancement. It does not affect any calculations elsewhere.
+    const fmtNum = (v) => {
+      if (v === null || v === undefined || v === '') return '—';
+      const n = Number(v);
+      if (!Number.isFinite(n)) return String(v);
+      return n.toLocaleString();
+    };
+    const fmtDateTimeLocal = (tz, ts) => {
+      try {
+        if (!ts) return '';
+        const d = (ts instanceof Date) ? ts : new Date(ts);
+        if (!Number.isFinite(d.getTime())) return String(ts);
+        const opt = { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' };
+        try {
+          return new Intl.DateTimeFormat('en-US', { ...opt, timeZone: tz || undefined }).format(d);
+        } catch {
+          return new Intl.DateTimeFormat('en-US', opt).format(d);
+        }
+      } catch {
+        return '';
+      }
+    };
+
+    // Date-only formatter for table columns (no time)
+    const fmtDateOnlyLocal = (tz, ts) => {
+      try {
+        if (!ts) return '';
+        // Accept already-formatted dates (MM/DD/YYYY or YYYY-MM-DD)
+        const s0 = String(ts).trim();
+        if (/^\d{2}\/\d{2}\/\d{4}$/.test(s0)) return s0;
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s0)) {
+          const [y, m, d] = s0.split('-');
+          return `${m}/${d}/${y}`;
+        }
+        const d = (ts instanceof Date) ? ts : new Date(ts);
+        if (!Number.isFinite(d.getTime())) return s0;
+        const opt = { year: 'numeric', month: '2-digit', day: '2-digit' };
+        try {
+          return new Intl.DateTimeFormat('en-US', { ...opt, timeZone: tz || undefined }).format(d);
+        } catch {
+          return new Intl.DateTimeFormat('en-US', opt).format(d);
+        }
+      } catch {
+        return '';
+      }
+    };
+
+    const ctx = window.__FLOW_RECEIVING_FS_CTX__;
+    if (!ctx || !ctx.planRows || !ctx.receivingRows) {
+      alert('Receiving data not available yet. Please refresh the page and try again.');
+      return;
+    }
+
+    const { ws, tz, planRows, receivingRows, records } = ctx;
+    const normalizePO = (v) => String(v ?? '').trim().toUpperCase();
+    const toNum = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+    const normalizeFreight = (v) => {
+      const s = String(v ?? '').trim();
+      if (!s) return '';
+      const low = s.toLowerCase();
+      if (low.includes('sea') || low.includes('ocean')) return 'Sea';
+      if (low.includes('air')) return 'Air';
+      return s.charAt(0).toUpperCase() + s.slice(1);
+    };
+
+
+    // -------------------- Build PO-level facts (units-only) --------------------
+
+    // 1) Received timestamps by PO
+    const receivedByPO = new Map();
+    for (const r of (receivingRows || [])) {
+      const po = normalizePO(r.po ?? r.PO ?? r.po_number ?? r.PO_Number ?? r.poNumber ?? r.po_no ?? r.poNo);
+      const receivedAt = r.receivedAt || r.received_at || r.received_at_utc || r.received;
+      if (!po) continue;
+      if (receivedAt) receivedByPO.set(po, receivedAt);
+    }
+
+    // 2) Planned units + metadata by PO (prefer planRows for supplier / zendesk / freight)
+    const getPO = (r) => normalizePO(
+      r.po_number ?? r.poNumber ?? r.PO_Number ?? r.PO ?? r.po ?? r.po_no ?? r.poNo ?? r.supplier_po ?? r.supplierPO ?? ''
+    );
+    const getPlannedUnits = (r) => (
+      toNum(r.target_qty ?? r.targetQty ?? r.planned_qty ?? r.plannedQty ?? r.planned_units ?? r.plannedUnits ?? r.PlannedUnits ?? r.units ?? r.Units ?? r.qty ?? r.Qty)
+    );
+
+    const plannedUnitsByPO = new Map();
+    const metaByPO = new Map(); // {supplier, zendesk, freight}
+    for (const row of (planRows || [])) {
+      const po = getPO(row);
+      if (!po) continue;
+
+      plannedUnitsByPO.set(po, (plannedUnitsByPO.get(po) || 0) + getPlannedUnits(row));
+
+      // Try several likely field names (keep additive + non-breaking)
+      const supplier = row.supplier || row.Supplier || row.vendor || row.Vendor || row.supplier_name || row.supplierName || row.factory || row.Factory;
+      const zendesk = row.zendesk || row.zendesk_ticket || row.zendesk_ticket_number || row.zendesk_ticket_num || row.ticket || row.ticket_id || row.zendeskTicket || row.zendeskTicketNumber || row.zendesk_no || row.zendeskNo;
+      const freightRaw = row.freight_type ?? row.freightType ?? row.freightTypeName ?? row.freight ?? row.mode ?? row.ship_mode ?? row.shipMode ?? row.Freight ?? row.transport_mode ?? row.transportMode ?? row.transport ?? row.Transport;
+      const freight = freightRaw ? normalizeFreight(freightRaw) : undefined;
+
+      const prev = metaByPO.get(po) || {};
+      metaByPO.set(po, {
+        supplier: prev.supplier || (supplier ? String(supplier) : undefined),
+        zendesk: prev.zendesk || ((zendesk !== null && zendesk !== undefined && zendesk !== '') ? String(zendesk) : undefined),
+        freight: prev.freight || (freight ? String(freight) : undefined),
+      });
+    }
+
+    // 2b) Back-fill metadata from receivingRows if planRows did not carry it
+    for (const r of (receivingRows || [])) {
+      const po = normalizePO(r.po ?? r.PO ?? r.po_number ?? r.PO_Number ?? r.poNumber ?? r.po_no ?? r.poNo);
+      if (!po) continue;
+      if (!metaByPO.has(po)) metaByPO.set(po, {});
+      const prev = metaByPO.get(po) || {};
+
+      const supplier = r.supplier || r.Supplier || r.vendor || r.Vendor || r.supplier_name || r.supplierName;
+      const zendesk = r.zendesk || r.zendesk_ticket || r.ticket || r.ticket_id || r.zendeskTicket;
+      const freightRaw = r.freight_type ?? r.freightType ?? r.freight ?? r.mode ?? r.ship_mode ?? r.shipMode ?? r.Freight ?? r.transport_mode ?? r.transportMode;
+      const freight = freightRaw ? normalizeFreight(freightRaw) : undefined;
+
+      metaByPO.set(po, {
+        supplier: prev.supplier || (supplier ? String(supplier) : undefined),
+        zendesk: prev.zendesk || ((zendesk !== null && zendesk !== undefined && zendesk !== '') ? String(zendesk) : undefined),
+        freight: prev.freight || (freight ? String(freight) : undefined),
+      });
+    }
+
+    // 3) Applied units (VAS actuals) by PO from records (units-only, align with computeVASStatus)
+    // NOTE: We intentionally do NOT filter by status here because the VAS endpoint payload is not consistent
+    // across environments, and the core UI logic (computeVASStatus) counts all returned rows.
+    const appliedUnitsByPO = new Map();
+
+    const recs = Array.isArray(records)
+      ? records
+      : (records && Array.isArray(records.records) ? records.records
+        : (records && Array.isArray(records.rows) ? records.rows
+          : (records && Array.isArray(records.data) ? records.data : [])));
+
+    for (const rec of recs) {
+      const po = getPO(rec) || normalizePO(rec.po_number ?? rec.po ?? rec.PO ?? rec.PO_Number);
+      if (!po) continue;
+
+      const qtyRaw = rec.qty ?? rec.quantity ?? rec.units ?? rec.target_qty ?? rec.applied_qty ?? rec.applied_units ?? rec.appliedUnits ?? rec.Qty ?? rec.Units;
+      const qty = toNum(qtyRaw);
+      const q = qty > 0 ? qty : 1; // match computeVASStatus defaulting behavior
+
+      appliedUnitsByPO.set(po, (appliedUnitsByPO.get(po) || 0) + q);
+    }
+
+    // 4) Build PO-level rows for ALL planned POs (not only received)
+    const rows = [];
+    for (const [po, plannedUnits] of plannedUnitsByPO.entries()) {
+      const meta = metaByPO.get(po) || {};
+      const supplier = meta.supplier || '—';
+      const zendesk = meta.zendesk || '—';
+      const freight = meta.freight || '—';
+      const receivedAt = receivedByPO.get(po) || '';
+      const approxReceivedUnits = receivedAt ? plannedUnits : 0; // definition: planned units for received POs
+      const appliedUnits = appliedUnitsByPO.get(po) || 0;
+
+      // Lane-level fields (from Intl Transit & Clearing lane manual inputs)
+      let etaFC = '';
+      let latestArrivalDate = '';
+      let shipmentNo = '';
+      let hbl = '';
+      let mbl = '';
+      try {
+        const ticket = (zendesk && zendesk !== '—') ? zendesk : 'NO_TICKET';
+        const lKey = (typeof laneKey === 'function') ? laneKey(supplier, ticket, freight) : '';
+        const lm = lKey ? (loadIntlLaneManual(ws, lKey) || {}) : {};
+        etaFC = String(lm.eta_fc || lm.etaFC || lm.eta_fc_at || lm.eta_fc_fc || '').trim();
+        latestArrivalDate = String(lm.latest_arrival_date || lm.latestArrivalDate || lm.latestArrival || lm.latest_arrival || '').trim();
+        shipmentNo = String(lm.shipment_no || lm.shipmentNo || lm.shipment_number || lm.shipmentNumber || lm.shipment || '').trim();
+        hbl = String(lm.hbl || lm.HBL || '').trim();
+        mbl = String(lm.mbl || lm.MBL || '').trim();
+      } catch { /* ignore */ }
+
+      rows.push({ supplier, zendesk, freight, po, plannedUnits, approxReceivedUnits, appliedUnits, shipmentNo, hbl, mbl, etaFC,
+ latestArrivalDate, receivedAt });
+    }
+    rows.sort((a,b) =>
+      a.supplier.localeCompare(b.supplier) ||
+      String(a.zendesk).localeCompare(String(b.zendesk)) ||
+      String(a.freight).localeCompare(String(b.freight)) ||
+      String(a.po).localeCompare(String(b.po))
+    );
+
+    // -------------------- KPIs (keep the ones you already like) --------------------
+    const receivedOnly = rows.filter(r => !!r.receivedAt);
+    const totalReceivedPOs = receivedOnly.length;
+    const totalApproxUnits = receivedOnly.reduce((a,r)=>a+(r.approxReceivedUnits||0),0);
+    const totalAppliedUnits = rows.reduce((a,r)=>a+(r.appliedUnits||0),0);
+    const suppliersWithReceipts = new Set(receivedOnly.map(r=>r.supplier)).size;
+
+    const root = ensureReceivingFullModal();
+    root.classList.remove('hidden');
+
+    // Replace the body content with a unified grouped table (no dropdown dependency).
+    // Baseline modal markup doesn't always include a dedicated body id, so fall back to the main scroll container.
+    const body = root.querySelector('#flow-recvfs-body') || root.querySelector('.flex-1.overflow-auto.p-4');
+    if (body) {
+      body.innerHTML = `
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4" id="flow-recvfs-kpis"></div>
+
+        <div class="flex items-center justify-between mb-2">
+          <div>
+            <div class="text-sm font-semibold">Receiving — Full screen (units-based)</div>
+            <div class="text-[11px] text-gray-500">Grouped: Supplier → Zendesk → Freight → PO</div>
+          </div>
+          <div class="flex gap-2">
+            <button id="flow-recvfs-expandall" class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50">Expand all</button>
+            <button id="flow-recvfs-collapseall" class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50">Collapse all</button>
+            <button id="flow-recvfs-dl-all" class="px-3 py-1.5 text-sm rounded-md border hover:bg-gray-50">Download (PO rows)</button>
+          </div>
+        </div>
+
+        <div class="rounded-lg border overflow-auto" style="max-height:70vh">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50 sticky top-0 z-10">
+              <tr>
+                <th class="text-left px-3 py-2">Supplier / Zendesk / Freight / PO</th>
+                <th class="text-left px-3 py-2">Freight</th>
+                <th class="text-right px-3 py-2">Planned units</th>
+                <th class="text-right px-3 py-2">Approx received units</th>
+                <th class="text-right px-3 py-2">UID applied units</th>
+                <th class="text-left px-3 py-2">Shipment #</th>
+                <th class="text-left px-3 py-2">HBL</th>
+                <th class="text-left px-3 py-2">MBL</th>
+                <th class="text-left px-3 py-2">ETA FC</th>
+                <th class="text-left px-3 py-2">Latest arrival date</th>
+                <th class="text-left px-3 py-2">Received at</th>
+              </tr>
+            </thead>
+            <tbody id="flow-recvfs-rows"></tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    // KPIs
+    const kpi = root.querySelector('#flow-recvfs-kpis');
+    if (kpi) {
+      kpi.innerHTML = `
+        <div class="rounded-lg border p-3">
+          <div class="text-xs text-gray-500">POs received</div>
+          <div class="text-xl font-semibold">${fmtNum(totalReceivedPOs)}</div>
+        </div>
+        <div class="rounded-lg border p-3">
+          <div class="text-xs text-gray-500">Approx received units</div>
+          <div class="text-xl font-semibold">${fmtNum(totalApproxUnits)}</div>
+          <div class="text-[11px] text-gray-500 mt-1">Sum of planned units for received POs</div>
+        </div>
+        <div class="rounded-lg border p-3">
+          <div class="text-xs text-gray-500">UID applied units</div>
+          <div class="text-xl font-semibold">${fmtNum(totalAppliedUnits)}</div>
+          <div class="text-[11px] text-gray-500 mt-1">From VAS records (status=complete)</div>
+        </div>
+        <div class="rounded-lg border p-3">
+          <div class="text-xs text-gray-500">Suppliers with receipts</div>
+          <div class="text-xl font-semibold">${fmtNum(suppliersWithReceipts)}</div>
+        </div>
+      `;
+    }
+
+    // -------------------- Grouped / expandable rendering --------------------
+    const state = window.__FLOW_RECVFS_EXPAND_STATE__ = window.__FLOW_RECVFS_EXPAND_STATE__ || {
+      collapsedSupplier: new Set(),
+      collapsedZendesk: new Set(),
+      collapsedFreight: new Set(),
+    };
+
+    const makeKey = (parts) => parts.map(p => String(p ?? '—')).join('|||');
+    const esc = (v) => (typeof escapeHtml === 'function') ? escapeHtml(String(v ?? '')) : String(v ?? '');
+
+    // Build nested grouping: supplier -> zendesk -> freight -> po rows
+    const groups = new Map();
+    for (const r of rows) {
+      const sKey = r.supplier || '—';
+      const zKey = r.zendesk || '—';
+      const fKey = r.freight || '—';
+
+      if (!groups.has(sKey)) groups.set(sKey, new Map());
+      const zg = groups.get(sKey);
+      if (!zg.has(zKey)) zg.set(zKey, new Map());
+      const fg = zg.get(zKey);
+      if (!fg.has(fKey)) fg.set(fKey, []);
+      fg.get(fKey).push(r);
+    }
+
+    const sum = (arr, fn) => arr.reduce((a, x) => a + (fn(x) || 0), 0);
+    const countReceived = (arr) => arr.reduce((a, x) => a + (x.receivedAt ? 1 : 0), 0);
+
+    const caret = (isCollapsed) => isCollapsed ? '▸' : '▾';
+
+    const render = () => {
+      const tb = root.querySelector('#flow-recvfs-rows');
+      if (!tb) return;
+
+      let html = '';
+      let poRowIdx = 0;
+      let supplierIdx = 0;
+      const suppliers = Array.from(groups.keys()).sort((a,b)=>String(a).localeCompare(String(b)));
+
+      for (const supplier of suppliers) {
+        const supZebra = (supplierIdx++ % 2) ? 'bg-[#990033]/5' : 'bg-white';
+        const sId = 'S:' + supplier;
+        const zg = groups.get(supplier);
+        const allRowsS = [];
+        for (const fm of zg.values()) for (const arr of fm.values()) allRowsS.push(...arr);
+
+        const sPlanned = sum(allRowsS, x=>x.plannedUnits);
+        const sApprox = sum(allRowsS, x=>x.approxReceivedUnits);
+        const sApplied = sum(allRowsS, x=>x.appliedUnits);
+        const sPOs = allRowsS.length;
+        const sRecPOs = countReceived(allRowsS);
+        const sPct = sPOs ? Math.round((sRecPOs / sPOs) * 100) : 0;
+
+        const sCollapsed = state.collapsedSupplier.has(sId);
+        html += `
+          <tr class="${supZebra} hover:bg-gray-50 cursor-pointer select-none" data-kind="supplier" data-id="${esc(sId)}">
+            <td class="px-3 py-2 font-semibold text-[14px]">
+              <span class="inline-block w-4">${caret(sCollapsed)}</span>
+              ${esc(supplier)}
+              <span class="text-[11px] text-gray-500 ml-2">(${fmtNum(sRecPOs)}/${fmtNum(sPOs)} POs received)</span>
+              <div class="mt-1 w-40 h-1.5 bg-gray-200 rounded">
+                <div class="h-1.5 rounded bg-emerald-500" style="width:${sPct}%"></div>
+              </div>
+            </td>
+            <td class="px-3 py-2"></td>
+            <td class="px-3 py-2 text-right font-semibold">${fmtNum(sPlanned)}</td>
+            <td class="px-3 py-2 text-right font-semibold">${fmtNum(sApprox)}</td>
+            <td class="px-3 py-2 text-right font-semibold">${fmtNum(sApplied)}</td>
+            <td class="px-3 py-2"></td>
+            <td class="px-3 py-2"></td>
+            <td class="px-3 py-2"></td>
+            <td class="px-3 py-2"></td>
+            <td class="px-3 py-2"></td>
+            <td class="px-3 py-2"></td>
+          </tr>
+        `;
+
+        if (sCollapsed) continue;
+
+        const zendeskKeys = Array.from(zg.keys()).sort((a,b)=>String(a).localeCompare(String(b)));
+        for (const zendesk of zendeskKeys) {
+          const zId = 'Z:' + makeKey([supplier, zendesk]);
+          const fg = zg.get(zendesk);
+
+          const allRowsZ = [];
+          for (const arr of fg.values()) allRowsZ.push(...arr);
+
+          const zPlanned = sum(allRowsZ, x=>x.plannedUnits);
+          const zApprox = sum(allRowsZ, x=>x.approxReceivedUnits);
+          const zApplied = sum(allRowsZ, x=>x.appliedUnits);
+          const zPOs = allRowsZ.length;
+          const zRecPOs = countReceived(allRowsZ);
+          const zPct = zPOs ? Math.round((zRecPOs / zPOs) * 100) : 0;
+
+          const zFreights = Array.from(fg.keys()).filter(x => String(x || '').trim());
+          const zFreightLabel = zFreights.length ? (zFreights.length === 1 ? zFreights[0] : zFreights.join(' / ')) : '—';
+
+          const uniqVal = (arr, key) => {
+            const set = new Set();
+            for (const x of arr) {
+              const v = (x && x[key]) ? String(x[key]).trim() : '';
+              if (v) set.add(v);
+            }
+            if (set.size === 1) return Array.from(set)[0];
+            return '';
+          };
+          const zShipment = uniqVal(allRowsZ, 'shipmentNo');
+          const zHBL = uniqVal(allRowsZ, 'hbl');
+          const zMBL = uniqVal(allRowsZ, 'mbl');
+          const zEta = uniqVal(allRowsZ, 'etaFC');
+          const zLatest = uniqVal(allRowsZ, 'latestArrivalDate');
+
+          const zCollapsed = state.collapsedZendesk.has(zId);
+          html += `
+            <tr class="bg-gray-50/70 hover:bg-gray-50 cursor-pointer select-none" data-kind="zendesk" data-id="${esc(zId)}">
+              <td class="px-3 py-2 text-[13px] font-medium">
+                <span class="inline-block w-4"></span>
+                <span class="inline-block w-4">${caret(zCollapsed)}</span>
+                <span class="text-sm text-gray-700"><span class="font-medium">Zendesk:</span> ${esc(zendesk)}</span>
+                <span class="text-[11px] text-gray-500 ml-2">(${fmtNum(zRecPOs)}/${fmtNum(zPOs)} POs received)</span>
+                <div class="mt-1 w-36 h-1.5 bg-gray-200 rounded">
+                  <div class="h-1.5 rounded bg-emerald-500" style="width:${zPct}%"></div>
+                </div>
+              </td>
+              <td class="px-3 py-2 text-sm text-gray-700">${esc(zFreightLabel)}</td>
+              <td class="px-3 py-2 text-right">${fmtNum(zPlanned)}</td>
+              <td class="px-3 py-2 text-right">${fmtNum(zApprox)}</td>
+              <td class="px-3 py-2 text-right">${fmtNum(zApplied)}</td>
+              <td class="px-3 py-2">${esc(zShipment || "—")}</td>
+              <td class="px-3 py-2">${esc(zHBL || "—")}</td>
+              <td class="px-3 py-2">${esc(zMBL || "—")}</td>
+              <td class="px-3 py-2">${esc(fmtDateOnlyLocal(tz, zEta) || "—")}</td>
+              <td class="px-3 py-2">${esc(fmtDateOnlyLocal(tz, zLatest) || "—")}</td>
+              <td class="px-3 py-2"></td>
+            </tr>
+          `;
+
+          if (zCollapsed) continue;
+
+          const freightKeys = Array.from(fg.keys()).sort((a,b)=>String(a).localeCompare(String(b)));
+          for (const freight of freightKeys) {
+            const fId = 'F:' + makeKey([supplier, zendesk, freight]);
+            const arr = fg.get(freight) || [];
+
+            const fPlanned = sum(arr, x=>x.plannedUnits);
+            const fApprox = sum(arr, x=>x.approxReceivedUnits);
+            const fApplied = sum(arr, x=>x.appliedUnits);
+            const fPOs = arr.length;
+            const fRecPOs = countReceived(arr);
+
+            const fCollapsed = state.collapsedFreight.has(fId);
+            html += `
+              <tr class="bg-gray-50 hover:bg-gray-50 cursor-pointer select-none" data-kind="freight" data-id="${esc(fId)}">
+                <td class="px-3 py-2">
+                  <span class="inline-block w-4"></span>
+                  <span class="inline-block w-4"></span>
+                  <span class="inline-block w-4">${caret(fCollapsed)}</span>
+                  <span class="text-xs text-gray-600"><span class="font-medium">Freight:</span> ${esc(freight)}</span>
+                  <span class="text-[11px] text-gray-500 ml-2">(${fmtNum(fRecPOs)}/${fmtNum(fPOs)} POs received)</span>
+                </td>
+                <td class="px-3 py-2">${esc(freight)}</td>
+                <td class="px-3 py-2 text-right">${fmtNum(fPlanned)}</td>
+                <td class="px-3 py-2 text-right">${fmtNum(fApprox)}</td>
+                <td class="px-3 py-2 text-right">${fmtNum(fApplied)}</td>
+                <td class="px-3 py-2"></td>
+                <td class="px-3 py-2"></td>
+                <td class="px-3 py-2"></td>
+                <td class="px-3 py-2"></td>
+                <td class="px-3 py-2"></td>
+                <td class="px-3 py-2"></td>
+              </tr>
+            `;
+
+            if (fCollapsed) continue;
+
+            for (const r of arr) {
+              html += `
+                <tr class="${(poRowIdx++ % 2) ? "bg-[#990033]/5" : "bg-white"} hover:bg-gray-50" data-kind="po">
+                  <td class="px-3 py-2">
+                    <span class="inline-block w-4"></span>
+                    <span class="inline-block w-4"></span>
+                    <span class="inline-block w-4"></span>
+                    <span class="font-mono text-xs">${esc(r.po)}</span>
+                  </td>
+                  <td class="px-3 py-2">${esc(r.freight || '—')}</td>
+                  <td class="px-3 py-2 text-right">${fmtNum(r.plannedUnits)}</td>
+                  <td class="px-3 py-2 text-right">${fmtNum(r.approxReceivedUnits)}</td>
+                  <td class="px-3 py-2 text-right">${fmtNum(r.appliedUnits)}</td>
+                  <td class="px-3 py-2">${esc(r.shipmentNo || '—')}</td>
+                  <td class="px-3 py-2">${esc(r.hbl || '—')}</td>
+                  <td class="px-3 py-2">${esc(r.mbl || '—')}</td>
+                  <td class="px-3 py-2">${esc(fmtDateOnlyLocal(tz, r.etaFC) || '—')}</td>
+                  <td class="px-3 py-2">${esc(fmtDateOnlyLocal(tz, r.latestArrivalDate) || '—')}</td>
+                  <td class="px-3 py-2">${esc(fmtDateOnlyLocal(tz, r.receivedAt))}</td>
+                </tr>
+              `;
+            }
+          }
+        }
+      }
+
+      tb.innerHTML = html || `<tr><td class="px-3 py-6 text-center text-gray-500" colspan="11">No planned POs found for this week</td></tr>`;
+    };
+
+    // Toggle handlers (single delegated listener)
+    const tb = root.querySelector('#flow-recvfs-rows');
+    if (tb && !tb.__FLOW_RECVFS_BOUND__) {
+      tb.__FLOW_RECVFS_BOUND__ = true;
+      tb.addEventListener('click', (ev) => {
+        const tr = ev.target && ev.target.closest ? ev.target.closest('tr') : null;
+        if (!tr) return;
+        const kind = tr.getAttribute('data-kind');
+        const id = tr.getAttribute('data-id');
+        if (!kind || !id) return;
+
+        if (kind === 'supplier') {
+          if (state.collapsedSupplier.has(id)) state.collapsedSupplier.delete(id);
+          else state.collapsedSupplier.add(id);
+          render();
+        } else if (kind === 'zendesk') {
+          if (state.collapsedZendesk.has(id)) state.collapsedZendesk.delete(id);
+          else state.collapsedZendesk.add(id);
+          render();
+        } else if (kind === 'freight') {
+          if (state.collapsedFreight.has(id)) state.collapsedFreight.delete(id);
+          else state.collapsedFreight.add(id);
+          render();
+        }
+      });
+    }
+
+    // Expand / Collapse all
+    const btnExpand = root.querySelector('#flow-recvfs-expandall');
+    if (btnExpand) btnExpand.onclick = () => {
+      state.collapsedSupplier.clear();
+      state.collapsedZendesk.clear();
+      state.collapsedFreight.clear();
+      render();
+    };
+    const btnCollapse = root.querySelector('#flow-recvfs-collapseall');
+    if (btnCollapse) btnCollapse.onclick = () => {
+      // Collapse everything at supplier level is enough.
+      state.collapsedSupplier.clear();
+      for (const supplier of groups.keys()) state.collapsedSupplier.add('S:' + supplier);
+      state.collapsedZendesk.clear();
+      state.collapsedFreight.clear();
+      render();
+    };
+
+    // Download full table (flat CSV of PO-level rows)
+    const dlAll = root.querySelector('#flow-recvfs-dl-all');
+    if (dlAll) {
+      dlAll.onclick = () => {
+        const out = [
+          ['week_start', ws],
+          ['supplier','zendesk','freight','po','planned_units','approx_received_units','uid_applied_units','eta_fc','latest_arrival_date','received_at']
+        ];
+        for (const r of rows) {
+          out.push([
+            r.supplier, r.zendesk, r.freight, r.po,
+            String(r.plannedUnits ?? 0),
+            String(r.approxReceivedUnits ?? 0),
+            String(r.appliedUnits ?? 0),
+            String(r.etaFC ?? ''),
+            String(r.latestArrivalDate ?? ''),
+            String(r.receivedAt ?? '')
+          ]);
+        }
+        const csv = out.map(line => line.map(x => {
+          const s = String(x ?? '');
+          if (/[,"\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+          return s;
+        }).join(',')).join('\n');
+
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const a = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+        a.href = url;
+        a.download = `receiving_fullscreen_${(ws || 'week').toString().replace(/[:\s]/g,'_')}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(()=>URL.revokeObjectURL(url), 250);
+      };
+    }
+
+    // Initial render
+    render();
+  }
+
+  function wireReceivingFullScreen() {
+    const btn = document.getElementById('flow-receiving-fullscreen');
+    if (!btn || btn.__bound) return;
+    btn.__bound = true;
+    btn.addEventListener('click', () => openReceivingFullScreenModal());
+  }
+
 function renderTopNodes(ws, tz, receiving, vas, intl, manual) {
     // use a single 'now' reference for all upcoming/past comparisons
     const now = new Date();
@@ -3108,10 +3796,12 @@ function renderTopNodes(ws, tz, receiving, vas, intl, manual) {
 
   detail.innerHTML = [
     header(title, receiving.level, subtitle),
+    `<div class="mt-2 flex justify-end"><button type="button" id="flow-receiving-fullscreen" class="text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Full screen</button></div>`,
     bullets(insights),
     kpis,
     table(['Supplier', 'Progress', 'POs received', 'Planned units', 'Cartons In', 'Cartons Out'], supRows),
   ].join('');
+    try { wireReceivingFullScreen(); } catch {}
   return;
 }
 
@@ -3400,7 +4090,11 @@ detail.innerHTML = [
 
     // default
     detail.innerHTML = header('Flow', 'gray', 'Click a node above to see details.');
-  }
+  
+
+    // Best-effort bind for Receiving full-screen button (only exists in Receiving view).
+    try { wireReceivingFullScreen(); } catch {}
+}
 
   
   function escapeAttr(s) {
@@ -3419,6 +4113,9 @@ detail.innerHTML = [
     const departed = v(manual.departed_at);
     const arrived = v(manual.arrived_at);
     const destClr = v(manual.dest_customs_cleared_at);
+
+    const etaFC = v(manual.eta_fc || manual.etaFC || manual.eta_fc_at || manual.eta_fc_fc);
+    const latestArrivalDate = v(manual.latest_arrival_date || manual.latestArrivalDate || manual.latestArrival || manual.latest_arrival);
 
     // Baseline (reference-only): show expected milestone dates without persisting.
     const vasDueB = makeBizLocalDate(
@@ -3599,6 +4296,16 @@ detail.innerHTML = [
                   <span>Baseline: <span class="font-mono">${baseDestClr}</span></span>
                   <button type="button" class="flow-intl-copy text-[11px] underline hover:text-gray-700" data-target="flow-intl-destclr" data-val="${baseDestClr}">Copy</button>
                 </div>
+              </label>
+
+              <label class="text-sm">
+                <div class="text-xs text-gray-500 mb-1">ETA FC</div>
+                <input id="flow-intl-etafc" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${etaFC}"/>
+              </label>
+
+              <label class="text-sm">
+                <div class="text-xs text-gray-500 mb-1">Latest arrival date</div>
+                <input id="flow-intl-latestarrival" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${latestArrivalDate}"/>
               </label>
 
               <div class="flex items-center gap-3 md:pt-6">
@@ -3898,6 +4605,8 @@ detail.innerHTML = [
         const departed = detail.querySelector('#flow-intl-departed')?.value || '';
         const arrived = detail.querySelector('#flow-intl-arrived')?.value || '';
         const destClr = detail.querySelector('#flow-intl-destclr')?.value || '';
+        const etaFC = detail.querySelector('#flow-intl-etafc')?.value || '';
+        const latestArrivalDate = detail.querySelector('#flow-intl-latestarrival')?.value || '';
 
         const hold = !!detail.querySelector('#flow-intl-hold')?.checked;
         const note = detail.querySelector('#flow-intl-note')?.value || '';
@@ -3907,6 +4616,8 @@ detail.innerHTML = [
           departed_at: safeISO(departed),
           arrived_at: safeISO(arrived),
           dest_customs_cleared_at: safeISO(destClr),
+          eta_fc: safeISO(etaFC),
+          latest_arrival_date: safeISO(latestArrivalDate),
           customs_hold: hold,
           note: String(note || ''),
         };
@@ -5062,6 +5773,13 @@ async function refresh() {
       planRows = asArray(planRows);
       receivingRows = asArray(receivingRows);
       records = asArray(records);
+
+    // Receiving full-screen (units-based table) uses existing data only (no new endpoints).
+    // Store a lightweight context snapshot for the modal to render instantly.
+    try {
+      window.__FLOW_RECEIVING_FS_CTX__ = { ws, tz, planRows, receivingRows, records };
+    } catch {}
+
     } catch (e) {
       console.warn('[flow] load error', e);
     }
