@@ -1088,12 +1088,9 @@ async function downloadAppliedWeek() {
   weDate.setDate(weDate.getDate() + 6);
   const we = iso(weDate);
 
-  // Filter only 'complete' records within this week
-  const records = (state.records || []).filter(r => {
-    if (r.status !== 'complete') return false;
-    const d = toISODate(r.date_local);
-    return d && d >= ws && d <= we;
-  });
+  // Risk-averse: export exactly what Ops is already using for this week
+  const records = (state.records || []).filter(r => r.status === 'complete');
+
 
   if (!records.length) {
     alert('No applied UIDs found for this week.');
