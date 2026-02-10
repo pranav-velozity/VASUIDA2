@@ -626,7 +626,7 @@ function createHeart(size=24, color=BRAND, bpm=40){
   async function fetchPlan(w){
   if(!apiBase) return [];
   try {
-    return await api(`/plan/weeks/${w}?limit=150000`);
+    return await api(`/plan/weeks/${w}?limit=65000`);
   } catch {
     return [];
   }
@@ -635,19 +635,19 @@ function createHeart(size=24, color=BRAND, bpm=40){
 async function fetchActualsAll(){
   if (!apiBase) return [];
   try {
-    const d = await fetchJSONCached(`${apiBase}/records?limit=150000`, 20000);
+    const d = await fetchJSONCached(`${apiBase}/records?limit=65000`, 20000);
     return (d && d.records) || [];
   } catch {
     return [];
   }
 }
-  async function fetchActuals(f,t){ if(!apiBase) return []; try{const d=await api(`/records?from=${f}&to=${t}&status=complete&limit=150000`); return d.records||[];}catch{return [];} }
+  async function fetchActuals(f,t){ if(!apiBase) return []; try{const d=await api(`/records?from=${f}&to=${t}&status=complete&limit=65000`); return d.records||[];}catch{return [];} }
 
 // --- Fetch bins for a week (business week start) ---
 async function fetchBins(ws) {
   if (!apiBase) return [];
   try {
-    const r = await api(`/bins/weeks/${ws}?limit=150000`);
+    const r = await api(`/bins/weeks/${ws}?limit=65000`);
     return Array.isArray(r) ? r : (r.bins || []);
   } catch {
     return [];
@@ -1817,7 +1817,7 @@ async function fetchActualsInWeek(ws, we) {
   if (!apiBase) return [];
   try {
     // get everything, we’ll filter locally
-    const d = await fetchJSONCached(`${apiBase}/records?limit=150000`, 20000);
+    const d = await fetchJSONCached(`${apiBase}/records?limit=65000`, 20000);
     const all = (d && d.records) || [];
 
     const startTs = new Date(ws + 'T00:00:00Z').getTime();
@@ -2562,7 +2562,7 @@ async function loadOpsMetrics() {
   if (!apiBase) return;
   try {
     // Fetch all recent completed records, up to 50k
-    const data = await fetchJSONCached(`${apiBase}/records?status=complete&limit=150000`, 15000);
+    const data = await fetchJSONCached(`${apiBase}/records?status=complete&limit=65000`, 15000);
     const rows = (data && data.records) || [];
 
     const now = Date.now();
@@ -2672,7 +2672,7 @@ async function refreshDashboardTotals(){
   const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
   const we  = iso(weD);
 
-  const data = await fetchJSONCached(`${apiBase}/records?limit=150000`, 15000);
+  const data = await fetchJSONCached(`${apiBase}/records?limit=65000`, 15000);
   const all = (data && data.records) || [];
 
   const inWeek = all.filter(r => {
