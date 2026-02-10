@@ -9,7 +9,7 @@
   const BUSINESS_TZ = document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai';
 
 // --- Exec should not fetch; rely on Ops-populated window.state
-const EXEC_USE_NETWORK = true;
+const EXEC_USE_NETWORK = false; // set true only if Exec must self-fetch (defaults false to avoid heavy /records pulls)
 
 // --- API base (normalized; always ends with /api)
 const _rawBase =
@@ -2349,9 +2349,7 @@ ensureSummaryBtn(async () => {
 
 // 🔹 NEW: re-render exactly when the app signals data is ready
 window.addEventListener('state:ready', _execTryRender);
-
-
-  _execBootTimer = setInterval(_execTryRender, 600);
+  // NOTE: removed aggressive 600ms polling to avoid repeated heavy work / network calls.
   document.addEventListener('visibilitychange', _execTryRender);
   setTimeout(_execTryRender, 0);
 
