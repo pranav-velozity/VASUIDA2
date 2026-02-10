@@ -589,6 +589,39 @@ function createHeart(size=24, color=BRAND, bpm=40){
 }
   // API helpers
   const state={weekStart:'', plan:[], records:[]};
+
+  // ---- lightweight fetch cache (prevents repeated 150k pulls) ----
+  // Many views reuse the same /records payload. When the browser/network is shaky,
+  // repeated large downloads create lag. This cache de-dupes in-flight requests
+  // and reuses results for a short TTL.
+  const __fetchCache = new Map(); // url -> { ts, data, promise }
+  async function fetchJSONCached(url, ttlMs = 15000) {
+    const now = Date.now();
+    const hit = __fetchCache.get(url);
+
+    if (hit) {
+      if (hit.data && (now - hit.ts) < ttlMs) return hit.data;
+      if (hit.promise) return hit.promise;
+    }
+
+    const prom = fetch(url, { cache: 'no-store' })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(await r.text());
+        return r.json();
+      })
+      .then((data) => {
+        __fetchCache.set(url, { ts: Date.now(), data, promise: null });
+        return data;
+      })
+      .catch((err) => {
+        __fetchCache.delete(url);
+        throw err;
+      });
+
+    __fetchCache.set(url, { ts: now, data: hit ? hit.data : null, promise: prom });
+    return prom;
+  }
+
   async function api(path,opts={}){const r=await fetch(`${apiBase}${path}`,{method:opts.method||'GET',headers:{'Content-Type':'application/json'},body:opts.body?JSON.stringify(opts.body):undefined}); if(!r.ok) throw new Error(await r.text()); const ct=r.headers.get('content-type')||''; return ct.includes('json')?r.json():r.text();}
   async function fetchPlan(w){
   if(!apiBase) return [];
@@ -602,8 +635,8 @@ function createHeart(size=24, color=BRAND, bpm=40){
 async function fetchActualsAll(){
   if (!apiBase) return [];
   try {
-    const d = await api(`/records?limit=150000`);
-    return d.records || [];
+    const d = await fetchJSONCached(`${apiBase}/records?limit=150000`, 20000);
+    return (d && d.records) || [];
   } catch {
     return [];
   }
@@ -1784,8 +1817,8 @@ async function fetchActualsInWeek(ws, we) {
   if (!apiBase) return [];
   try {
     // get everything, we’ll filter locally
-    const d = await api(`/records?limit=150000`);
-    const all = d.records || [];
+    const d = await fetchJSONCached(`${apiBase}/records?limit=150000`, 20000);
+    const all = (d && d.records) || [];
 
     const startTs = new Date(ws + 'T00:00:00Z').getTime();
     const endTs   = startTs + 7 * 86400000;
@@ -2529,9 +2562,8 @@ async function loadOpsMetrics() {
   if (!apiBase) return;
   try {
     // Fetch all recent completed records, up to 50k
-    const res = await fetch(`${apiBase}/records?status=complete&limit=150000`);
-    if (!res.ok) throw new Error(await res.text());
-    const rows = (await res.json()).records || [];
+    const data = await fetchJSONCached(`${apiBase}/records?status=complete&limit=150000`, 15000);
+    const rows = (data && data.records) || [];
 
     const now = Date.now();
     const startToday = new Date();
@@ -2640,9 +2672,8 @@ async function refreshDashboardTotals(){
   const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
   const we  = iso(weD);
 
-  const res = await fetch(`${apiBase}/records?limit=150000`);
-  if(!res.ok) return;
-  const all = (await res.json()).records || [];
+  const data = await fetchJSONCached(`${apiBase}/records?limit=150000`, 15000);
+  const all = (data && data.records) || [];
 
   const inWeek = all.filter(r => {
     if (r.status !== 'complete') return false;
