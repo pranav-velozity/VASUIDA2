@@ -347,12 +347,15 @@ function iconContainer() {
 function getFacility() {
   try {
     const f = (window.state && window.state.facility) ? String(window.state.facility).trim() : '';
-    return f || 'LKWF';
-  } catch { return 'LKWF'; }
+    return f; // <-- no hardcoded default
+  } catch {
+    return '';
+  }
 }
 
 async function fetchFlowWeek(ws, facility) {
-  const f = String(facility || getFacility() || 'LKWF').trim() || 'LKWF';
+  const f = String(facility || getFacility() || '').trim();
+  if (!ws || !f) return null; // <-- don't call backend without a real facility
   try {
     return await api(`/flow/week/${encodeURIComponent(ws)}?facility=${encodeURIComponent(f)}`);
   } catch (e) {
@@ -361,8 +364,8 @@ async function fetchFlowWeek(ws, facility) {
 }
 
 async function patchFlowWeek(ws, patch, facility) {
-  const f = String(facility || getFacility() || 'LKWF').trim() || 'LKWF';
-  if (!ws || !patch || typeof patch !== 'object') return null;
+  const f = String(facility || getFacility() || '').trim();
+  if (!ws || !f || !patch || typeof patch !== 'object') return null; // <-- require facility
   if (window.__FLOW_SUPPRESS_BACKEND_WRITE__) return null;
   try {
     return await api(`/flow/week/${encodeURIComponent(ws)}?facility=${encodeURIComponent(f)}`, {
@@ -375,7 +378,6 @@ async function patchFlowWeek(ws, patch, facility) {
     return null;
   }
 }
-
 // Prime local week-scoped stores from backend once per (ws, facility).
 async function primeFlowWeekFromBackend(ws) {
   const f = getFacility();
