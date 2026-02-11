@@ -641,6 +641,18 @@ async function fetchActualsAll(){
     return [];
   }
 }
+
+// Shared snapshot for all /records consumers.
+// IMPORTANT: Keep the URL identical everywhere so fetchJSONCached can de-dupe.
+async function getRecordsSnapshot(ttlMs = 15000) {
+  if (!apiBase) return [];
+  try {
+    const d = await fetchJSONCached(`${apiBase}/records?limit=65000`, ttlMs);
+    return (d && d.records) || [];
+  } catch {
+    return [];
+  }
+}
   async function fetchActuals(f,t){ if(!apiBase) return []; try{const d=await api(`/records?from=${f}&to=${t}&status=complete&limit=65000`); return d.records||[];}catch{return [];} }
 
 // --- Fetch bins for a week (business week start) ---
@@ -2562,8 +2574,7 @@ async function loadOpsMetrics() {
   if (!apiBase) return;
   try {
     // Fetch all recent completed records, up to 50k
-    const data = await fetchJSONCached(`${apiBase}/records?status=complete&limit=65000`, 15000);
-    const rows = (data && data.records) || [];
+    const rows = await getRecordsSnapshot(15000);
 
     const now = Date.now();
     const startToday = new Date();
@@ -2655,15 +2666,71 @@ async function loadOpsMetrics() {
   }
 }
 
+  
+  // Coalesce scan SSE updates to avoid UI hangs when scan events are frequent.
+  let __opsRefreshTimer = null;
+  let __opsRefreshRunning = false;
+  let __opsRefreshPending = false;
+  let __opsRefreshLast = 0;
+
+  function scheduleOpsRefresh() {
+    if (!apiBase) return;
+    if (document.hidden) return;
+    __opsRefreshPending = true;
+
+    if (__opsRefreshTimer) return;
+    const minGapMs = 1500; // at most ~1 refresh per 1.5s
+    const wait = Math.max(0, minGapMs - (Date.now() - __opsRefreshLast));
+
+    __opsRefreshTimer = setTimeout(runOpsRefresh, wait);
+  }
+
+  async function runOpsRefresh() {
+    __opsRefreshTimer = null;
+
+    if (__opsRefreshRunning) {
+      __opsRefreshPending = true;
+      return;
+    }
+
+    if (!__opsRefreshPending) return;
+    __opsRefreshPending = false;
+
+    __opsRefreshRunning = true;
+    __opsRefreshLast = Date.now();
+
+    try {
+      // Yield once so clicks/paint can happen.
+      await new Promise((r) => setTimeout(r, 0));
+      await loadOpsMetrics();
+      await refreshDashboardTotals();
+    } catch (e) {
+      console.warn('Ops refresh failed:', e);
+    } finally {
+      __opsRefreshRunning = false;
+      if (__opsRefreshPending) scheduleOpsRefresh();
+    }
+  }
+
   function startSSE(){
     if(!apiBase) return;
     try{
       const ev=new EventSource(`${apiBase}/events/scan`);
       $('#ops-dot')?.classList.replace('bg-gray-300','bg-green-500');
-      ev.onmessage=async()=>{ await loadOpsMetrics(); await refreshDashboardTotals(); };
-      ev.onerror = ()=>{ try{ev.close();}catch{}; $('#ops-dot')?.classList.replace('bg-green-500','bg-amber-500'); setTimeout(startSSE,3000); };
+      ev.onmessage=()=>{ scheduleOpsRefresh(); };
+      ev.onerror = ()=>{
+        try{ev.close();}catch{}
+        $('#ops-dot')?.classList.replace('bg-green-500','bg-amber-500');
+        setTimeout(startSSE,3000);
+      };
+
+      // Refresh once when tab becomes visible again.
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) scheduleOpsRefresh();
+      });
     }catch{}
   }
+
 
   // ---------- Dashboard weekly refresh from completion timestamps ----------
 async function refreshDashboardTotals(){
@@ -2672,8 +2739,7 @@ async function refreshDashboardTotals(){
   const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
   const we  = iso(weD);
 
-  const data = await fetchJSONCached(`${apiBase}/records?limit=65000`, 15000);
-  const all = (data && data.records) || [];
+  const all = await getRecordsSnapshot(15000);
 
   const inWeek = all.filter(r => {
     if (r.status !== 'complete') return false;
