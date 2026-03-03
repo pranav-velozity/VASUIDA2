@@ -8,7 +8,7 @@
 <meta name="business-tz" content="Asia/Shanghai"/>
   <title>VelOzity Pinpoint</title>
 
- <!-- Tailwind -->
+<!-- Tailwind -->
 <script src="https://cdn.tailwindcss.com"></script>
 <!-- SheetJS -->
 <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
@@ -214,31 +214,15 @@
 }
 </style>
 
-  <!-- 🔐 Clerk Authentication -->
-<meta name="clerk-publishable-key" content="pk_live_Y2xlcmsudmVsb3ppdHkuY29tLmF1JA">
+<!-- 🔐 Clerk Authentication -->
+<meta name="clerk-publishable-key" content="pk_test_bG92ZWQtYm9hLTE5LmNsZXJrLmFjY291bnRzLmRldiQ">
 <script 
   async
   crossorigin="anonymous"
-  data-clerk-publishable-key="pk_live_Y2xlcmsudmVsb3ppdHkuY29tLmF1JA"
-  src="https://clerk.velozity.com.au/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"
+  data-clerk-publishable-key="pk_test_bG92ZWQtYm9hLTE5LmNsZXJrLmFjY291bnRzLmRldiQ"
+  src="https://loved-boa-19.clerk.accounts.dev/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"
   type="text/javascript"
 ></script>
-
-**Notice the changes:**
-- ✅ `pk_test_...` → `pk_live_...` (production key)
-- ✅ `loved-boa-19.clerk.accounts.dev` → `clerk.velozity.com.au` (production domain)
-
-5. Commit message: "Switch to production Clerk keys"
-6. Click **"Commit changes"**
-
----
-
-## 🚀 THEN:
-
-Wait for Netlify to redeploy (1-2 minutes), then visit:
-```
-https://pinpoint.velozity.com.au
-
 <script src="/auth-helper.js" defer></script>
 
 </head>
@@ -4404,6 +4388,7 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 
 </body>
 </html>
+
 
 
 
