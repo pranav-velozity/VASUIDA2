@@ -1,6 +1,6 @@
 [build]
   base = "ui"
-  publish = "dist"
+  publish = "ui"
   command = "npm run build"
 
 [build.environment]
