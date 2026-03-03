@@ -8,6 +8,12 @@ const ExcelJS = require('exceljs');
 const Database = require('better-sqlite3');
 const { randomUUID } = require('crypto');
 
+// 🔐 Security Middleware
+const { authenticateRequest, requireRole, autoFilterResponse, optionalAuth, authenticateApiKey } = require('./middleware/auth');
+const { apiLimiter, writeOpLimiter, uploadLimiter } = require('./middleware/rateLimiter');
+const { validateRecordInput, validateBulkInput } = require('./middleware/validation');
+const { auditLog } = require('./middleware/auditLog');
+
 // ---- Config ----
 const PORT = process.env.PORT || 4000;
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*'; // set to your frontend origin(s) in prod
@@ -40,6 +46,9 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '100mb' }));
+
+// 🔐 Rate Limiting
+app.use(apiLimiter);
 
 /* ===== BEGIN: /api alias -> root endpoints =====
    This lets /api/plan, /api/records, /api/bins, /api/flow/... hit the same handlers as
@@ -238,7 +247,10 @@ app.get('/health', (req, res) => res.json({ ok: true, now: new Date().toISOStrin
 // ===== Flow Week API (facility-scoped, week-scoped) =====
 
 // GET /flow/week/:weekStart?facility=LKWF
-app.get('/flow/week/:weekStart', (req, res) => {
+app.get('/flow/week/:weekStart',
+  authenticateRequest,
+  auditLog('view_flow'),
+  (req, res) => {
   const wsIn = String(req.params.weekStart || '').trim();
   const facility = normFacility(req.query.facility);
   if (!facility) return res.status(400).json({ error: 'facility required' });
@@ -258,7 +270,10 @@ app.get('/flow/week/:weekStart', (req, res) => {
 });
 
 // GET /flow/week/:weekStart/all   (full view across facilities)
-app.get('/flow/week/:weekStart/all', (req, res) => {
+app.get('/flow/week/:weekStart/all',
+  authenticateRequest,
+  auditLog('view_flow_all'),
+  (req, res) => {
   const wsIn = String(req.params.weekStart || '').trim();
   const monday = mondayOfLoose(wsIn);
   if (!monday) return res.status(400).json({ error: 'invalid weekStart' });
@@ -275,7 +290,12 @@ app.get('/flow/week/:weekStart/all', (req, res) => {
 });
 
 // POST /flow/week/:weekStart?facility=LKWF   body: { ...patch }
-app.post('/flow/week/:weekStart', (req, res) => {
+app.post('/flow/week/:weekStart',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'client', 'api']),
+  writeOpLimiter,
+  auditLog('edit_flow'),
+  (req, res) => {
   const wsIn = String(req.params.weekStart || '').trim();
   const facility = normFacility(req.query.facility);
   if (!facility) return res.status(400).json({ error: 'facility required' });
@@ -311,7 +331,12 @@ app.post('/flow/week/:weekStart', (req, res) => {
 
 
 // --- Inline cell patch from Intake table ---
-app.patch('/records/:id', (req, res) => {
+app.patch('/records/:id',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'api']),
+  validateRecordInput,
+  auditLog('patch_record'),
+  (req, res) => {
   const id = String(req.params.id);
   const { field, value } = req.body || {};
   if (!id || !field) return res.status(400).json({ error: 'id and field required' });
@@ -363,7 +388,13 @@ app.patch('/records/:id', (req, res) => {
 });
 
 // --- Create record (used by UI once a row is complete) ---
-app.post('/records', (req, res) => {
+app.post('/records',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'api']),
+  validateRecordInput,
+  writeOpLimiter,
+  auditLog('create_record'),
+  (req, res) => {
   const b = req.body || {};
   const rec = {
     id: b.id || randomUUID(),
@@ -418,7 +449,13 @@ function normalizeUploadRow(row) {
   };
 }
 
-app.post('/records/import', (req, res) => {
+app.post('/records/import',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'api']),
+  validateBulkInput,
+  uploadLimiter,
+  auditLog('import_records'),
+  (req, res) => {
   const arr = Array.isArray(req.body) ? req.body : [];
   if (!arr.length) return res.status(400).json({ error: 'array of rows required' });
 
@@ -483,7 +520,11 @@ app.post('/records/import', (req, res) => {
 
 
 // --- Fetch records ---
-app.get('/records', (req, res) => {
+app.get('/records',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_records'),
+  (req, res) => {
   // Accept either from/to OR weekStart/weekEnd (we translate weekStart/weekEnd to from/to)
   const weekStart = req.query.weekStart ? String(req.query.weekStart) : '';
   const weekEnd   = req.query.weekEnd   ? String(req.query.weekEnd)   : '';
@@ -514,7 +555,11 @@ app.get('/records', (req, res) => {
 
 // --- Paginated records (cursor-based; for drilldowns only) ---
 // Cursor format: "<completed_at>|<id>" (both URL-encoded by the client). Results are ordered DESC.
-app.get('/records/page', (req, res) => {
+app.get('/records/page',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_records_page'),
+  (req, res) => {
   try {
     const weekStart = req.query.weekStart ? String(req.query.weekStart) : '';
     const weekEnd   = req.query.weekEnd   ? String(req.query.weekEnd)   : '';
@@ -578,7 +623,11 @@ app.get('/records/page', (req, res) => {
 
 
 // --- Ops quick stats (tiny payload; safe to call frequently) ---
-app.get('/summary/ops', (req, res) => {
+app.get('/summary/ops',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_summary_ops'),
+  (req, res) => {
   try {
     const now = new Date();
     const nowISO = now.toISOString();
@@ -643,7 +692,11 @@ app.get('/summary/ops', (req, res) => {
 
 
 // --- Fetch records summary (totals + trends; avoids pulling huge record sets to client) ---
-app.get('/records/summary', (req, res) => {
+app.get('/records/summary',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_records_summary'),
+  (req, res) => {
   try {
     // Accept either from/to OR weekStart/weekEnd (same pattern as /records)
     const weekStart = req.query.weekStart ? String(req.query.weekStart) : '';
@@ -721,7 +774,11 @@ app.get('/records/summary', (req, res) => {
 
 
 // --- Summary: PO+SKU rollup (for discrepancies without pulling raw records) ---
-app.get('/summary/po_sku', (req, res) => {
+app.get('/summary/po_sku',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_summary_po_sku'),
+  (req, res) => {
   try {
     const fromRaw = req.query.from ? String(req.query.from) : '';
     const toRaw   = req.query.to   ? String(req.query.to)   : '';
@@ -756,7 +813,11 @@ app.get('/summary/po_sku', (req, res) => {
 });
 
 // --- Summary: SKU rollup ---
-app.get('/summary/sku', (req, res) => {
+app.get('/summary/sku',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_summary_sku'),
+  (req, res) => {
   try {
     const fromRaw = req.query.from ? String(req.query.from) : '';
     const toRaw   = req.query.to   ? String(req.query.to)   : '';
@@ -816,7 +877,11 @@ function _getBinsForWeek(ws) {
   return db.prepare(`SELECT week_start, mobile_bin, total_units, weight_kg, date_local FROM bins WHERE week_start = ?`).all(ws);
 }
 
-app.get('/summary/shipment_summary', (req, res) => {
+app.get('/summary/shipment_summary',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_summary_shipment'),
+  (req, res) => {
   try {
     const ws = String(req.query.weekStart || '').slice(0, 10);
     if (!ws) return res.status(400).json({ error: 'weekStart is required (YYYY-MM-DD)' });
@@ -940,7 +1005,11 @@ app.get('/summary/shipment_summary', (req, res) => {
   }
 });
 
-app.get('/summary/shipment_detail', (req, res) => {
+app.get('/summary/shipment_detail',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_summary_shipment_detail'),
+  (req, res) => {
   try {
     const ws = String(req.query.weekStart || '').slice(0, 10);
     if (!ws) return res.status(400).json({ error: 'weekStart is required (YYYY-MM-DD)' });
@@ -1066,7 +1135,11 @@ app.get('/summary/shipment_detail', (req, res) => {
 
 // --- Export: applied UIDs (CSV stream) ---
 // For large weeks, do NOT materialize the full dataset in the browser.
-app.get('/export/applied', (req, res) => {
+app.get('/export/applied',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('export_applied'),
+  (req, res) => {
   try {
     const fromRaw = req.query.from ? String(req.query.from) : '';
     const toRaw   = req.query.to   ? String(req.query.to)   : '';
@@ -1111,7 +1184,11 @@ app.get('/export/applied', (req, res) => {
   }
 });
 // --- Export XLSX ---
-app.get('/export/xlsx', async (req, res) => {
+app.get('/export/xlsx',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('export_xlsx'),
+  async (req, res) => {
   const date = String(req.query.date || todayChicagoISO());
   const rows = db.prepare('SELECT * FROM records WHERE date_local = ? ORDER BY completed_at DESC').all(date);
   const wb = new ExcelJS.Workbook();
@@ -1134,7 +1211,12 @@ app.get('/export/xlsx', async (req, res) => {
 });
 
 // --- Deletions ---
-app.delete('/records', (req, res) => {
+app.delete('/records',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'api']),
+  validateBulkInput,
+  auditLog('bulk_delete_records'),
+  (req, res) => {
   const uid = String(req.query.uid || '').trim();
   const sku = String(req.query.sku_code || '').trim();
 
@@ -1147,7 +1229,12 @@ app.delete('/records', (req, res) => {
   return res.json({ ok: true, deleted: info.changes });
 });
 
-app.post('/records/delete', (req, res) => {
+app.post('/records/delete',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'api']),
+  validateBulkInput,
+  auditLog('delete_records'),
+  (req, res) => {
   const input = req.body;
 
   // Normalize input to a list of objects with { uid, sku_code? }
@@ -1237,7 +1324,11 @@ const flowWeekAllForWeek = db.prepare(`
    Returns the same payload as GET /plan/weeks/:mondayISO
    (works for /api/plan too thanks to the /api alias above)
 */
-app.get('/plan', (req, res) => {
+app.get('/plan',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_plan'),
+  (req, res) => {
   const ws = String(req.query.weekStart || req.query.ws || '').trim();
   if (!ws) return res.status(400).json({ error: 'weekStart required' });
   const monday = mondayOfLoose(ws);
@@ -1274,7 +1365,11 @@ const norm = body.map(r => ({
   return norm;
 }
 
-app.get('/plan/weeks/:mondayISO', (req, res) => {
+app.get('/plan/weeks/:mondayISO',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_plan_week'),
+  (req, res) => {
   const monday = String(req.params.mondayISO);
   const row = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(monday);
   if (!row) return res.json([]);
@@ -1285,7 +1380,12 @@ app.get('/plan/weeks/:mondayISO', (req, res) => {
   }
 });
 
-app.put('/plan/weeks/:mondayISO', (req, res) => {
+app.put('/plan/weeks/:mondayISO',
+  authenticateRequest,
+  requireRole(['admin', 'client', 'api']),
+  uploadLimiter,
+  auditLog('upload_plan'),
+  (req, res) => {
   const monday = String(req.params.mondayISO);
   const arr = normalizePlanArray(req.body, monday);
   db.prepare(`
@@ -1296,7 +1396,11 @@ app.put('/plan/weeks/:mondayISO', (req, res) => {
   return res.json(arr);
 });
 
-app.post('/plan/weeks/:mondayISO/zero', (req, res) => {
+app.post('/plan/weeks/:mondayISO/zero',
+  authenticateRequest,
+  requireRole(['admin', 'client', 'api']),
+  auditLog('zero_plan'),
+  (req, res) => {
   const monday = String(req.params.mondayISO);
   db.prepare(`
     INSERT INTO plans(week_start, data, updated_at)
@@ -1306,7 +1410,10 @@ app.post('/plan/weeks/:mondayISO/zero', (req, res) => {
   return res.json({ ok: true, week_start: monday, rows: 0 });
 });
 
-app.get('/plan/weeks', (req, res) => {
+app.get('/plan/weeks',
+  authenticateRequest,
+  auditLog('list_plan_weeks'),
+  (req, res) => {
   const rows = db.prepare(`SELECT week_start, updated_at FROM plans ORDER BY week_start DESC LIMIT 52`).all();
   res.json(rows);
 });
@@ -1362,7 +1469,13 @@ function mondayOf(ymd) {
 }
 
 // PUT /bins/weeks/:ws    body: [{mobile_bin, total_units?, weight_kg?, date_local?}, ...]
-binsRouter.put('/weeks/:ws', async (req, res) => {
+binsRouter.put('/weeks/:ws',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'api']),
+  writeOpLimiter,
+  validateBulkInput,
+  auditLog('edit_bins'),
+  async (req, res) => {
   try {
     const ws = req.params.ws; // YYYY-MM-DD (business Monday from client)
     if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) return res.status(400).send('Invalid week start');
@@ -1409,7 +1522,11 @@ binsRouter.put('/weeks/:ws', async (req, res) => {
 });
 
 // GET /bins/weeks/:ws
-binsRouter.get('/weeks/:ws', async (req, res) => {
+binsRouter.get('/weeks/:ws',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_bins'),
+  async (req, res) => {
   try {
     const ws = req.params.ws;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) return res.status(400).send('Invalid week start');
@@ -1444,14 +1561,24 @@ function normalizeReceivingArray(body, ws) {
 }
 
 // GET /receiving/weeks/:ws
-receivingRouter.get('/weeks/:ws', (req, res) => {
+receivingRouter.get('/weeks/:ws',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_receiving'),
+  (req, res) => {
   const ws = req.params.ws;
   const rows = db.prepare(`SELECT * FROM receiving WHERE week_start=? ORDER BY supplier_name, po_number`).all(ws);
   res.json(rows);
 });
 
 // PUT /receiving/weeks/:ws  (UPSERT array)
-receivingRouter.put('/weeks/:ws', (req, res) => {
+receivingRouter.put('/weeks/:ws',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'api']),
+  writeOpLimiter,
+  validateBulkInput,
+  auditLog('edit_receiving'),
+  (req, res) => {
   const ws = req.params.ws;
   const rows = normalizeReceivingArray(req.body, ws);
 
@@ -1489,7 +1616,11 @@ receivingRouter.put('/weeks/:ws', (req, res) => {
 });
 
 // Alias GET /receiving?weekStart=YYYY-MM-DD  (like bins/plan)
-receivingRouter.get('/', (req, res) => {
+receivingRouter.get('/',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('query_receiving'),
+  (req, res) => {
   const ws = String(req.query.weekStart || '').trim();
   if (!ws) return res.status(400).json({ error: 'weekStart required' });
   const rows = db.prepare(`SELECT * FROM receiving WHERE week_start=? ORDER BY supplier_name, po_number`).all(ws);
@@ -1503,7 +1634,11 @@ app.use('/receiving', receivingRouter);
    Returns the same as GET /bins/weeks/:ws
    (works for /api/bins too thanks to the /api alias above)
 */
-app.get('/bins', (req, res) => {
+app.get('/bins',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('query_bins'),
+  (req, res) => {
   const ws = String(req.query.weekStart || req.query.ws || '').trim();
   if (!ws) return res.status(400).json({ error: 'weekStart required' });
   const monday = mondayOfLoose(ws);
@@ -1520,7 +1655,31 @@ app.get('/bins', (req, res) => {
 /* ===== END: /bins alias ===== */
 
 
+// 🔐 AUDIT LOG ENDPOINT (Admin Only)
+const { getAuditLogs } = require('./middleware/auditLog');
 
+app.get('/admin/audit-logs',
+  authenticateRequest,
+  requireRole(['admin']),
+  (req, res) => {
+    try {
+      const filters = {
+        userId: req.query.user_id,
+        orgId: req.query.org_id,
+        action: req.query.action,
+        startDate: req.query.start_date,
+        endDate: req.query.end_date,
+        limit: parseInt(req.query.limit) || 100
+      };
+
+      const logs = getAuditLogs(filters);
+      res.json(logs);
+    } catch (error) {
+      console.error('Failed to fetch audit logs:', error);
+      res.status(500).json({ error: 'Failed to fetch audit logs' });
+    }
+  }
+);
 
 
 // ---- Start ----
