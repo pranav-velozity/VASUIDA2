@@ -1,13 +1,15 @@
 // middleware/auditLog.js — Audit Logging for Security & Compliance
-
 const Database = require('better-sqlite3');
 const path = require('path');
+const fs = require('fs');
 
 // Initialize audit log database
 const DB_DIR = process.env.DB_DIR || path.join(__dirname, '../data');
+fs.mkdirSync(DB_DIR, { recursive: true }); // ← ADD THIS LINE
 const AUDIT_DB = path.join(DB_DIR, 'audit_log.sqlite');
 
 const auditDb = new Database(AUDIT_DB);
+
 auditDb.pragma('journal_mode = WAL');
 
 // Create audit log table
