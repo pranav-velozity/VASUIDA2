@@ -11,23 +11,8 @@
 (function intakeModule() {
   'use strict';
 
-  // ---- Guard: wait for globals exposed by index.html on window ----
-  // index.html exposes: BRAND, apiBase, $, iso, fmtInt, toNum, toUI,
-  //   createHeart, state, toISODate, todayISO, todayInTZ via window.*
-  const apiBase     = window.apiBase;
-  const $           = window.$;
-  const iso         = window.iso;
-  const fmtInt      = window.fmtInt;
-  const toNum       = window.toNum;
-  const toUI        = window.toUI;
-  const createHeart = window.createHeart;
-  const state       = window.state;
-  const toISODate   = window.toISODate;
-  const todayISO    = window.todayISO;
-  const todayInTZ   = window.todayInTZ;
-  const BRAND       = window.BRAND;
-
-  if (!apiBase || !$) {
+  // ---- Guard: wait for globals ----
+  if (typeof apiBase === 'undefined' || typeof $ === 'undefined') {
     console.warn('[intake] Globals not ready, retrying in 200ms…');
     return setTimeout(intakeModule, 200);
   }
@@ -50,24 +35,17 @@
     return ct.includes('json') ? r.json() : r.text();
   }
 
-  // ---- authFetch: fetch with Clerk token, never mutates opts ----
+  // ---- authFetch: raw fetch with Clerk token (for non-JSON-body calls) ----
   async function authFetch(url, opts = {}) {
     let token = null;
     if (window.Clerk && window.Clerk.session) {
       try { token = await window.Clerk.session.getToken(); } catch (e) { console.warn('[intake] getToken failed', e); }
     }
-    // Build a clean new options object — never mutate the caller's opts
-    const fetchOpts = {
-      method:  opts.method  || 'GET',
-      body:    opts.body    || undefined,
-      headers: Object.assign(
-        {},
-        opts.headers || {},
-        token ? { 'Authorization': `Bearer ${token}` } : {}
-      )
-    };
-    console.log('[intake] authFetch', fetchOpts.method, url, 'token:', token ? 'yes' : 'NO TOKEN');
-    return fetch(url, fetchOpts);
+    if (token) {
+      opts.headers = opts.headers || {};
+      opts.headers['Authorization'] = `Bearer ${token}`;
+    }
+    return fetch(url, opts);
   }
 
   // ====================================================================
@@ -341,10 +319,9 @@
 
         if (apiBase && payload.length) {
           try {
-            // Server rejects > 1000 rows per request — send in chunks
+            // Server limit: 1000 rows per request — chunk if needed
             const CHUNK = 1000;
             let totalInserted = 0, totalRejected = 0, allErrors = [];
-
             for (let i = 0; i < payload.length; i += CHUNK) {
               const chunk = payload.slice(i, i + CHUNK);
               const res = await authFetch(`${apiBase}/records/import`, {
@@ -358,14 +335,12 @@
               totalRejected += j.rejected ?? 0;
               if (Array.isArray(j.errors)) allErrors = allErrors.concat(j.errors);
             }
-
             const newlyAdded = intakeRows.slice(-items.length);
             for (const ui of newlyAdded) {
               if (requiredFilled(ui)) { ui.sync = 'synced'; ui.status = 'complete'; }
             }
-
             if (totalRejected) {
-              console.warn('Some rows were rejected by the server', allErrors);
+              console.warn('Rows rejected by server', allErrors);
               alert(`Upload finished.\nInserted: ${totalInserted}\nRejected: ${totalRejected}`);
             }
           } catch (err) {
