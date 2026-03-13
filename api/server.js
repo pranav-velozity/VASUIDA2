@@ -1522,6 +1522,10 @@ binsRouter.put('/weeks/:ws',
 });
 
 // GET /bins/weeks/:ws
+// Returns bins enriched with po_number and supplier_name by joining against
+// the records table (UID scans) and the stored plan (for supplier lookup).
+// This is required so the client can build the Mobile Bin Report with PO/Supplier
+// columns, and so autoFilterResponse can correctly scope data for supplier/client roles.
 binsRouter.get('/weeks/:ws',
   authenticateRequest,
   autoFilterResponse,
@@ -1530,8 +1534,56 @@ binsRouter.get('/weeks/:ws',
   try {
     const ws = req.params.ws;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) return res.status(400).send('Invalid week start');
-    const rows = await Bins.getByWeek(ws); // returns [{mobile_bin, total_units, weight_kg, date_local, week_start}, ...]
-    return res.json(rows);
+
+    const bins = await Bins.getByWeek(ws); // [{mobile_bin, total_units, weight_kg, date_local, week_start}]
+    if (!bins.length) return res.json([]);
+
+    const we = _weekEndISO(ws);
+
+    // Join: for each mobile_bin find the PO(s) it was associated with in records this week.
+    // Use the PRIMARY po_number (most scans wins) to keep one row per bin.
+    const binPORows = db.prepare(`
+      SELECT
+        TRIM(mobile_bin) AS mobile_bin,
+        po_number,
+        COUNT(*) AS scan_count
+      FROM records
+      WHERE date_local >= ? AND date_local <= ?
+        AND TRIM(COALESCE(mobile_bin, \'\')) <> \'\'
+        AND TRIM(COALESCE(po_number, \'\')) <> \'\'
+      GROUP BY TRIM(mobile_bin), po_number
+    `).all(ws, we);
+
+    // Build map: mobile_bin -> po_number (highest scan_count wins)
+    const binToPO = new Map();
+    for (const r of binPORows) {
+      const mb = String(r.mobile_bin || \'\').trim();
+      if (!mb) continue;
+      const existing = binToPO.get(mb);
+      if (!existing || r.scan_count > existing.scan_count) {
+        binToPO.set(mb, { po_number: String(r.po_number || \'\').trim(), scan_count: r.scan_count });
+      }
+    }
+
+    // Build supplier lookup from the week\'s plan
+    const planRows = _getPlanRowsForWeek(ws);
+    const poToSupplier = new Map();
+    for (const p of planRows) {
+      const po = String(p?.po_number || \'\').trim();
+      if (!po || poToSupplier.has(po)) continue;
+      poToSupplier.set(po, String(p?.supplier_name || p?.supplier || \'\').trim());
+    }
+
+    // Enrich each bin row
+    const enriched = bins.map(b => {
+      const mb = String(b.mobile_bin || \'\').trim();
+      const poEntry = binToPO.get(mb);
+      const po_number = poEntry?.po_number || \'\';
+      const supplier_name = po_number ? (poToSupplier.get(po_number) || \'\') : \'\';
+      return { ...b, po_number, supplier_name };
+    });
+
+    return res.json(enriched);
   } catch (e) {
     console.error(e);
     return res.status(500).send('Failed to fetch bins');
