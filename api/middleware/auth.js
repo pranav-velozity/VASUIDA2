@@ -166,19 +166,28 @@ async function filterDataByRole(req, data) {
 }
 
 // Middleware to auto-filter response data
+// IMPORTANT: res.json must remain synchronous-compatible for Express.
+// We use a wrapper that resolves the async filter before calling the real res.json.
 function autoFilterResponse(req, res, next) {
   const originalJson = res.json.bind(res);
-  
-  res.json = async function(data) {
-    // Only filter if user is supplier or client
+
+  res.json = function(data) {
     const userRole = req.auth?.orgRole;
     if (userRole === 'org:supplier_auth' || userRole === 'org:client_auth') {
-      const filtered = await filterDataByRole(req, data);
-      return originalJson(filtered);
+      // Run async filter then send — Express is fine with this because the response
+      // is fully controlled here (we call originalJson exactly once after awaiting).
+      filterDataByRole(req, data)
+        .then(filtered => originalJson(filtered))
+        .catch(err => {
+          console.error('[autoFilterResponse] filter error, sending unfiltered:', err);
+          originalJson(data);
+        });
+      // Return `this` (res) so callers chaining off res.json() don't break
+      return res;
     }
     return originalJson(data);
   };
-  
+
   next();
 }
 
