@@ -1549,43 +1549,43 @@ binsRouter.get('/weeks/:ws',
         COUNT(*) AS scan_count
       FROM records
       WHERE date_local >= ? AND date_local <= ?
-        AND TRIM(COALESCE(mobile_bin, \'\')) <> \'\'
-        AND TRIM(COALESCE(po_number, \'\')) <> \'\'
+        AND TRIM(COALESCE(mobile_bin, '')) <> ''
+        AND TRIM(COALESCE(po_number, '')) <> ''
       GROUP BY TRIM(mobile_bin), po_number
     `).all(ws, we);
 
     // Build map: mobile_bin -> po_number (highest scan_count wins)
     const binToPO = new Map();
     for (const r of binPORows) {
-      const mb = String(r.mobile_bin || \'\').trim();
+      const mb = String(r.mobile_bin || '').trim();
       if (!mb) continue;
       const existing = binToPO.get(mb);
       if (!existing || r.scan_count > existing.scan_count) {
-        binToPO.set(mb, { po_number: String(r.po_number || \'\').trim(), scan_count: r.scan_count });
+        binToPO.set(mb, { po_number: String(r.po_number || '').trim(), scan_count: r.scan_count });
       }
     }
 
-    // Build supplier lookup from the week\'s plan
+    // Build supplier lookup from the week's plan
     const planRows = _getPlanRowsForWeek(ws);
     const poToSupplier = new Map();
     for (const p of planRows) {
-      const po = String(p?.po_number || \'\').trim();
+      const po = String(p && p.po_number || '').trim();
       if (!po || poToSupplier.has(po)) continue;
-      poToSupplier.set(po, String(p?.supplier_name || p?.supplier || \'\').trim());
+      poToSupplier.set(po, String(p && (p.supplier_name || p.supplier) || '').trim());
     }
 
-    // Enrich each bin row
+    // Enrich each bin row with po_number and supplier_name
     const enriched = bins.map(b => {
-      const mb = String(b.mobile_bin || \'\').trim();
+      const mb = String(b.mobile_bin || '').trim();
       const poEntry = binToPO.get(mb);
-      const po_number = poEntry?.po_number || \'\';
-      const supplier_name = po_number ? (poToSupplier.get(po_number) || \'\') : \'\';
-      return { ...b, po_number, supplier_name };
+      const po_number = poEntry ? poEntry.po_number : '';
+      const supplier_name = po_number ? (poToSupplier.get(po_number) || '') : '';
+      return Object.assign({}, b, { po_number: po_number, supplier_name: supplier_name });
     });
 
     return res.json(enriched);
   } catch (e) {
-    console.error(e);
+    console.error('GET /bins/weeks failed:', e);
     return res.status(500).send('Failed to fetch bins');
   }
 });
