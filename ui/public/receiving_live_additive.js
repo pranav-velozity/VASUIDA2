@@ -625,6 +625,7 @@ function computeCartonsOutByPOFromRecords(records) {
       const newWs = addDaysISO(ws, -7);
       if (weekInput) weekInput.value = newWs;
       if (window.state) window.state.weekStart = newWs;
+      try { tick(); } catch (e) { console.warn('[receiving] prev-week tick error', e); }
     };
 
     if (nextBtn) nextBtn.onclick = () => {
@@ -632,6 +633,7 @@ function computeCartonsOutByPOFromRecords(records) {
       const newWs = addDaysISO(ws, 7);
       if (weekInput) weekInput.value = newWs;
       if (window.state) window.state.weekStart = newWs;
+      try { tick(); } catch (e) { console.warn('[receiving] next-week tick error', e); }
     };
 
     return page;
@@ -1597,6 +1599,9 @@ function dtLocalNow() {
   return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
 }
 
+// Alias used in wireRowInputs receive button handler
+function nowDateTimeLocalValue() { return dtLocalNow(); }
+
   // When Ops refreshes window.state (week switch), recompute Carton Out and re-render if needed.
   window.addEventListener('state:ready', () => {
   // If Ops refreshes window.state/week selector, re-run tick so we load the correct week when on #receiving.
@@ -1608,7 +1613,7 @@ function dtLocalNow() {
     if (!ws) return;
     if (ws !== M.ws) return;
     if (typeof computeCartonsOutByPOFromState === 'function') {
-      M.cartonsOutByPO = computeCartonsOutByPOFromState(ws);
+      M.cartonsOutByPO = computeCartonsOutByPOFromState(window.state || {});
       try { renderCurrentSupplierView(); } catch {}
     }
   } catch {}
