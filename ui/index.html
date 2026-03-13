@@ -3125,11 +3125,13 @@ function downloadMobileBins(){
   try{
     const bins = Array.isArray(state.bins) ? state.bins : [];
     const plan = Array.isArray(state.plan) ? state.plan : [];
+    // Plan-based supplier lookup as fallback (bins API now returns po_number + supplier_name directly)
     const poToSupplier = new Map(plan.map(p => [String(p.po_number||p.po||'').trim(), String(p.supplier_name||p.supplier||p.vendor||p.vendor_name||p.factory||'').trim()]));
     const rows = [];
     for(const b of bins){
       const po = String(b.po_number || b.po || b.poNumber || '').trim();
-      const supplier = String(b.supplier || poToSupplier.get(po) || '').trim();
+      // Prefer supplier_name returned by the enriched API; fall back to plan lookup
+      const supplier = String(b.supplier_name || b.supplier || poToSupplier.get(po) || '').trim();
       const mobileBin = String(b.mobile_bin || b.mobileBin || '').trim();
       const weight = Number(b.weight_kg ?? b.weight ?? 0) || 0;
       const units  = Number(b.total_units ?? b.units ?? 0) || 0;
