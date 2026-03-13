@@ -115,22 +115,50 @@ async function filterDataByRole(req, data) {
   // For suppliers and clients, filter by their PO numbers
   if (userRole === 'org:supplier_auth' || userRole === 'org:client_auth') {
     const allowedPOs = await getOrgPONumbers(req.auth.orgId);
-    
+
+    // Helper: does this record belong to an allowed PO?
+    const poAllowed = (r) => {
+      const po = r.po_number ?? r.po ?? null;
+      return po !== null && allowedPOs.includes(String(po));
+    };
+
     if (allowedPOs.length === 0) {
-      return []; // No POs assigned, return empty
+      // No POs assigned — return empty for PO-keyed data; pass through
+      // non-PO data (bins, week-level summaries) unchanged.
+      if (Array.isArray(data)) {
+        const hasPOField = data.some(r => 'po_number' in r || 'po' in r);
+        return hasPOField ? [] : data;
+      }
+      if (data && typeof data === 'object' && ('po_number' in data)) return null;
+      return data;
     }
 
-    // Filter data to only include records with allowed PO numbers
+    // Flat array — filter only if items have a PO field.
+    // Arrays without po_number (e.g. bins rows keyed by mobile_bin) pass through
+    // unfiltered so they are not silently wiped.
     if (Array.isArray(data)) {
-      return data.filter(record => 
-        allowedPOs.includes(record.po_number)
-      );
-    } else if (data && typeof data === 'object') {
-      // Single record
-      if (allowedPOs.includes(data.po_number)) {
-        return data;
+      const hasPOField = data.length > 0 && data.some(r => 'po_number' in r || 'po' in r);
+      if (!hasPOField) return data;
+      return data.filter(poAllowed);
+    }
+
+    // Plain object handling
+    if (data && typeof data === 'object') {
+      // Single flat record with a po_number field
+      if ('po_number' in data) {
+        return poAllowed(data) ? data : null;
       }
-      return null;
+
+      // Envelope object (e.g. { by_po: [...], by_day: [...], total_units: N })
+      // Deep-filter any array values whose items contain po_number/po fields.
+      const filtered = { ...data };
+      for (const [key, val] of Object.entries(filtered)) {
+        if (Array.isArray(val) && val.length > 0 &&
+            ('po_number' in val[0] || 'po' in val[0])) {
+          filtered[key] = val.filter(poAllowed);
+        }
+      }
+      return filtered;
     }
   }
 
