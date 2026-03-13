@@ -1,0 +1,1742 @@
+// server.js — VelOzity UID Ops Backend (Express + SQLite + SSE)
+
+const fs = require('fs');
+const path = require('path');
+const express = require('express');
+const cors = require('cors');
+const ExcelJS = require('exceljs');
+const Database = require('better-sqlite3');
+const { randomUUID } = require('crypto');
+
+// 🔐 Security Middleware
+const { authenticateRequest, requireRole, autoFilterResponse, optionalAuth, authenticateApiKey } = require('./middleware/auth');
+const { apiLimiter, writeOpLimiter, uploadLimiter } = require('./middleware/rateLimiter');
+const { validateRecordInput, validateBulkInput } = require('./middleware/validation');
+const { auditLog } = require('./middleware/auditLog');
+
+// ---- Config ----
+const PORT = process.env.PORT || 4000;
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*'; // set to your frontend origin(s) in prod
+const DB_DIR = process.env.DB_DIR || path.join(__dirname, 'data');
+fs.mkdirSync(DB_DIR, { recursive: true });
+const DB_FILE = process.env.DB_FILE || path.join(DB_DIR, 'uid_ops.sqlite');
+
+// ---- App ----
+const app = express();
+
+// --- Global CORS (single source of truth) ---
+const allowList = (ALLOWED_ORIGIN || '*')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // same-origin/curl
+    if (allowList.includes('*') || allowList.includes(origin)) return cb(null, true);
+    // allow Netlify preview subdomains if a wildcard *.netlify.app was provided
+    if (allowList.some(a => a.endsWith('.netlify.app') && origin.endsWith('.netlify.app'))) {
+      return cb(null, true);
+    }
+    return cb(new Error('Not allowed by CORS: ' + origin));
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+app.use(express.json({ limit: '100mb' }));
+
+// 🔐 Rate Limiting
+app.use(apiLimiter);
+
+/* ===== BEGIN: /api alias -> root endpoints =====
+   This lets /api/plan, /api/records, /api/bins, /api/flow/... hit the same handlers as
+   /plan, /records, /bins, /flow/... without duplicating code.
+   Place ABOVE all your app.get('/...') routes.
+*/
+app.use((req, _res, next) => {
+  if (req.url === '/api' || req.url === '/api/') {
+    req.url = '/';
+    return next();
+  }
+  if (req.url.startsWith('/api/')) {
+    req.url = req.url.slice(4) || '/'; // drop leading "/api"
+  }
+  next();
+});
+/* ===== END: /api alias ===== */
+
+
+// ---- Summary cache (in-memory, additive) ----
+const _summaryCache = new Map();
+const SUMMARY_TTL_MS = 30 * 1000; // 30s
+
+function _summaryKey(q) {
+  const from = String(q.from || q.weekStart || '').trim();
+  const to = String(q.to || q.weekEnd || '').trim();
+  const status = String(q.status || 'complete').trim();
+  return `${from}|${to}|${status}`;
+}
+
+
+
+// --- Time helpers (America/Chicago) ---
+function chicagoISOFromDate(d = new Date()) {
+  try {
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit'
+    });
+    const parts = fmt.formatToParts(d);
+    const y = parts.find(p => p.type === 'year')?.value;
+    const m = parts.find(p => p.type === 'month')?.value;
+    const dd = parts.find(p => p.type === 'day')?.value;
+    if (y && m && dd) return `${y}-${m}-${dd}`;
+  } catch {}
+  return d.toISOString().slice(0, 10);
+}
+const todayChicagoISO = () => chicagoISOFromDate(new Date());
+
+function toISODate(v) {
+  if (v == null) return '';
+  if (typeof v === 'number' && isFinite(v)) { // Excel serial
+    const base = new Date(Date.UTC(1899, 11, 30));
+    const ms = Math.round(v * 86400000);
+    const d = new Date(base.getTime() + ms);
+    return d.toISOString().slice(0, 10);
+  }
+  const s = String(v).trim();
+  if (!s) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const d1 = new Date(s);
+  if (!isNaN(d1)) return d1.toISOString().slice(0, 10);
+  const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (m) {
+    const dd = m[1].padStart(2, '0');
+    const mm = m[2].padStart(2, '0');
+    const yyyy = (m[3].length === 2 ? '20' + m[3] : m[3]);
+    const d2 = new Date(`${yyyy}-${mm}-${dd}T00:00:00Z`);
+    if (!isNaN(d2)) return d2.toISOString().slice(0, 10);
+  }
+  return '';
+}
+
+// --- DB setup ---
+const db = new Database(DB_FILE);
+db.pragma('journal_mode = WAL');
+db.exec(`
+CREATE TABLE IF NOT EXISTS records (
+  id TEXT PRIMARY KEY,
+  date_local TEXT,
+  mobile_bin TEXT,
+  sscc_label TEXT,
+  po_number TEXT,
+  sku_code TEXT,
+  uid TEXT,
+  status TEXT DEFAULT 'draft',
+  completed_at TEXT,
+  sync_state TEXT DEFAULT 'unknown'
+);
+CREATE INDEX IF NOT EXISTS idx_records_date ON records(date_local);
+CREATE INDEX IF NOT EXISTS idx_records_status ON records(status);
+CREATE INDEX IF NOT EXISTS idx_records_completed_at ON records(completed_at);
+CREATE INDEX IF NOT EXISTS idx_records_status_completed_at ON records(status, completed_at);
+CREATE INDEX IF NOT EXISTS idx_records_po ON records(po_number);
+CREATE INDEX IF NOT EXISTS idx_records_po_status ON records(po_number, status);
+CREATE INDEX IF NOT EXISTS idx_records_po_mobile_bin ON records(po_number, mobile_bin);
+CREATE INDEX IF NOT EXISTS idx_records_sku ON records(sku_code);
+CREATE INDEX IF NOT EXISTS idx_records_uid ON records(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_po_sku_uid ON records(po_number, sku_code, uid);
+
+CREATE TABLE IF NOT EXISTS plans (
+  week_start TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+db.exec(`
+CREATE TABLE IF NOT EXISTS receiving(
+  week_start TEXT NOT NULL,
+  po_number TEXT NOT NULL,
+  supplier_name TEXT,
+  facility_name TEXT,
+  received_at_utc TEXT,
+  received_at_local TEXT,
+  received_tz TEXT,
+  cartons_received INTEGER DEFAULT 0,
+  cartons_damaged INTEGER DEFAULT 0,
+  cartons_noncompliant INTEGER DEFAULT 0,
+  cartons_replaced INTEGER DEFAULT 0,
+  updated_at TEXT,
+  PRIMARY KEY(week_start, po_number)
+);
+CREATE INDEX IF NOT EXISTS idx_receiving_week ON receiving(week_start);
+CREATE INDEX IF NOT EXISTS idx_receiving_supplier ON receiving(week_start, supplier_name);
+`);
+
+// ---- Flow week persistence (facility-scoped) ----
+db.exec(`
+CREATE TABLE IF NOT EXISTS flow_week (
+  facility   TEXT NOT NULL,
+  week_start TEXT NOT NULL,
+  data       TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (facility, week_start)
+);
+CREATE INDEX IF NOT EXISTS idx_flow_week_ws ON flow_week(week_start);
+CREATE INDEX IF NOT EXISTS idx_flow_week_fac ON flow_week(facility);
+`);
+
+
+
+
+const selectRecordById = db.prepare('SELECT * FROM records WHERE id = ?');
+const selectByComposite = db.prepare('SELECT id FROM records WHERE po_number = ? AND sku_code = ? AND uid = ?');
+const deleteById = db.prepare('DELETE FROM records WHERE id = ?');
+const deleteBySkuUid = db.prepare('DELETE FROM records WHERE uid = ? AND sku_code = ?');
+const deleteByUid = db.prepare('DELETE FROM records WHERE uid = ?');
+
+const upsertByComposite = db.prepare(`
+INSERT INTO records (id, date_local, mobile_bin, sscc_label, po_number, sku_code, uid, status, completed_at, sync_state)
+VALUES (@id, @date_local, @mobile_bin, @sscc_label, @po_number, @sku_code, @uid, @status, @completed_at, @sync_state)
+ON CONFLICT(po_number, sku_code, uid) DO UPDATE SET
+  date_local   = COALESCE(excluded.date_local, records.date_local),
+  mobile_bin   = COALESCE(excluded.mobile_bin, records.mobile_bin),
+  sscc_label   = COALESCE(excluded.sscc_label, records.sscc_label),
+  status       = CASE WHEN excluded.status='complete' THEN 'complete' ELSE records.status END,
+  completed_at = COALESCE(records.completed_at, excluded.completed_at),
+  sync_state   = 'synced'
+`);
+
+// --- Completion rule (SSCC optional) ---
+function isComplete(row) {
+  return Boolean(
+    (row?.date_local || '').trim() &&
+    (row?.mobile_bin || '').trim() &&
+    (row?.po_number || '').trim() &&
+    (row?.sku_code  || '').trim() &&
+    (row?.uid       || '').trim()
+  );
+}
+
+// --- SSE hub for ops pulse ---
+const clients = new Set();
+function emitScan(ts = new Date()) {
+  const payload = JSON.stringify({ ts: ts.toISOString() });
+  for (const res of clients) {
+    try { res.write(`data: ${payload}\n\n`); } catch {}
+  }
+}
+
+app.get('/events/scan', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': allowList.includes('*') ? '*' : (req.headers.origin || allowList[0] || '*')
+  });
+  res.write('\n');
+  clients.add(res);
+  req.on('close', () => { clients.delete(res); });
+});
+
+// --- Health ---
+app.get('/health', (req, res) => res.json({ ok: true, now: new Date().toISOString() }));
+
+
+// ===== Flow Week API (facility-scoped, week-scoped) =====
+
+// GET /flow/week/:weekStart?facility=LKWF
+app.get('/flow/week/:weekStart',
+  authenticateRequest,
+  auditLog('view_flow'),
+  (req, res) => {
+  const wsIn = String(req.params.weekStart || '').trim();
+  const facility = normFacility(req.query.facility);
+  if (!facility) return res.status(400).json({ error: 'facility required' });
+
+  const monday = mondayOfLoose(wsIn);
+  if (!monday) return res.status(400).json({ error: 'invalid weekStart' });
+
+  const row = flowWeekGet.get(facility, monday);
+  if (!row) return res.json({ facility, week_start: monday, data: null, updated_at: null });
+
+  return res.json({
+    facility,
+    week_start: monday,
+    data: safeJsonParse(row.data, null),
+    updated_at: row.updated_at || null
+  });
+});
+
+// GET /flow/week/:weekStart/all   (full view across facilities)
+app.get('/flow/week/:weekStart/all',
+  authenticateRequest,
+  auditLog('view_flow_all'),
+  (req, res) => {
+  const wsIn = String(req.params.weekStart || '').trim();
+  const monday = mondayOfLoose(wsIn);
+  if (!monday) return res.status(400).json({ error: 'invalid weekStart' });
+
+  const rows = flowWeekAllForWeek.all(monday);
+  const facilities = {};
+  for (const r of rows) {
+    facilities[r.facility] = {
+      data: safeJsonParse(r.data, null),
+      updated_at: r.updated_at || null
+    };
+  }
+  return res.json({ week_start: monday, facilities });
+});
+
+// POST /flow/week/:weekStart?facility=LKWF   body: { ...patch }
+app.post('/flow/week/:weekStart',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'client', 'api']),
+  writeOpLimiter,
+  auditLog('edit_flow'),
+  (req, res) => {
+  const wsIn = String(req.params.weekStart || '').trim();
+  const facility = normFacility(req.query.facility);
+  if (!facility) return res.status(400).json({ error: 'facility required' });
+
+  const monday = mondayOfLoose(wsIn);
+  if (!monday) return res.status(400).json({ error: 'invalid weekStart' });
+
+  const patch = (req.body && typeof req.body === 'object') ? req.body : null;
+  if (!patch) return res.status(400).json({ error: 'patch object required' });
+
+  const existingRow = flowWeekGet.get(facility, monday);
+  const existing = existingRow ? (safeJsonParse(existingRow.data, {}) || {}) : {};
+  const merged = (function mergeFlowWeek(existingObj, patchObj) {
+    const out = { ...(existingObj || {}) };
+    for (const [k, v] of Object.entries(patchObj || {})) {
+      if (k === 'intl_lanes' && v && typeof v === 'object' && !Array.isArray(v)) {
+        const prev = (existingObj && existingObj.intl_lanes && typeof existingObj.intl_lanes === 'object' && !Array.isArray(existingObj.intl_lanes))
+          ? existingObj.intl_lanes
+          : {};
+        out.intl_lanes = { ...prev, ...v };
+        continue;
+      }
+      out[k] = v;
+    }
+    return out;
+  })(existing, patch);
+
+  flowWeekUpsert.run(facility, monday, JSON.stringify(merged));
+
+  return res.json({ ok: true, facility, week_start: monday, data: merged });
+});
+
+
+
+// --- Inline cell patch from Intake table ---
+app.patch('/records/:id',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'api']),
+  validateRecordInput,
+  auditLog('patch_record'),
+  (req, res) => {
+  const id = String(req.params.id);
+  const { field, value } = req.body || {};
+  if (!id || !field) return res.status(400).json({ error: 'id and field required' });
+
+  const allowed = new Set(['date_local','mobile_bin','sscc_label','po_number','sku_code','uid']);
+  if (!allowed.has(field)) return res.status(400).json({ error: `Invalid field: ${field}` });
+
+  let row = selectRecordById.get(id);
+  let createdNow = false;
+  if (!row) {
+    db.prepare(`INSERT INTO records(id, date_local, status, sync_state) VALUES(?, ?, 'draft', 'pending')`)
+      .run(id, todayChicagoISO());
+    row = selectRecordById.get(id);
+    createdNow = true;
+  }
+
+  const next = { ...row, [field]: String(value ?? '') };
+  const completed = isComplete(next);
+
+  db.prepare(`
+    UPDATE records SET
+      date_local=?, mobile_bin=?, sscc_label=?, po_number=?, sku_code=?, uid=?,
+      status=?, completed_at=?, sync_state=? WHERE id=?
+  `).run(
+    next.date_local || row.date_local || todayChicagoISO(),
+    next.mobile_bin ?? row.mobile_bin ?? '',
+    next.sscc_label ?? row.sscc_label ?? '',
+    next.po_number  ?? row.po_number  ?? '',
+    next.sku_code   ?? row.sku_code   ?? '',
+    next.uid        ?? row.uid        ?? '',
+    completed ? 'complete' : 'draft',
+    completed ? new Date().toISOString() : row.completed_at,
+    completed ? 'synced' : 'pending',
+    id
+  );
+
+  const after = selectRecordById.get(id);
+
+  // if just completed, pulse
+  if (completed && row.status !== 'complete') emitScan(new Date(after.completed_at));
+
+  // if we created a new shell but it duplicates an existing composite, drop the shell
+  if (createdNow && after.po_number && after.sku_code && after.uid) {
+    const ex = selectByComposite.get(after.po_number, after.sku_code, after.uid);
+    if (ex && ex.id && ex.id !== id) { try { deleteById.run(id); } catch {} }
+  }
+
+  return res.json({ ok: true, record: after });
+});
+
+// --- Create record (used by UI once a row is complete) ---
+app.post('/records',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'api']),
+  validateRecordInput,
+  writeOpLimiter,
+  auditLog('create_record'),
+  (req, res) => {
+  const b = req.body || {};
+  const rec = {
+    id: b.id || randomUUID(),
+    date_local: toISODate(b.date_local) || todayChicagoISO(),
+    mobile_bin: String(b.mobile_bin ?? ''),
+    sscc_label: String(b.sscc_label ?? ''), // optional
+    po_number:  String(b.po_number  ?? ''),
+    sku_code:   String(b.sku_code   ?? ''),
+    uid:        String(b.uid        ?? ''),
+    status:     'complete',
+    completed_at: new Date().toISOString(),
+    sync_state: 'synced'
+  };
+
+  if (!rec.date_local || !rec.mobile_bin || !rec.po_number || !rec.sku_code || !rec.uid) {
+    return res.status(400).json({ error: 'date_local, mobile_bin, po_number, sku_code, uid are required' });
+  }
+
+  try {
+    upsertByComposite.run(rec);
+    emitScan(new Date(rec.completed_at));
+    const row = selectByComposite.get(rec.po_number, rec.sku_code, rec.uid);
+    const saved = row ? selectRecordById.get(row.id) : selectRecordById.get(rec.id);
+    return res.json({ ok: true, record: saved });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+// --- Import (kept for compatibility; UI can still call it if desired) ---
+function normalizeUploadRow(row) {
+  const norm = {};
+  for (const k in row) norm[String(k).toLowerCase().trim()] = row[k];
+  const pick = (...names) => {
+    for (const n of names) {
+      const v = norm[n.toLowerCase().trim()];
+      if (v != null && String(v).trim() !== '') return String(v);
+    }
+    return '';
+  };
+  return {
+    id: randomUUID(),
+    date_local: toISODate(pick('date_local', 'date')) || todayChicagoISO(),
+    mobile_bin: String(pick('mobile_bin', 'mobile bin (box)') || ''),
+    sscc_label: String(pick('sscc_label', 'sscc label (box)', 'sscc') || ''),
+    po_number:  String(pick('po_number', 'po_number', 'po', 'po#', 'po number') || ''),
+    sku_code:   String(pick('sku_code', 'sku_code', 'sku', 'sku code') || ''),
+    uid:        String(pick('uid', 'uid', 'u_id', 'u id') || ''), // verbatim
+    status: 'complete',
+    completed_at: new Date().toISOString(),
+    sync_state: 'synced'
+  };
+}
+
+app.post('/records/import',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'api']),
+  validateBulkInput,
+  uploadLimiter,
+  auditLog('import_records'),
+  (req, res) => {
+  const arr = Array.isArray(req.body) ? req.body : [];
+  if (!arr.length) return res.status(400).json({ error: 'array of rows required' });
+
+  try {
+    const normalized = arr.map(normalizeUploadRow);
+
+    const payload = [];
+    const rejected = [];
+
+    normalized.forEach((r, index) => {
+      const missing = [];
+      if (!r.date_local) missing.push('date_local');
+      if (!r.po_number) missing.push('po_number');
+      if (!r.sku_code)  missing.push('sku_code');
+      if (!r.uid)       missing.push('uid');
+
+      if (missing.length) {
+        rejected.push({
+          index,
+          po_number: r.po_number,
+          sku_code:  r.sku_code,
+          uid:       r.uid,
+          reason:    'Missing ' + missing.join(', ')
+        });
+      } else {
+        // NOTE: mobile_bin is allowed to be empty on import; can be fixed later in intake UI
+        payload.push(r);
+      }
+    });
+
+    if (!payload.length) {
+      return res.json({
+        ok:       true,
+        inserted: 0,
+        total:    arr.length,
+        rejected: rejected.length,
+        errors:   rejected
+      });
+    }
+
+    const trx = db.transaction(rows => {
+      for (const r of rows) upsertByComposite.run(r);
+    });
+    trx(payload);
+
+    if (payload.length) {
+      emitScan(new Date(payload[payload.length - 1].completed_at));
+    }
+
+    return res.json({
+      ok:       true,
+      inserted: payload.length,
+      total:    arr.length,
+      rejected: rejected.length,
+      errors:   rejected
+    });
+  } catch (e) {
+    console.error('Import failed:', e);
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+
+// --- Fetch records ---
+app.get('/records',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_records'),
+  (req, res) => {
+  // Accept either from/to OR weekStart/weekEnd (we translate weekStart/weekEnd to from/to)
+  const weekStart = req.query.weekStart ? String(req.query.weekStart) : '';
+  const weekEnd   = req.query.weekEnd   ? String(req.query.weekEnd)   : '';
+  const fromQ     = req.query.from      ? String(req.query.from)      : '';
+  const toQ       = req.query.to        ? String(req.query.to)        : '';
+
+  const fromRaw = fromQ || weekStart || '';
+  const toRaw   = toQ   || weekEnd   || '';
+
+  // Normalize ISO timestamps (e.g. 2026-02-02T00:00:00.000Z) to YYYY-MM-DD for date_local filtering.
+  const from = fromRaw && fromRaw.includes('T') ? fromRaw.slice(0, 10) : fromRaw;
+  const to   = toRaw   && toRaw.includes('T')   ? toRaw.slice(0, 10)   : toRaw;
+  const status = req.query.status ? String(req.query.status) : '';
+  const limit  = req.query.limit  ? Number(req.query.limit)  : undefined;
+
+  const params = [];
+  let sql = 'SELECT * FROM records WHERE 1=1';
+  if (from)   { sql += ' AND date_local >= ?'; params.push(from); }
+  if (to)     { sql += ' AND date_local <= ?'; params.push(to); }
+  if (status) { sql += ' AND status = ?';      params.push(status); }
+  sql += ' ORDER BY completed_at DESC';
+  if (limit)  { sql += ' LIMIT ?';             params.push(limit); }
+
+  const rows = db.prepare(sql).all(...params);
+  res.json({ records: rows });
+});
+
+
+// --- Paginated records (cursor-based; for drilldowns only) ---
+// Cursor format: "<completed_at>|<id>" (both URL-encoded by the client). Results are ordered DESC.
+app.get('/records/page',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_records_page'),
+  (req, res) => {
+  try {
+    const weekStart = req.query.weekStart ? String(req.query.weekStart) : '';
+    const weekEnd   = req.query.weekEnd   ? String(req.query.weekEnd)   : '';
+    const fromQ     = req.query.from      ? String(req.query.from)      : '';
+    const toQ       = req.query.to        ? String(req.query.to)        : '';
+
+    const fromRaw = fromQ || weekStart || '';
+    const toRaw   = toQ   || weekEnd   || '';
+
+    const from = fromRaw && fromRaw.includes('T') ? fromRaw.slice(0, 10) : fromRaw;
+    const to   = toRaw   && toRaw.includes('T')   ? toRaw.slice(0, 10)   : toRaw;
+    const status = req.query.status ? String(req.query.status) : '';
+
+    const limitRaw = req.query.limit ? Number(req.query.limit) : 5000;
+    const limit = Math.max(1, Math.min(20000, Number.isFinite(limitRaw) ? limitRaw : 5000));
+
+    const cursor = req.query.cursor ? String(req.query.cursor) : '';
+    let cursorCompletedAt = '';
+    let cursorId = '';
+    if (cursor.includes('|')) {
+      const parts = cursor.split('|');
+      cursorCompletedAt = parts[0] || '';
+      cursorId = parts[1] || '';
+    }
+
+    const params = [];
+    let sql = 'SELECT * FROM records WHERE 1=1';
+    if (from)   { sql += ' AND date_local >= ?'; params.push(from); }
+    if (to)     { sql += ' AND date_local <= ?'; params.push(to); }
+    if (status) { sql += ' AND status = ?';      params.push(status); }
+
+    // keyset pagination: (completed_at, id) DESC
+    if (cursorCompletedAt && cursorId) {
+      sql += ' AND (completed_at < ? OR (completed_at = ? AND id < ?))';
+      params.push(cursorCompletedAt, cursorCompletedAt, cursorId);
+    } else if (cursorCompletedAt) {
+      sql += ' AND completed_at < ?';
+      params.push(cursorCompletedAt);
+    }
+
+    sql += ' ORDER BY completed_at DESC, id DESC';
+    sql += ' LIMIT ?';
+    params.push(limit);
+
+    const rows = db.prepare(sql).all(...params);
+
+    let next_cursor = null;
+    if (rows.length) {
+      const last = rows[rows.length - 1];
+      if (last?.completed_at && last?.id) {
+        next_cursor = `${last.completed_at}|${last.id}`;
+      }
+    }
+
+    return res.json({ records: rows, next_cursor });
+  } catch (e) {
+    console.error('GET /records/page failed:', e);
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+
+// --- Ops quick stats (tiny payload; safe to call frequently) ---
+app.get('/summary/ops',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_summary_ops'),
+  (req, res) => {
+  try {
+    const now = new Date();
+    const nowISO = now.toISOString();
+    const hourAgoISO = new Date(now.getTime() - 3600e3).toISOString();
+    const halfAgoISO = new Date(now.getTime() - 1800e3).toISOString();
+    const todayYMD = todayChicagoISO();
+
+    const scansToday = db.prepare(
+      `SELECT COUNT(*) AS n FROM records WHERE status='complete' AND date_local = ?`
+    ).get(todayYMD)?.n || 0;
+
+    const lastHour = db.prepare(
+      `SELECT COUNT(*) AS n FROM records WHERE status='complete' AND completed_at >= ?`
+    ).get(hourAgoISO)?.n || 0;
+
+    const last30 = db.prepare(
+      `SELECT COUNT(*) AS n FROM records WHERE status='complete' AND completed_at >= ?`
+    ).get(halfAgoISO)?.n || 0;
+
+    const drafts = db.prepare(
+      `SELECT COUNT(*) AS n FROM records WHERE status <> 'complete'`
+    ).get()?.n || 0;
+
+    // Duplicate pairs among completed rows for today (sku_code + uid)
+    const dupeRow = db.prepare(
+      `SELECT
+        (COUNT(*) - COUNT(DISTINCT COALESCE(TRIM(sku_code),'') || '|' || COALESCE(TRIM(uid),''))) AS dupes
+       FROM records
+       WHERE status='complete' AND date_local = ? AND TRIM(COALESCE(sku_code,''))<>'' AND TRIM(COALESCE(uid,''))<>''`
+    ).get(todayYMD);
+    const dupes = Math.max(0, Number(dupeRow?.dupes || 0));
+
+    const syncRows = db.prepare(
+      `SELECT COALESCE(sync_state,'unknown') AS sync_state, COUNT(*) AS n
+       FROM records
+       GROUP BY COALESCE(sync_state,'unknown')`
+    ).all();
+    const sync_counts = {};
+    for (const r of syncRows) sync_counts[r.sync_state] = Number(r.n || 0);
+
+    const lastCompleted = db.prepare(
+      `SELECT MAX(completed_at) AS ts FROM records WHERE status='complete'`
+    ).get()?.ts || null;
+
+    return res.json({
+      now: nowISO,
+      today: todayYMD,
+      scans_today: Number(scansToday),
+      last_hour: Number(lastHour),
+      last_30m: Number(last30),
+      drafts: Number(drafts),
+      dupes: Number(dupes),
+      sync_counts,
+      last_completed_at: lastCompleted
+    });
+  } catch (e) {
+    console.error('GET /summary/ops failed:', e);
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+
+
+// --- Fetch records summary (totals + trends; avoids pulling huge record sets to client) ---
+app.get('/records/summary',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_records_summary'),
+  (req, res) => {
+  try {
+    // Accept either from/to OR weekStart/weekEnd (same pattern as /records)
+    const weekStart = req.query.weekStart ? String(req.query.weekStart) : '';
+    const weekEnd   = req.query.weekEnd   ? String(req.query.weekEnd)   : '';
+    const fromQ     = req.query.from      ? String(req.query.from)      : '';
+    const toQ       = req.query.to        ? String(req.query.to)        : '';
+
+    const fromRaw = fromQ || weekStart || '';
+    const toRaw   = toQ   || weekEnd   || '';
+
+    // Normalize ISO timestamps (e.g. 2026-02-02T00:00:00.000Z) to YYYY-MM-DD for date_local filtering.
+    const from = fromRaw && fromRaw.includes('T') ? fromRaw.slice(0, 10) : fromRaw;
+    const to   = toRaw   && toRaw.includes('T')   ? toRaw.slice(0, 10)   : toRaw;
+
+    const status = req.query.status ? String(req.query.status) : 'complete';
+
+    // cache
+    const key = _summaryKey({ from, to, status });
+    const cached = _summaryCache.get(key);
+    if (cached && (Date.now() - cached.ts) < SUMMARY_TTL_MS) {
+      return res.json(cached.data);
+    }
+
+    const params = [];
+    let where = 'WHERE 1=1';
+    if (from)   { where += ' AND date_local >= ?'; params.push(from); }
+    if (to)     { where += ' AND date_local <= ?'; params.push(to); }
+    if (status) { where += ' AND status = ?';      params.push(status); }
+
+    // total units (count of records)
+    const totalRow = db.prepare(`
+      SELECT COUNT(*) AS total_units
+      FROM records
+      ${where}
+    `).get(...params);
+
+    // trend: units by day
+    const byDayRows = db.prepare(`
+      SELECT date_local AS ymd, COUNT(*) AS units
+      FROM records
+      ${where}
+      GROUP BY date_local
+      ORDER BY date_local
+    `).all(...params);
+
+    // optional: PO-level totals + cartons_out (= distinct mobile_bin)
+    const byPoRows = db.prepare(`
+      SELECT
+        po_number AS po,
+        COUNT(*) AS units,
+        COUNT(DISTINCT NULLIF(TRIM(mobile_bin), '')) AS cartons_out
+      FROM records
+      ${where}
+        AND TRIM(COALESCE(po_number,'')) <> ''
+      GROUP BY po_number
+      ORDER BY po_number
+    `).all(...params);
+
+    const data = {
+      from: from || null,
+      to: to || null,
+      status,
+      total_units: Number(totalRow?.total_units || 0),
+      by_day: byDayRows.map(r => ({ ymd: r.ymd, units: Number(r.units || 0) })),
+      by_po: byPoRows.map(r => ({ po: r.po, units: Number(r.units || 0), cartons_out: Number(r.cartons_out || 0) }))
+    };
+
+    _summaryCache.set(key, { ts: Date.now(), data });
+    return res.json(data);
+  } catch (e) {
+    console.error('GET /records/summary failed:', e);
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+
+// --- Summary: PO+SKU rollup (for discrepancies without pulling raw records) ---
+app.get('/summary/po_sku',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_summary_po_sku'),
+  (req, res) => {
+  try {
+    const fromRaw = req.query.from ? String(req.query.from) : '';
+    const toRaw   = req.query.to   ? String(req.query.to)   : '';
+    const from = fromRaw && fromRaw.includes('T') ? fromRaw.slice(0, 10) : fromRaw;
+    const to   = toRaw   && toRaw.includes('T')   ? toRaw.slice(0, 10)   : toRaw;
+    const status = req.query.status ? String(req.query.status) : 'complete';
+
+    const params = [];
+    let where = 'WHERE 1=1';
+    if (from)   { where += ' AND date_local >= ?'; params.push(from); }
+    if (to)     { where += ' AND date_local <= ?'; params.push(to); }
+    if (status) { where += ' AND status = ?';      params.push(status); }
+
+    const rows = db.prepare(`
+      SELECT
+        po_number AS po,
+        sku_code  AS sku,
+        COUNT(*) AS units
+      FROM records
+      ${where}
+        AND TRIM(COALESCE(po_number,'')) <> ''
+        AND TRIM(COALESCE(sku_code,'')) <> ''
+      GROUP BY po_number, sku_code
+      ORDER BY po_number, sku_code
+    `).all(...params);
+
+    return res.json({ from: from || null, to: to || null, status, rows: rows.map(r => ({ po: r.po, sku: r.sku, units: Number(r.units || 0) })) });
+  } catch (e) {
+    console.error('GET /summary/po_sku failed:', e);
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+// --- Summary: SKU rollup ---
+app.get('/summary/sku',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_summary_sku'),
+  (req, res) => {
+  try {
+    const fromRaw = req.query.from ? String(req.query.from) : '';
+    const toRaw   = req.query.to   ? String(req.query.to)   : '';
+    const from = fromRaw && fromRaw.includes('T') ? fromRaw.slice(0, 10) : fromRaw;
+    const to   = toRaw   && toRaw.includes('T')   ? toRaw.slice(0, 10)   : toRaw;
+    const status = req.query.status ? String(req.query.status) : 'complete';
+
+    const params = [];
+    let where = 'WHERE 1=1';
+    if (from)   { where += ' AND date_local >= ?'; params.push(from); }
+    if (to)     { where += ' AND date_local <= ?'; params.push(to); }
+    if (status) { where += ' AND status = ?';      params.push(status); }
+
+    const rows = db.prepare(`
+      SELECT sku_code AS sku, COUNT(*) AS units
+      FROM records
+      ${where}
+        AND TRIM(COALESCE(sku_code,'')) <> ''
+      GROUP BY sku_code
+      ORDER BY sku_code
+    `).all(...params);
+
+    return res.json({ from: from || null, to: to || null, status, rows: rows.map(r => ({ sku: r.sku, units: Number(r.units || 0) })) });
+  } catch (e) {
+    console.error('GET /summary/sku failed:', e);
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+
+// --- Shipment reports (summary + detail) ---
+// Used for Operations downloads without pulling raw record datasets to the browser.
+// Week-scoped (weekStart -> weekStart+6). Grouping is derived from the uploaded plan JSON.
+function _normStr(v) {
+  const s = String(v ?? '').trim();
+  return s ? s : '(Unspecified)';
+}
+
+function _weekEndISO(ws) {
+  const d = new Date(String(ws) + 'T00:00:00');
+  d.setDate(d.getDate() + 6);
+  return d.toISOString().slice(0, 10);
+}
+
+function _getPlanRowsForWeek(ws) {
+  const row = db.prepare(`SELECT data FROM plans WHERE week_start = ?`).get(ws);
+  if (!row?.data) return [];
+  try {
+    const parsed = JSON.parse(row.data);
+    return Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.rows) ? parsed.rows : []);
+  } catch {
+    return [];
+  }
+}
+
+function _getBinsForWeek(ws) {
+  return db.prepare(`SELECT week_start, mobile_bin, total_units, weight_kg, date_local FROM bins WHERE week_start = ?`).all(ws);
+}
+
+app.get('/summary/shipment_summary',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_summary_shipment'),
+  (req, res) => {
+  try {
+    const ws = String(req.query.weekStart || '').slice(0, 10);
+    if (!ws) return res.status(400).json({ error: 'weekStart is required (YYYY-MM-DD)' });
+    const we = _weekEndISO(ws);
+
+    const plan = _getPlanRowsForWeek(ws);
+    const metaByPO = new Map();
+    for (const p of plan) {
+      const po = String(p?.po_number || '').trim();
+      if (!po || metaByPO.has(po)) continue;
+      metaByPO.set(po, {
+        supplier: _normStr(p?.supplier_name),
+        zendesk: _normStr(p?.zendesk_ticket ?? p?.zendesk_ticket_number ?? p?.zendesk),
+        freight: _normStr(p?.freight_type),
+        facility: _normStr(p?.facility_name),
+      });
+    }
+
+    // applied units by PO (week scoped)
+    const poUnits = db.prepare(`
+      SELECT po_number AS po, COUNT(*) AS units
+      FROM records
+      WHERE status='complete'
+        AND date_local >= ? AND date_local <= ?
+        AND TRIM(COALESCE(po_number,'')) <> ''
+      GROUP BY po_number
+    `).all(ws, we);
+
+    // distinct bins by PO (week scoped)
+    const poBins = db.prepare(`
+      SELECT po_number AS po, TRIM(mobile_bin) AS mobile_bin
+      FROM records
+      WHERE status='complete'
+        AND date_local >= ? AND date_local <= ?
+        AND TRIM(COALESCE(po_number,'')) <> ''
+        AND TRIM(COALESCE(mobile_bin,'')) <> ''
+      GROUP BY po_number, TRIM(mobile_bin)
+    `).all(ws, we);
+
+    const bins = _getBinsForWeek(ws);
+    const binWeight = new Map();
+    for (const b of bins) {
+      const mb = String(b?.mobile_bin ?? '').trim();
+      if (!mb) continue;
+      binWeight.set(mb, Number(b?.weight_kg || 0) || 0);
+    }
+
+    const binsByPO = new Map();
+    for (const r of poBins) {
+      const po = String(r.po || '').trim();
+      const mb = String(r.mobile_bin || '').trim();
+      if (!po || !mb) continue;
+      if (!binsByPO.has(po)) binsByPO.set(po, new Set());
+      binsByPO.get(po).add(mb);
+    }
+
+    const groups = new Map(); // gkey -> agg
+    const binAssigned = new Map();
+
+    for (const r of poUnits) {
+      const po = String(r.po || '').trim();
+      if (!po) continue;
+      const m = metaByPO.get(po) || { supplier: '(Unspecified)', zendesk: '(Unspecified)', freight: '(Unspecified)', facility: '(Unspecified)' };
+      const gkey = `${m.supplier}|||${m.zendesk}|||${m.freight}|||${m.facility}`;
+      if (!groups.has(gkey)) {
+        groups.set(gkey, {
+          'Supplier Name': m.supplier,
+          'Zendesk Ticket #': m.zendesk,
+          'Freight Type': m.freight,
+          'Facility Name': m.facility,
+          _poSet: new Set(),
+          _binSet: new Set(),
+          'Unique PO Count': 0,
+          'Total Units Applied': 0,
+          'Total Mobile Bins': 0,
+          'Gross Weight': 0,
+          'CBM': 0,
+        });
+      }
+      const g = groups.get(gkey);
+      g['Total Units Applied'] += Number(r.units || 0) || 0;
+      g._poSet.add(po);
+
+      const poBinSet = binsByPO.get(po) || new Set();
+      for (const mb of poBinSet) {
+        g._binSet.add(mb);
+        if (!binAssigned.has(mb)) {
+          binAssigned.set(mb, gkey);
+          g['Gross Weight'] += binWeight.get(mb) || 0;
+        }
+      }
+    }
+
+    const out = [];
+    for (const g of groups.values()) {
+      const binCount = g._binSet.size;
+      out.push({
+        'Supplier Name': g['Supplier Name'],
+        'Zendesk Ticket #': g['Zendesk Ticket #'],
+        'Freight Type': g['Freight Type'],
+        'Facility Name': g['Facility Name'],
+        'Unique PO Count': g._poSet.size,
+        'Total Units Applied': Number(g['Total Units Applied'] || 0),
+        'Total Mobile Bins': binCount,
+        'Gross Weight': Math.round((Number(g['Gross Weight'] || 0) + Number.EPSILON) * 100) / 100,
+        'CBM': Math.round((binCount * 0.046 + Number.EPSILON) * 1000) / 1000,
+      });
+    }
+
+    out.sort((a, b) =>
+      String(a['Supplier Name']).localeCompare(String(b['Supplier Name'])) ||
+      String(a['Zendesk Ticket #']).localeCompare(String(b['Zendesk Ticket #'])) ||
+      String(a['Freight Type']).localeCompare(String(b['Freight Type'])) ||
+      String(a['Facility Name']).localeCompare(String(b['Facility Name']))
+    );
+
+    return res.json({ weekStart: ws, weekEnd: we, rows: out });
+  } catch (e) {
+    console.error('GET /summary/shipment_summary failed:', e);
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+app.get('/summary/shipment_detail',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_summary_shipment_detail'),
+  (req, res) => {
+  try {
+    const ws = String(req.query.weekStart || '').slice(0, 10);
+    if (!ws) return res.status(400).json({ error: 'weekStart is required (YYYY-MM-DD)' });
+    const we = _weekEndISO(ws);
+
+    const plan = _getPlanRowsForWeek(ws);
+    const metaByPO = new Map();
+    for (const p of plan) {
+      const po = String(p?.po_number || '').trim();
+      if (!po || metaByPO.has(po)) continue;
+      metaByPO.set(po, {
+        supplier: _normStr(p?.supplier_name),
+        zendesk: _normStr(p?.zendesk_ticket ?? p?.zendesk_ticket_number ?? p?.zendesk),
+        freight: _normStr(p?.freight_type),
+        facility: _normStr(p?.facility_name),
+      });
+    }
+
+    const poUnits = db.prepare(`
+      SELECT po_number AS po, COUNT(*) AS units
+      FROM records
+      WHERE status='complete'
+        AND date_local >= ? AND date_local <= ?
+        AND TRIM(COALESCE(po_number,'')) <> ''
+      GROUP BY po_number
+    `).all(ws, we);
+
+    const poBins = db.prepare(`
+      SELECT po_number AS po, TRIM(mobile_bin) AS mobile_bin
+      FROM records
+      WHERE status='complete'
+        AND date_local >= ? AND date_local <= ?
+        AND TRIM(COALESCE(po_number,'')) <> ''
+        AND TRIM(COALESCE(mobile_bin,'')) <> ''
+      GROUP BY po_number, TRIM(mobile_bin)
+    `).all(ws, we);
+
+    const bins = _getBinsForWeek(ws);
+    const binWeight = new Map();
+    for (const b of bins) {
+      const mb = String(b?.mobile_bin ?? '').trim();
+      if (!mb) continue;
+      binWeight.set(mb, Number(b?.weight_kg || 0) || 0);
+    }
+
+    const binsByPO = new Map();
+    for (const r of poBins) {
+      const po = String(r.po || '').trim();
+      const mb = String(r.mobile_bin || '').trim();
+      if (!po || !mb) continue;
+      if (!binsByPO.has(po)) binsByPO.set(po, new Set());
+      binsByPO.get(po).add(mb);
+    }
+
+    const groups = new Map();
+    const binAssigned = new Map();
+
+    for (const r of poUnits) {
+      const po = String(r.po || '').trim();
+      if (!po) continue;
+      const m = metaByPO.get(po) || { supplier: '(Unspecified)', zendesk: '(Unspecified)', freight: '(Unspecified)', facility: '(Unspecified)' };
+      const gkey = `${m.supplier}|||${m.zendesk}|||${m.freight}|||${m.facility}|||${po}`;
+
+      if (!groups.has(gkey)) {
+        groups.set(gkey, {
+          'Supplier Name': m.supplier,
+          'Zendesk Ticket #': m.zendesk,
+          'Freight Type': m.freight,
+          'Facility Name': m.facility,
+          'PO': po,
+          _binSet: new Set(),
+          'Total Units Applied': 0,
+          'Total Mobile Bins': 0,
+          'Gross Weight': 0,
+          'CBM': 0,
+        });
+      }
+
+      const g = groups.get(gkey);
+      g['Total Units Applied'] += Number(r.units || 0) || 0;
+
+      const poBinSet = binsByPO.get(po) || new Set();
+      for (const mb of poBinSet) {
+        g._binSet.add(mb);
+        if (!binAssigned.has(mb)) {
+          binAssigned.set(mb, gkey);
+          g['Gross Weight'] += binWeight.get(mb) || 0;
+        }
+      }
+    }
+
+    const out = [];
+    for (const g of groups.values()) {
+      const binCount = g._binSet.size;
+      out.push({
+        'Supplier Name': g['Supplier Name'],
+        'Zendesk Ticket #': g['Zendesk Ticket #'],
+        'Freight Type': g['Freight Type'],
+        'Facility Name': g['Facility Name'],
+        'PO': g['PO'],
+        'Total Units Applied': Number(g['Total Units Applied'] || 0),
+        'Total Mobile Bins': binCount,
+        'Gross Weight': Math.round((Number(g['Gross Weight'] || 0) + Number.EPSILON) * 100) / 100,
+        'CBM': Math.round((binCount * 0.046 + Number.EPSILON) * 1000) / 1000,
+      });
+    }
+
+    out.sort((a, b) =>
+      String(a['Supplier Name']).localeCompare(String(b['Supplier Name'])) ||
+      String(a['Zendesk Ticket #']).localeCompare(String(b['Zendesk Ticket #'])) ||
+      String(a['Freight Type']).localeCompare(String(b['Freight Type'])) ||
+      String(a['Facility Name']).localeCompare(String(b['Facility Name'])) ||
+      String(a['PO']).localeCompare(String(b['PO']))
+    );
+
+    return res.json({ weekStart: ws, weekEnd: we, rows: out });
+  } catch (e) {
+    console.error('GET /summary/shipment_detail failed:', e);
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+
+// --- Export: applied UIDs (CSV stream) ---
+// For large weeks, do NOT materialize the full dataset in the browser.
+app.get('/export/applied',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('export_applied'),
+  (req, res) => {
+  try {
+    const fromRaw = req.query.from ? String(req.query.from) : '';
+    const toRaw   = req.query.to   ? String(req.query.to)   : '';
+    const from = fromRaw && fromRaw.includes('T') ? fromRaw.slice(0, 10) : fromRaw;
+    const to   = toRaw   && toRaw.includes('T')   ? toRaw.slice(0, 10)   : toRaw;
+    if (!from || !to) return res.status(400).send('from and to are required (YYYY-MM-DD)');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="Applied_UIDs_${from}_to_${to}.csv"`);
+
+    // UTF-8 BOM for Excel compatibility
+    res.write('\ufeff');
+    res.write('Date Applied,Mobile Bin,SSCC Label,PO Number,SKU Code,UID\r\n');
+
+    const stmt = db.prepare(`
+      SELECT date_local, mobile_bin, sscc_label, po_number, sku_code, uid
+      FROM records
+      WHERE status='complete'
+        AND date_local >= ? AND date_local <= ?
+      ORDER BY date_local, po_number, sku_code
+    `);
+
+    const esc = (v) => {
+      const s = String(v ?? '');
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+    };
+
+    for (const r of stmt.iterate(from, to)) {
+      res.write([
+        esc(r.date_local),
+        esc(r.mobile_bin),
+        esc(r.sscc_label),
+        esc(r.po_number),
+        esc(r.sku_code),
+        esc(r.uid)
+      ].join(',') + '\r\n');
+    }
+    return res.end();
+  } catch (e) {
+    console.error('GET /export/applied failed:', e);
+    return res.status(500).send(String(e?.message || e));
+  }
+});
+// --- Export XLSX ---
+app.get('/export/xlsx',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('export_xlsx'),
+  async (req, res) => {
+  const date = String(req.query.date || todayChicagoISO());
+  const rows = db.prepare('SELECT * FROM records WHERE date_local = ? ORDER BY completed_at DESC').all(date);
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('UIDs');
+  ws.columns = [
+    { header: 'Date', key: 'date_local', width: 12 },
+    { header: 'Mobile Bin (BOX)', key: 'mobile_bin', width: 16 },
+    { header: 'SSCC Label (BOX)', key: 'sscc_label', width: 18 },
+    { header: 'PO_Number', key: 'po_number', width: 14 },
+    { header: 'SKU_Code', key: 'sku_code', width: 14 },
+    { header: 'UID', key: 'uid', width: 22 },
+    { header: 'Status', key: 'status', width: 10 },
+    { header: 'Completed At', key: 'completed_at', width: 22 },
+  ];
+  rows.forEach(r => ws.addRow(r));
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="uids_${date}.xlsx"`);
+  await wb.xlsx.write(res);
+  res.end();
+});
+
+// --- Deletions ---
+app.delete('/records',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'api']),
+  validateBulkInput,
+  auditLog('bulk_delete_records'),
+  (req, res) => {
+  const uid = String(req.query.uid || '').trim();
+  const sku = String(req.query.sku_code || '').trim();
+
+  if (!uid) return res.status(400).json({ error: 'uid required' });
+
+  const info = sku
+    ? deleteBySkuUid.run(uid, sku)  // original behavior
+    : deleteByUid.run(uid);         // NEW: delete all rows with this UID
+
+  return res.json({ ok: true, deleted: info.changes });
+});
+
+app.post('/records/delete',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'api']),
+  validateBulkInput,
+  auditLog('delete_records'),
+  (req, res) => {
+  const input = req.body;
+
+  // Normalize input to a list of objects with { uid, sku_code? }
+  let items = [];
+  if (Array.isArray(input)) {
+    items = input.map(x => {
+      if (typeof x === 'string') return { uid: String(x).trim(), sku_code: '' };
+      return { uid: String(x?.uid || '').trim(), sku_code: String(x?.sku_code || '').trim() };
+    });
+  } else if (input && typeof input === 'object') {
+    items = [{ uid: String(input.uid || '').trim(), sku_code: String(input.sku_code || '').trim() }];
+  }
+
+  if (!items.length) {
+    return res.status(400).json({ error: 'Body must be array or object containing uid (and optional sku_code)' });
+  }
+
+  const results = [];
+  const trx = db.transaction(list => {
+    for (const it of list) {
+      const uid = it.uid;
+      const sku = it.sku_code;
+
+      if (!uid) {
+        results.push({ uid, sku_code: sku, deleted: 0, error: 'missing uid' });
+        continue;
+      }
+
+      const info = sku
+        ? deleteBySkuUid.run(uid, sku) // original precise delete
+        : deleteByUid.run(uid);        // NEW: delete all rows with this UID
+
+      results.push({ uid, sku_code: sku, deleted: info.changes });
+    }
+  });
+
+  try { trx(items); }
+  catch (e) { return res.status(500).json({ error: String(e?.message || e) }); }
+
+  const total = results.reduce((s, r) => s + (r.deleted || 0), 0);
+  return res.json({ ok: true, total_deleted: total, results });
+});
+
+// Simple helper to compute Monday for a given date (kept consistent with your existing mondayOf)
+function mondayOfLoose(ymd) {
+  if (!ymd) return '';
+  try {
+    const d = new Date(String(ymd).trim() + 'T00:00:00Z');
+    const day = d.getUTCDay();               // 0..6, Sunday=0
+    const diff = (day === 0 ? -6 : (1 - day));
+    d.setUTCDate(d.getUTCDate() + diff);
+    return d.toISOString().slice(0,10);
+  } catch { return ''; }
+}
+
+
+// ---- Flow week helpers / statements ----
+function normFacility(v) {
+  return String(v || '').trim();
+}
+function safeJsonParse(s, fallback) {
+  try { return JSON.parse(s); } catch { return fallback; }
+}
+
+const flowWeekGet = db.prepare(`
+  SELECT data, updated_at
+  FROM flow_week
+  WHERE facility = ? AND week_start = ?
+`);
+
+const flowWeekUpsert = db.prepare(`
+  INSERT INTO flow_week(facility, week_start, data, updated_at)
+  VALUES (?, ?, ?, datetime('now'))
+  ON CONFLICT(facility, week_start) DO UPDATE SET
+    data = excluded.data,
+    updated_at = excluded.updated_at
+`);
+
+const flowWeekAllForWeek = db.prepare(`
+  SELECT facility, data, updated_at
+  FROM flow_week
+  WHERE week_start = ?
+  ORDER BY facility
+`);
+
+/* ===== BEGIN: /plan?weekStart=YYYY-MM-DD alias =====
+   Returns the same payload as GET /plan/weeks/:mondayISO
+   (works for /api/plan too thanks to the /api alias above)
+*/
+app.get('/plan',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_plan'),
+  (req, res) => {
+  const ws = String(req.query.weekStart || req.query.ws || '').trim();
+  if (!ws) return res.status(400).json({ error: 'weekStart required' });
+  const monday = mondayOfLoose(ws);
+  if (!monday) return res.status(400).json({ error: 'invalid weekStart' });
+
+  const row = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(monday);
+  if (!row) return res.json([]);
+  try { return res.json(JSON.parse(row.data) || []); }
+  catch { return res.json([]); }
+});
+/* ===== END: /plan alias ===== */
+
+
+// ---------- Weekly Plan API (kept) ----------
+function normalizePlanArray(body, fallbackStart) {
+  if (!Array.isArray(body)) return [];
+const norm = body.map(r => ({
+  po_number: String(r?.po_number ?? '').trim(),
+  sku_code:  String(r?.sku_code  ?? '').trim(),
+  start_date: (String(r?.start_date ?? '').trim()) || fallbackStart || '',
+  due_date:   String(r?.due_date   ?? '').trim(),
+  target_qty: Number(r?.target_qty ?? 0) || 0,
+
+  // NEW fields
+  supplier_name:  r?.supplier_name  ? String(r.supplier_name).trim()  : undefined,
+  facility_name:  r?.facility_name  ? String(r.facility_name).trim()  : undefined,
+  freight_type:   r?.freight_type   ? String(r.freight_type).trim()   : undefined,
+  zendesk_ticket: r?.zendesk_ticket ? String(r.zendesk_ticket).trim() : undefined,
+
+  priority:   r?.priority ? String(r.priority).trim() : undefined,
+  notes:      r?.notes ? String(r.notes).trim() : undefined,
+})).filter(r => r.po_number && r.sku_code && r.due_date);
+
+  return norm;
+}
+
+app.get('/plan/weeks/:mondayISO',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_plan_week'),
+  (req, res) => {
+  const monday = String(req.params.mondayISO);
+  const row = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(monday);
+  if (!row) return res.json([]);
+  try {
+    return res.json(JSON.parse(row.data) || []);
+  } catch {
+    return res.json([]);
+  }
+});
+
+app.put('/plan/weeks/:mondayISO',
+  authenticateRequest,
+  requireRole(['admin', 'client', 'api']),
+  uploadLimiter,
+  auditLog('upload_plan'),
+  (req, res) => {
+  const monday = String(req.params.mondayISO);
+  const arr = normalizePlanArray(req.body, monday);
+  db.prepare(`
+    INSERT INTO plans(week_start, data, updated_at)
+    VALUES(?, ?, datetime('now'))
+    ON CONFLICT(week_start) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
+  `).run(monday, JSON.stringify(arr));
+  return res.json(arr);
+});
+
+app.post('/plan/weeks/:mondayISO/zero',
+  authenticateRequest,
+  requireRole(['admin', 'client', 'api']),
+  auditLog('zero_plan'),
+  (req, res) => {
+  const monday = String(req.params.mondayISO);
+  db.prepare(`
+    INSERT INTO plans(week_start, data, updated_at)
+    VALUES(?, '[]', datetime('now'))
+    ON CONFLICT(week_start) DO UPDATE SET data='[]', updated_at=datetime('now')
+  `).run(monday);
+  return res.json({ ok: true, week_start: monday, rows: 0 });
+});
+
+app.get('/plan/weeks',
+  authenticateRequest,
+  auditLog('list_plan_weeks'),
+  (req, res) => {
+  const rows = db.prepare(`SELECT week_start, updated_at FROM plans ORDER BY week_start DESC LIMIT 52`).all();
+  res.json(rows);
+});
+
+// --- bins.routes.js ---
+const binsRouter = express.Router();
+
+// Store: use your DB (SQL/NoSQL). Here we assume a generic DAL with upsertMany/getByWeek.
+// --- Bins DAL (SQLite, inline) ---
+db.exec(`
+CREATE TABLE IF NOT EXISTS bins (
+  week_start  TEXT NOT NULL,
+  mobile_bin  TEXT NOT NULL,
+  total_units INTEGER,
+  weight_kg   REAL,
+  date_local  TEXT,
+  PRIMARY KEY (week_start, mobile_bin)
+);
+CREATE INDEX IF NOT EXISTS idx_bins_week ON bins(week_start);
+`);
+
+const Bins = {
+  upsertMany: db.transaction((rows) => {
+    const stmt = db.prepare(`
+      INSERT INTO bins (week_start, mobile_bin, total_units, weight_kg, date_local)
+      VALUES (@week_start, @mobile_bin, @total_units, @weight_kg, @date_local)
+      ON CONFLICT(week_start, mobile_bin) DO UPDATE SET
+        total_units = excluded.total_units,
+        weight_kg   = excluded.weight_kg,
+        date_local  = excluded.date_local
+    `);
+    let n = 0;
+    for (const r of rows) { stmt.run(r); n++; }
+    return n;
+  }),
+  getByWeek: (ws) => {
+    return db.prepare(`
+      SELECT week_start, mobile_bin, total_units, weight_kg, date_local
+      FROM bins
+      WHERE week_start = ?
+      ORDER BY mobile_bin
+    `).all(ws);
+  }
+};
+
+// Helper: Monday anchor computed in business TZ on the server if you store server-side
+function mondayOf(ymd) {
+  const d = new Date(ymd + 'T00:00:00Z');
+  const day = d.getUTCDay();
+  const diff = (day === 0 ? -6 : (1 - day));
+  d.setUTCDate(d.getUTCDate() + diff);
+  return d.toISOString().slice(0,10);
+}
+
+// PUT /bins/weeks/:ws    body: [{mobile_bin, total_units?, weight_kg?, date_local?}, ...]
+binsRouter.put('/weeks/:ws',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'api']),
+  writeOpLimiter,
+  validateBulkInput,
+  auditLog('edit_bins'),
+  async (req, res) => {
+  try {
+    const ws = req.params.ws; // YYYY-MM-DD (business Monday from client)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) return res.status(400).send('Invalid week start');
+
+    const rows = Array.isArray(req.body) ? req.body : [];
+    if (!rows.length) return res.json({ ok: true, upserted: 0 });
+
+    const clean = [];
+    const seen = new Set();
+    const errors = [];
+
+    for (const r of rows) {
+      const bin = String(r.mobile_bin || '').trim();
+      const units = (r.total_units == null || r.total_units === '') ? null : Number(r.total_units);
+      const weight = (r.weight_kg == null || r.weight_kg === '') ? null : Number(r.weight_kg);
+      const dateLocal = String(r.date_local || ws);
+
+      if (!bin) { errors.push({row:r, reason:'missing mobile_bin'}); continue; }
+      if (units != null && (!Number.isFinite(units) || units < 0)) { errors.push({row:r, reason:'invalid total_units'}); continue; }
+      if (weight != null && (!Number.isFinite(weight) || weight < 0)) { errors.push({row:r, reason:'invalid weight_kg'}); continue; }
+
+      // de-dupe per (ws,bin). If multiple entries present, keep last one.
+      const key = ws + '|' + bin;
+      if (seen.has(key)) clean.pop();
+      seen.add(key);
+
+      clean.push({
+        week_start: ws,
+        mobile_bin: bin,
+        total_units: units,
+        weight_kg: weight,
+        date_local: dateLocal
+      });
+    }
+
+    if (!clean.length) return res.status(400).json({ ok:false, errors });
+
+    const upserted = await Bins.upsertMany(clean); // implement in DAL
+    return res.json({ ok:true, upserted, rejected: errors.length, errors });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send('Failed to upsert bins');
+  }
+});
+
+// GET /bins/weeks/:ws
+// Returns bins enriched with po_number and supplier_name by joining against
+// the records table (UID scans) and the stored plan (for supplier lookup).
+// This is required so the client can build the Mobile Bin Report with PO/Supplier
+// columns, and so autoFilterResponse can correctly scope data for supplier/client roles.
+binsRouter.get('/weeks/:ws',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_bins'),
+  async (req, res) => {
+  try {
+    const ws = req.params.ws;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) return res.status(400).send('Invalid week start');
+
+    const bins = await Bins.getByWeek(ws); // [{mobile_bin, total_units, weight_kg, date_local, week_start}]
+    if (!bins.length) return res.json([]);
+
+    const we = _weekEndISO(ws);
+
+    // Join: for each mobile_bin find the PO(s) it was associated with in records this week.
+    // Use the PRIMARY po_number (most scans wins) to keep one row per bin.
+    const binPORows = db.prepare(`
+      SELECT
+        TRIM(mobile_bin) AS mobile_bin,
+        po_number,
+        COUNT(*) AS scan_count
+      FROM records
+      WHERE date_local >= ? AND date_local <= ?
+        AND TRIM(COALESCE(mobile_bin, '')) <> ''
+        AND TRIM(COALESCE(po_number, '')) <> ''
+      GROUP BY TRIM(mobile_bin), po_number
+    `).all(ws, we);
+
+    // Build map: mobile_bin -> po_number (highest scan_count wins)
+    const binToPO = new Map();
+    for (const r of binPORows) {
+      const mb = String(r.mobile_bin || '').trim();
+      if (!mb) continue;
+      const existing = binToPO.get(mb);
+      if (!existing || r.scan_count > existing.scan_count) {
+        binToPO.set(mb, { po_number: String(r.po_number || '').trim(), scan_count: r.scan_count });
+      }
+    }
+
+    // Build supplier lookup from the week's plan
+    const planRows = _getPlanRowsForWeek(ws);
+    const poToSupplier = new Map();
+    for (const p of planRows) {
+      const po = String(p && p.po_number || '').trim();
+      if (!po || poToSupplier.has(po)) continue;
+      poToSupplier.set(po, String(p && (p.supplier_name || p.supplier) || '').trim());
+    }
+
+    // Enrich each bin row with po_number and supplier_name
+    const enriched = bins.map(b => {
+      const mb = String(b.mobile_bin || '').trim();
+      const poEntry = binToPO.get(mb);
+      const po_number = poEntry ? poEntry.po_number : '';
+      const supplier_name = po_number ? (poToSupplier.get(po_number) || '') : '';
+      return Object.assign({}, b, { po_number: po_number, supplier_name: supplier_name });
+    });
+
+    return res.json(enriched);
+  } catch (e) {
+    console.error('GET /bins/weeks failed:', e);
+    return res.status(500).send('Failed to fetch bins');
+  }
+});
+
+app.use('/bins', binsRouter);
+
+const receivingRouter = express.Router();
+
+function normalizeReceivingArray(body, ws) {
+  if (!Array.isArray(body)) return [];
+  return body.map(r => ({
+    week_start: ws,
+    po_number: String(r?.po_number ?? r?.po ?? '').trim(),
+    supplier_name: r?.supplier_name ? String(r.supplier_name).trim() : (r?.supplier ? String(r.supplier).trim() : ''),
+    facility_name: r?.facility_name ? String(r.facility_name).trim() : (r?.facility ? String(r.facility).trim() : ''),
+    received_at_utc: r?.received_at_utc ? String(r.received_at_utc).trim() : '',
+    received_at_local: r?.received_at_local ? String(r.received_at_local).trim() : '',
+    received_tz: r?.received_tz ? String(r.received_tz).trim() : '',
+    cartons_received: Number(r?.cartons_received ?? r?.cartons_in ?? 0) || 0,
+    cartons_damaged: Number(r?.cartons_damaged ?? r?.damaged ?? 0) || 0,
+    cartons_noncompliant: Number(r?.cartons_noncompliant ?? r?.noncompliant ?? r?.non_compliant ?? 0) || 0,
+    cartons_replaced: Number(r?.cartons_replaced ?? r?.replaced ?? 0) || 0,
+    updated_at: new Date().toISOString(),
+  })).filter(x => x.po_number);
+}
+
+// GET /receiving/weeks/:ws
+receivingRouter.get('/weeks/:ws',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_receiving'),
+  (req, res) => {
+  const ws = req.params.ws;
+  const rows = db.prepare(`SELECT * FROM receiving WHERE week_start=? ORDER BY supplier_name, po_number`).all(ws);
+  res.json(rows);
+});
+
+// PUT /receiving/weeks/:ws  (UPSERT array)
+receivingRouter.put('/weeks/:ws',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'api']),
+  writeOpLimiter,
+  validateBulkInput,
+  auditLog('edit_receiving'),
+  (req, res) => {
+  const ws = req.params.ws;
+  const rows = normalizeReceivingArray(req.body, ws);
+
+  const stmt = db.prepare(`
+    INSERT INTO receiving(
+      week_start, po_number, supplier_name, facility_name,
+      received_at_utc, received_at_local, received_tz,
+      cartons_received, cartons_damaged, cartons_noncompliant, cartons_replaced,
+      updated_at
+    ) VALUES (
+      @week_start, @po_number, @supplier_name, @facility_name,
+      @received_at_utc, @received_at_local, @received_tz,
+      @cartons_received, @cartons_damaged, @cartons_noncompliant, @cartons_replaced,
+      @updated_at
+    )
+    ON CONFLICT(week_start, po_number) DO UPDATE SET
+      supplier_name=excluded.supplier_name,
+      facility_name=excluded.facility_name,
+      received_at_utc=excluded.received_at_utc,
+      received_at_local=excluded.received_at_local,
+      received_tz=excluded.received_tz,
+      cartons_received=excluded.cartons_received,
+      cartons_damaged=excluded.cartons_damaged,
+      cartons_noncompliant=excluded.cartons_noncompliant,
+      cartons_replaced=excluded.cartons_replaced,
+      updated_at=excluded.updated_at
+  `);
+
+  const tx = db.transaction((arr) => {
+    for (const r of arr) stmt.run(r);
+  });
+
+  tx(rows);
+  res.json({ ok: true, week_start: ws, rows: rows.length });
+});
+
+// Alias GET /receiving?weekStart=YYYY-MM-DD  (like bins/plan)
+receivingRouter.get('/',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('query_receiving'),
+  (req, res) => {
+  const ws = String(req.query.weekStart || '').trim();
+  if (!ws) return res.status(400).json({ error: 'weekStart required' });
+  const rows = db.prepare(`SELECT * FROM receiving WHERE week_start=? ORDER BY supplier_name, po_number`).all(ws);
+  res.json(rows);
+});
+
+app.use('/receiving', receivingRouter);
+
+
+/* ===== BEGIN: /bins?weekStart=YYYY-MM-DD alias =====
+   Returns the same as GET /bins/weeks/:ws
+   (works for /api/bins too thanks to the /api alias above)
+*/
+app.get('/bins',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('query_bins'),
+  (req, res) => {
+  const ws = String(req.query.weekStart || req.query.ws || '').trim();
+  if (!ws) return res.status(400).json({ error: 'weekStart required' });
+  const monday = mondayOfLoose(ws);
+  if (!monday) return res.status(400).json({ error: 'invalid weekStart' });
+
+  try {
+    const rows = Bins.getByWeek(monday);
+    return res.json(rows);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send('Failed to fetch bins');
+  }
+});
+/* ===== END: /bins alias ===== */
+
+
+// 🔐 AUDIT LOG ENDPOINT (Admin Only)
+const { getAuditLogs } = require('./middleware/auditLog');
+
+app.get('/admin/audit-logs',
+  authenticateRequest,
+  requireRole(['admin']),
+  (req, res) => {
+    try {
+      const filters = {
+        userId: req.query.user_id,
+        orgId: req.query.org_id,
+        action: req.query.action,
+        startDate: req.query.start_date,
+        endDate: req.query.end_date,
+        limit: parseInt(req.query.limit) || 100
+      };
+
+      const logs = getAuditLogs(filters);
+      res.json(logs);
+    } catch (error) {
+      console.error('Failed to fetch audit logs:', error);
+      res.status(500).json({ error: 'Failed to fetch audit logs' });
+    }
+  }
+);
+
+
+// ---- Start ----
+app.listen(PORT, () => {
+  console.log(`UID Ops backend listening on http://localhost:${PORT}`);
+  console.log(`DB file: ${DB_FILE}`);
+  console.log(`CORS origin(s): ${allowList.join(', ')}`);
+});
