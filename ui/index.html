@@ -6,7 +6,8 @@
   <!-- ⬇️ Set to your Render API base (no trailing slash) -->
   <meta name="api-base" content="https://vasuida1.onrender.com"/>
 <meta name="business-tz" content="Asia/Shanghai"/>
-  <title>VelOzity Pinpoint</title>
+  <title>VelOzity Pinpoint — Every Unit. Every Step.</title>
+<link href="https://fonts.googleapis.com/css2?family=ADLaM+Display&display=swap" rel="stylesheet"/>
 
 <!-- Tailwind -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -228,67 +229,182 @@
 <body class="bg-gray-50 min-h-screen">
 
 <!-- 🔐 Login Screen (shows when NOT signed in) -->
-<div id="auth-login-screen" style="display:flex; align-items:center; justify-content:center; min-height:100vh; background:#f8fafc;">
-  <div style="max-width:450px; width:90%; background:white; border-radius:16px; box-shadow:0 4px 20px rgba(0,0,0,0.08); overflow:hidden;">
-    <div style="padding:40px 40px 24px 40px; text-align:center; background:white;">
-      <h1 style="font-size:28px; font-weight:700; margin-bottom:8px; color:#111827;">VelOzity Pinpoint</h1>
-      <p style="font-size:15px; color:#6b7280; margin:0;">UID Operations Platform</p>
+<div id="auth-login-screen" style="display:flex;width:100vw;height:100vh;overflow:hidden;">
+
+  <!-- Left panel: login form -->
+  <div style="width:34%;min-width:320px;background:#fff;display:flex;flex-direction:column;justify-content:center;padding:56px 48px;position:relative;z-index:2;border-right:0.5px solid rgba(0,0,0,0.06);">
+    <div style="margin-bottom:40px;">
+      <div style="font-family:'ADLaM Display',serif;font-size:22px;line-height:1.1;">
+        <span style="color:#1C1C1E;">VelOzity</span><span style="color:#990033;"> Pinpoint</span>
+      </div>
+      <div style="font-size:11px;color:#AEAEB2;margin-top:8px;letter-spacing:0.08em;text-transform:uppercase;">Every Unit. Every Step.</div>
     </div>
-    <div id="clerk-signin-mount" style="padding:0 40px 40px 40px;"></div>
-    <p style="text-align:center; padding:0 40px 32px 40px; font-size:13px; color:#9ca3af; margin:0;">
-      Sign in to access the operations dashboard
-    </p>
+    <div id="clerk-signin-mount"></div>
+    <div style="font-size:10px;color:#C7C7CC;margin-top:24px;line-height:1.7;">
+      By signing in you agree to VelOzity's terms.<br>Having trouble? Contact your administrator.
+    </div>
   </div>
+
+  <!-- Right panel: alive animation -->
+  <div style="flex:1;background:#1C1C1E;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;">
+    <canvas id="login-grid-canvas" style="position:absolute;inset:0;width:100%;height:100%;z-index:0;"></canvas>
+    <div style="position:absolute;width:600px;height:600px;border-radius:50%;background:radial-gradient(circle,rgba(153,0,51,0.14) 0%,rgba(153,0,51,0.04) 40%,transparent 70%);animation:loginGlow 5s ease-in-out infinite;z-index:1;"></div>
+    <div id="login-particles" style="position:absolute;inset:0;z-index:2;pointer-events:none;"></div>
+    <div style="position:relative;z-index:3;display:flex;flex-direction:column;align-items:center;gap:32px;animation:loginRise 1.2s cubic-bezier(0.16,1,0.3,1) both;">
+      <div style="font-family:'ADLaM Display',serif;text-align:center;">
+        <span style="display:block;font-size:clamp(36px,4vw,56px);color:#fff;letter-spacing:-0.02em;line-height:1.05;">VelOzity</span>
+        <span style="display:block;font-size:clamp(36px,4vw,56px);color:#990033;letter-spacing:-0.02em;line-height:1.05;">Pinpoint</span>
+      </div>
+      <svg viewBox="0 0 380 80" width="340" height="72" overflow="visible">
+        <path d="M4,40 L60,40 L78,14 L96,66 L112,24 L130,40 L190,40 L208,14 L226,66 L242,24 L260,40 L376,40" fill="none" stroke="rgba(153,0,51,0.15)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path id="login-ecg-live" d="M4,40 L60,40 L78,14 L96,66 L112,24 L130,40 L190,40 L208,14 L226,66 L242,24 L260,40 L376,40" fill="none" stroke="#990033" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="480" stroke-dashoffset="480"/>
+        <circle id="login-ecg-dot" cx="376" cy="40" r="0" fill="#990033"/>
+        <circle id="login-ring1" cx="376" cy="40" r="4" fill="none" stroke="rgba(153,0,51,0.6)" stroke-width="1.2"/>
+        <circle id="login-ring2" cx="376" cy="40" r="4" fill="none" stroke="rgba(153,0,51,0.3)" stroke-width="0.8"/>
+      </svg>
+      <div style="font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:0.22em;text-transform:uppercase;">Every Unit. Every Step.</div>
+    </div>
+  </div>
+
+  <style>
+    @keyframes loginGlow{0%,100%{transform:scale(1);opacity:.8}50%{transform:scale(1.2);opacity:1}}
+    @keyframes loginRise{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes loginFloat{0%{transform:translateY(0) scale(1);opacity:0}8%{opacity:1}92%{opacity:.8}100%{transform:translateY(-110vh) scale(.3);opacity:0}}
+  </style>
+  <script>
+  (function loginPanel(){
+    function init(){
+      var canvas=document.getElementById('login-grid-canvas');
+      if(!canvas) return;
+      var right=canvas.parentElement;
+      function drawGrid(){
+        canvas.width=right.offsetWidth; canvas.height=right.offsetHeight;
+        var ctx=canvas.getContext('2d');
+        ctx.strokeStyle='rgba(255,255,255,0.035)'; ctx.lineWidth=0.5;
+        var s=52;
+        for(var x=0;x<canvas.width;x+=s){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,canvas.height);ctx.stroke();}
+        for(var y=0;y<canvas.height;y+=s){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke();}
+      }
+      window.addEventListener('resize',drawGrid); drawGrid();
+      var live=document.getElementById('login-ecg-live'),dot=document.getElementById('login-ecg-dot'),r1=document.getElementById('login-ring1'),r2=document.getElementById('login-ring2');
+      if(live&&dot&&r1&&r2){
+        var total=480,dur=2800,start=null;
+        function ease(t){return t<.5?2*t*t:-1+(4-2*t)*t;}
+        function tick(ts){
+          if(!start)start=ts;
+          var p=((ts-start)%dur)/dur,offset,opacity;
+          if(p<.78){var ep=ease(p/.78);offset=total-total*ep;opacity=1;}
+          else if(p<.88){offset=0;opacity=1;}
+          else{var fp=(p-.88)/.12;offset=-total*fp*.6;opacity=1-fp;}
+          live.style.strokeDashoffset=offset; live.style.opacity=opacity;
+          var dr=0,do_=0;
+          if(p>.5&&p<.88){dr=p<.6?(p-.5)*40:4;do_=1;}
+          dot.setAttribute('r',Math.max(0,dr)); dot.style.opacity=do_;
+          var rp=p>.58?(p-.58)/.42:0;
+          r1.setAttribute('r',4+rp*26); r1.style.opacity=p>.58?Math.max(0,.7-rp*.7):0;
+          var rp2=p>.65?(p-.65)/.35:0;
+          r2.setAttribute('r',4+rp2*22); r2.style.opacity=p>.65?Math.max(0,.45-rp2*.45):0;
+          requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+      }
+      var pc=document.getElementById('login-particles');
+      if(pc){
+        function spawnP(){
+          var p=document.createElement('div'),sz=1.5+Math.random()*3,d=9+Math.random()*10,dl=Math.random()*-d;
+          p.style.cssText='position:absolute;border-radius:50%;background:rgba(153,0,51,0.6);width:'+sz+'px;height:'+sz+'px;left:'+(10+Math.random()*80)+'%;bottom:-8px;animation:loginFloat '+d+'s '+dl+'s linear infinite;';
+          pc.appendChild(p); setTimeout(function(){p.remove();},(d+Math.abs(dl))*1000+500);
+        }
+        for(var i=0;i<18;i++) spawnP();
+        setInterval(spawnP,1800);
+      }
+    }
+    if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
+  })();
+  <\/script>
 </div>
 
 <!-- 🔐 App Content (shows when signed in) -->
 <div id="app-content" style="display:none;">
 
-<!-- Top Nav -->
-<header class="vo-nav">
-<div class="vo-wrap py-3 flex items-center justify-between">
-<div class="flex items-center gap-3">
-<div class="text-xl font-semibold">VelOzity Pinpoint</div>
-<div class="text-gray-500 text-sm" id="vo-today"></div>
-</div>
-<div class="flex items-center gap-4">
-<nav class="inline-flex items-center gap-1 p-1 rounded-xl bg-[#E2E2E2] border border-gray-300" id="nav-toggle">
-<a class="seg px-3 py-1.5 rounded-lg text-sm font-medium transition select-none" href="#exec" id="nav-exec">
-  Executive
-</a>
-<a class="seg px-3 py-1.5 rounded-lg text-sm font-medium transition select-none" href="#dashboard" id="nav-dash">
-    Operations
-  </a>
-<a class="seg px-3 py-1.5 rounded-lg text-sm font-medium transition select-none" href="#receiving" id="nav-receiving">
-  Receiving
-</a>
-<a class="seg px-3 py-1.5 rounded-lg text-sm font-medium transition select-none" href="#intake" id="nav-intake">
-    Intake
-  </a>
-<a class="seg px-3 py-1.5 rounded-lg text-sm font-medium transition select-none" href="#flow" id="nav-flow">
-    Flow
-  </a>
-</nav>
-<!-- 🔐 User Info -->
-<div class="flex items-center gap-3 px-3 py-2 bg-white rounded-lg border border-gray-200">
-  <div class="text-right">
-    <div id="user-name-display" class="font-semibold text-sm text-gray-900"></div>
-    <div class="flex gap-2 items-center text-xs text-gray-500">
-      <span id="user-role-display"></span>
-      <span id="user-org-display"></span>
+<!-- New Nav Shell -->
+<style>
+  /* ── Pinpoint 3.0 Nav ── */
+  .pn-nav{position:sticky;top:0;z-index:40;background:#fff;border-bottom:0.5px solid rgba(0,0,0,0.08);}
+  .pn-wrap{max-width:none;width:min(96vw,1920px);margin:0 auto;padding:0 24px;display:flex;align-items:center;justify-content:space-between;height:52px;}
+  .pn-brand{font-family:'ADLaM Display',serif;font-size:17px;white-space:nowrap;text-decoration:none;display:flex;align-items:center;gap:0;}
+  .pn-brand-v{color:#1C1C1E;}
+  .pn-brand-p{color:#990033;}
+  .pn-nav-items{display:flex;align-items:center;gap:2px;padding:4px;background:#F5F5F7;border-radius:10px;border:0.5px solid rgba(0,0,0,0.06);}
+  .pn-nav-item{font-size:12px;font-weight:500;color:#6E6E73;padding:6px 14px;border-radius:7px;text-decoration:none;transition:background .15s,color .15s;white-space:nowrap;cursor:pointer;}
+  .pn-nav-item.active{background:#fff;color:#1C1C1E;box-shadow:0 1px 3px rgba(0,0,0,0.08),0 1px 2px rgba(0,0,0,0.04);}
+  .pn-nav-item:hover:not(.active){background:rgba(0,0,0,0.04);color:#1C1C1E;}
+  .pn-user{display:flex;align-items:center;gap:10px;}
+  .pn-user-info{text-align:right;}
+  .pn-user-name{font-size:12px;font-weight:500;color:#1C1C1E;}
+  .pn-user-meta{font-size:10px;color:#AEAEB2;display:flex;gap:6px;align-items:center;justify-content:flex-end;}
+  .pn-signout{font-size:11px;color:#6E6E73;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:7px;padding:5px 10px;cursor:pointer;transition:background .15s;font-family:inherit;}
+  .pn-signout:hover{background:#EBEBED;}
+  .pn-date{font-size:11px;color:#AEAEB2;}
+
+  /* ── Page background ── */
+  body{background:#F5F5F7 !important;}
+  main.vo-wrap{padding:16px 24px !important;}
+
+  /* ── Pulse Bar ── */
+  .pulse-bar{position:fixed;bottom:0;left:0;right:0;z-index:50;background:#fff;border-top:0.5px solid rgba(0,0,0,0.08);padding:10px 24px;display:none;align-items:center;gap:14px;}
+  .pulse-bar.visible{display:flex;}
+  .pulse-name{font-family:'ADLaM Display',serif;font-size:14px;color:#1C1C1E;white-space:nowrap;}
+  .pulse-divider{width:0.5px;height:18px;background:rgba(0,0,0,0.1);flex-shrink:0;}
+  .pulse-input-wrap{flex:1;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:9px 14px;font-size:12px;color:#AEAEB2;cursor:text;font-family:inherit;}
+  .pulse-send{width:32px;height:32px;border-radius:8px;background:#1C1C1E;display:flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer;border:none;}
+  .pulse-send svg{pointer-events:none;}
+
+  /* ECG in Pulse bar */
+  .pulse-ecg-path{fill:none;stroke:#990033;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:80;stroke-dashoffset:80;animation:pulseEcg 2.2s ease-in-out infinite;}
+  .pulse-ecg-dot{fill:#990033;animation:pulseEcgDot 2.2s ease-in-out infinite;}
+  @keyframes pulseEcg{0%{stroke-dashoffset:80;opacity:1}60%{stroke-dashoffset:0;opacity:1}80%{stroke-dashoffset:0;opacity:1}100%{stroke-dashoffset:-80;opacity:0}}
+  @keyframes pulseEcgDot{0%,40%{r:1.5;opacity:0}55%{r:3;opacity:1}80%{r:2.5;opacity:1}100%{r:2;opacity:0}}
+
+  /* Pulse expanded panel */
+  .pulse-panel{position:fixed;bottom:53px;left:0;right:0;z-index:49;background:#fff;border-top:0.5px solid rgba(0,0,0,0.08);max-height:380px;display:none;flex-direction:column;}
+  .pulse-panel.open{display:flex;}
+  .pulse-chat{flex:1;overflow-y:auto;padding:16px 24px;display:flex;flex-direction:column;gap:10px;}
+  .pulse-msg{font-size:12px;line-height:1.55;max-width:60%;}
+  .pulse-msg.ai{color:#3c3c43;background:#F5F5F7;border-radius:4px 10px 10px 10px;padding:9px 12px;align-self:flex-start;}
+  .pulse-msg.user{color:#fff;background:#1C1C1E;border-radius:10px 4px 10px 10px;padding:9px 12px;align-self:flex-end;}
+  .pulse-msg-from{font-size:9px;font-weight:500;color:#AEAEB2;margin-bottom:3px;letter-spacing:.05em;}
+  .pulse-suggestions{display:flex;gap:7px;padding:0 24px 10px;flex-wrap:wrap;}
+  .pulse-sug{font-size:11px;color:#636366;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:16px;padding:5px 12px;cursor:pointer;font-family:inherit;transition:background .15s;}
+  .pulse-sug:hover{background:#EBEBED;}
+  .pulse-collapse{font-size:10px;color:#AEAEB2;cursor:pointer;padding:4px 10px;border-radius:6px;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);white-space:nowrap;font-family:inherit;}
+
+  /* padding bottom so content doesn't hide behind Pulse */
+  #app-content main{padding-bottom:72px !important;}
+</style>
+
+<header class="pn-nav">
+  <div class="pn-wrap">
+    <a class="pn-brand" href="#week-hub">
+      <span class="pn-brand-v">VelOzity</span><span class="pn-brand-p">&nbsp;Pinpoint</span>
+    </a>
+    <nav class="pn-nav-items" id="nav-toggle">
+      <a class="pn-nav-item active" href="#week-hub" id="nav-weekhub">Week Hub</a>
+      <a class="pn-nav-item" href="#exec" id="nav-exec">Executive</a>
+      <a class="pn-nav-item" href="#reports" id="nav-reports">Reports &amp; Downloads</a>
+    </nav>
+    <div class="pn-user">
+      <div class="pn-date" id="vo-today"></div>
+      <div class="pn-user-info">
+        <div class="pn-user-name" id="user-name-display"></div>
+        <div class="pn-user-meta">
+          <span id="user-role-display"></span>
+          <span id="user-org-display"></span>
+        </div>
+      </div>
+      <button class="pn-signout" onclick="handleSignOut()">Sign out</button>
     </div>
   </div>
-  <button 
-    onclick="handleSignOut()" 
-    id="btn-signout"
-    class="px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-50 transition"
-    style="background:white; color:#111827;"
-  >
-    Sign Out
-  </button>
-</div>
-</div>
-</div>
 </header>
 <main class="vo-wrap py-4">
 <!-- ================= Operations ================= -->
@@ -327,14 +443,14 @@
 </svg>
     PO Discrepancy
   </button>
-<button aria-label="Shipment Summary" class="cmd cmd--ghost" id="btn-ship-summary" title="Shipment summary grouped by Supplier, Zendesk, Freight, Facility">
+<button aria-label="Shipment Summary" class="cmd cmd--ghost" id="btn-ship-summary" title="Shipment summary grouped by Facility, Zendesk, Freight, Client">
 <svg aria-hidden="true" fill="none" focusable="false" stroke="currentColor" viewbox="0 0 24 24">
 <path d="M3 7h13l5 5v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" stroke-linejoin="round" stroke-width="1.5"></path>
 <path d="M16 7v5h5" stroke-linecap="round" stroke-width="1.5"></path>
 </svg>
   Shipment Summary
 </button>
-<button aria-label="Shipment Details" class="cmd cmd--ghost" id="btn-ship-detail" title="Shipment detail by Supplier, Zendesk, Freight, Facility, and PO">
+<button aria-label="Shipment Details" class="cmd cmd--ghost" id="btn-ship-detail" title="Shipment detail by Facility, Zendesk, Freight, Client, and PO">
 <svg aria-hidden="true" fill="none" focusable="false" stroke="currentColor" viewbox="0 0 24 24">
 <path d="M4 6h16M4 12h12M4 18h8" stroke-linecap="round" stroke-width="1.5"></path>
 </svg>
@@ -363,10 +479,10 @@
 <button class="ops-pill ops-pill--active" data-opsview="overview" title="Overview"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 <path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M4 13h6V4H4v9Zm10 7h6v-6h-6v6ZM14 4v6h6V4h-6ZM4 20h6v-5H4v5Z"/>
 </svg><span>Overview</span></button>
-<button class="ops-pill" data-opsview="supplier" title="Supplier"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+<button class="ops-pill" data-opsview="supplier" title="Facility"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 <path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M15 7a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/>
 <path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M4 20a8 8 0 0 1 16 0"/>
-</svg><span>Supplier</span></button>
+</svg><span>Facility</span></button>
 <button class="ops-pill" data-opsview="facility" title="Facility"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M4 20V6a2 2 0 0 1 2-2h6v16"/><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M14 20V10a2 2 0 0 1 2-2h4v12"/><path stroke-width="1.6" stroke-linecap="round" d="M7 8h2"/><path stroke-width="1.6" stroke-linecap="round" d="M7 11h2"/><path stroke-width="1.6" stroke-linecap="round" d="M7 14h2"/></svg><span>Facility</span></button>
 <button class="ops-pill" data-opsview="zendesk" title="Zendesk"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="1.6" stroke-linecap="round" d="M7 9h10"/><path stroke-width="1.6" stroke-linecap="round" d="M7 13h6"/><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M6 3h12a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3H10l-4 3v-3H6a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3Z"/></svg><span>Zendesk</span></button>
 <button class="ops-pill" data-opsview="freight" title="Freight type"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M3 7h11v10H3z"/><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M14 10h4l3 3v4h-7z"/><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M6.5 19a1.5 1.5 0 1 0 0-.01"/><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M17.5 19a1.5 1.5 0 1 0 0-.01"/></svg><span>Freight</span></button>
@@ -1538,7 +1654,7 @@ function supplierRingSVG(applied, planned) {
   // Using currentColor for strokes so Tailwind text colors can control it later
   return `
     <div class="flex items-center justify-center w-full">
-      <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-label="Supplier progress ring">
+      <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-label="Facility progress ring">
         <circle cx="${size/2}" cy="${size/2}" r="${r}"
           fill="none" stroke="#E5E7EB" stroke-width="${stroke}" />
         <circle cx="${size/2}" cy="${size/2}" r="${r}"
@@ -1662,7 +1778,7 @@ function zendeskBulletHTML(applied, planned) {
   `;
 }
 
-// ----- Progress Tiles (Supplier / Facility / Freight / Zendesk) -----
+// ----- Progress Tiles (Facility / Facility / Freight / Zendesk) -----
 function renderProgressTiles(plan = [], records = []) {
   const tilesRoot = document.getElementById('ops-progress-tiles');
   if (!tilesRoot) return;
@@ -1798,7 +1914,7 @@ function renderProgressTiles(plan = [], records = []) {
       if (metricEl) metricEl.textContent = `${fmtInt(applied)} / ${fmtInt(planned)}`;
       if (pctEl) pctEl.textContent = `${pct}%`;
 
-     // Supplier gets a circular progress ring; others stay as text for now
+     // Facility gets a circular progress ring; others stay as text for now
 if (vizEl) {
   if (!planned) {
     vizEl.textContent = 'No plan for selection';
@@ -2988,35 +3104,24 @@ state.weekCartonsIn = cartonsInUse;
   window._pendingWeekStart = ws;
 
 function syncNav() {
-  const hash = (location.hash || '#dashboard');
+  const hash = (location.hash || '#week-hub');
+  // Also sync the new Pinpoint nav
+  if(typeof syncPinpointNav === 'function'){
+    if(hash==='#exec') syncPinpointNav('#exec');
+    else if(hash==='#reports') syncPinpointNav('#reports');
+    else syncPinpointNav('#week-hub');
+  }
+  // Legacy nav elements (kept for module compatibility)
   const dash   = document.getElementById('nav-dash');
   const intake = document.getElementById('nav-intake');
   const exec   = document.getElementById('nav-exec');
   const recv   = document.getElementById('nav-receiving');
   const flow   = document.getElementById('nav-flow');
-  if (!dash || !intake || !exec || !recv || !flow) return;
-
-  [dash, intake, exec, recv, flow].forEach(el => {
-    el.classList.remove('active');
-    el.removeAttribute('aria-current');
+  [dash,intake,exec,recv,flow].filter(Boolean).forEach(el=>{
+    el.classList.remove('active'); el.removeAttribute('aria-current');
   });
-
-if (hash === '#receiving') {
-  recv.classList.add('active');
-  recv.setAttribute('aria-current', 'page');
-} else if (hash === '#intake') {
-  intake.classList.add('active');
-  intake.setAttribute('aria-current', 'page');
-} else if (hash === '#exec') {
-  exec.classList.add('active');
-  exec.setAttribute('aria-current', 'page');
-} else if (hash === '#flow') {
-  flow.classList.add('active');
-  flow.setAttribute('aria-current', 'page');
-} else {
-  dash.classList.add('active');
-  dash.setAttribute('aria-current', 'page');
-}
+  if(hash==='#exec' && exec){ exec.classList.add('active'); exec.setAttribute('aria-current','page'); }
+  else if(dash){ dash.classList.add('active'); dash.setAttribute('aria-current','page'); }
 }
 
   
@@ -4326,10 +4431,201 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 })();
 </script>
 <script src="/public/exec_live_additive.js?v=8" defer></script>
+<script src="/public/exec_range_additive.js?v=1" defer></script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
 <script src="/public/flow_live_additive.js?v=61" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
+
+<!-- Pulse Bar -->
+<div class="pulse-panel" id="pulse-panel">
+  <div class="pulse-chat" id="pulse-chat"></div>
+  <div class="pulse-suggestions" id="pulse-suggestions">
+    <button class="pulse-sug" onclick="pulseSuggest(this)">What's at risk this week?</button>
+    <button class="pulse-sug" onclick="pulseSuggest(this)">Which suppliers are behind?</button>
+    <button class="pulse-sug" onclick="pulseSuggest(this)">Show week vs last week</button>
+  </div>
+</div>
+<div class="pulse-bar visible" id="pulse-bar">
+  <svg viewBox="0 0 48 24" width="44" height="22" overflow="visible">
+    <path class="pulse-ecg-path" d="M2,12 L10,12 L14,4 L18,20 L21,9 L25,12 L46,12"/>
+    <circle class="pulse-ecg-dot" cx="46" cy="12" r="2"/>
+  </svg>
+  <span class="pulse-name">Pulse</span>
+  <div class="pulse-divider"></div>
+  <div class="pulse-input-wrap" id="pulse-input-display" onclick="togglePulse(true)">Ask anything about this week's ops…</div>
+  <button class="pulse-send" onclick="togglePulse(true)" aria-label="Open Pulse">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10M8 3l4 4-4 4" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+</div>
+
+<script>
+// ── Pulse panel toggle ──
+function togglePulse(open){
+  const panel=document.getElementById('pulse-panel');
+  if(!panel) return;
+  if(open) panel.classList.add('open');
+  else panel.classList.remove('open');
+}
+
+// ── Pulse suggestion click ──
+function pulseSuggest(btn){
+  const text = btn.textContent.trim();
+  togglePulse(true);
+  const display = document.getElementById('pulse-input-display');
+  if(display) display.textContent = text;
+  // TODO: wire to Pulse AI API
+}
+
+// ── Nav routing: add week-hub and reports ──
+(function patchRouting(){
+  const origShow = window.show;
+
+  window.show = function(hash){
+    let h = (hash||'#').trim();
+    if(h==='#'||!h) h='#week-hub';
+    if(h.startsWith('#/')) h='#'+h.slice(2);
+
+    // Handle new routes
+    if(h==='#week-hub'||h==='#dashboard'||h==='#operations'||h==='#ops'||h===''){
+      // Show ops (existing page-dashboard = Week Hub)
+      ['page-dashboard','page-intake','page-exec','page-receiving','page-flow','page-reports'].forEach(id=>{
+        const el=document.getElementById(id);
+        if(el){el.classList.add('hidden');el.style.display='none';}
+      });
+      const dash=document.getElementById('page-dashboard');
+      if(dash){dash.classList.remove('hidden');dash.style.display='block';}
+      if(typeof window.renderDashboard==='function'){try{window.renderDashboard();}catch(e){}}
+      syncPinpointNav('#week-hub');
+      return;
+    }
+
+    if(h==='#reports'){
+      ['page-dashboard','page-intake','page-exec','page-receiving','page-flow','page-reports'].forEach(id=>{
+        const el=document.getElementById(id);
+        if(el){el.classList.add('hidden');el.style.display='none';}
+      });
+      let rp=document.getElementById('page-reports');
+      if(!rp){
+        rp=document.createElement('section');
+        rp.id='page-reports';
+        const main=document.querySelector('main.vo-wrap')||document.querySelector('main');
+        if(main) main.appendChild(rp);
+        renderReportsPage(rp);
+      }
+      rp.classList.remove('hidden');
+      rp.style.display='block';
+      syncPinpointNav('#reports');
+      return;
+    }
+
+    // For exec/receiving/intake/flow — delegate to original show()
+    if(typeof origShow==='function') origShow(h);
+    // Sync our nav after
+    if(h==='#exec') syncPinpointNav('#exec');
+  };
+
+  // Override hashchange to use patched show
+  window.removeEventListener('hashchange', window.__pnHashChange);
+  window.__pnHashChange = ()=>window.show(getRouteHash ? getRouteHash() : location.hash);
+  window.addEventListener('hashchange', window.__pnHashChange);
+
+  // Initial route on load
+  document.addEventListener('DOMContentLoaded', function(){
+    const h = (location.hash||'#week-hub');
+    setTimeout(()=>window.show(h||'#week-hub'), 50);
+  });
+})();
+
+// ── Sync new nav active state ──
+function syncPinpointNav(hash){
+  const items = document.querySelectorAll('.pn-nav-item');
+  items.forEach(el=>el.classList.remove('active'));
+  if(hash==='#exec'){ const e=document.getElementById('nav-exec'); if(e) e.classList.add('active'); }
+  else if(hash==='#reports'){ const r=document.getElementById('nav-reports'); if(r) r.classList.add('active'); }
+  else { const w=document.getElementById('nav-weekhub'); if(w) w.classList.add('active'); }
+}
+
+// ── Reports page renderer ──
+function renderReportsPage(container){
+  container.innerHTML = `
+  <div style="padding:4px 0 20px;">
+    <div style="font-size:22px;font-weight:600;color:#1C1C1E;letter-spacing:-0.02em;margin-bottom:20px;">Reports &amp; Downloads</div>
+
+    <!-- VAS Processing -->
+    <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;overflow:hidden;margin-bottom:14px;">
+      <div style="padding:12px 18px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:space-between;">
+        <div style="font-size:12px;font-weight:500;color:#1C1C1E;display:flex;align-items:center;gap:8px;">
+          <span>VAS Processing</span>
+          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">3 reports</span>
+        </div>
+        <span style="font-size:10px;color:#AEAEB2;">UID scanning &amp; labelling</span>
+      </div>
+      <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px;">
+        ${reportCard('Applied UIDs Export','All applied UID records for the selected week, filterable by PO and SKU.','XLSX','Admin · Supplier','btn-dl-week-applied')}
+        ${reportCard('PO × SKU Summary','Unit counts grouped by PO and SKU with completion status.','XLSX','Admin · Supplier','ops-dl-posku')}
+        ${reportCard('SKU Summary','Aggregated unit totals by SKU across all POs for the week.','XLSX','Admin · Supplier','ops-dl-po')}
+      </div>
+    </div>
+
+    <!-- Shipment -->
+    <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;overflow:hidden;margin-bottom:14px;">
+      <div style="padding:12px 18px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:space-between;">
+        <div style="font-size:12px;font-weight:500;color:#1C1C1E;display:flex;align-items:center;gap:8px;">
+          <span>Shipment</span>
+          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">2 reports</span>
+        </div>
+        <span style="font-size:10px;color:#AEAEB2;">Transit &amp; delivery tracking</span>
+      </div>
+      <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(2,1fr);gap:10px;">
+        ${reportCard('Shipment Summary','High-level view of all shipments — status, units, PO count per shipment.','XLSX','Admin · Client','ops-dl-ship-summary')}
+        ${reportCard('Shipment Details','Line-by-line shipment detail including container, routing and delivery dates.','XLSX','Admin · Client','ops-dl-ship-detail')}
+      </div>
+    </div>
+
+    <!-- Operations -->
+    <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;overflow:hidden;margin-bottom:14px;">
+      <div style="padding:12px 18px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:space-between;">
+        <div style="font-size:12px;font-weight:500;color:#1C1C1E;display:flex;align-items:center;gap:8px;">
+          <span>Operations</span>
+          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">2 reports</span>
+        </div>
+        <span style="font-size:10px;color:#AEAEB2;">Weekly ops overview</span>
+      </div>
+      <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(2,1fr);gap:10px;">
+        ${reportCard('Ops Summary Report','Full week summary — throughput, completion rate, at-risk POs, receiving status.','PDF','Admin only','flow-download-pdf')}
+        ${reportCard('Mobile Bin Export','Full bin manifest with unit counts, weights, and QA status.','XLSX','Admin only','ops-dl-mobile-bin')}
+      </div>
+    </div>
+  </div>`;
+
+  // Wire buttons — proxy clicks to existing hidden buttons
+  container.querySelectorAll('[data-proxy]').forEach(btn=>{
+    btn.addEventListener('click',function(){
+      const target = document.getElementById(this.dataset.proxy);
+      if(target) target.click();
+      else console.warn('[Reports] proxy target not found:', this.dataset.proxy);
+    });
+  });
+}
+
+function reportCard(name, desc, fmt, role, proxyId){
+  const fmtColor = fmt==='PDF' ? 'rgba(153,0,51,0.1);color:#990033' : fmt==='CSV' ? 'rgba(91,140,255,0.1);color:#5B8CFF' : 'rgba(58,125,68,0.1);color:#2E7D52';
+  return `<div style="background:#F5F5F7;border-radius:10px;padding:12px 14px;">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:6px;">
+      <div style="font-size:12px;font-weight:500;color:#1C1C1E;line-height:1.3;">${name}</div>
+      <button data-proxy="${proxyId}" style="flex-shrink:0;width:28px;height:28px;border-radius:7px;background:#1C1C1E;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;" title="Download ${name}">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 1v7M3 5l3 3 3-3M1 10h10" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+    <div style="font-size:10px;color:#6E6E73;line-height:1.4;margin-bottom:8px;">${desc}</div>
+    <div style="display:flex;align-items:center;gap:6px;">
+      <span style="font-size:9px;font-weight:600;padding:2px 7px;border-radius:6px;font-family:monospace;background:${fmtColor}">${fmt}</span>
+      <span style="font-size:9px;color:#AEAEB2;">${role}</span>
+    </div>
+  </div>`;
+}
+</script>
 </div><!-- end app-content -->
 
 <script>
@@ -4378,53 +4674,151 @@ async function initializeClerkAuth() {
   }
 }
 
+// ── Pinpoint 3.0 Role System ──
+// Frontend display names — org:supplier_auth is always shown as "Facility"
+const PN_ROLE_LABELS = {
+  'org:admin_auth':    'Admin',
+  'org:supplier_auth': 'Facility',
+  'org:client_auth':   'Client',
+  'org:api_auth':      'API'
+};
+
+// Resolve role key from Clerk membership
+function getPNRole(user) {
+  return user?.organizationMemberships?.[0]?.role || '';
+}
+
+// Apply role-based UI gating — called once on sign-in, safe to re-call
+function applyPNRoleGating(roleKey) {
+  const isAdmin    = roleKey === 'org:admin_auth';
+  const isFacility = roleKey === 'org:supplier_auth';
+  const isClient   = roleKey === 'org:client_auth';
+
+  // ── 1. Nav items ──
+  // Executive: visible to Admin + Client only
+  const navExec = document.getElementById('nav-exec');
+  if (navExec) navExec.style.display = (isAdmin || isClient) ? '' : 'none';
+
+  // ── 2. Upload Plan / Zero Plan buttons ──
+  // Admin only — hidden for Facility and Client
+  ['btn-upload-plan','btn-zero-plan','file-plan'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = isAdmin ? '' : 'none';
+  });
+
+  // ── 3. Week Hub — Receiving & VAS CTAs ──
+  // Clients cannot navigate to Receiving or VAS Processing
+  // We set a body data attribute that the flow module can read,
+  // and also hide the buttons if they exist in the DOM already.
+  document.body.setAttribute('data-pn-role', roleKey);
+  if (isClient) {
+    // Hide Receive Inventory and VAS Processing CTA buttons
+    // These may not be in DOM yet (flow module injects them) — we use
+    // a MutationObserver to catch them when they appear
+    hideCTAsForClient();
+    observeCTAsForClient();
+  }
+
+  // ── 4. Reports page — role stored for use when page renders ──
+  window._pnRoleKey = roleKey;
+
+  // ── 5. Pulse system prompt context (stored for API calls) ──
+  window._pnPulseRole = PN_ROLE_LABELS[roleKey] || 'User';
+
+  console.log('[PNRole] Gating applied for:', PN_ROLE_LABELS[roleKey] || roleKey);
+}
+
+// Hide Receiving/VAS CTAs for Client role
+function hideCTAsForClient() {
+  // Selectors target the CTA buttons flow_live_additive.js renders
+  const ctaTexts = ['receive inventory', 'vas processing', 'receiving →', 'vas processing →'];
+  document.querySelectorAll('button, a').forEach(el => {
+    const txt = (el.textContent || '').trim().toLowerCase();
+    if (ctaTexts.some(t => txt.includes(t))) {
+      el.style.display = 'none';
+    }
+  });
+}
+
+// Watch for CTA buttons injected later by flow module
+function observeCTAsForClient() {
+  if (window._pnCtaObserver) return;
+  window._pnCtaObserver = new MutationObserver(() => hideCTAsForClient());
+  window._pnCtaObserver.observe(document.body, { childList: true, subtree: true });
+}
+
+// Block navigation to unauthorised pages
+function guardRoute(hash) {
+  const roleKey = window._pnRoleKey || '';
+  const isFacility = roleKey === 'org:supplier_auth';
+  const isClient   = roleKey === 'org:client_auth';
+
+  if (isClient && (hash === '#receiving' || hash === '#intake')) {
+    console.log('[PNRole] Client blocked from', hash, '— redirecting to #week-hub');
+    window.location.hash = '#week-hub';
+    return false;
+  }
+  if (isFacility && hash === '#exec') {
+    console.log('[PNRole] Facility blocked from #exec — redirecting to #week-hub');
+    window.location.hash = '#week-hub';
+    return false;
+  }
+  return true;
+}
+
+// Patch window.show to enforce route guards
+(function patchShowForRoles(){
+  const _origShow = window.show;
+  window.show = function(hash) {
+    if (!guardRoute(hash || location.hash)) return;
+    if (typeof _origShow === 'function') _origShow(hash);
+  };
+})();
+
 function updateUI(user, session) {
   const loginScreen = document.getElementById('auth-login-screen');
-  const appContent = document.getElementById('app-content');
-  const userNameEl = document.getElementById('user-name-display');
-  const userRoleEl = document.getElementById('user-role-display');
-  const userOrgEl = document.getElementById('user-org-display');
-  
+  const appContent  = document.getElementById('app-content');
+  const userNameEl  = document.getElementById('user-name-display');
+  const userRoleEl  = document.getElementById('user-role-display');
+  const userOrgEl   = document.getElementById('user-org-display');
+
   if (user && session) {
-    // User is signed in - show app
     if (loginScreen) loginScreen.style.display = 'none';
-    if (appContent) appContent.style.display = 'block';
-    
-    // Update user info
+    if (appContent)  appContent.style.display  = 'block';
+
     if (userNameEl) {
       userNameEl.textContent = user.fullName || user.firstName || 'User';
     }
-    
+
+    const roleKey = getPNRole(user);
+
     if (userRoleEl) {
-      const membership = user.organizationMemberships?.[0];
-      const role = membership?.role || '';
-      const roleMap = {
-        'org:admin_auth': 'Admin',
-        'org:supplier_auth': 'Supplier',
-        'org:client_auth': 'Client',
-        'org:api_auth': 'API'
-      };
-      userRoleEl.textContent = roleMap[role] || 'User';
+      userRoleEl.textContent = PN_ROLE_LABELS[roleKey] || 'User';
     }
-    
+
     if (userOrgEl) {
       const org = user.organizationMemberships?.[0]?.organization;
       userOrgEl.textContent = org?.name || '';
     }
-    
-    // Fire the deferred initial data load now that we have a valid session + token
+
+    // Apply role gating after a short tick so DOM is settled
+    setTimeout(() => applyPNRoleGating(roleKey), 0);
+
+    // Fire deferred data load
     if (window._pendingWeekStart && typeof window.setWeek === 'function') {
       const ws = window._pendingWeekStart;
       window._pendingWeekStart = null;
       window.setWeek(ws);
     }
 
-    console.log('[Auth] UI updated - showing app');
+    console.log('[Auth] UI updated - showing app for role:', PN_ROLE_LABELS[roleKey] || roleKey);
   } else {
-    // User is signed out - show login
     if (loginScreen) loginScreen.style.display = 'flex';
-    if (appContent) appContent.style.display = 'none';
-    
+    if (appContent)  appContent.style.display  = 'none';
+    // Clear role state on sign-out
+    window._pnRoleKey   = '';
+    window._pnPulseRole = '';
+    if (window._pnCtaObserver) { window._pnCtaObserver.disconnect(); window._pnCtaObserver = null; }
     console.log('[Auth] UI updated - showing login');
   }
 }
