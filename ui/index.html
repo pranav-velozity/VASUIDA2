@@ -138,13 +138,17 @@
 #flow-sub { display:none !important; }
 
 /* ── Week Hub: tighten flow/right tile heights, make detail tile prominent ── */
-#flow-journey svg { height: 320px !important; }
-@media (min-width: 1024px) { #flow-journey svg { height: 340px !important; } }
-#flow-top-tile { padding: 10px 12px !important; }
-/* Right tile: reduce min-height */
-#page-flow .lg\:col-span-1 { min-height: 180px !important; }
-/* Detail tile: give it generous minimum height */
-#page-flow > div > .rounded-2xl:last-of-type { min-height: 420px !important; }
+#flow-journey svg { height: 220px !important; }
+@media (min-width: 1024px) { #flow-journey svg { height: 240px !important; } }
+#flow-top-tile { padding: 8px 10px !important; }
+#flow-top-tile .flex.items-center.justify-between.mb-2 { margin-bottom: 6px !important; }
+/* Right tile: compact */
+#page-flow .lg\:col-span-1 { min-height: 0 !important; }
+#page-flow .lg\:col-span-1 > div { padding: 10px 12px !important; }
+/* Detail tile: generous height, remove top border radius join */
+#flow-detail { min-height: 480px; }
+/* Tighten the grid gap between flow+right and detail */
+#page-flow .grid.grid-cols-1.gap-3 { gap: 8px !important; }
 
 /* segmented toggle visuals (neutral) */
 .seg { color:#303030; }
@@ -5163,27 +5167,65 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     obs.observe(detail, {childList:true});
   }
 
-  // Inject on state:ready (after flow renders)
-  window.addEventListener('state:ready', function(){
-    setTimeout(function(){
-      // Only inject if no node selected (detail shows default "Click a node")
-      var detail = document.getElementById('flow-detail');
-      if(detail && !document.getElementById('wh-ops-overview')){
-        // Check it's still showing the default (not a node detail)
-        var txt = detail.textContent || '';
-        if(txt.includes('Click a node') || txt.trim().length < 5){
-          syncOpsToDetail();
-          observeDetail();
-        }
+  // ── Main strategy: watch flow-detail with MutationObserver ──
+  // The flow module writes "Click a node above to see details." as the default.
+  // As soon as we see that text appear, we replace it with ops overview.
+  // This is reliable regardless of timing — it fires after the flow module settles.
+  var _userSelectedNode = false;
+  var _detailObserver = null;
+
+  function startDetailWatcher(){
+    var detail = document.getElementById('flow-detail');
+    if(!detail || _detailObserver) return;
+    _detailObserver = new MutationObserver(function(){
+      if(_userSelectedNode) return; // user clicked a node, leave it alone
+      var txt = (detail.textContent || '').trim();
+      // Flow module default text = "Click a node above to see details."
+      if(txt.startsWith('Click a node') || txt.length < 10){
+        // Small debounce — wait for flow module to finish writing
+        clearTimeout(window._whDetailTimer);
+        window._whDetailTimer = setTimeout(function(){
+          if(!_userSelectedNode) syncOpsToDetail();
+        }, 80);
       }
-    }, 700);
+    });
+    _detailObserver.observe(detail, {childList:true, subtree:true, characterData:true});
+  }
+
+  // Detect user node clicks — wire to all journey node click targets
+  document.addEventListener('click', function(e){
+    var node = e.target.closest('[data-journey-node],[data-flow-node],[data-node]');
+    if(node){
+      _userSelectedNode = true;
+      // Reset flag when user navigates away and back
+    }
   });
 
-  // Re-inject when navigating back to Week Hub
+  // Reset on Week Hub nav
   window.addEventListener('hashchange', function(){
     if(location.hash === '#flow'){
-      setTimeout(syncOpsToDetail, 800);
+      _userSelectedNode = false;
+      _detailObserver = null; // will restart on next state:ready
+      setTimeout(function(){
+        startDetailWatcher();
+        syncOpsToDetail();
+      }, 400);
     }
+  });
+
+  // Start watching on first state:ready
+  window.addEventListener('state:ready', function(){
+    setTimeout(function(){
+      startDetailWatcher();
+      // Also try immediate inject if already showing default
+      var detail = document.getElementById('flow-detail');
+      if(detail){
+        var txt = (detail.textContent||'').trim();
+        if(txt.startsWith('Click a node') || txt.length < 10){
+          if(!_userSelectedNode) syncOpsToDetail();
+        }
+      }
+    }, 200);
   });
 })();
 
@@ -5842,5 +5884,11 @@ async function handleSignOut() {
 
 </body>
 </html>
+
+
+
+
+
+
 
 
