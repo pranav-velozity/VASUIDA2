@@ -275,18 +275,18 @@ function statusLabel(level) {
 
 // Shared status color palette used across Flow renderers
 const levelColor = (level) => ({
-  green: '#97DC21',
+  green: '#C8F902',
   red: '#D61A3C',
-  upcoming: '#C7C7CC',
-  yellow: '#F5BD25',
-  gray: '#C7C7CC',
+  upcoming: '#E5E5EA',
+  yellow: '#FFA203',
+  gray: '#E5E5EA',
   future: '#E5E5EA',
 }[level] || '#AEAEB2');
 
 
 function strokeForLevel(level, upcoming=false) {
-    if (level === 'green') return upcoming ? 'rgba(151,220,33,0.25)' : '#97DC21';
-    if (level === 'yellow') return upcoming ? 'rgba(245,189,37,0.25)' : '#F5BD25';
+    if (level === 'green') return upcoming ? 'rgba(200,249,2,0.25)' : '#C8F902';
+    if (level === 'yellow') return upcoming ? 'rgba(255,162,3,0.25)' : '#FFA203';
     if (level === 'red') return upcoming ? 'rgba(214,26,60,0.20)' : '#D61A3C';
     return '#E5E5EA';
   }
@@ -2556,7 +2556,7 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
       return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
     };
 
-    const lvlColor = (lvl) => (lvl === 'red' ? '#D61A3C' : (lvl === 'yellow' ? '#F5BD25' : (lvl === 'green' ? '#97DC21' : '#AEAEB2')));
+    const lvlColor = (lvl) => (lvl === 'red' ? '#D61A3C' : (lvl === 'yellow' ? '#FFA203' : (lvl === 'green' ? '#C8F902' : '#AEAEB2')));
 
     const health = (() => {
       const worst = [
