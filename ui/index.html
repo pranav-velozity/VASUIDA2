@@ -143,6 +143,7 @@
 #flow-journey svg { height: 520px !important; width:100% !important; display:block; }
 @media (min-width: 1024px) { #flow-journey svg { height: 560px !important; } }
 #flow-top-tile { overflow:hidden; }
+#flow-top-tile.flow-tile--nodes { background:#ffffff !important; border-color:rgba(0,0,0,0.08) !important; }
 #flow-top-tile { padding: 8px 10px !important; }
 #flow-top-tile .flex.items-center.justify-between.mb-2 { margin-bottom: 6px !important; }
 /* Right tile: compact */
@@ -5328,7 +5329,7 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=62" defer></script>
+<script src="/public/flow_live_additive.js?v=63" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -5902,10 +5903,6 @@ async function handleSignOut() {
 
 </body>
 </html>
-
-
-
-
 
 
 
