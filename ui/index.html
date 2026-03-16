@@ -133,10 +133,18 @@
 /* Children visibility controlled individually — do NOT force display:block on all children */
 
 /* ── Week Hub: suppress flow module's own header row ── */
-/* The flex row containing flow-sub = "Flow / date / ← → Reset Download PDF" */
 #page-flow div:has(> #flow-sub),
 #page-flow div:has(> #flow-prev-week) { display:none !important; }
 #flow-sub { display:none !important; }
+
+/* ── Week Hub: tighten flow/right tile heights, make detail tile prominent ── */
+#flow-journey svg { height: 320px !important; }
+@media (min-width: 1024px) { #flow-journey svg { height: 340px !important; } }
+#flow-top-tile { padding: 10px 12px !important; }
+/* Right tile: reduce min-height */
+#page-flow .lg\:col-span-1 { min-height: 180px !important; }
+/* Detail tile: give it generous minimum height */
+#page-flow > div > .rounded-2xl:last-of-type { min-height: 420px !important; }
 
 /* segmented toggle visuals (neutral) */
 .seg { color:#303030; }
@@ -508,7 +516,7 @@ window.__clerkOnLoad = function() {
 </div>
 
 <!-- ── KPI Tiles ── -->
-<div id="wh-kpi-row" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+<div id="wh-kpi-row" style="display:none;">
   <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;">
     <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px;">Units Planned</div>
     <div id="wh-kpi-planned" style="font-size:24px;font-weight:600;color:#1C1C1E;letter-spacing:-0.03em;line-height:1;font-variant-numeric:tabular-nums;">—</div>
@@ -3246,6 +3254,8 @@ function renderOpsInsights(view){
 
   // Always replace insight content on view switch (prevents stacking previous view DOM)
   root.innerHTML = '';
+  // Track the current view for later mirroring
+  window._lastOpsView = view;
 
   const plan = Array.isArray(state.plan) ? state.plan : [];
   const recs = Array.isArray(state.records) ? state.records : []; // /records/summary (applied units etc)
@@ -5081,38 +5091,98 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 
 </script>
 <script>
-// ── Week Hub: Ops overview in detail tile ──
-// flow_live_additive.js now defaults to null selection (patched).
-// null selection = "Click a node above" in detail, Week Totals in right tile.
-// We replace the detail content with ops insights on first render.
+// ── Week Hub: Ops Insights in detail tile ──
+// On first render and whenever no node is selected, we mirror ops insights
+// into #flow-detail. When user clicks a node the flow module overwrites it.
+// When user clicks "Week Hub" nav again we restore the ops overview.
 (function whDetailOverlay(){
-  function injectOpsOverview(){
+
+  // Mirror ops insights into flow-detail
+  function syncOpsToDetail(){
     var detail = document.getElementById('flow-detail');
     if(!detail) return;
-    // Don't override if user has already clicked a node (real content present)
-    if(detail.querySelector('[data-node]') || document.getElementById('wh-ops-overview')) return;
-    // Get ops insights content
+    // Trigger a fresh renderOpsInsights render first
+    var view = window._lastOpsView || 'overview';
+    if(typeof renderOpsInsights === 'function'){
+      try{ renderOpsInsights(view); }catch(e){}
+    }
+    // Now pull the rendered content
     var src = document.getElementById('ops-insights-content');
-    var html = (src && src.innerHTML && src.innerHTML.trim().length > 30)
-      ? src.innerHTML
-      : '<div style="padding:20px 0;font-size:12px;color:#6E6E73;">Click a milestone node above to see details.</div>';
+    if(!src || !src.innerHTML || src.innerHTML.trim().length < 20) return;
+    // Build the detail panel with the ops pills bar + content
+    var pillsBar = document.getElementById('ops-insights-subtitle')
+      ? ('<div style="font-size:13px;font-weight:500;color:#1C1C1E;margin-bottom:10px;">Insights</div>'
+        + '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:14px;" id="wh-ops-pills-clone">'
+        + Array.from(document.querySelectorAll('.ops-pill')).map(function(p){
+            var active = p.classList.contains('ops-pill--active') ? ' ops-pill--active' : '';
+            var view = p.getAttribute('data-opsview') || '';
+            return '<button class="ops-pill wh-detail-pill' + active + '" data-opsview="' + view + '" style="min-width:0;height:26px;">' + p.innerHTML + '</button>';
+          }).join('')
+        + '</div>')
+      : '';
     var wrap = document.createElement('div');
     wrap.id = 'wh-ops-overview';
     wrap.style.cssText = 'padding:4px 0;';
-    wrap.innerHTML = html;
+    wrap.innerHTML = pillsBar + '<div id="wh-ops-content-mirror">' + src.innerHTML + '</div>';
     detail.innerHTML = '';
     detail.appendChild(wrap);
   }
+  // Expose for pill onclick
+  window.whDetailOverlay_sync = syncOpsToDetail;
 
-  // Inject after flow renders
+  // Wire cloned pill clicks via event delegation on flow-detail
+  document.addEventListener('click', function(e){
+    var pill = e.target.closest('.wh-detail-pill');
+    if(!pill) return;
+    var view = pill.getAttribute('data-opsview');
+    if(!view) return;
+    // Update active state on cloned pills
+    document.querySelectorAll('.wh-detail-pill').forEach(function(p){ p.classList.remove('ops-pill--active'); });
+    pill.classList.add('ops-pill--active');
+    // Also sync original pills
+    document.querySelectorAll('.ops-pill').forEach(function(p){
+      if(p.getAttribute('data-opsview') === view) p.classList.add('ops-pill--active');
+      else p.classList.remove('ops-pill--active');
+    });
+    // Render and mirror
+    window._lastOpsView = view;
+    if(typeof renderOpsInsights === 'function'){ try{ renderOpsInsights(view); }catch(e){} }
+    var src = document.getElementById('ops-insights-content');
+    var mirror = document.getElementById('wh-ops-content-mirror');
+    if(src && mirror) mirror.innerHTML = src.innerHTML;
+  });
+
+  // Watch for flow module replacing detail content (node click)
+  // When wh-ops-overview disappears the user has clicked a node — that's fine
+  function observeDetail(){
+    var detail = document.getElementById('flow-detail');
+    if(!detail) return;
+    var obs = new MutationObserver(function(){
+      // nothing — user interaction drives content from here
+    });
+    obs.observe(detail, {childList:true});
+  }
+
+  // Inject on state:ready (after flow renders)
   window.addEventListener('state:ready', function(){
-    setTimeout(injectOpsOverview, 500);
+    setTimeout(function(){
+      // Only inject if no node selected (detail shows default "Click a node")
+      var detail = document.getElementById('flow-detail');
+      if(detail && !document.getElementById('wh-ops-overview')){
+        // Check it's still showing the default (not a node detail)
+        var txt = detail.textContent || '';
+        if(txt.includes('Click a node') || txt.trim().length < 5){
+          syncOpsToDetail();
+          observeDetail();
+        }
+      }
+    }, 700);
   });
 
   // Re-inject when navigating back to Week Hub
   window.addEventListener('hashchange', function(){
     if(location.hash === '#flow'){
-      setTimeout(injectOpsOverview, 600);
+      setTimeout(syncOpsToDetail, 800);
     }
   });
 })();
