@@ -1936,7 +1936,7 @@ function computeManualNodeStatuses(ws, tz) {
             <div id="flow-journey" class="w-full"></div>
           </div>
           <!-- Summary tile (right 1/3) -->
-          <div class="rounded-2xl border bg-white shadow-sm p-3 min-h-[220px] lg:col-span-1">
+          <div class="rounded-2xl border bg-white shadow-sm p-3 lg:col-span-1" style="min-height:0;">
             <div class="flex items-center justify-between mb-2">
               <div class="text-sm font-semibold text-gray-700">Week totals</div>
             </div>
@@ -2587,25 +2587,16 @@ const signoffSection = (context) => {
 
   const title = (context === 'node') ? 'Week sign-off' : 'Week sign-off (master ticks)';
   return `
-    <div class="rounded-2xl border bg-white p-3">
-      <div class="text-xs font-semibold text-gray-700">${title}</div>
-      <div class="text-[11px] text-gray-500 mt-0.5">Use these only when the week is operationally complete. Does not create fake timestamps.</div>
-
-      <div class="mt-3 space-y-3">
-        <label class="flex items-start justify-between gap-3">
-          <div>
-            <div class="text-sm font-semibold text-gray-800">Receiving complete</div>
-            <div class="text-[11px] mt-0.5">${hintRec}</div>
-          </div>
-          <input id="signoff-receiving" type="checkbox" class="h-5 w-5 rounded border-gray-300" ${signoff.receivingComplete ? 'checked' : ''} />
+    <div class="rounded-xl border bg-white p-2 mt-2">
+      <div class="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Week sign-off</div>
+      <div class="space-y-1.5">
+        <label class="flex items-center justify-between gap-2">
+          <div class="text-xs text-gray-700">Receiving complete <span class="text-[10px] text-gray-400">${hintRec}</span></div>
+          <input id="signoff-receiving" type="checkbox" class="h-4 w-4 rounded border-gray-300" ${signoff.receivingComplete ? 'checked' : ''} />
         </label>
-
-        <label class="flex items-start justify-between gap-3">
-          <div>
-            <div class="text-sm font-semibold text-gray-800">VAS complete</div>
-            <div class="text-[11px] mt-0.5">${hintVas}</div>
-          </div>
-          <input id="signoff-vas" type="checkbox" class="h-5 w-5 rounded border-gray-300" ${signoff.vasComplete ? 'checked' : ''} />
+        <label class="flex items-center justify-between gap-2">
+          <div class="text-xs text-gray-700">VAS complete <span class="text-[10px] text-gray-400">${hintVas}</span></div>
+          <input id="signoff-vas" type="checkbox" class="h-4 w-4 rounded border-gray-300" ${signoff.vasComplete ? 'checked' : ''} />
         </label>
       </div>
     </div>
@@ -2632,17 +2623,16 @@ const signoffSection = (context) => {
             hRow(icon.box, 'Total CBM', fmt2(cbm))
           )}
 
-          <div class="rounded-2xl border bg-white p-3">
-            <div class="text-xs font-semibold text-gray-700">Pre-booked containers</div>
-            <div class="text-[11px] text-gray-500 mt-0.5">Plan inputs for this week (local only)</div>
-            <div class="grid grid-cols-2 gap-3 mt-3">
+          <div class="rounded-xl border bg-gray-50 p-2">
+            <div class="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Pre-booked containers</div>
+            <div class="grid grid-cols-2 gap-2">
               <label class="block">
-                <div class="text-xs font-semibold text-gray-700">20 ft</div>
-                <input id="prebook-20" type="number" min="0" class="mt-1 w-full rounded-lg border px-3 py-2 text-sm" value="${fmtInt(prebook.c20)}" />
+                <div class="text-[10px] text-gray-500">20 ft</div>
+                <input id="prebook-20" type="number" min="0" class="mt-0.5 w-full rounded-lg border px-2 py-1 text-xs" value="${fmtInt(prebook.c20)}" />
               </label>
               <label class="block">
-                <div class="text-xs font-semibold text-gray-700">40 ft</div>
-                <input id="prebook-40" type="number" min="0" class="mt-1 w-full rounded-lg border px-3 py-2 text-sm" value="${fmtInt(prebook.c40)}" />
+                <div class="text-[10px] text-gray-500">40 ft</div>
+                <input id="prebook-40" type="number" min="0" class="mt-0.5 w-full rounded-lg border px-2 py-1 text-xs" value="${fmtInt(prebook.c40)}" />
               </label>
             </div>
           </div>
@@ -2850,7 +2840,7 @@ const signoffSection = (context) => {
       return weekTotalsView();
     })();
 
-    el.innerHTML = `<div class="min-h-[320px]">${view}${signoffSection(selNode ? 'node' : 'week')}</div>`;
+    el.innerHTML = `<div>${view}${signoffSection(selNode ? 'node' : 'week')}</div>`;
 
     // Bind back button
     const back = document.getElementById('rt-back');
