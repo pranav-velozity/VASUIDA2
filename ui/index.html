@@ -425,217 +425,117 @@ window.__clerkOnLoad = function() {
 <main class="vo-wrap py-4">
 <!-- ================= Operations ================= -->
 <section class="hidden" id="page-dashboard">
+<!--
+  ═══════════════════════════════════════════════════════
+  WEEK HUB — Pinpoint 3.0
+  Architecture:
+    • #page-flow is pre-declared here so flow_live_additive.js
+      mounts its S-curve, Week Totals, and Detail tile directly
+      into this page — zero changes to the flow module.
+    • location.hash is set to #flow when Week Hub is shown so
+      the flow module's hash checks pass and it renders.
+    • KPI tiles and header are injected by this shell above
+      the flow module's own skeleton.
+    • All existing IDs (capsules, week-start, btn-upload-plan,
+      btn-zero-plan, all download buttons) are preserved exactly.
+  ═══════════════════════════════════════════════════════
+-->
 
-<!-- ═══════════════════════════════════════════════════
-     WEEK HUB — Pinpoint 3.0
-     All IDs preserved verbatim for JS compatibility.
-     Visual reskin only — zero logic changes.
-═══════════════════════════════════════════════════ -->
+<!-- Hidden inputs and legacy download buttons (preserved verbatim) -->
+<input class="hidden" id="week-start" type="date"/>
+<input accept=".xlsx,.csv" class="hidden" id="file-plan" type="file"/>
+<div class="hidden" id="capsules"></div>
+<div aria-label="Reports and downloads" class="cmdbar shrink-0 hidden" role="group">
+  <button aria-label="Upload Plan" class="cmd cmd--primary" id="btn-upload-plan" title="Upload planned PO×SKU for the selected week"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 3v12m0-12 4 4m-4-4-4 4M4 17h16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>Upload Plan</button>
+  <button aria-label="Zero Plan" class="cmd cmd--danger" id="btn-zero-plan" title="Clear the plan for this week"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" stroke-linecap="round" stroke-width="1.5"/></svg>Zero Plan</button>
+  <button aria-label="PO × SKU Discrepancy" class="cmd cmd--ghost" id="btn-dl-posku"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3 5h18M3 12h18M3 19h18" stroke-linecap="round" stroke-width="1.5"/></svg>PO × SKU Discrepancy</button>
+  <button aria-label="PO Discrepancy" class="cmd cmd--ghost" id="btn-dl-po"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7" stroke-linecap="round" stroke-width="1.5"/></svg>PO Discrepancy</button>
+  <button aria-label="Shipment Summary" class="cmd cmd--ghost" id="btn-ship-summary"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3 7h13l5 5v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" stroke-linejoin="round" stroke-width="1.5"/><path d="M16 7v5h5" stroke-linecap="round" stroke-width="1.5"/></svg>Shipment Summary</button>
+  <button aria-label="Shipment Details" class="cmd cmd--ghost" id="btn-ship-detail"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 6h16M4 12h12M4 18h8" stroke-linecap="round" stroke-width="1.5"/></svg>Shipment Details</button>
+  <button aria-label="Download Applied" class="cmd cmd--ghost" id="btn-dl-week-applied"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>Download Applied</button>
+</div>
+<!-- Legacy ops IDs — kept hidden so existing JS writes don't crash -->
+<span class="hidden" id="ops-insights-subtitle"></span>
+<div class="hidden" id="ops-insights-content"></div>
+<div class="hidden" id="ops-progress-tiles"></div>
+<span class="hidden" id="ops-week-of"></span>
+<span class="hidden" id="ops-week-po-planned"></span>
+<span class="hidden" id="ops-week-po-received"></span>
+<span class="hidden" id="ops-week-units-planned"></span>
+<span class="hidden" id="ops-week-units-applied"></span>
+<span class="hidden" id="ops-week-cartons-in"></span>
+<span class="hidden" id="ops-week-cartons-out"></span>
+<span class="hidden" id="ops-week-cbm-in"></span>
+<span class="hidden" id="ops-week-cbm-out"></span>
+<span class="hidden" id="ops-week-cont-40"></span>
+<span class="hidden" id="ops-week-cont-20"></span>
+<span class="hidden" id="ops-week-suppliers"></span>
+<span class="hidden" id="ops-week-zendesk"></span>
+<span class="hidden" id="ops-week-health"></span>
+<span class="hidden" id="health-dot"></span>
+<span class="hidden" id="health-pill"></span>
+<span class="hidden" id="health-status-dot"></span>
+<span class="hidden" id="vo-health"></span>
+<span class="hidden" id="vo-footer-text"></span>
 
-<!-- ── Header row: title + week selector + actions ── -->
-<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px;flex-wrap:wrap;">
-
-  <!-- Left: title + week nav -->
-  <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+<!-- ── Week Hub Header ── -->
+<div id="wh-header" style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px;flex-wrap:wrap;">
+  <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
     <div style="font-size:22px;font-weight:600;color:#1C1C1E;letter-spacing:-0.02em;line-height:1;">Week Hub</div>
     <div style="display:flex;align-items:center;gap:6px;">
-      <label style="font-size:11px;color:#AEAEB2;font-weight:500;">Week</label>
-      <input id="week-start" type="date" style="font-size:12px;color:#1C1C1E;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:5px 9px;background:#fff;font-family:inherit;cursor:pointer;"/>
-      <input accept=".xlsx,.csv" class="hidden" id="file-plan" type="file"/>
+      <label style="font-size:10px;color:#AEAEB2;font-weight:500;text-transform:uppercase;letter-spacing:.06em;">Week</label>
+      <input id="wh-week-display" type="date" style="font-size:11px;color:#1C1C1E;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:5px 8px;background:#fff;font-family:inherit;cursor:pointer;" onchange="if(typeof window.setWeek==='function')window.setWeek(this.value)"/>
     </div>
-    <!-- Week capsules (week nav pills) -->
-    <div id="capsules" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;"></div>
+    <div id="wh-capsules-display" style="display:flex;flex-wrap:wrap;gap:5px;"></div>
   </div>
-
-  <!-- Right: Upload Plan + Zero Plan (admin only, gated by applyPNRoleGating) -->
   <div style="display:flex;align-items:center;gap:6px;">
-    <div aria-label="Operations actions" class="cmdbar" role="group" style="background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:10px;padding:4px;box-shadow:none;">
-      <button aria-label="Upload Plan" class="cmd cmd--primary" id="btn-upload-plan" title="Upload planned PO×SKU for the selected week" style="background:#1C1C1E;color:#fff;border-radius:7px;font-size:11px;font-weight:500;padding:6px 12px;gap:6px;">
-        <svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="13" height="13"><path d="M12 3v12m0-12 4 4m-4-4-4 4M4 17h16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6"/></svg>
-        Upload Plan
-      </button>
-      <button aria-label="Zero Plan" class="cmd cmd--danger" id="btn-zero-plan" title="Clear the plan for this week" style="border-radius:7px;font-size:11px;font-weight:500;padding:6px 12px;gap:6px;color:#D61A3C;background:rgba(214,26,60,0.06);border-color:rgba(214,26,60,0.15);">
-        <svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="13" height="13"><path d="M6 18L18 6M6 6l12 12" stroke-linecap="round" stroke-width="1.6"/></svg>
-        Zero Plan
-      </button>
-    </div>
-    <!-- Hidden download buttons (proxied from Reports page) -->
-    <div aria-label="Reports and downloads" class="cmdbar shrink-0 hidden" role="group">
-      <button aria-label="PO × SKU Discrepancy" class="cmd cmd--ghost" id="btn-dl-posku" title="Compare planned vs applied at PO×SKU level"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3 5h18M3 12h18M3 19h18" stroke-linecap="round" stroke-width="1.5"/></svg>PO × SKU Discrepancy</button>
-      <button aria-label="PO Discrepancy" class="cmd cmd--ghost" id="btn-dl-po" title="Compare planned vs applied at PO level"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7" stroke-linecap="round" stroke-width="1.5"/></svg>PO Discrepancy</button>
-      <button aria-label="Shipment Summary" class="cmd cmd--ghost" id="btn-ship-summary" title="Shipment summary grouped by Facility, Zendesk, Freight, Client"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3 7h13l5 5v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" stroke-linejoin="round" stroke-width="1.5"/><path d="M16 7v5h5" stroke-linecap="round" stroke-width="1.5"/></svg>Shipment Summary</button>
-      <button aria-label="Shipment Details" class="cmd cmd--ghost" id="btn-ship-detail" title="Shipment detail by Facility, Zendesk, Freight, Client, and PO"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 6h16M4 12h12M4 18h8" stroke-linecap="round" stroke-width="1.5"/></svg>Shipment Details</button>
-      <button aria-label="Download Applied" class="cmd cmd--ghost" id="btn-dl-week-applied" title="Export applied UIDs for this week"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>Download Applied</button>
-    </div>
+    <button id="wh-btn-upload" style="font-size:11px;font-weight:500;background:#1C1C1E;color:#fff;border:none;border-radius:7px;padding:7px 13px;cursor:pointer;display:flex;align-items:center;gap:5px;" onclick="document.getElementById('file-plan').click()">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m0-12 4 4m-4-4-4 4M4 17h16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Upload Plan
+    </button>
+    <button id="wh-btn-zero" style="font-size:11px;font-weight:500;background:rgba(214,26,60,0.06);color:#D61A3C;border:0.5px solid rgba(214,26,60,0.18);border-radius:7px;padding:7px 13px;cursor:pointer;display:flex;align-items:center;gap:5px;" onclick="document.getElementById('btn-zero-plan').click()">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 18L18 6M6 6l12 12" stroke-linecap="round"/></svg>
+      Zero Plan
+    </button>
   </div>
 </div>
 
-<!-- ── Zone 1: 4 KPI tiles ── -->
-<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px;">
-
-  <!-- Units Planned -->
-  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:16px 18px;position:relative;overflow:hidden;">
-    <div style="font-size:10px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Units Planned</div>
-    <div style="font-size:26px;font-weight:600;color:#1C1C1E;letter-spacing:-0.03em;line-height:1;font-variant-numeric:tabular-nums;" id="wh-kpi-planned">—</div>
+<!-- ── KPI Tiles ── -->
+<div id="wh-kpi-row" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px;">
+  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;">
+    <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px;">Units Planned</div>
+    <div id="wh-kpi-planned" style="font-size:24px;font-weight:600;color:#1C1C1E;letter-spacing:-0.03em;line-height:1;font-variant-numeric:tabular-nums;">—</div>
     <div style="font-size:10px;color:#6E6E73;margin-top:5px;">This week</div>
   </div>
-
-  <!-- Units Applied -->
-  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:16px 18px;position:relative;overflow:hidden;">
-    <div style="font-size:10px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Units Applied</div>
-    <div style="font-size:26px;font-weight:600;color:#97DC21;letter-spacing:-0.03em;line-height:1;font-variant-numeric:tabular-nums;" id="wh-kpi-applied">—</div>
-    <div style="font-size:10px;color:#6E6E73;margin-top:5px;" id="wh-kpi-applied-sub">This week</div>
+  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;">
+    <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px;">Units Applied</div>
+    <div id="wh-kpi-applied" style="font-size:24px;font-weight:600;color:#97DC21;letter-spacing:-0.03em;line-height:1;font-variant-numeric:tabular-nums;">—</div>
+    <div id="wh-kpi-applied-sub" style="font-size:10px;color:#6E6E73;margin-top:5px;">of — planned</div>
   </div>
-
-  <!-- Completion % -->
-  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:16px 18px;position:relative;overflow:hidden;">
-    <div style="font-size:10px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Completion</div>
-    <div style="font-size:26px;font-weight:600;letter-spacing:-0.03em;line-height:1;font-variant-numeric:tabular-nums;" id="wh-kpi-pct">—</div>
-    <!-- Thin progress bar -->
+  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;">
+    <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px;">Completion</div>
+    <div id="wh-kpi-pct" style="font-size:24px;font-weight:600;letter-spacing:-0.03em;line-height:1;font-variant-numeric:tabular-nums;color:#1C1C1E;">—</div>
     <div style="height:3px;background:rgba(0,0,0,0.06);border-radius:2px;margin-top:8px;overflow:hidden;">
-      <div id="wh-kpi-pct-bar" style="height:3px;border-radius:2px;background:#97DC21;width:0%;transition:width 0.6s ease;"></div>
+      <div id="wh-kpi-pct-bar" style="height:3px;border-radius:2px;background:#97DC21;width:0%;transition:width .6s ease;"></div>
     </div>
   </div>
-
-  <!-- Health status -->
-  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:16px 18px;position:relative;overflow:hidden;">
-    <div style="font-size:10px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Week Health</div>
+  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;">
+    <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px;">Week Health</div>
     <div style="display:flex;align-items:center;gap:7px;margin-top:4px;">
-      <span id="health-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#F5BD25;flex-shrink:0;"></span>
-      <span id="health-pill" style="font-size:16px;font-weight:600;color:#1C1C1E;" id="vo-health">—</span>
+      <span id="wh-health-dot" style="width:8px;height:8px;border-radius:50%;background:#F5BD25;flex-shrink:0;display:inline-block;"></span>
+      <span id="wh-health-label" style="font-size:18px;font-weight:600;color:#F5BD25;">—</span>
     </div>
-    <div style="font-size:10px;color:#6E6E73;margin-top:5px;" id="vo-footer-text">Applied this week: —</div>
-  </div>
-
-</div>
-
-<!-- ── Zone 2: Insights (left) + Week Totals (right) ── -->
-<div style="display:grid;grid-template-columns:1fr 340px;gap:12px;margin-bottom:12px;align-items:start;">
-
-  <!-- Left: Ops Insights panel (all existing IDs preserved) -->
-  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:18px 20px;min-height:420px;">
-    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px;flex-wrap:wrap;">
-      <div>
-        <div style="font-size:13px;font-weight:500;color:#1C1C1E;">Insights</div>
-        <div style="font-size:10px;color:#6E6E73;margin-top:2px;" id="ops-insights-subtitle">Week overview</div>
-      </div>
-      <!-- Ops view pills (all data-opsview attributes unchanged) -->
-      <div style="display:flex;flex-wrap:wrap;gap:5px;justify-content:flex-end;">
-        <button class="ops-pill ops-pill--active" data-opsview="overview" title="Overview"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M4 13h6V4H4v9Zm10 7h6v-6h-6v6ZM14 4v6h6V4h-6ZM4 20h6v-5H4v5Z"/></svg><span>Overview</span></button>
-        <button class="ops-pill" data-opsview="supplier" title="Facility"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M15 7a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M4 20a8 8 0 0 1 16 0"/></svg><span>Facility</span></button>
-        <button class="ops-pill" data-opsview="facility" title="Facility"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M4 20V6a2 2 0 0 1 2-2h6v16"/><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M14 20V10a2 2 0 0 1 2-2h4v12"/><path stroke-width="1.6" stroke-linecap="round" d="M7 8h2"/><path stroke-width="1.6" stroke-linecap="round" d="M7 11h2"/><path stroke-width="1.6" stroke-linecap="round" d="M7 14h2"/></svg><span>Facility</span></button>
-        <button class="ops-pill" data-opsview="zendesk" title="Zendesk"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="1.6" stroke-linecap="round" d="M7 9h10"/><path stroke-width="1.6" stroke-linecap="round" d="M7 13h6"/><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M6 3h12a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3H10l-4 3v-3H6a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3Z"/></svg><span>Zendesk</span></button>
-        <button class="ops-pill" data-opsview="freight" title="Freight type"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M3 7h11v10H3z"/><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M14 10h4l3 3v4h-7z"/><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M6.5 19a1.5 1.5 0 1 0 0-.01"/><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M17.5 19a1.5 1.5 0 1 0 0-.01"/></svg><span>Freight</span></button>
-        <button class="ops-pill" data-opsview="carton" title="Cartons"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M21 8.5 12 3 3 8.5l9 5.5 9-5.5Z"/><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M21 8.5v7L12 21l-9-5.5v-7"/><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M12 14v7"/></svg><span>Carton</span></button>
-        <button class="ops-pill" data-opsview="placeholder" title="Placeholder"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M12 2l1.2 3.6L17 7l-3.8 1.4L12 12l-1.2-3.6L7 7l3.8-1.4L12 2Z"/><path stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M5 13l.8 2.4L8 16l-2.2.6L5 19l-.8-2.4L2 16l2.2-.6L5 13Z"/></svg><span>Placeholder</span></button>
-      </div>
-    </div>
-    <!-- Insights content (rendered by renderOpsInsights) -->
-    <div class="pr-2 space-y-3 overflow-auto" id="ops-insights-content">
-      <div style="font-size:12px;color:#AEAEB2;padding:20px 0;">Select a view above to see progress &amp; exceptions.</div>
-    </div>
-    <!-- Legacy hidden tiles (keep for JS stability) -->
-    <div class="hidden" id="ops-progress-tiles"></div>
-  </div>
-
-  <!-- Right: Week Totals panel (all IDs preserved verbatim) -->
-  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:18px 20px;">
-    <div style="font-size:13px;font-weight:500;color:#1C1C1E;margin-bottom:2px;">Week Totals</div>
-    <div style="font-size:10px;color:#AEAEB2;margin-bottom:16px;">Week of <span id="ops-week-of" style="color:#6E6E73;">—</span></div>
-
-    <!-- Totals rows -->
-    <div style="display:flex;flex-direction:column;gap:0;border-radius:10px;overflow:hidden;border:0.5px solid rgba(0,0,0,0.08);">
-
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#F5F5F7;border-bottom:0.5px solid rgba(0,0,0,0.06);">
-        <div style="font-size:11px;color:#6E6E73;display:flex;align-items:center;gap:7px;">
-          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="13" height="13"><path d="M7 3h10v4H7zM5 7h14v14H5z" stroke-width="1.5"/></svg>
-          POs planned – received
-        </div>
-        <div style="font-size:11px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;">
-          <span id="ops-week-po-planned">0</span> – <span id="ops-week-po-received">0</span>
-        </div>
-      </div>
-
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#F5F5F7;border-bottom:0.5px solid rgba(0,0,0,0.06);">
-        <div style="font-size:11px;color:#6E6E73;display:flex;align-items:center;gap:7px;">
-          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="13" height="13"><path d="M4 7h16M4 12h16M4 17h16" stroke-width="1.5"/></svg>
-          Units planned – applied
-        </div>
-        <div style="font-size:11px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;">
-          <span id="ops-week-units-planned">0</span> – <span id="ops-week-units-applied">0</span>
-        </div>
-      </div>
-
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#F5F5F7;border-bottom:0.5px solid rgba(0,0,0,0.06);">
-        <div style="font-size:11px;color:#6E6E73;display:flex;align-items:center;gap:7px;">
-          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="13" height="13"><path d="M4 7l8-4 8 4v10l-8 4-8-4z" stroke-width="1.5"/></svg>
-          Cartons in – out
-        </div>
-        <div style="font-size:11px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;">
-          <span id="ops-week-cartons-in">0</span> – <span id="ops-week-cartons-out">0</span>
-        </div>
-      </div>
-
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#F5F5F7;border-bottom:0.5px solid rgba(0,0,0,0.06);">
-        <div style="font-size:11px;color:#6E6E73;display:flex;align-items:center;gap:7px;">
-          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="13" height="13"><path d="M6 4h12v16H6z" stroke-width="1.5"/><path d="M8 8h8M8 12h8M8 16h8" stroke-width="1.5"/></svg>
-          CBM in – out
-        </div>
-        <div style="font-size:11px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;">
-          <span id="ops-week-cbm-in">0.000</span> – <span id="ops-week-cbm-out">0.000</span>
-        </div>
-      </div>
-
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#F5F5F7;">
-        <div style="font-size:11px;color:#6E6E73;display:flex;align-items:center;gap:7px;">
-          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="13" height="13"><path d="M3 7h18" stroke-width="1.5"/><path d="M6 7v10a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7" stroke-width="1.5"/><path d="M7 11h10" stroke-width="1.5"/></svg>
-          Approx. containers
-        </div>
-        <div style="font-size:11px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;white-space:nowrap;">
-          <span id="ops-week-cont-40">0</span> × 40' HQ
-          <span style="color:#AEAEB2;margin:0 3px;">·</span>
-          <span id="ops-week-cont-20">0</span> × 20' GP
-        </div>
-      </div>
-    </div>
-
-    <!-- Suppliers + Zendesk mini tiles -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;">
-      <div style="background:#F5F5F7;border-radius:8px;padding:10px 12px;border:0.5px solid rgba(0,0,0,0.06);">
-        <div style="font-size:10px;color:#AEAEB2;margin-bottom:4px;">Total facilities</div>
-        <div style="font-size:18px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;" id="ops-week-suppliers">0</div>
-      </div>
-      <div style="background:#F5F5F7;border-radius:8px;padding:10px 12px;border:0.5px solid rgba(0,0,0,0.06);">
-        <div style="font-size:10px;color:#AEAEB2;margin-bottom:4px;">Total Zendesk</div>
-        <div style="font-size:18px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;" id="ops-week-zendesk">0</div>
-      </div>
-    </div>
-
-    <!-- Health + updated -->
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-top:10px;padding-top:10px;border-top:0.5px solid rgba(0,0,0,0.06);">
-      <div style="display:flex;align-items:center;gap:6px;font-size:10px;color:#6E6E73;">
-        <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#F5BD25;" id="health-status-dot"></span>
-        Health
-        <span id="ops-week-health" style="font-size:10px;color:#6E6E73;">—</span>
-      </div>
-      <div style="font-size:10px;color:#AEAEB2;">Updated on refresh</div>
-    </div>
-  </div>
-
-</div>
-
-<!-- ── Zone 3: Reports & Downloads strip ── -->
-<div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 18px;">
-  <div style="font-size:12px;font-weight:500;color:#1C1C1E;margin-bottom:10px;">Reports &amp; downloads</div>
-  <div style="display:flex;align-items:center;gap:8px;overflow-x:auto;padding-bottom:2px;">
-    <button class="cmd" id="ops-dl-posku" style="font-size:11px;white-space:nowrap;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:6px 12px;background:#F5F5F7;color:#1C1C1E;gap:6px;"><span>📊</span>PO × SKU Discrepancy</button>
-    <button class="cmd" id="ops-dl-po" style="font-size:11px;white-space:nowrap;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:6px 12px;background:#F5F5F7;color:#1C1C1E;gap:6px;"><span>📑</span>PO Discrepancy</button>
-    <button class="cmd" id="ops-dl-ship-summary" style="font-size:11px;white-space:nowrap;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:6px 12px;background:#F5F5F7;color:#1C1C1E;gap:6px;"><span>🚚</span>Shipment Summary</button>
-    <button class="cmd" id="ops-dl-ship-detail" style="font-size:11px;white-space:nowrap;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:6px 12px;background:#F5F5F7;color:#1C1C1E;gap:6px;"><span>📄</span>Shipment Details</button>
-    <button class="cmd" id="ops-dl-week-applied" style="font-size:11px;white-space:nowrap;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:6px 12px;background:#F5F5F7;color:#1C1C1E;gap:6px;"><span>⬇️</span>Download Applied</button>
-    <button class="cmd" id="ops-dl-mobile-bin" style="font-size:11px;white-space:nowrap;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:6px 12px;background:#F5F5F7;color:#1C1C1E;gap:6px;"><span>📦</span>Mobile Bin</button>
+    <div id="wh-health-sub" style="font-size:10px;color:#6E6E73;margin-top:5px;">Applied: —</div>
   </div>
 </div>
+
+<!-- ── Flow module mounts here — DO NOT REMOVE #page-flow ── -->
+<!-- flow_live_additive.js finds this element, calls injectSkeleton() on it,
+     which writes: flow-journey (S-curve), flow-footer (right tile),
+     flow-detail (bottom tile). All its functionality is 100% intact. -->
+<section id="page-flow" style="display:block;">
+  <!-- flow_live_additive.js will replace this content with its skeleton -->
+</section>
 
 <!-- ================= UID Intake ================= -->
 </section>
@@ -1184,6 +1084,13 @@ function computeBinQA(ws, records=[], bins=[]) {
     if(voHealth) voHealth.textContent = label;
     if(voFooter) voFooter.textContent = 'Applied: ' + fmtInt(appliedWeek);
     if(opsHealth) opsHealth.textContent = label;
+    // Update wh KPI health tile
+    var whDot=document.getElementById('wh-health-dot');
+    var whLabel=document.getElementById('wh-health-label');
+    var whSub=document.getElementById('wh-health-sub');
+    if(whDot) whDot.style.background=color;
+    if(whLabel){whLabel.textContent=label;whLabel.style.color=color;}
+    if(whSub) whSub.textContent='Applied: '+fmtInt(appliedWeek);
   }
 
   // ---------- Downloads ----------
@@ -5163,6 +5070,40 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 })();
 
 </script>
+<script>
+// ── Week Hub: sync capsules and week display from hidden ops elements ──
+(function whSync(){
+  function syncWhHeader(){
+    var src=document.getElementById('week-start');
+    var dst=document.getElementById('wh-week-display');
+    if(src&&dst&&src.value&&dst.value!==src.value) dst.value=src.value;
+    var srcC=document.getElementById('capsules');
+    var dstC=document.getElementById('wh-capsules-display');
+    if(srcC&&dstC&&srcC.innerHTML!==dstC.innerHTML) dstC.innerHTML=srcC.innerHTML;
+  }
+  function setupObserver(){
+    var capEl=document.getElementById('capsules');
+    if(capEl){
+      var obs=new MutationObserver(syncWhHeader);
+      obs.observe(capEl,{childList:true,subtree:true,characterData:true,attributes:true});
+    }
+    var wkIn=document.getElementById('week-start');
+    if(wkIn) wkIn.addEventListener('change',function(){
+      var dst=document.getElementById('wh-week-display');
+      if(dst) dst.value=this.value;
+    });
+    var wkDp=document.getElementById('wh-week-display');
+    if(wkDp) wkDp.addEventListener('change',function(){
+      var wkIn=document.getElementById('week-start');
+      if(wkIn) wkIn.value=this.value;
+      if(typeof window.setWeek==='function') window.setWeek(this.value);
+    });
+  }
+  window.addEventListener('state:ready',syncWhHeader);
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',setupObserver);
+  else setupObserver();
+})();
+</script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
 <script src="/public/flow_live_additive.js?v=61" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
@@ -5342,13 +5283,25 @@ document.addEventListener('DOMContentLoaded', function(){
     if(h.startsWith('#/')) h='#'+h.slice(2);
 
     // ── Week Hub ──
-    if(h==='#week-hub'||h==='#dashboard'||h==='#operations'||h==='#ops'){
+    if(h==='#week-hub'||h==='#dashboard'||h==='#operations'||h==='#ops'||h==='#flow'){
       _pnHideAll();
-      _pnSetHash('#dashboard'); // keep legacy hash so flow module stays happy
+      // Set hash to #flow — flow_live_additive.js checks location.hash === '#flow'
+      // to decide whether to render. page-flow lives INSIDE page-dashboard so
+      // showing page-dashboard automatically shows the flow module content.
+      history.replaceState(null,'','#flow');
       const dash=document.getElementById('page-dashboard');
       if(dash){dash.classList.remove('hidden');dash.style.display='block';}
+      // Also ensure page-flow inside is visible
+      const pf=document.getElementById('page-flow');
+      if(pf){pf.style.display='block';}
+      // Trigger flow module render via state:ready
+      setTimeout(function(){window.dispatchEvent(new Event('state:ready'));},50);
       if(typeof window.renderDashboard==='function'){try{window.renderDashboard();}catch(e){}}
       syncPinpointNav('#week-hub');
+      // Sync wh-week-display with current week
+      var wkIn=document.getElementById('week-start');
+      var wkDp=document.getElementById('wh-week-display');
+      if(wkIn&&wkDp&&wkIn.value) wkDp.value=wkIn.value;
       return;
     }
 
@@ -5406,7 +5359,7 @@ document.addEventListener('DOMContentLoaded', function(){
     if(_pnShowBusy) return; // guard re-entrancy
     const h = typeof getRouteHash==='function' ? getRouteHash() : location.hash;
     // Only handle hashes our router owns — let exec/flow/receiving handle their own
-    if(h==='#exec'||h==='#reports'||h==='#week-hub'||h==='#dashboard'||h==='#operations'){
+    if(h==='#exec'||h==='#reports'||h==='#week-hub'||h==='#dashboard'||h==='#operations'||h==='#flow'){
       _pnShowBusy=true;
       try{ window.show(h); }finally{ setTimeout(function(){_pnShowBusy=false;},100); }
     }
