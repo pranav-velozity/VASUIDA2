@@ -138,8 +138,8 @@
 #flow-sub { display:none !important; }
 
 /* ── Week Hub: tighten flow/right tile heights, make detail tile prominent ── */
-/* Flow visual: centered, fills tile */
-#flow-journey { width:100%; display:flex; justify-content:center; align-items:center; overflow:hidden; }
+/* Flow visual: centered with top offset */
+#flow-journey { width:100%; display:flex; justify-content:center; align-items:center; overflow:hidden; padding-top:14%; }
 #flow-journey svg { height: 520px !important; width:100% !important; display:block; }
 @media (min-width: 1024px) { #flow-journey svg { height: 560px !important; } }
 #flow-top-tile { overflow:hidden; }
@@ -5209,10 +5209,37 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     if(!pill) return;
     var view = pill.getAttribute('data-opsview');
     if(!view) return;
+    e.stopPropagation();
     window._lastOpsView = view;
-    // Always rebuild the full detail pane with the new view
-    // This is reliable regardless of whether the mirror element exists
-    syncOpsToDetail(view);
+    // Update active pill state
+    document.querySelectorAll('.wh-detail-pill').forEach(function(p){
+      p.classList.toggle('ops-pill--active', p.getAttribute('data-opsview') === view);
+    });
+    // Render insights for this view
+    if(typeof renderOpsInsights === 'function'){
+      try { renderOpsInsights(view); } catch(err) { console.error('[Pill] renderOpsInsights failed:', err); return; }
+    }
+    // Update the content mirror — or rebuild if gone
+    var src = document.getElementById('ops-insights-content');
+    if(!src) return;
+    var mirror = document.getElementById('wh-ops-content-mirror');
+    if(mirror){
+      mirror.innerHTML = src.innerHTML;
+    } else {
+      // Full rebuild — mirror was removed (e.g. flow re-rendered)
+      var detail = document.getElementById('flow-detail');
+      if(detail && src.innerHTML.trim().length > 10){
+        var ov = document.getElementById('wh-ops-overview');
+        if(ov){
+          var m2 = document.createElement('div');
+          m2.id = 'wh-ops-content-mirror';
+          m2.innerHTML = src.innerHTML;
+          ov.appendChild(m2);
+        } else {
+          syncOpsToDetail(view);
+        }
+      }
+    }
   });
 
   // Watch for flow module replacing detail content (node click)
@@ -5936,11 +5963,5 @@ async function handleSignOut() {
 
 </body>
 </html>
-
-
-
-
-
-
 
 
