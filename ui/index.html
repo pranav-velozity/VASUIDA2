@@ -138,8 +138,8 @@
 #flow-sub { display:none !important; }
 
 /* ── Week Hub: tighten flow/right tile heights, make detail tile prominent ── */
-#flow-journey svg { height: 220px !important; }
-@media (min-width: 1024px) { #flow-journey svg { height: 240px !important; } }
+#flow-journey svg { height: 380px !important; }
+@media (min-width: 1024px) { #flow-journey svg { height: 400px !important; } }
 #flow-top-tile { padding: 8px 10px !important; }
 #flow-top-tile .flex.items-center.justify-between.mb-2 { margin-bottom: 6px !important; }
 /* Right tile: compact */
@@ -5120,10 +5120,17 @@ window.addEventListener('popstate', () => show(getRouteHash()));
         + '<button id="wh-insights-fullscreen" style="font-size:10px;color:#6E6E73;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:6px;padding:4px 10px;cursor:pointer;font-family:inherit;">Full screen</button>'
         + '</div>'
         + '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:14px;" id="wh-ops-pills-clone">'
-        + Array.from(document.querySelectorAll('.ops-pill')).map(function(p){
-            var active = p.classList.contains('ops-pill--active') ? ' ops-pill--active' : '';
-            var view = p.getAttribute('data-opsview') || '';
-            return '<button class="ops-pill wh-detail-pill' + active + '" data-opsview="' + view + '" style="min-width:0;height:26px;">' + p.innerHTML + '</button>';
+        + [
+            {v:'overview', l:'Overview'},
+            {v:'supplier', l:'Facility'},
+            {v:'facility', l:'Facility'},
+            {v:'zendesk',  l:'Zendesk'},
+            {v:'freight',  l:'Freight'},
+            {v:'carton',   l:'Carton'}
+          ].map(function(p){
+            var cur = window._lastOpsView || 'overview';
+            var active = (p.v === cur) ? ' ops-pill--active' : '';
+            return '<button class="ops-pill wh-detail-pill' + active + '" data-opsview="' + p.v + '" style="min-width:0;height:26px;font-size:11px;">' + p.l + '</button>';
           }).join('')
         + '</div>')
       : '';
@@ -5150,10 +5157,10 @@ window.addEventListener('popstate', () => show(getRouteHash()));
       card.style.cssText = 'background:#fff;border-radius:14px;width:100%;max-width:1100px;padding:24px;position:relative;min-height:400px;';
       // Pills row
       var pillsHTML = '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:16px;" id="wh-modal-pills">'
-        + Array.from(document.querySelectorAll('.ops-pill')).map(function(p){
-            var active = p.classList.contains('ops-pill--active') ? ' ops-pill--active' : '';
-            var view = p.getAttribute('data-opsview') || '';
-            return '<button class="ops-pill wh-modal-pill' + active + '" data-opsview="' + view + '" style="height:28px;">' + p.innerHTML + '</button>';
+        + [{v:'overview',l:'Overview'},{v:'supplier',l:'Facility'},{v:'facility',l:'Facility'},{v:'zendesk',l:'Zendesk'},{v:'freight',l:'Freight'},{v:'carton',l:'Carton'}].map(function(p){
+            var cur = window._lastOpsView||'overview';
+            var active = (p.v===cur) ? ' ops-pill--active' : '';
+            return '<button class="ops-pill wh-modal-pill' + active + '" data-opsview="' + p.v + '" style="height:28px;font-size:11px;">' + p.l + '</button>';
           }).join('') + '</div>';
       card.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">'
         + '<div style="font-size:16px;font-weight:600;color:#1C1C1E;">Insights</div>'
@@ -5550,8 +5557,7 @@ document.addEventListener('DOMContentLoaded', function(){
       // Also ensure page-flow inside is visible
       const pf=document.getElementById('page-flow');
       if(pf){pf.style.display='block';}
-      // Trigger flow module render via state:ready
-      setTimeout(function(){window.dispatchEvent(new Event('state:ready'));},50);
+      // Flow module listens to hashchange — we set hash to #flow above, no extra dispatch needed
       if(typeof window.renderDashboard==='function'){try{window.renderDashboard();}catch(e){}}
       syncPinpointNav('#week-hub');
       // Sync wh-week-display with current week
@@ -5935,5 +5941,11 @@ async function handleSignOut() {
 
 </body>
 </html>
+
+
+
+
+
+
 
 
