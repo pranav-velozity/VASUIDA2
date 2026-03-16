@@ -260,11 +260,10 @@
   }
 
   function dot(level, upcoming=false) {
-    // Muted dots for upcoming phases
-    if (level === 'green') return upcoming ? 'bg-emerald-300' : 'bg-emerald-500';
-    if (level === 'yellow') return upcoming ? 'bg-amber-300' : 'bg-amber-500';
-    if (level === 'red') return upcoming ? 'bg-rose-300' : 'bg-rose-500';
-    return upcoming ? 'bg-gray-300' : 'bg-gray-400';
+    if (level === 'green') return upcoming ? 'bg-emerald-200' : 'bg-emerald-400';
+    if (level === 'yellow') return upcoming ? 'bg-amber-200' : 'bg-amber-400';
+    if (level === 'red') return upcoming ? 'bg-rose-200' : 'bg-rose-400';
+    return upcoming ? 'bg-gray-200' : 'bg-gray-300';
   }
 
 function statusLabel(level) {
@@ -276,20 +275,20 @@ function statusLabel(level) {
 
 // Shared status color palette used across Flow renderers
 const levelColor = (level) => ({
-  green: '#34d399',
-  red: '#fb7185',
-  upcoming: '#cbd5e1',
-  yellow: '#e6b800',
-  gray: '#f6d365',
-  future: '#e5e7eb',
-}[level] || '#9ca3af');
+  green: '#97DC21',
+  red: '#D61A3C',
+  upcoming: '#C7C7CC',
+  yellow: '#F5BD25',
+  gray: '#C7C7CC',
+  future: '#E5E5EA',
+}[level] || '#AEAEB2');
 
 
 function strokeForLevel(level, upcoming=false) {
-    // Matte palette (less saturated)
-    if (level === 'green') return upcoming ? '#d1fae5' : '#a7f3d0';
-    if (level === 'red') return upcoming ? '#ffe4e6' : '#fecaca';
-    return '#e5e7eb';
+    if (level === 'green') return upcoming ? 'rgba(151,220,33,0.25)' : '#97DC21';
+    if (level === 'yellow') return upcoming ? 'rgba(245,189,37,0.25)' : '#F5BD25';
+    if (level === 'red') return upcoming ? 'rgba(214,26,60,0.20)' : '#D61A3C';
+    return '#E5E5EA';
   }
 
 
@@ -2355,10 +2354,10 @@ function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
     }
 
     // Ghost/base road behind colored segments (thicker, subtle)
-    const baseRoad = `<path d="${roadPath}" fill="none" stroke="#48484A" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" />`;
+    const baseRoad = `<path d="${roadPath}" fill="none" stroke="rgba(0,0,0,0.1)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" />`;
 
     // Center dashed line
-    const dashed = `<path d="${roadPath}" fill="none" stroke="#C8F902" stroke-width="2.5" stroke-dasharray="7 7" stroke-linecap="round" stroke-linejoin="round" />`;
+    const dashed = `<path d="${roadPath}" fill="none" stroke="#C7C7CC" stroke-width="1.5" stroke-dasharray="8 8" stroke-linecap="round" stroke-linejoin="round" />`;
 
     // Milestones (icons in white circles)
     let milestones = '';
@@ -2454,10 +2453,10 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
         <svg viewBox="-180 0 1250 560" preserveAspectRatio="xMidYMid meet" aria-label="Journey map" style="width:100%; display:block;">
 
           <!-- road shadow (subtle) -->
-          <path d="${roadPath}" fill="none" stroke="rgba(0,0,0,0.18)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" transform="translate(2,3)"></path>
+          <path d="${roadPath}" fill="none" stroke="rgba(0,0,0,0.04)" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" transform="translate(1,1)"></path>
           <!-- road base -->
-          <path d="${roadPath}" fill="none" stroke="#2C2C2E" stroke-width="52" stroke-linecap="round" stroke-linejoin="round" />
-          <path d="${roadPath}" fill="none" stroke="#3A3A3C" stroke-width="43" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="${roadPath}" fill="none" stroke="#E5E5EA" stroke-width="52" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="${roadPath}" fill="none" stroke="#F2F2F7" stroke-width="43" stroke-linecap="round" stroke-linejoin="round" />
           ${baseRoad}
           ${segs}
           ${dashed}
@@ -2557,7 +2556,7 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
       return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
     };
 
-    const lvlColor = (lvl) => (lvl === 'red' ? '#ef4444' : (lvl === 'yellow' ? '#f59e0b' : (lvl === 'green' ? '#10b981' : '#9ca3af')));
+    const lvlColor = (lvl) => (lvl === 'red' ? '#D61A3C' : (lvl === 'yellow' ? '#F5BD25' : (lvl === 'green' ? '#97DC21' : '#AEAEB2')));
 
     const health = (() => {
       const worst = [
