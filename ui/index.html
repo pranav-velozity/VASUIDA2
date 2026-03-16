@@ -120,13 +120,20 @@
     .cell{width:100%;padding:.4rem .5rem;border:0;outline:none}
     .cell:focus{box-shadow:0 0 0 3px rgba(59,130,246,.25)}
     .th{font-size:.75rem;font-weight:600;color:#F0D731}
-    /* Shorter week capsule */
-    .wkcap{border-radius:12px;border:1px solid rgba(0,0,0,.12);padding:.55rem .75rem;width:86px}
-    .wkcap .m{font-size:10px}
-    .wkcap .d{font-size:16px;font-weight:700;line-height:1.1}
-    .wkcap .t{font-size:11px;margin-top:2px;color:#990033}
-    .wkcap .bar{height:6px;border-radius:9999px;background:#e5e7eb;overflow:hidden;margin-top:4px}
-    .wkcap .bar>div{height:6px;border-radius:9999px;background:#990033;width:0%}
+    /* Week capsule */
+    .wkcap{border-radius:10px;border:0.5px solid rgba(0,0,0,0.08);padding:8px 10px;width:72px;background:#fff;cursor:pointer;transition:border-color .18s,transform .18s;position:relative;overflow:hidden;}
+    .wkcap:hover{border-color:rgba(0,0,0,0.18);transform:translateY(-1px);}
+    .wkcap.active{border-color:rgba(153,0,51,0.4);}
+    .wkcap.active::after{content:'';position:absolute;bottom:0;left:0;right:0;height:2.5px;background:#990033;border-radius:0 0 10px 10px;}
+    .wkcap .m{font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;}
+    .wkcap.active .m{color:#990033;}
+    .wkcap .d{font-size:17px;font-weight:600;color:#1C1C1E;line-height:1.15;letter-spacing:-0.02em;}
+    .wkcap .t{font-size:10px;margin-top:2px;color:#AEAEB2;font-variant-numeric:tabular-nums;}
+    .wkcap.active .t{color:#6E6E73;}
+    .wkcap .bar{height:3px;border-radius:9999px;background:rgba(0,0,0,0.05);overflow:hidden;margin-top:5px;}
+    .wkcap .bar>div{height:3px;border-radius:9999px;background:#C8F902;width:0%;transition:width .6s ease;}
+    @keyframes capIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:translateY(0)}}
+    .wkcap{animation:capIn .25s ease both;}
 
 /* Respect .hidden; only style when visible */
 #page-dashboard:not(.hidden){ display:block; }
@@ -392,10 +399,18 @@ window.__clerkOnLoad = function() {
   .pulse-send svg{pointer-events:none;}
 
   /* ECG in Pulse bar */
-  .pulse-ecg-path{fill:none;stroke:#990033;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:80;stroke-dashoffset:80;animation:pulseEcg 2.2s ease-in-out infinite;}
-  .pulse-ecg-dot{fill:#990033;animation:pulseEcgDot 2.2s ease-in-out infinite;}
-  @keyframes pulseEcg{0%{stroke-dashoffset:80;opacity:1}60%{stroke-dashoffset:0;opacity:1}80%{stroke-dashoffset:0;opacity:1}100%{stroke-dashoffset:-80;opacity:0}}
-  @keyframes pulseEcgDot{0%,40%{r:1.5;opacity:0}55%{r:3;opacity:1}80%{r:2.5;opacity:1}100%{r:2;opacity:0}}
+  /* Pulse sonar animation */
+  .pulse-orb{fill:#990033;}
+  .pulse-ring{fill:none;stroke:#990033;stroke-width:1.2;}
+  .pulse-ring-1{animation:sonarRing 2.4s ease-out infinite;}
+  .pulse-ring-2{animation:sonarRing 2.4s ease-out infinite .8s;}
+  .pulse-ring-3{animation:sonarRing 2.4s ease-out infinite 1.6s;}
+  @keyframes sonarRing{
+    0%{r:4;stroke-opacity:0.7;stroke-width:1.5;}
+    100%{r:14;stroke-opacity:0;stroke-width:0.5;}
+  }
+  @keyframes orbPulse{0%,100%{opacity:1;r:3}50%{opacity:0.6;r:2.2}}
+  .pulse-orb{animation:orbPulse 2.4s ease-in-out infinite;}
 
   /* Pulse expanded panel */
   .pulse-panel{position:fixed;bottom:53px;left:0;right:0;z-index:49;background:#fff;border-top:0.5px solid rgba(0,0,0,0.08);max-height:380px;display:none;flex-direction:column;}
@@ -493,32 +508,39 @@ window.__clerkOnLoad = function() {
 <span class="hidden" id="vo-health"></span>
 <span class="hidden" id="vo-footer-text"></span>
 
-<!-- ── Week Hub Header ── -->
-<div id="wh-header" style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px;flex-wrap:wrap;">
-  <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
-    <div style="font-size:22px;font-weight:600;color:#1C1C1E;letter-spacing:-0.02em;line-height:1;">Week Hub</div>
-    <div style="display:flex;align-items:center;gap:6px;">
-      <label style="font-size:10px;color:#AEAEB2;font-weight:500;text-transform:uppercase;letter-spacing:.06em;">Week</label>
-      <input id="wh-week-display" type="date" style="font-size:11px;color:#1C1C1E;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:5px 8px;background:#fff;font-family:inherit;cursor:pointer;" onchange="if(typeof window.setWeek==='function')window.setWeek(this.value)"/>
+<!-- ── Week Hub Header Tile ── -->
+<div id="wh-header" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:14px 20px;display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px;flex-wrap:wrap;">
+
+  <!-- Left: Brand + week date -->
+  <div style="display:flex;align-items:center;gap:14px;flex-shrink:0;">
+    <div>
+      <div style="font-size:18px;font-weight:600;color:#1C1C1E;letter-spacing:-0.02em;line-height:1;">Week Hub</div>
+      <input id="wh-week-display" type="date" style="font-size:10px;color:#AEAEB2;border:none;background:transparent;font-family:inherit;cursor:pointer;padding:0;margin-top:3px;outline:none;" onchange="if(typeof window.setWeek==='function')window.setWeek(this.value)"/>
     </div>
-    <div id="wh-capsules-display" style="display:none;"></div>
+    <!-- Prev/Next week -->
+    <div style="display:flex;gap:2px;">
+      <button onclick="var b=document.getElementById('flow-prev-week');if(b)b.click();" style="width:26px;height:26px;border:0.5px solid rgba(0,0,0,0.08);background:#F5F5F7;border-radius:7px;cursor:pointer;font-size:13px;color:#6E6E73;display:flex;align-items:center;justify-content:center;transition:all .15s;" title="Previous week">←</button>
+      <button onclick="var b=document.getElementById('flow-next-week');if(b)b.click();" style="width:26px;height:26px;border:0.5px solid rgba(0,0,0,0.08);background:#F5F5F7;border-radius:7px;cursor:pointer;font-size:13px;color:#6E6E73;display:flex;align-items:center;justify-content:center;transition:all .15s;" title="Next week">→</button>
+    </div>
   </div>
-  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-    <!-- Flow week nav buttons (proxy to hidden flow-prev-week / flow-next-week) -->
-    <div style="display:flex;gap:4px;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:9px;padding:3px;">
-      <button onclick="var b=document.getElementById('flow-prev-week');if(b)b.click();" style="width:28px;height:28px;border:none;background:transparent;border-radius:6px;cursor:pointer;font-size:14px;color:#1C1C1E;display:flex;align-items:center;justify-content:center;" title="Previous week">←</button>
-      <button onclick="var b=document.getElementById('flow-next-week');if(b)b.click();" style="width:28px;height:28px;border:none;background:transparent;border-radius:6px;cursor:pointer;font-size:14px;color:#1C1C1E;display:flex;align-items:center;justify-content:center;" title="Next week">→</button>
-    </div>
-    <button onclick="var b=document.getElementById('flow-reset');if(b)b.click();" style="font-size:11px;font-weight:500;background:#F5F5F7;color:#1C1C1E;border:0.5px solid rgba(0,0,0,0.08);border-radius:7px;padding:6px 11px;cursor:pointer;">Reset view</button>
-    <button onclick="var b=document.getElementById('flow-download-pdf');if(b)b.click();" style="font-size:11px;font-weight:500;background:#F5F5F7;color:#1C1C1E;border:0.5px solid rgba(0,0,0,0.08);border-radius:7px;padding:6px 11px;cursor:pointer;">Download PDF</button>
-    <div style="width:0.5px;height:20px;background:rgba(0,0,0,0.08);margin:0 2px;"></div>
-    <button id="wh-btn-upload" style="font-size:11px;font-weight:500;background:#1C1C1E;color:#fff;border:none;border-radius:7px;padding:7px 13px;cursor:pointer;display:flex;align-items:center;gap:5px;" onclick="document.getElementById('file-plan').click()">
+
+  <!-- Center: Week capsules -->
+  <div id="wh-capsules-display" style="display:flex;gap:6px;flex:1;justify-content:center;flex-wrap:wrap;"></div>
+
+  <!-- Right: Actions -->
+  <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+    <button onclick="var b=document.getElementById('flow-download-pdf');if(b)b.click();" style="font-size:11px;color:#6E6E73;background:transparent;border:none;cursor:pointer;padding:4px 6px;display:flex;align-items:center;gap:4px;transition:color .15s;" title="Download PDF">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      PDF
+    </button>
+    <div style="width:0.5px;height:16px;background:rgba(0,0,0,0.08);"></div>
+    <button id="wh-btn-upload" onclick="document.getElementById('file-plan').click()" style="font-size:11px;font-weight:500;color:#1C1C1E;background:#fff;border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:7px 14px;cursor:pointer;display:flex;align-items:center;gap:5px;transition:all .15s;">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m0-12 4 4m-4-4-4 4M4 17h16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" stroke-linecap="round" stroke-linejoin="round"/></svg>
       Upload Plan
     </button>
-    <button id="wh-btn-zero" style="font-size:11px;font-weight:500;background:rgba(214,26,60,0.06);color:#D61A3C;border:0.5px solid rgba(214,26,60,0.18);border-radius:7px;padding:7px 13px;cursor:pointer;display:flex;align-items:center;gap:5px;" onclick="document.getElementById('btn-zero-plan').click()">
+    <button id="wh-btn-zero" onclick="document.getElementById('btn-zero-plan').click()" style="font-size:11px;font-weight:500;color:#AEAEB2;background:transparent;border:none;cursor:pointer;padding:7px 8px;display:flex;align-items:center;gap:4px;transition:color .15s;" title="Clear plan for this week">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 18L18 6M6 6l12 12" stroke-linecap="round"/></svg>
-      Zero Plan
+      Zero
     </button>
   </div>
 </div>
@@ -1010,7 +1032,7 @@ function computeBinQA(ws, records=[], bins=[]) {
         : { planned: 0, applied: 0 });
 
     const el = document.createElement('button');
-    el.className = 'wkcap bg-white hover:scale-[1.02] transition';
+    el.className = 'wkcap';
     el.style.borderColor = (id === state.weekStart ? BRAND : 'rgba(0,0,0,.12)');
     el.innerHTML = `
       <div class="m" style="color:${id === state.weekStart ? BRAND : '#D1E231'}">${mon}</div>
@@ -5343,9 +5365,11 @@ window.addEventListener('popstate', () => show(getRouteHash()));
   </div>
 </div>
 <div class="pulse-bar" id="pulse-bar">
-  <svg viewBox="0 0 48 24" width="44" height="22" overflow="visible">
-    <path class="pulse-ecg-path" d="M2,12 L10,12 L14,4 L18,20 L21,9 L25,12 L46,12"/>
-    <circle class="pulse-ecg-dot" cx="46" cy="12" r="2"/>
+  <svg viewBox="0 0 28 28" width="28" height="28" overflow="visible" style="flex-shrink:0;">
+    <circle class="pulse-ring pulse-ring-1" cx="14" cy="14" r="4"/>
+    <circle class="pulse-ring pulse-ring-2" cx="14" cy="14" r="4"/>
+    <circle class="pulse-ring pulse-ring-3" cx="14" cy="14" r="4"/>
+    <circle class="pulse-orb" cx="14" cy="14" r="3" fill="#990033"/>
   </svg>
   <span class="pulse-name">Pulse</span>
   <div class="pulse-divider"></div>
@@ -5903,11 +5927,5 @@ async function handleSignOut() {
 
 </body>
 </html>
-
-
-
-
-
-
 
 
