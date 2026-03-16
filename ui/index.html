@@ -133,10 +133,9 @@
 /* Children visibility controlled individually — do NOT force display:block on all children */
 
 /* ── Week Hub: suppress flow module's own header row ── */
-/* Target the flex row that contains flow-sub (the "Flow / date + buttons" header).
-   :has() is supported in Chrome 105+, Safari 15.4+, Firefox 121+ */
-#page-flow div:has(> #flow-sub) { display:none !important; }
-/* Fallback: also hide the individual elements */
+/* The flex row containing flow-sub = "Flow / date / ← → Reset Download PDF" */
+#page-flow div:has(> #flow-sub),
+#page-flow div:has(> #flow-prev-week) { display:none !important; }
 #flow-sub { display:none !important; }
 
 /* segmented toggle visuals (neutral) */
@@ -5082,83 +5081,38 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 
 </script>
 <script>
-// ── Week Hub: Ops overview overlay in detail tile on first load ──
-// flow_live_additive.js always renders 'receiving' detail on first render.
-// We want the ops overview (Insights) to show instead on page load.
-// Strategy: after flow renders, inject ops overview HTML into flow-detail.
-// When user clicks a milestone node, flow-detail is replaced — that's correct.
+// ── Week Hub: Ops overview in detail tile ──
+// flow_live_additive.js now defaults to null selection (patched).
+// null selection = "Click a node above" in detail, Week Totals in right tile.
+// We replace the detail content with ops insights on first render.
 (function whDetailOverlay(){
-  var _overlayActive = false;
-  var _overlayEl = null;
-
-  function buildOverlayHTML(){
-    // Pull content from ops-insights-content (rendered by renderOpsInsights)
+  function injectOpsOverview(){
+    var detail = document.getElementById('flow-detail');
+    if(!detail) return;
+    // Don't override if user has already clicked a node (real content present)
+    if(detail.querySelector('[data-node]') || document.getElementById('wh-ops-overview')) return;
+    // Get ops insights content
     var src = document.getElementById('ops-insights-content');
-    if(src && src.innerHTML && src.innerHTML.trim().length > 20){
-      return src.innerHTML;
-    }
-    // Fallback: show a simple week summary from available state data
-    var plan = (window.state && window.state.plan) ? window.state.plan : [];
-    var planned = plan.reduce(function(s,p){return s+(Number(p.target_qty)||0);},0);
-    return '<div style="padding:12px 0;">' +
-      '<div style="font-size:14px;font-weight:500;color:#1C1C1E;margin-bottom:12px;">Week Overview</div>' +
-      '<div style="font-size:12px;color:#6E6E73;">Select a milestone node above to see details, or use the Insights view below.</div>' +
-      '<div style="margin-top:16px;font-size:12px;color:#1C1C1E;"><strong>Planned this week:</strong> ' + planned.toLocaleString() + ' units</div>' +
-      '</div>';
-  }
-
-  function injectOverlay(){
-    var detail = document.getElementById('flow-detail');
-    if(!detail) return;
-    if(_overlayActive) return; // already showing overlay
-    _overlayEl = document.createElement('div');
-    _overlayEl.id = 'wh-detail-overlay';
-    _overlayEl.style.cssText = 'padding:4px 0;';
-    _overlayEl.innerHTML = buildOverlayHTML();
-    // Replace detail content with overlay
+    var html = (src && src.innerHTML && src.innerHTML.trim().length > 30)
+      ? src.innerHTML
+      : '<div style="padding:20px 0;font-size:12px;color:#6E6E73;">Click a milestone node above to see details.</div>';
+    var wrap = document.createElement('div');
+    wrap.id = 'wh-ops-overview';
+    wrap.style.cssText = 'padding:4px 0;';
+    wrap.innerHTML = html;
     detail.innerHTML = '';
-    detail.appendChild(_overlayEl);
-    _overlayActive = true;
+    detail.appendChild(wrap);
   }
 
-  function removeOverlay(){
-    _overlayActive = false;
-    _overlayEl = null;
-  }
-
-  // Watch flow-detail: when flow module replaces content (node click),
-  // the overlay is gone — mark it inactive
-  function setupDetailObserver(){
-    var detail = document.getElementById('flow-detail');
-    if(!detail) return;
-    var obs = new MutationObserver(function(){
-      // If wh-detail-overlay no longer exists, user clicked a node
-      if(!document.getElementById('wh-detail-overlay')){
-        removeOverlay();
-      }
-    });
-    obs.observe(detail, {childList:true});
-  }
-
-  // On state:ready: after flow module renders (500ms), inject overlay
-  var _firstRender = true;
+  // Inject after flow renders
   window.addEventListener('state:ready', function(){
-    if(!_firstRender) return;
-    setTimeout(function(){
-      if(_firstRender){
-        _firstRender = false;
-        injectOverlay();
-        setupDetailObserver();
-      }
-    }, 600);
+    setTimeout(injectOpsOverview, 500);
   });
 
-  // Re-inject overlay when user navigates back to Week Hub
+  // Re-inject when navigating back to Week Hub
   window.addEventListener('hashchange', function(){
-    var h = location.hash;
-    if(h === '#flow' || h === '#week-hub' || h === '#dashboard'){
-      _firstRender = true;
-      _overlayActive = false;
+    if(location.hash === '#flow'){
+      setTimeout(injectOpsOverview, 600);
     }
   });
 })();
@@ -5818,11 +5772,5 @@ async function handleSignOut() {
 
 </body>
 </html>
-
-
-
-
-
-
 
 
