@@ -4346,7 +4346,7 @@ function wireOpsInsights(){
       const v = (btn.getAttribute('data-opsview') || 'overview').trim();
       state.opsView = v;
       window._lastOpsView = v; // preserve across state:ready refreshes
-      try { renderOpsInsights(v); } catch (e) { console.warn('[OPS] renderOpsInsights failed:', e); }
+      try { (window.renderOpsInsights||renderOpsInsights)(v); } catch (e) { console.warn('[OPS] renderOpsInsights failed:', e); }
     });
   });
 
@@ -4371,10 +4371,7 @@ window.addEventListener('state:ready', () => {
       var mirror = document.getElementById('wh-ops-content-mirror');
       if(src && mirror){
         mirror.innerHTML = src.innerHTML;
-        console.log('[state:ready] mirror updated for view:', v, 'len:', src.innerHTML.trim().length);
       }
-    } else {
-      console.log('[state:ready] mirror not found, wh-ops-overview:', !!document.getElementById('wh-ops-overview'));
     }
   } catch (e) { console.warn('[OPS] state:ready render failed:', e); }
 });
@@ -4411,6 +4408,8 @@ window.addEventListener('popstate', () => show(getRouteHash()));
   window.toISODate = toISODate;
   window.todayISO = todayISO;
   window.todayInTZ = todayInTZ;
+  window.renderOpsInsights = renderOpsInsights;
+  window.wireOpsInsights = wireOpsInsights;
 
 })();
 
@@ -5123,15 +5122,13 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     if(!detail) return;
     // Pause observer during rebuild to prevent re-trigger
     var view = overrideView || window._lastOpsView || 'overview';
-    console.log('[syncOps] rebuilding for view:', view, '| overrideView:', overrideView);
     if(_detailObserver){ _detailObserver.disconnect(); _detailObserver = null; }
     window._lastOpsView = view;
-    if(typeof renderOpsInsights === 'function'){
-      try{ renderOpsInsights(view); }catch(e){ console.error('[syncOps]',e); }
+    if(typeof window.renderOpsInsights === 'function'){
+      try{ window.renderOpsInsights(view); }catch(e){ console.error('[syncOps]',e); }
     }
     // Now pull the rendered content
     var src = document.getElementById('ops-insights-content');
-    console.log('[syncOps] src length:', src ? src.innerHTML.trim().length : 'NO ELEMENT', '| starts with:', src ? src.innerHTML.trim().substring(0,80) : '');
     if(!src || !src.innerHTML || src.innerHTML.trim().length < 20){
       // Restart observer and bail
       startDetailWatcher();
@@ -5164,7 +5161,6 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     wrap.innerHTML = pillsBar + '<div id="wh-ops-content-mirror">' + src.innerHTML + '</div>';
     detail.innerHTML = '';
     detail.appendChild(wrap);
-    console.log('[syncOps] detail rebuilt, wh-ops-overview exists:', !!document.getElementById('wh-ops-overview'));
     // Restart the observer after rebuild
     setTimeout(startDetailWatcher, 100);
   }
@@ -5174,7 +5170,6 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 
   // Global pill click handler — called directly from onclick on cloned pills
   window.__whPillClick = function(view){
-    console.log('[Pill] clicked:', view, '| __whPillClick fired');
     if(!view) return;
     window._lastOpsView = view;
     syncOpsToDetail(view);
@@ -5957,4 +5952,6 @@ async function handleSignOut() {
 
 </body>
 </html>
+
+
 
