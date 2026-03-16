@@ -4345,6 +4345,7 @@ function wireOpsInsights(){
       btn.classList.add('ops-pill--active');
       const v = (btn.getAttribute('data-opsview') || 'overview').trim();
       state.opsView = v;
+      window._lastOpsView = v; // preserve across state:ready refreshes
       try { renderOpsInsights(v); } catch (e) { console.warn('[OPS] renderOpsInsights failed:', e); }
     });
   });
@@ -4356,13 +4357,20 @@ function wireOpsInsights(){
   try { renderOpsInsights(initial); } catch (e) { console.warn('[OPS] renderOpsInsights failed:', e); }
 }
 
-// Re-render insights whenever the week data finishes loading (setWeek wrapper dispatches state:ready).
+// Re-render insights on state:ready — respect user's pill selection via _lastOpsView
 window.addEventListener('state:ready', () => {
   try {
-    const active = document.querySelector('.ops-pill--active');
-    const v = (state.opsView || active?.getAttribute('data-opsview') || 'overview').trim();
+    // Use _lastOpsView (set by pill clicks) so user selection is preserved across refreshes
+    const v = (window._lastOpsView || state.opsView || 'overview').trim();
     state.opsView = v;
+    window._lastOpsView = v;
     renderOpsInsights(v);
+    // If ops overview is showing in detail tile, update it with fresh data
+    if(document.getElementById('wh-ops-content-mirror') && document.getElementById('wh-ops-overview')){
+      var src = document.getElementById('ops-insights-content');
+      var mirror = document.getElementById('wh-ops-content-mirror');
+      if(src && mirror) mirror.innerHTML = src.innerHTML;
+    }
   } catch (e) { console.warn('[OPS] state:ready render failed:', e); }
 });
 
@@ -5981,11 +5989,4 @@ async function handleSignOut() {
 
 </body>
 </html>
-
-
-
-
-
-
-
 
