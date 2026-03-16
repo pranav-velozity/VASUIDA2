@@ -132,13 +132,12 @@
 #page-dashboard:not(.hidden){ display:block; }
 /* Children visibility controlled individually — do NOT force display:block on all children */
 
-/* ── Week Hub: suppress flow module's own header row entirely ── */
-/* The "Flow / date" title, subheader, and ← → Reset Download PDF row
-   are all hidden — replaced by the Week Hub header above */
-#page-flow > div > div:first-child,
-#page-flow .flex.items-center.justify-between.mb-2 {
-  display: none !important;
-}
+/* ── Week Hub: suppress flow module's own header row ── */
+/* Target the flex row that contains flow-sub (the "Flow / date + buttons" header).
+   :has() is supported in Chrome 105+, Safari 15.4+, Firefox 121+ */
+#page-flow div:has(> #flow-sub) { display:none !important; }
+/* Fallback: also hide the individual elements */
+#flow-sub { display:none !important; }
 
 /* segmented toggle visuals (neutral) */
 .seg { color:#303030; }
