@@ -226,10 +226,10 @@
 ></script>
 
 </head>
-<body class="bg-gray-50 min-h-screen">
+<body style="margin:0;padding:0;height:100%;overflow-x:hidden;">
 
 <!-- 🔐 Login Screen (shows when NOT signed in) -->
-<div id="auth-login-screen" style="display:flex;width:100vw;height:100vh;overflow:hidden;">
+<div id="auth-login-screen" style="display:flex;width:100vw;height:100vh;min-height:100vh;overflow:hidden;position:fixed;top:0;left:0;z-index:9999;">
 
   <!-- Left panel: login form -->
   <div style="width:34%;min-width:320px;background:#fff;display:flex;flex-direction:column;justify-content:center;padding:56px 48px;position:relative;z-index:2;border-right:0.5px solid rgba(0,0,0,0.06);">
@@ -321,7 +321,7 @@
     }
     if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
   })();
-  <\/script>
+  </script>
 </div>
 
 <!-- 🔐 App Content (shows when signed in) -->
