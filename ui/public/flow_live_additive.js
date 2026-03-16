@@ -2079,8 +2079,8 @@ function computeManualNodeStatuses(ws, tz) {
       const strokeForLevel = (level, upcoming) => {
         // Matte palette
         const map = {
-          green: '#10b981',
-          red:   '#ef4444',
+          green: '#C8F902',
+          red:   '#D61A3C',
           gray:  '#9ca3af'
         };
         const base = map[level] || map.gray;
@@ -2089,8 +2089,8 @@ function computeManualNodeStatuses(ws, tz) {
 
       const dotFillForLevel = (level, upcoming) => {
         const map = {
-          green: '#10b981',
-          red:   '#ef4444',
+          green: '#C8F902',
+          red:   '#D61A3C',
           gray:  '#9ca3af'
         };
         const base = map[level] || map.gray;
@@ -2227,13 +2227,13 @@ function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
     // - upcoming: distinct from At-Risk (cool neutral)
     // - future: capability not yet live
     const levelColor = (level) => ({
-      green: '#34d399',
-      red: '#fb7185',
-      upcoming: '#cbd5e1',
-      yellow: '#e6b800',
-      gray: '#f6d365',
-      future: '#e5e7eb',
-    }[level] || '#9ca3af');
+      green: '#C8F902',
+      red: '#D61A3C',
+      upcoming: '#E5E5EA',
+      yellow: '#FFA203',
+      gray: '#E5E5EA',
+      future: '#E5E5EA',
+    }[level] || '#AEAEB2');
     const segStroke = (level, upcoming) => upcoming ? matte(levelColor(level), 0.20) : levelColor(level);
     const statusText = (n) => {
       if (!n) return '—';
@@ -2560,10 +2560,10 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
 
     const health = (() => {
       const worst = [
-        { label: 'Receiving', color: receiving?.color || lvlColor(receiving?.level) || '#10b981' },
-        { label: 'VAS', color: vas?.color || lvlColor(vas?.level) || '#10b981' },
-        { label: 'Transit', color: intl?.color || lvlColor(intl?.level) || '#10b981' },
-        { label: 'Last Mile', color: lvlColor(manual?.levels?.lastMile) || '#10b981' },
+        { label: 'Receiving', color: receiving?.color || lvlColor(receiving?.level) || '#C8F902' },
+        { label: 'VAS', color: vas?.color || lvlColor(vas?.level) || '#C8F902' },
+        { label: 'Transit', color: intl?.color || lvlColor(intl?.level) || '#C8F902' },
+        { label: 'Last Mile', color: lvlColor(manual?.levels?.lastMile) || '#C8F902' },
       ].reduce((acc, n) => severityRank(n.color) > severityRank(acc.color) ? n : acc);
       const band = _bandFromColor(worst.color);
       const label = (band === 'green') ? 'On Track' : (band === 'yellow') ? 'At Risk' : (band === 'red') ? 'Delayed' : 'Upcoming';
@@ -5016,9 +5016,9 @@ function statusBg(color){
 
 function statusStroke(color){
   const band = _bandFromColor(color);
-  if (band === "red") return "#ef4444";
-  if (band === "yellow") return "#f59e0b";
-  if (band === "green") return "#10b981";
+  if (band === "red") return "#D61A3C";
+  if (band === "yellow") return "#FFA203";
+  if (band === "green") return "#C8F902";
   return "#9ca3af";
 }
 
@@ -5080,7 +5080,7 @@ function renderFooterTrends(el, nodes, weekKey) {
     { id: 'intl', color: (intl && intl.color) || levelColor(intl.level || 'green') },
     { id: 'lm', color: levelColor((manual.levels && manual.levels.lastMile) || manual.levels?.lastmile || 'green') },
   ];
-  const worst = nodeColors.reduce((acc, n) => severityRank(n.color) > severityRank(acc.color) ? n : acc, nodeColors[0] || { color: '#10b981' });
+  const worst = nodeColors.reduce((acc, n) => severityRank(n.color) > severityRank(acc.color) ? n : acc, nodeColors[0] || { color: '#C8F902' });
   const pillText = (colorToStatus(worst.color) || 'On Track');
 
   el.innerHTML = `
@@ -5610,7 +5610,7 @@ function buildReportHTML(cache) {
           .w-28 { width: 112px; }
           .h-2 { height: 8px; }
           .h-full { height: 100%; }
-          .bg-emerald-400 { background: #34d399; }
+          .bg-emerald-400 { background: #C8F902; }
 
           /* Keep metric rows on a single line in PDF (Week totals) */
           .flex.items-center.justify-between > div:last-child { white-space: nowrap; }
