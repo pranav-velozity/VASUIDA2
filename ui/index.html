@@ -130,14 +130,7 @@
 
 /* Respect .hidden; only style when visible */
 #page-dashboard:not(.hidden){ display:block; }
-#page-dashboard:not(.hidden) > *{
-  position:relative;
-  display:block;
-  width:100%;
-  max-width:100%;
-  min-width:0;
-  margin-bottom:.75rem;
-}
+/* Children visibility controlled individually — do NOT force display:block on all children */
 
 /* segmented toggle visuals (neutral) */
 .seg { color:#303030; }
@@ -3141,8 +3134,10 @@ if (h === '#intake') {
     const el = document.getElementById('page-receiving');
     el && el.classList.remove('hidden');
   } else if (h === '#flow') {
-    const el = document.getElementById('page-flow');
+    // #page-flow now lives inside #page-dashboard (Week Hub)
+    const el = document.getElementById('page-dashboard');
     el && el.classList.remove('hidden');
+    el && (el.style.display = 'block');
   } else if (h === '#exec') {
     const el = document.getElementById('page-exec');
     el && el.classList.remove('hidden');
@@ -3156,7 +3151,8 @@ if (h === '#intake') {
   }
 
   // Hard fallback: if Tailwind hidden class isn't behaving for some reason, enforce display.
-  ['page-dashboard','page-intake','page-exec','page-receiving','page-flow'].forEach(id => {
+  // Hard fallback — page-flow excluded: it now lives inside page-dashboard
+  ['page-dashboard','page-intake','page-exec','page-receiving'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     el.style.display = el.classList.contains('hidden') ? 'none' : 'block';
@@ -5263,7 +5259,8 @@ document.addEventListener('DOMContentLoaded', function(){
 
   // Helper: hide all pages
   function _pnHideAll(){
-    ['page-dashboard','page-intake','page-exec','page-receiving','page-flow','page-reports'].forEach(id=>{
+    // page-flow lives inside page-dashboard — hiding page-dashboard hides page-flow too
+    ['page-dashboard','page-intake','page-exec','page-receiving','page-reports'].forEach(id=>{
       const el=document.getElementById(id);
       if(el){el.classList.add('hidden');el.style.display='none';}
     });
@@ -5679,11 +5676,3 @@ async function handleSignOut() {
 
 </body>
 </html>
-
-
-
-
-
-
-
-
