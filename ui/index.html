@@ -5117,6 +5117,7 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     var detail = document.getElementById('flow-detail');
     if(!detail) return;
     // Pause observer during rebuild to prevent re-trigger
+    console.log('[syncOps] rebuilding for view:', view);
     if(_detailObserver){ _detailObserver.disconnect(); _detailObserver = null; }
     // Trigger a fresh renderOpsInsights render first
     var view = overrideView || window._lastOpsView || 'overview';
@@ -5167,11 +5168,9 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 
   // Global pill click handler — called directly from onclick on cloned pills
   window.__whPillClick = function(view){
+    console.log('[Pill] clicked:', view, '| __whPillClick fired');
     if(!view) return;
     window._lastOpsView = view;
-    // Tell the watcher not to override what we're about to write
-    // (we're not a node click, so keep _userSelectedNode false)
-    // Full rebuild of the detail tile with the new view — simplest and most reliable
     syncOpsToDetail(view);
   };
 
@@ -5229,44 +5228,7 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     if(src && mc) mc.innerHTML = src.innerHTML;
   });
 
-  // Wire cloned pill clicks via event delegation
-  document.addEventListener('click', function(e){
-    var pill = e.target.closest('.wh-detail-pill');
-    if(!pill) return;
-    var view = pill.getAttribute('data-opsview');
-    if(!view) return;
-    e.stopPropagation();
-    window._lastOpsView = view;
-    // Update active pill state
-    document.querySelectorAll('.wh-detail-pill').forEach(function(p){
-      p.classList.toggle('ops-pill--active', p.getAttribute('data-opsview') === view);
-    });
-    // Render insights for this view
-    if(typeof renderOpsInsights === 'function'){
-      try { renderOpsInsights(view); } catch(err) { console.error('[Pill] renderOpsInsights failed:', err); return; }
-    }
-    // Update the content mirror — or rebuild if gone
-    var src = document.getElementById('ops-insights-content');
-    if(!src) return;
-    var mirror = document.getElementById('wh-ops-content-mirror');
-    if(mirror){
-      mirror.innerHTML = src.innerHTML;
-    } else {
-      // Full rebuild — mirror was removed (e.g. flow re-rendered)
-      var detail = document.getElementById('flow-detail');
-      if(detail && src.innerHTML.trim().length > 10){
-        var ov = document.getElementById('wh-ops-overview');
-        if(ov){
-          var m2 = document.createElement('div');
-          m2.id = 'wh-ops-content-mirror';
-          m2.innerHTML = src.innerHTML;
-          ov.appendChild(m2);
-        } else {
-          syncOpsToDetail(view);
-        }
-      }
-    }
-  });
+  // Pill clicks handled via onclick="window.__whPillClick(this.dataset.opsview)" on each button
 
   // Watch for flow module replacing detail content (node click)
   // When wh-ops-overview disappears the user has clicked a node — that's fine
@@ -5989,4 +5951,6 @@ async function handleSignOut() {
 
 </body>
 </html>
+
+
 
