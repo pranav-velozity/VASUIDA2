@@ -5117,16 +5117,16 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     var detail = document.getElementById('flow-detail');
     if(!detail) return;
     // Pause observer during rebuild to prevent re-trigger
-    console.log('[syncOps] rebuilding for view:', view);
-    if(_detailObserver){ _detailObserver.disconnect(); _detailObserver = null; }
-    // Trigger a fresh renderOpsInsights render first
     var view = overrideView || window._lastOpsView || 'overview';
+    console.log('[syncOps] rebuilding for view:', view, '| overrideView:', overrideView);
+    if(_detailObserver){ _detailObserver.disconnect(); _detailObserver = null; }
     window._lastOpsView = view;
     if(typeof renderOpsInsights === 'function'){
       try{ renderOpsInsights(view); }catch(e){ console.error('[syncOps]',e); }
     }
     // Now pull the rendered content
     var src = document.getElementById('ops-insights-content');
+    console.log('[syncOps] src length:', src ? src.innerHTML.trim().length : 'NO ELEMENT');
     if(!src || !src.innerHTML || src.innerHTML.trim().length < 20){
       // Restart observer and bail
       startDetailWatcher();
@@ -5159,6 +5159,7 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     wrap.innerHTML = pillsBar + '<div id="wh-ops-content-mirror">' + src.innerHTML + '</div>';
     detail.innerHTML = '';
     detail.appendChild(wrap);
+    console.log('[syncOps] detail rebuilt, wh-ops-overview exists:', !!document.getElementById('wh-ops-overview'));
     // Restart the observer after rebuild
     setTimeout(startDetailWatcher, 100);
   }
