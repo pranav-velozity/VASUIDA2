@@ -1964,8 +1964,7 @@ function computeManualNodeStatuses(ws, tz) {
         st.id = 'flow-journey-style';
         st.textContent = `
           /* Journey map sizing + crispness */
-          #flow-journey svg { width: 100%; height: 500px; display: block; }
-          @media (min-width: 1024px) { #flow-journey svg { height: 540px; } }
+          #flow-journey svg { width: 100%; display: block; }
           .flow-journey-hit { cursor: pointer; }
           .flow-journey-hit:focus { outline: none; }
         `;
@@ -2452,7 +2451,7 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
 
     root.innerHTML = `
       <div class="w-full overflow-hidden">
-        <svg viewBox="-180 0 1250 560" preserveAspectRatio="xMidYMid meet" aria-label="Journey map" style="height:520px; width:100%;">
+        <svg viewBox="-180 0 1250 560" preserveAspectRatio="xMidYMid meet" aria-label="Journey map" style="width:100%; display:block;">
 
           <!-- road shadow (subtle) -->
           <path d="${roadPath}" fill="none" stroke="rgba(148,163,184,0.25)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" transform="translate(2,3)"></path>
