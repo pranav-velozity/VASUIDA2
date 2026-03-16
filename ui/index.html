@@ -5134,7 +5134,7 @@ window.addEventListener('popstate', () => show(getRouteHash()));
           ].map(function(p){
             var cur = window._lastOpsView || 'overview';
             var active = (p.v === cur) ? ' ops-pill--active' : '';
-            return '<button class="ops-pill wh-detail-pill' + active + '" data-opsview="' + p.v + '" onclick="window.__whPillClick(\'' + p.v + '\')" style="min-width:0;height:26px;font-size:11px;cursor:pointer;">' + p.l + '</button>';
+            return '<button class="ops-pill wh-detail-pill' + active + '" data-opsview="' + p.v + '" onclick="window.__whPillClick(this.dataset.opsview)" style="min-width:0;height:26px;font-size:11px;cursor:pointer;">' + p.l + '</button>';
           }).join('')
         + '</div>')
       : '';
@@ -5184,7 +5184,7 @@ window.addEventListener('popstate', () => show(getRouteHash()));
       card.style.cssText = 'background:#fff;border-radius:14px;width:100%;max-width:1400px;padding:28px 32px;position:relative;min-height:600px;';
       // Pills row
       var pillsHTML = '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:16px;" id="wh-modal-pills">'
-        + [{v:'overview',l:'Overview'},{v:'supplier',l:'Facility'},{v:'facility',l:'Facility'},{v:'zendesk',l:'Zendesk'},{v:'freight',l:'Freight'},{v:'carton',l:'Carton'}].map(function(p){
+        + [{v:'overview',l:'Overview'},{v:'supplier',l:'Supplier'},{v:'facility',l:'Facility'},{v:'zendesk',l:'Zendesk'},{v:'freight',l:'Freight'},{v:'carton',l:'Carton'}].map(function(p){
             var cur = window._lastOpsView||'overview';
             var active = (p.v===cur) ? ' ops-pill--active' : '';
             return '<button class="ops-pill wh-modal-pill' + active + '" data-opsview="' + p.v + '" style="height:28px;font-size:11px;">' + p.l + '</button>';
