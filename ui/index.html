@@ -5108,15 +5108,21 @@ window.addEventListener('popstate', () => show(getRouteHash()));
   function syncOpsToDetail(overrideView){
     var detail = document.getElementById('flow-detail');
     if(!detail) return;
+    // Pause observer during rebuild to prevent re-trigger
+    if(_detailObserver){ _detailObserver.disconnect(); _detailObserver = null; }
     // Trigger a fresh renderOpsInsights render first
     var view = overrideView || window._lastOpsView || 'overview';
     window._lastOpsView = view;
     if(typeof renderOpsInsights === 'function'){
-      try{ renderOpsInsights(view); }catch(e){}
+      try{ renderOpsInsights(view); }catch(e){ console.error('[syncOps]',e); }
     }
     // Now pull the rendered content
     var src = document.getElementById('ops-insights-content');
-    if(!src || !src.innerHTML || src.innerHTML.trim().length < 20) return;
+    if(!src || !src.innerHTML || src.innerHTML.trim().length < 20){
+      // Restart observer and bail
+      startDetailWatcher();
+      return;
+    }
     // Build the detail panel with the ops pills bar + content
     var pillsBar = document.getElementById('ops-insights-subtitle')
       ? ('<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
@@ -5144,6 +5150,8 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     wrap.innerHTML = pillsBar + '<div id="wh-ops-content-mirror">' + src.innerHTML + '</div>';
     detail.innerHTML = '';
     detail.appendChild(wrap);
+    // Restart the observer after rebuild
+    setTimeout(startDetailWatcher, 100);
   }
   // Expose globally — flow module calls this directly to avoid blink
   window.__whInjectOps = syncOpsToDetail;
@@ -5153,22 +5161,10 @@ window.addEventListener('popstate', () => show(getRouteHash()));
   window.__whPillClick = function(view){
     if(!view) return;
     window._lastOpsView = view;
-    // Update active states on all cloned pills
-    document.querySelectorAll('.wh-detail-pill').forEach(function(p){
-      p.classList.toggle('ops-pill--active', p.getAttribute('data-opsview') === view);
-    });
-    // Render insights
-    if(typeof renderOpsInsights === 'function'){
-      try{ renderOpsInsights(view); }catch(e){ console.error('[Pill]',e); return; }
-    }
-    // Update content mirror
-    var src = document.getElementById('ops-insights-content');
-    var mirror = document.getElementById('wh-ops-content-mirror');
-    if(src && mirror){
-      mirror.innerHTML = src.innerHTML;
-    } else if(src && src.innerHTML.trim().length > 10){
-      syncOpsToDetail(view);
-    }
+    // Tell the watcher not to override what we're about to write
+    // (we're not a node click, so keep _userSelectedNode false)
+    // Full rebuild of the detail tile with the new view — simplest and most reliable
+    syncOpsToDetail(view);
   };
 
   // Wire fullscreen button for ops insights
@@ -5985,5 +5981,11 @@ async function handleSignOut() {
 
 </body>
 </html>
+
+
+
+
+
+
 
 
