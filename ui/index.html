@@ -404,10 +404,10 @@ window.__clerkOnLoad = function() {
     <a class="pn-brand" href="#week-hub">
       <span class="pn-brand-v">VelOzity</span><span class="pn-brand-p">&nbsp;Pinpoint</span>
     </a>
-    <nav class="pn-nav-items" id="nav-toggle">
-      <a class="pn-nav-item active" href="#week-hub" id="nav-weekhub">Week Hub</a>
-      <a class="pn-nav-item" href="#exec" id="nav-exec">Executive</a>
-      <a class="pn-nav-item" href="#reports" id="nav-reports">Reports &amp; Downloads</a>
+    <nav class="pn-nav-items" id="pn-nav-items">
+      <a class="pn-nav-item active" href="#week-hub" id="nav-weekhub" onclick="event.preventDefault();window.show('#week-hub')">Week Hub</a>
+      <a class="pn-nav-item" href="#exec" id="nav-exec" onclick="event.preventDefault();window.show('#exec')">Executive</a>
+      <a class="pn-nav-item" href="#reports" id="nav-reports" onclick="event.preventDefault();window.show('#reports')">Reports &amp; Downloads</a>
     </nav>
     <div class="pn-user">
       <div class="pn-date" id="vo-today"></div>
@@ -4388,7 +4388,18 @@ window.addEventListener('state:ready', () => {
 
 window.addEventListener('hashchange', () => show(getRouteHash()));
 window.addEventListener('popstate', () => show(getRouteHash()));
-  show(getRouteHash()); // initial render
+  // Pinpoint 3.0: re-route initial show through new routing
+  (function(){
+    const _initHash = getRouteHash();
+    const _mapped = (_initHash === '#dashboard' || _initHash === '#operations' || _initHash === '#ops' || !_initHash || _initHash === '#')
+      ? '#week-hub' : _initHash;
+    if(typeof syncPinpointNav === 'function') {
+      if(_mapped === '#exec') syncPinpointNav('#exec');
+      else if(_mapped === '#reports') syncPinpointNav('#reports');
+      else syncPinpointNav('#week-hub');
+    }
+    show(_mapped);
+  })();
   try{ wireOpsDownloads(); }catch{}
   try{ wireOpsInsights(); }catch{}
 
@@ -5127,7 +5138,7 @@ window.addEventListener('popstate', () => show(getRouteHash()));
   </svg>
   <span class="pulse-name">Pulse</span>
   <div class="pulse-divider"></div>
-  <div class="pulse-input-wrap" id="pulse-input-display" onclick="togglePulse(true)">Ask anything about this week's ops…</div>
+  <input type="text" class="pulse-input-wrap" id="pulse-input-display" placeholder="Ask anything about this week's ops…" onclick="togglePulse(true)" style="outline:none;border:0.5px solid rgba(0,0,0,0.08);"/>
   <button class="pulse-send" onclick="togglePulse(true)" aria-label="Open Pulse">
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10M8 3l4 4-4 4" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
@@ -5201,7 +5212,7 @@ function pulseSuggest(btn){
 
   // Override hashchange to use patched show
   window.removeEventListener('hashchange', window.__pnHashChange);
-  window.__pnHashChange = ()=>window.show(getRouteHash ? getRouteHash() : location.hash);
+  window.__pnHashChange = ()=>{ const h = typeof getRouteHash==='function' ? getRouteHash() : location.hash; window.show(h); };
   window.addEventListener('hashchange', window.__pnHashChange);
 
   // Initial route on load
@@ -5517,11 +5528,4 @@ async function handleSignOut() {
 
 </body>
 </html>
-
-
-
-
-
-
-
 
