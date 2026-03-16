@@ -511,21 +511,15 @@ window.__clerkOnLoad = function() {
 <!-- ── Week Hub Header Tile ── -->
 <div id="wh-header" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:14px 20px;display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px;flex-wrap:wrap;">
 
-  <!-- Left: Brand + week date -->
-  <div style="display:flex;align-items:center;gap:14px;flex-shrink:0;">
-    <div>
+  <!-- Left: Brand + week date + capsules right after -->
+  <div style="display:flex;align-items:center;gap:14px;flex:1;min-width:0;flex-wrap:wrap;">
+    <div style="flex-shrink:0;">
       <div style="font-size:18px;font-weight:600;color:#1C1C1E;letter-spacing:-0.02em;line-height:1;">Week Hub</div>
       <input id="wh-week-display" type="date" style="font-size:10px;color:#AEAEB2;border:none;background:transparent;font-family:inherit;cursor:pointer;padding:0;margin-top:3px;outline:none;" onchange="if(typeof window.setWeek==='function')window.setWeek(this.value)"/>
     </div>
-    <!-- Prev/Next week -->
-    <div style="display:flex;gap:2px;">
-      <button onclick="var b=document.getElementById('flow-prev-week');if(b)b.click();" style="width:26px;height:26px;border:0.5px solid rgba(0,0,0,0.08);background:#F5F5F7;border-radius:7px;cursor:pointer;font-size:13px;color:#6E6E73;display:flex;align-items:center;justify-content:center;transition:all .15s;" title="Previous week">←</button>
-      <button onclick="var b=document.getElementById('flow-next-week');if(b)b.click();" style="width:26px;height:26px;border:0.5px solid rgba(0,0,0,0.08);background:#F5F5F7;border-radius:7px;cursor:pointer;font-size:13px;color:#6E6E73;display:flex;align-items:center;justify-content:center;transition:all .15s;" title="Next week">→</button>
-    </div>
+    <!-- Week capsules immediately after title -->
+    <div id="wh-capsules-display" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
   </div>
-
-  <!-- Center: Week capsules -->
-  <div id="wh-capsules-display" style="display:flex;gap:6px;flex:1;justify-content:center;flex-wrap:wrap;"></div>
 
   <!-- Right: Actions -->
   <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
@@ -554,7 +548,7 @@ window.__clerkOnLoad = function() {
   </div>
   <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;">
     <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px;">Units Applied</div>
-    <div id="wh-kpi-applied" style="font-size:24px;font-weight:600;color:#97DC21;letter-spacing:-0.03em;line-height:1;font-variant-numeric:tabular-nums;">—</div>
+    <div id="wh-kpi-applied" style="font-size:24px;font-weight:600;color:#1C1C1E;letter-spacing:-0.03em;line-height:1;font-variant-numeric:tabular-nums;">—</div>
     <div id="wh-kpi-applied-sub" style="font-size:10px;color:#6E6E73;margin-top:5px;">of — planned</div>
   </div>
   <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;">
@@ -1014,8 +1008,7 @@ function computeBinQA(ws, records=[], bins=[]) {
   function renderCapsules(baseISO, plannedTotal = 0, appliedTotal = 0, totalsByWeek = null) {
   const r = $('#capsules');
   if (!r) return;
-  r.classList.remove('hidden');
-  r.innerHTML = '';
+  r.innerHTML = ''; // keep hidden — wh-capsules-display mirrors this
 
   const list = [-7, 0, 7, 14, 21].map(n => addDaysISO(baseISO, n));
 
@@ -5351,7 +5344,7 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=64" defer></script>
+<script src="/public/flow_live_additive.js?v=65" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -5927,5 +5920,11 @@ async function handleSignOut() {
 
 </body>
 </html>
+
+
+
+
+
+
 
 
