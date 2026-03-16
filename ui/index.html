@@ -5153,31 +5153,152 @@ function togglePulse(open){
   else panel.classList.remove('open');
 }
 
+// ── Pulse: add message to chat ──
+function pulseAddMessage(text, role){
+  const chat = document.getElementById('pulse-chat');
+  if(!chat) return;
+  const from = role==='user' ? 'You' : 'Pulse';
+  const div = document.createElement('div');
+  div.className = 'pulse-msg ' + role;
+  div.innerHTML = '<div class="pulse-msg-from">'+from+'</div>'+text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+// ── Pulse: loading indicator ──
+function pulseShowLoading(){
+  const chat = document.getElementById('pulse-chat');
+  if(!chat) return null;
+  const div = document.createElement('div');
+  div.className = 'pulse-msg ai';
+  div.id = 'pulse-loading-msg';
+  div.innerHTML = '<div class="pulse-msg-from">Pulse</div><span style="display:flex;gap:3px;align-items:center;"><span style="width:5px;height:5px;border-radius:50%;background:#AEAEB2;animation:pulseDot 1.2s infinite 0s"></span><span style="width:5px;height:5px;border-radius:50%;background:#AEAEB2;animation:pulseDot 1.2s infinite .2s"></span><span style="width:5px;height:5px;border-radius:50%;background:#AEAEB2;animation:pulseDot 1.2s infinite .4s"></span></span>';
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+// ── Pulse: send message ──
+async function pulseSend(){
+  const input = document.getElementById('pulse-input-display');
+  if(!input) return;
+  const text = input.value.trim();
+  if(!text) return;
+  input.value = '';
+  togglePulse(true);
+  pulseAddMessage(text, 'user');
+  const loading = pulseShowLoading();
+
+  // Build context
+  const role = window._pnPulseRole || 'User';
+  const org  = document.getElementById('user-org-display')?.textContent || '';
+  const week = window.state?.weekStart || '';
+
+  try {
+    const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
+    let token = null;
+    if(window.Clerk?.session){ try{ token = await window.Clerk.session.getToken(); }catch(_){} }
+
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system: `You are Pulse, the AI operations assistant for VelOzity Pinpoint — a warehouse UID operations platform.
+Current user role: ${role}
+Current org: ${org}
+Current week: ${week}
+API base: ${apiBase}
+
+You help users understand their warehouse operations — throughput, PO status, exceptions, shipment tracking.
+Keep responses concise and actionable. Use numbers when available from context.
+${role==='Client'?'You can only discuss data relevant to this org. Do not reveal data from other orgs or admin-level views.':''}
+${role==='Facility'?'You can only discuss data relevant to this org. The Executive page is not available to your role.':''}
+Never perform write operations. You are read-only.
+If asked for something outside your scope, acknowledge and redirect to what you CAN help with.`,
+        messages: [{role:'user', content: text}]
+      })
+    });
+
+    if(loading) loading.remove();
+
+    if(!resp.ok){
+      const err = await resp.text();
+      pulseAddMessage('Sorry, I ran into an issue connecting. Please try again.', 'ai');
+      console.error('[Pulse] API error:', err);
+      return;
+    }
+
+    const data = await resp.json();
+    const reply = data.content?.find(b=>b.type==='text')?.text || 'No response.';
+    pulseAddMessage(reply, 'ai');
+
+  } catch(e){
+    if(loading) loading.remove();
+    pulseAddMessage('Sorry, something went wrong. Please try again.', 'ai');
+    console.error('[Pulse] error:', e);
+  }
+}
+
 // ── Pulse suggestion click ──
 function pulseSuggest(btn){
   const text = btn.textContent.trim();
+  const input = document.getElementById('pulse-input-display');
+  if(input){ input.value = text; }
   togglePulse(true);
-  const display = document.getElementById('pulse-input-display');
-  if(display) display.textContent = text;
-  // TODO: wire to Pulse AI API
+  pulseSend();
 }
+
+// ── Pulse: wire Enter key and send button ──
+document.addEventListener('DOMContentLoaded', function(){
+  const input = document.getElementById('pulse-input-display');
+  if(input){
+    input.addEventListener('keydown', function(e){
+      if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); pulseSend(); }
+    });
+    input.addEventListener('focus', function(){ togglePulse(true); });
+  }
+  const sendBtn = document.querySelector('.pulse-send');
+  if(sendBtn) sendBtn.addEventListener('click', pulseSend);
+});
+
+// Pulse dot animation style
+(function(){
+  const s=document.createElement('style');
+  s.textContent='@keyframes pulseDot{0%,80%,100%{transform:scale(0.6);opacity:.4}40%{transform:scale(1);opacity:1}}';
+  document.head.appendChild(s);
+})();
 
 // ── Nav routing: add week-hub and reports ──
 (function patchRouting(){
   const origShow = window.show;
+
+  // Helper: hide all pages
+  function _pnHideAll(){
+    ['page-dashboard','page-intake','page-exec','page-receiving','page-flow','page-reports'].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el){el.classList.add('hidden');el.style.display='none';}
+    });
+  }
+
+  // Helper: silently set hash without triggering our own hashchange listener
+  function _pnSetHash(h){
+    const clean = h.startsWith('#') ? h : '#'+h;
+    if(location.hash !== clean){
+      history.replaceState(null,'',clean);
+    }
+  }
 
   window.show = function(hash){
     let h = (hash||'#').trim();
     if(h==='#'||!h) h='#week-hub';
     if(h.startsWith('#/')) h='#'+h.slice(2);
 
-    // Handle new routes
-    if(h==='#week-hub'||h==='#dashboard'||h==='#operations'||h==='#ops'||h===''){
-      // Show ops (existing page-dashboard = Week Hub)
-      ['page-dashboard','page-intake','page-exec','page-receiving','page-flow','page-reports'].forEach(id=>{
-        const el=document.getElementById(id);
-        if(el){el.classList.add('hidden');el.style.display='none';}
-      });
+    // ── Week Hub ──
+    if(h==='#week-hub'||h==='#dashboard'||h==='#operations'||h==='#ops'){
+      _pnHideAll();
+      _pnSetHash('#dashboard'); // keep legacy hash so flow module stays happy
       const dash=document.getElementById('page-dashboard');
       if(dash){dash.classList.remove('hidden');dash.style.display='block';}
       if(typeof window.renderDashboard==='function'){try{window.renderDashboard();}catch(e){}}
@@ -5185,11 +5306,10 @@ function pulseSuggest(btn){
       return;
     }
 
+    // ── Reports ──
     if(h==='#reports'){
-      ['page-dashboard','page-intake','page-exec','page-receiving','page-flow','page-reports'].forEach(id=>{
-        const el=document.getElementById(id);
-        if(el){el.classList.add('hidden');el.style.display='none';}
-      });
+      _pnHideAll();
+      _pnSetHash('#reports');
       let rp=document.getElementById('page-reports');
       if(!rp){
         rp=document.createElement('section');
@@ -5204,10 +5324,32 @@ function pulseSuggest(btn){
       return;
     }
 
-    // For exec/receiving/intake/flow — delegate to original show()
+    // ── Executive ──
+    if(h==='#exec'){
+      _pnHideAll();
+      // Set hash FIRST so exec module's location.hash check passes
+      history.replaceState(null,'','#exec');
+      // Show the exec container
+      let ep=document.getElementById('page-exec');
+      if(!ep){
+        ep=document.createElement('section');
+        ep.id='page-exec';
+        const main=document.querySelector('main.vo-wrap')||document.querySelector('main');
+        if(main) main.appendChild(ep);
+      }
+      ep.classList.remove('hidden');
+      ep.style.display='block';
+      // Trigger exec module render — dispatch hashchange so its onHash listener fires
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+      // Also dispatch state:ready in case exec needs data
+      setTimeout(()=>window.dispatchEvent(new Event('state:ready')),100);
+      syncPinpointNav('#exec');
+      return;
+    }
+
+    // ── Receiving / Intake / Flow — delegate to original ──
+    _pnSetHash(h);
     if(typeof origShow==='function') origShow(h);
-    // Sync our nav after
-    if(h==='#exec') syncPinpointNav('#exec');
   };
 
   // Override hashchange to use patched show
@@ -5528,4 +5670,11 @@ async function handleSignOut() {
 
 </body>
 </html>
+
+
+
+
+
+
+
 
