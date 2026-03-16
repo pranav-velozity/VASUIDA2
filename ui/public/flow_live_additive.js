@@ -4104,8 +4104,8 @@ detail.innerHTML = [
       return;
     }
 
-    // default
-    detail.innerHTML = header('Flow', 'gray', 'Click a node above to see details.');
+    // default — leave empty so Week Hub can inject ops overview
+    detail.innerHTML = '<div id="wh-detail-placeholder"></div>';
   
 
     // Best-effort bind for Receiving full-screen button (only exists in Receiving view).
