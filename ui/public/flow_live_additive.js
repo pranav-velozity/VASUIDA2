@@ -4094,7 +4094,10 @@ detail.innerHTML = [
       return;
     }
 
-    // default — leave empty so Week Hub can inject ops overview
+    // default — inject ops overview directly if available (zero-blink)
+    if(typeof window.__whInjectOps === 'function'){
+      try{ window.__whInjectOps(); return; }catch(e){}
+    }
     detail.innerHTML = '<div id="wh-detail-placeholder"></div>';
   
 
