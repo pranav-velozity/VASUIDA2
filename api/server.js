@@ -243,6 +243,72 @@ app.get('/events/scan', (req, res) => {
 // --- Health ---
 app.get('/health', (req, res) => res.json({ ok: true, now: new Date().toISOString() }));
 
+// ── Pulse AI Proxy ──────────────────────────────────────────────────────────
+// Routes Pulse chat requests to Anthropic API server-side (avoids CORS).
+// Requires ANTHROPIC_API_KEY environment variable on Render.
+app.post('/pulse/chat',
+  authenticateRequest,
+  async (req, res) => {
+  try {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      return res.status(503).json({ error: 'Pulse not configured — ANTHROPIC_API_KEY missing' });
+    }
+
+    const { model, max_tokens, system, messages } = req.body;
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: 'messages array required' });
+    }
+
+    // Build role-aware system prompt server-side for security
+    const userRole = req.auth?.orgRole || '';
+    const roleLabel = {
+      'org:admin_auth':    'Admin',
+      'org:supplier_auth': 'Facility',
+      'org:client_auth':   'Client',
+      'org:api_auth':      'API'
+    }[userRole] || 'User';
+
+    const serverSystem = system || `You are Pulse, the AI operations assistant for VelOzity Pinpoint.
+Current user role: ${roleLabel}
+You help users understand warehouse operations — throughput, PO status, exceptions, shipment tracking.
+Keep responses concise and actionable.
+${userRole === 'org:client_auth' ? 'Only discuss data relevant to this org. Do not reveal other orgs data.' : ''}
+${userRole === 'org:supplier_auth' ? 'Only discuss data relevant to this org. Executive-level views are not available.' : ''}
+Never perform write operations. You are read-only.`;
+
+    const anthropicResp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: model || 'claude-sonnet-4-20250514',
+        max_tokens: Math.min(max_tokens || 1000, 2000),
+        system: serverSystem,
+        messages
+      })
+    });
+
+    if (!anthropicResp.ok) {
+      const err = await anthropicResp.text();
+      console.error('[Pulse] Anthropic error:', err);
+      return res.status(anthropicResp.status).json({ error: 'Pulse service error' });
+    }
+
+    const data = await anthropicResp.json();
+    return res.json(data);
+  } catch (e) {
+    console.error('[Pulse] proxy error:', e);
+    return res.status(500).json({ error: 'Pulse unavailable' });
+  }
+});
+// ── End Pulse AI Proxy ──────────────────────────────────────────────────────
+
+
+
 
 // ===== Flow Week API (facility-scoped, week-scoped) =====
 
