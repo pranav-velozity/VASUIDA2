@@ -5766,7 +5766,7 @@ async function refresh() {
           if (inp) inp.value = nextWs;
           UI.currentWs = nextWs;
           // Keep selection stable but safe
-          if (!UI.selection?.node) UI.selection = { node: 'receiving', sub: null };
+          if (!UI.selection?.node) UI.selection = { node: null, sub: null };
           refresh();
         } catch (e) {
           console.warn('[flow] week nav failed', e);
@@ -5836,8 +5836,8 @@ if (signoff.vasComplete) {
     }
 
     renderJourneyTop(ws, tz, receiving, vas, intl, manual);
-    // default selection if invalid
-    if (!UI.selection?.node || UI.selection.node === 'milk') UI.selection = { node: 'receiving', sub: null };
+    // default selection if invalid — null shows Week Totals (right tile) and 'Click a node' (detail)
+    if (UI.selection.node === 'milk') UI.selection = { node: null, sub: null };
     renderDetail(ws, tz, receiving, vas, intl, manual);
     renderRightTile(ws, tz, receiving, vas, intl, manual);
     highlightSelection();
