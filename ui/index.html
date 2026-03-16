@@ -138,10 +138,11 @@
 #flow-sub { display:none !important; }
 
 /* ── Week Hub: tighten flow/right tile heights, make detail tile prominent ── */
-#flow-journey svg { height: 440px !important; display:block; margin:0 auto; }
-@media (min-width: 1024px) { #flow-journey svg { height: 480px !important; } }
-#flow-journey { display:flex; justify-content:center; align-items:center; }
-#flow-top-tile { display:flex; flex-direction:column; align-items:stretch; }
+/* Flow visual: centered, fills tile */
+#flow-journey { width:100%; display:flex; justify-content:center; align-items:center; overflow:hidden; }
+#flow-journey svg { height: 520px !important; width:100% !important; display:block; }
+@media (min-width: 1024px) { #flow-journey svg { height: 560px !important; } }
+#flow-top-tile { overflow:hidden; }
 #flow-top-tile { padding: 8px 10px !important; }
 #flow-top-tile .flex.items-center.justify-between.mb-2 { margin-bottom: 6px !important; }
 /* Right tile: compact */
@@ -5104,11 +5105,12 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 (function whDetailOverlay(){
 
   // Mirror ops insights into flow-detail
-  function syncOpsToDetail(){
+  function syncOpsToDetail(overrideView){
     var detail = document.getElementById('flow-detail');
     if(!detail) return;
     // Trigger a fresh renderOpsInsights render first
-    var view = window._lastOpsView || 'overview';
+    var view = overrideView || window._lastOpsView || 'overview';
+    window._lastOpsView = view;
     if(typeof renderOpsInsights === 'function'){
       try{ renderOpsInsights(view); }catch(e){}
     }
@@ -5207,21 +5209,10 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     if(!pill) return;
     var view = pill.getAttribute('data-opsview');
     if(!view) return;
-    // Update active state
-    document.querySelectorAll('.wh-detail-pill').forEach(function(p){ p.classList.remove('ops-pill--active'); });
-    pill.classList.add('ops-pill--active');
     window._lastOpsView = view;
-    // Render ops insights
-    if(typeof renderOpsInsights === 'function'){ try{ renderOpsInsights(view); }catch(e){} }
-    // Mirror to detail tile — re-fetch mirror element in case DOM changed
-    var src = document.getElementById('ops-insights-content');
-    var mirror = document.getElementById('wh-ops-content-mirror');
-    if(src && mirror){
-      mirror.innerHTML = src.innerHTML;
-    } else if(src){
-      // Mirror element gone — re-sync full overview
-      syncOpsToDetail();
-    }
+    // Always rebuild the full detail pane with the new view
+    // This is reliable regardless of whether the mirror element exists
+    syncOpsToDetail(view);
   });
 
   // Watch for flow module replacing detail content (node click)
