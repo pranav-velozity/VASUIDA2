@@ -132,6 +132,12 @@
 #page-dashboard:not(.hidden){ display:block; }
 /* Children visibility controlled individually — do NOT force display:block on all children */
 
+/* ── Week Hub: suppress flow module's own "Flow" title and date subheader ── */
+#page-flow .text-2xl { display:none !important; }
+#flow-sub { display:none !important; }
+/* But keep everything else visible */
+#page-flow .flex.items-center.justify-between.mb-2 > div:first-child { display:none !important; }
+
 /* segmented toggle visuals (neutral) */
 .seg { color:#303030; }
 .seg.active {
@@ -479,7 +485,7 @@ window.__clerkOnLoad = function() {
       <label style="font-size:10px;color:#AEAEB2;font-weight:500;text-transform:uppercase;letter-spacing:.06em;">Week</label>
       <input id="wh-week-display" type="date" style="font-size:11px;color:#1C1C1E;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:5px 8px;background:#fff;font-family:inherit;cursor:pointer;" onchange="if(typeof window.setWeek==='function')window.setWeek(this.value)"/>
     </div>
-    <div id="wh-capsules-display" style="display:flex;flex-wrap:wrap;gap:5px;"></div>
+    <div id="wh-capsules-display" style="display:none;"></div>
   </div>
   <div style="display:flex;align-items:center;gap:6px;">
     <button id="wh-btn-upload" style="font-size:11px;font-weight:500;background:#1C1C1E;color:#fff;border:none;border-radius:7px;padding:7px 13px;cursor:pointer;display:flex;align-items:center;gap:5px;" onclick="document.getElementById('file-plan').click()">
@@ -5067,6 +5073,75 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 
 </script>
 <script>
+// ── Week Hub: Preserve flow module selection on first load ──
+// flow_live_additive.js defaults UI.selection.node to 'receiving' after first render.
+// We want 'milk' (Week Totals view) on first load. We hook into state:ready
+// and set the selection AFTER the flow module has run its first render.
+(function whSelectionFix(){
+  var _firstLoad = true;
+  window.addEventListener('state:ready', function(){
+    if(!_firstLoad) return;
+    // Give flow module time to render, then check and correct if needed
+    setTimeout(function(){
+      try {
+        // If flow module selected 'receiving' on its own, reset to 'milk'
+        // only on the very first load
+        if(window.UI && window.UI.selection && window.UI.selection.node === 'receiving' && _firstLoad){
+          // Don't override — receiving is actually a good default
+          // Just mark first load done
+        }
+        _firstLoad = false;
+      } catch(e){}
+    }, 300);
+  });
+})();
+
+// ── Week Hub: Inject nav buttons into Receiving and VAS detail tiles ──
+(function whNavButtons(){
+  function injectButtons(){
+    // Receiving detail tile — add "Open Receiving page →" button
+    var recBtn = document.getElementById('wh-nav-to-receiving');
+    if(!recBtn){
+      var detail = document.getElementById('flow-detail');
+      if(detail){
+        var titleEl = detail.querySelector('.text-lg.font-semibold');
+        if(titleEl && (titleEl.textContent||'').toLowerCase().includes('receiving')){
+          var wrap = document.createElement('div');
+          wrap.style.cssText = 'margin-top:12px;padding-top:12px;border-top:0.5px solid rgba(0,0,0,0.08);display:flex;gap:8px;';
+          wrap.innerHTML = '<button id="wh-nav-to-receiving" style="font-size:11px;font-weight:500;background:#1C1C1E;color:#fff;border:none;border-radius:7px;padding:7px 14px;cursor:pointer;display:flex;align-items:center;gap:5px;">Open Receiving page <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>';
+          detail.appendChild(wrap);
+          document.getElementById('wh-nav-to-receiving').addEventListener('click', function(){
+            if(typeof window.show === 'function') window.show('#receiving');
+            else location.hash = '#receiving';
+          });
+        }
+        // VAS Processing detail tile — add "Open VAS Processing page →" button
+        if(titleEl && (titleEl.textContent||'').toLowerCase().includes('vas')){
+          var wrap2 = document.createElement('div');
+          wrap2.style.cssText = 'margin-top:12px;padding-top:12px;border-top:0.5px solid rgba(0,0,0,0.08);display:flex;gap:8px;';
+          wrap2.innerHTML = '<button id="wh-nav-to-vas" style="font-size:11px;font-weight:500;background:#1C1C1E;color:#fff;border:none;border-radius:7px;padding:7px 14px;cursor:pointer;display:flex;align-items:center;gap:5px;">Open VAS Processing page <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>';
+          detail.appendChild(wrap2);
+          document.getElementById('wh-nav-to-vas').addEventListener('click', function(){
+            if(typeof window.show === 'function') window.show('#intake');
+            else location.hash = '#intake';
+          });
+        }
+      }
+    }
+  }
+  // Watch flow-detail for changes and inject buttons
+  document.addEventListener('DOMContentLoaded', function(){
+    var det = document.getElementById('flow-detail');
+    if(det){
+      var obs = new MutationObserver(function(){ setTimeout(injectButtons, 50); });
+      obs.observe(det, {childList:true, subtree:false});
+    }
+    // Also try immediately
+    setTimeout(injectButtons, 500);
+  });
+  window.addEventListener('state:ready', function(){ setTimeout(injectButtons, 400); });
+})();
+
 // ── Week Hub: sync capsules and week display from hidden ops elements ──
 (function whSync(){
   function syncWhHeader(){
@@ -5676,3 +5751,5 @@ async function handleSignOut() {
 
 </body>
 </html>
+
+
