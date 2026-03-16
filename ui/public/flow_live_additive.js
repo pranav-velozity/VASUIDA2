@@ -2234,7 +2234,7 @@ function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
       gray: '#f6d365',
       future: '#e5e7eb',
     }[level] || '#9ca3af');
-    const segStroke = (level, upcoming) => upcoming ? matte(levelColor(level), 0.28) : matte(levelColor(level), 0.50);
+    const segStroke = (level, upcoming) => upcoming ? matte(levelColor(level), 0.20) : levelColor(level);
     const statusText = (n) => {
       if (!n) return '—';
       if (n.disabled) return 'Future';
@@ -2350,11 +2350,11 @@ function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
       const nb = (fromId === 'milk') ? { level:'gray', upcoming:true } : (nodes[i+1] || { level:'gray', upcoming:true });
       const d = segPathBetween(fromId, toId);
       if (!d) continue;
-      segs += `<path d="${d}" fill="none" stroke="${segStroke(nb.level, nb.upcoming)}" stroke-width="20" stroke-linecap="round" stroke-linejoin="round" />`;
+      segs += `<path d="${d}" fill="none" stroke="${segStroke(nb.level, nb.upcoming)}" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />`;
     }
 
     // Ghost/base road behind colored segments (thicker, subtle)
-    const baseRoad = `<path d="${roadPath}" fill="none" stroke="rgba(0,0,0,0.1)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" />`;
+    const baseRoad = `<path d="${roadPath}" fill="none" stroke="#F2F2F7" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" />`;
 
     // Center dashed line
     const dashed = `<path d="${roadPath}" fill="none" stroke="#C7C7CC" stroke-width="1.5" stroke-dasharray="8 8" stroke-linecap="round" stroke-linejoin="round" />`;
