@@ -5199,9 +5199,9 @@ async function pulseSend(){
     let token = null;
     if(window.Clerk?.session){ try{ token = await window.Clerk.session.getToken(); }catch(_){} }
 
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    const resp = await fetch(apiBase + '/pulse/chat', {
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json', ...(token?{'Authorization':'Bearer '+token}:{})},
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 1000,
@@ -5327,7 +5327,7 @@ document.addEventListener('DOMContentLoaded', function(){
     // ── Executive ──
     if(h==='#exec'){
       _pnHideAll();
-      // Set hash FIRST so exec module's location.hash check passes
+      // Set hash so exec module location.hash checks pass
       history.replaceState(null,'','#exec');
       // Show the exec container
       let ep=document.getElementById('page-exec');
@@ -5339,10 +5339,11 @@ document.addEventListener('DOMContentLoaded', function(){
       }
       ep.classList.remove('hidden');
       ep.style.display='block';
-      // Trigger exec module render — dispatch hashchange so its onHash listener fires
-      window.dispatchEvent(new HashChangeEvent('hashchange'));
-      // Also dispatch state:ready in case exec needs data
-      setTimeout(()=>window.dispatchEvent(new Event('state:ready')),100);
+      // Trigger exec module directly — do NOT dispatch hashchange (causes infinite loop)
+      // exec_live_additive exposes _execTryRender via state:ready listener
+      setTimeout(function(){
+        window.dispatchEvent(new Event('state:ready'));
+      }, 50);
       syncPinpointNav('#exec');
       return;
     }
@@ -5354,7 +5355,16 @@ document.addEventListener('DOMContentLoaded', function(){
 
   // Override hashchange to use patched show
   window.removeEventListener('hashchange', window.__pnHashChange);
-  window.__pnHashChange = ()=>{ const h = typeof getRouteHash==='function' ? getRouteHash() : location.hash; window.show(h); };
+  var _pnShowBusy = false;
+  window.__pnHashChange = function(){
+    if(_pnShowBusy) return; // guard re-entrancy
+    const h = typeof getRouteHash==='function' ? getRouteHash() : location.hash;
+    // Only handle hashes our router owns — let exec/flow/receiving handle their own
+    if(h==='#exec'||h==='#reports'||h==='#week-hub'||h==='#dashboard'||h==='#operations'){
+      _pnShowBusy=true;
+      try{ window.show(h); }finally{ setTimeout(function(){_pnShowBusy=false;},100); }
+    }
+  };
   window.addEventListener('hashchange', window.__pnHashChange);
 
   // Initial route on load
