@@ -5167,65 +5167,55 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     obs.observe(detail, {childList:true});
   }
 
-  // ── Main strategy: watch flow-detail with MutationObserver ──
-  // The flow module writes "Click a node above to see details." as the default.
-  // As soon as we see that text appear, we replace it with ops overview.
-  // This is reliable regardless of timing — it fires after the flow module settles.
+  // ── Main strategy: watch for the sentinel placeholder ──
+  // flow_live_additive.js now writes <div id="wh-detail-placeholder"></div>
+  // as its default. We watch for this element and replace with ops overview.
   var _userSelectedNode = false;
   var _detailObserver = null;
+
+  function isShowingPlaceholder(){
+    return !!document.getElementById('wh-detail-placeholder');
+  }
 
   function startDetailWatcher(){
     var detail = document.getElementById('flow-detail');
     if(!detail || _detailObserver) return;
     _detailObserver = new MutationObserver(function(){
-      if(_userSelectedNode) return; // user clicked a node, leave it alone
-      var txt = (detail.textContent || '').trim();
-      // Flow module default text = "Click a node above to see details."
-      if(txt.startsWith('Click a node') || txt.length < 10){
-        // Small debounce — wait for flow module to finish writing
+      if(_userSelectedNode) return;
+      if(isShowingPlaceholder()){
         clearTimeout(window._whDetailTimer);
         window._whDetailTimer = setTimeout(function(){
-          if(!_userSelectedNode) syncOpsToDetail();
-        }, 80);
+          if(!_userSelectedNode && isShowingPlaceholder()) syncOpsToDetail();
+        }, 60);
       }
     });
-    _detailObserver.observe(detail, {childList:true, subtree:true, characterData:true});
+    _detailObserver.observe(detail, {childList:true});
   }
 
-  // Detect user node clicks — wire to all journey node click targets
+  // Detect user node clicks
   document.addEventListener('click', function(e){
-    var node = e.target.closest('[data-journey-node],[data-flow-node],[data-node]');
-    if(node){
-      _userSelectedNode = true;
-      // Reset flag when user navigates away and back
-    }
+    var node = e.target.closest('[data-journey-node],[data-flow-node]');
+    if(node) _userSelectedNode = true;
   });
 
   // Reset on Week Hub nav
   window.addEventListener('hashchange', function(){
     if(location.hash === '#flow'){
       _userSelectedNode = false;
-      _detailObserver = null; // will restart on next state:ready
+      _detailObserver = null;
       setTimeout(function(){
         startDetailWatcher();
-        syncOpsToDetail();
-      }, 400);
+        if(isShowingPlaceholder()) syncOpsToDetail();
+      }, 300);
     }
   });
 
-  // Start watching on first state:ready
+  // Start on state:ready
   window.addEventListener('state:ready', function(){
     setTimeout(function(){
       startDetailWatcher();
-      // Also try immediate inject if already showing default
-      var detail = document.getElementById('flow-detail');
-      if(detail){
-        var txt = (detail.textContent||'').trim();
-        if(txt.startsWith('Click a node') || txt.length < 10){
-          if(!_userSelectedNode) syncOpsToDetail();
-        }
-      }
-    }, 200);
+      if(!_userSelectedNode && isShowingPlaceholder()) syncOpsToDetail();
+    }, 150);
   });
 })();
 
@@ -5884,11 +5874,5 @@ async function handleSignOut() {
 
 </body>
 </html>
-
-
-
-
-
-
 
 
