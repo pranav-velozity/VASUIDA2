@@ -2376,8 +2376,9 @@ function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
 
       const st = statusText(n);
       const stLevel = statusLevel(n);
-      const stBg = matte(levelColor(stLevel), 0.14);
-      const stFg = matte(levelColor(stLevel), 0.92);
+      const stBg = stLevel === 'green' ? 'rgba(200,249,2,0.18)' : matte(levelColor(stLevel), 0.14);
+      // Green text is unreadable — use dark text for on-track, colored for risk/delayed
+      const stFg = stLevel === 'green' ? '#1C1C1E' : (stLevel === 'gray' || stLevel === 'future' ? '#6E6E73' : matte(levelColor(stLevel), 0.92));
 
       // Status pill below icon
       const pillW = Math.max(58, 14 + (String(st).length * 7));
