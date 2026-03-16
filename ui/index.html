@@ -216,11 +216,27 @@
 </style>
 
 <!-- 🔐 Clerk Authentication With New Publishable key  -->
+<script>
+// Safe Clerk onload — waits for initializeClerkAuth to be defined before calling it
+// Prevents ReferenceError when Clerk loads before body scripts finish parsing
+window.__clerkOnLoad = function() {
+  if (typeof initializeClerkAuth === 'function') {
+    initializeClerkAuth();
+  } else {
+    var t = setInterval(function() {
+      if (typeof initializeClerkAuth === 'function') {
+        clearInterval(t);
+        initializeClerkAuth();
+      }
+    }, 50);
+  }
+};
+</script>
 <script 
   async
   crossorigin="anonymous"
   data-clerk-publishable-key="pk_live_Y2xlcmsudmVsb3ppdHkuY29tLmF1JA"
-  onload="initializeClerkAuth()"
+  onload="window.__clerkOnLoad()"
   src="https://clerk.velozity.com.au/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"
   type="text/javascript"
 ></script>
