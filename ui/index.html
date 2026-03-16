@@ -4135,7 +4135,7 @@ function renderOpsInsights(view){
     const minPlanned = Math.min(...tickets.map(t=>t.planned||0), maxPlanned);
 
     // scale helpers (work in SVG viewBox coordinates)
-    const W=700, H=700;
+    const W=1000, H=520;
     const padL=70, padR=30, padT=30, padB=70;
     const x0=padL, x1=W-padR, y0=H-padB, y1=padT;
 
@@ -4212,7 +4212,7 @@ function renderOpsInsights(view){
           <div class="text-gray-600 mt-0.5" id="ops-ztt-body"></div>
         </div>
 
-        <svg id="ops-zendesk-matrix" class="w-full rounded-xl border bg-white" style="width:100%;height:auto;" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+        <svg id="ops-zendesk-matrix" class="w-full rounded-xl border bg-white" style="width:100%;height:480px;" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
 
           <!-- axes -->
           <line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y0}" stroke="rgba(148,163,184,0.6)" stroke-width="1"></line>
