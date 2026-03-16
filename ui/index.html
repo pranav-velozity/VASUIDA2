@@ -4135,123 +4135,73 @@ function renderOpsInsights(view){
     const minPlanned = Math.min(...tickets.map(t=>t.planned||0), maxPlanned);
 
     // scale helpers (work in SVG viewBox coordinates)
-    const W=1000, H=520;
-    const padL=70, padR=30, padT=30, padB=70;
-    const x0=padL, x1=W-padR, y0=H-padB, y1=padT;
+    // ── Zendesk bubble chart — sorted table layout ──
+    // Sort tickets by remaining units desc, show as a clean ranked list with visual bars
+    const sorted = [...tickets].sort((a,b)=>(b.planned-b.applied)-(a.planned-a.applied));
 
-    const scaleX = (v)=>{
-      if(maxPlanned===minPlanned) return (x0+x1)/2;
-      // log scale keeps extremes readable
-      const lv = Math.log10(Math.max(1, v));
-      const lmin = Math.log10(Math.max(1, minPlanned));
-      const lmax = Math.log10(Math.max(1, maxPlanned));
-      const t = (lv - lmin) / (lmax - lmin || 1);
-      return x0 + t*(x1-x0);
+    const statusColor = (pct)=>{
+      if(pct>=90) return '#97DC21';   // brand green
+      if(pct>=75) return '#F5BD25';   // brand amber
+      return '#D61A3C';               // brand red
     };
-    const scaleY = (risk)=>{
-      const t = Math.max(0, Math.min(1, risk));
-      return y0 - t*(y0-y1);
+    const statusLabel = (pct)=>{
+      if(pct>=90) return 'On track';
+      if(pct>=75) return 'At risk';
+      return 'Delayed';
     };
-    const scaleR = (v)=>{
-      const t = Math.sqrt(Math.max(0, v) / maxPlanned);
-      return 18 + t*46; // 18..64
+    const modeIcon = (mode)=>{
+      if(mode==='air') return '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.5H2l4-9 4 4 4-4z" stroke-linecap="round" stroke-linejoin="round"/><path d="M6.5 16.5v3M17.5 16.5v3" stroke-linecap="round"/></svg>';
+      if(mode==='sea') return '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l.9-4.5L12 9l8.1 3.5.9 4.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 17c2 2 4 2 6 0s4-2 6 0 4 2 6 0" stroke-linecap="round"/></svg>';
+      return '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>';
     };
 
-    // collision-lite: single pass nudging to reduce heavy overlaps
-    const placed = [];
-    const bubbles = tickets.map(t=>{
-      let cx = scaleX(t.planned), cy = scaleY(t.risk), r = scaleR(t.planned);
-      for(let i=0;i<placed.length;i++){
-        const o=placed[i];
-        const dx=cx-o.cx, dy=cy-o.cy;
-        const dist=Math.sqrt(dx*dx+dy*dy) || 1;
-        const minDist = r + o.r + 8;
-        if(dist < minDist){
-          const push = (minDist - dist);
-          cx += (dx/dist)*push*0.6;
-          cy += (dy/dist)*push*0.6;
-        }
-      }
-      // clamp
-      cx = Math.max(x0+r, Math.min(x1-r, cx));
-      cy = Math.max(y1+r, Math.min(y0-r, cy));
-      placed.push({cx,cy,r});
-      return {...t, cx, cy, r};
-    });
-
-    const riskStroke = (pct)=>{
-      if(pct>=90) return 'rgba(var(--ops-green-rgb),0.50)';        // green
-      if(pct>=75) return 'rgba(var(--ops-yellow-rgb),0.60)';        // amber
-      return 'rgba(220,38,38,0.55)';                    // red
-    };
-    const fillFor = (pct)=>{
-      // Light, matte green; intensity tracks completion %
-      const a = 0.12 + 0.33*(pct/100);
-      return `rgba(var(--ops-green-rgb),${a.toFixed(3)})`;
-    };
-    const iconFor = (mode)=>{
-      if(mode==='air') return '✈';
-      if(mode==='sea') return '🚢';
-      return '◻';
-    };
-
-    // Build SVG
     root.innerHTML = `
-      <div class="relative">
-        <div class="flex items-center justify-between mb-2">
-          <div class="text-xs text-gray-500">X: Volume (planned units) • Y: Risk (1 − completion)</div>
-          <div class="flex items-center gap-3 text-[11px] text-gray-500">
-            <span class="inline-flex items-center gap-1"><span class="w-2 h-2 rounded-full" style="background:rgba(var(--ops-green-rgb),0.25)"></span> Complete</span>
-            <span class="inline-flex items-center gap-1"><span class="w-2 h-2 rounded-full" style="background:rgba(var(--ops-yellow-rgb),0.30)"></span> At risk</span>
-            <span class="inline-flex items-center gap-1"><span class="w-2 h-2 rounded-full" style="background:rgba(239,68,68,0.25)"></span> Delayed</span>
+      <div style="font-family:inherit;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+          <div style="font-size:12px;color:#6E6E73;">Tickets ranked by remaining units — hover for detail</div>
+          <div style="display:flex;gap:14px;font-size:11px;color:#6E6E73;">
+            <span style="display:flex;align-items:center;gap:4px;"><span style="width:8px;height:8px;border-radius:50%;background:#97DC21;display:inline-block;"></span>On track</span>
+            <span style="display:flex;align-items:center;gap:4px;"><span style="width:8px;height:8px;border-radius:50%;background:#F5BD25;display:inline-block;"></span>At risk</span>
+            <span style="display:flex;align-items:center;gap:4px;"><span style="width:8px;height:8px;border-radius:50%;background:#D61A3C;display:inline-block;"></span>Delayed</span>
           </div>
         </div>
-
-        <div id="ops-zendesk-tooltip" class="pointer-events-none hidden absolute z-20 bg-white border rounded-lg shadow px-3 py-2 text-xs">
-          <div class="font-semibold" id="ops-ztt-title"></div>
-          <div class="text-gray-600 mt-0.5" id="ops-ztt-body"></div>
-        </div>
-
-        <svg id="ops-zendesk-matrix" class="w-full rounded-xl border bg-white" style="width:100%;height:480px;" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
-
-          <!-- axes -->
-          <line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y0}" stroke="rgba(148,163,184,0.6)" stroke-width="1"></line>
-          <line x1="${x0}" y1="${y0}" x2="${x0}" y2="${y1}" stroke="rgba(148,163,184,0.6)" stroke-width="1"></line>
-
-          <text x="${x0}" y="${y1-10}" font-size="12" fill="rgba(100,116,139,0.9)">Risk ↑</text>
-          <text x="${x1-120}" y="${y0+35}" font-size="12" fill="rgba(100,116,139,0.9)">Volume →</text>
-
-          ${bubbles.map((b,i)=>{
-            const ring = 2.5;
-            const circ = 2*Math.PI*(b.r-ring);
-            const dash = (circ*(b.pct/100)).toFixed(2);
-            const gap = (circ - dash).toFixed(2);
-            return `
-              <g class="ops-zb" data-k="${esc(b.k)}" data-planned="${b.planned}" data-received="${b.received}" data-applied="${b.applied}" data-pct="${b.pct.toFixed(1)}" data-mode="${b.mode}" transform="translate(0,0)">
-                <!-- outer risk ring (pops) -->
-                <circle cx="${b.cx.toFixed(2)}" cy="${b.cy.toFixed(2)}" r="${b.r.toFixed(2)}"
-                  fill="#ffffff" stroke="${riskStroke(b.pct)}" stroke-width="4"
-                  style="filter: drop-shadow(0 2px 6px rgba(15,23,42,0.18));"></circle>
-
-                <!-- base ring -->
-                <circle cx="${b.cx.toFixed(2)}" cy="${b.cy.toFixed(2)}" r="${(b.r-ring).toFixed(2)}"
-                  fill="#ffffff" stroke="rgba(100,116,139,0.22)" stroke-width="${ring}"></circle>
-
-                <!-- completion ring (applied color) -->
-                <circle cx="${b.cx.toFixed(2)}" cy="${b.cy.toFixed(2)}" r="${(b.r-ring).toFixed(2)}"
-                  fill="transparent" stroke="var(--ops-green)" stroke-width="${ring}"
-                  stroke-dasharray="${dash} ${gap}" transform="rotate(-90 ${b.cx.toFixed(2)} ${b.cy.toFixed(2)})"
-                  stroke-linecap="round"></circle>
-                <text x="${b.cx.toFixed(2)}" y="${(b.cy+4).toFixed(2)}" text-anchor="middle" font-size="${Math.max(14, Math.min(20, b.r/2)).toFixed(0)}" fill="rgba(15,23,42,0.85)">${iconFor(b.mode)}</text>
-                <text x="${b.cx.toFixed(2)}" y="${(b.cy + b.r + 14).toFixed(2)}" text-anchor="middle" font-size="12" fill="rgba(100,116,139,0.9)">${esc(b.k)}</text>
-              </g>
-            `;
+        <div style="border:0.5px solid rgba(0,0,0,0.08);border-radius:10px;overflow:hidden;">
+          <div style="display:grid;grid-template-columns:100px 1fr 90px 80px 70px 80px;padding:7px 14px;background:#F5F5F7;border-bottom:0.5px solid rgba(0,0,0,0.06);">
+            <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;">Ticket</div>
+            <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;">Progress</div>
+            <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;text-align:right;">Planned</div>
+            <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;text-align:right;">Applied</div>
+            <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;text-align:right;">%</div>
+            <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;text-align:right;">Status</div>
+          </div>
+          ${sorted.slice(0,15).map((t,i)=>{
+            const pct = t.pct||0;
+            const remaining = Math.max(0, Math.round(t.planned - t.applied));
+            const appPct = t.planned>0 ? Math.min(100, 100*t.applied/t.planned) : 0;
+            const recPct = t.planned>0 ? Math.min(100, 100*t.received/t.planned) : 0;
+            const col = statusColor(pct);
+            const bg = i%2===0 ? '#fff' : '#FAFAFA';
+            return `<div style="display:grid;grid-template-columns:100px 1fr 90px 80px 70px 80px;padding:9px 14px;background:${bg};border-bottom:0.5px solid rgba(0,0,0,0.05);align-items:center;">
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span style="color:#6E6E73;">${modeIcon(t.mode)}</span>
+                <span style="font-size:12px;font-weight:600;color:#1C1C1E;">${esc(t.k)}</span>
+              </div>
+              <div style="padding:0 12px;">
+                <div style="height:6px;background:rgba(0,0,0,0.06);border-radius:3px;overflow:hidden;position:relative;">
+                  <div style="position:absolute;left:0;top:0;height:6px;border-radius:3px;background:rgba(200,249,2,0.4);width:${recPct.toFixed(1)}%;"></div>
+                  <div style="position:absolute;left:0;top:0;height:6px;border-radius:3px;background:${col};width:${appPct.toFixed(1)}%;opacity:0.85;"></div>
+                </div>
+              </div>
+              <div style="font-size:12px;color:#1C1C1E;text-align:right;font-variant-numeric:tabular-nums;">${fmtInt(Math.round(t.planned))}</div>
+              <div style="font-size:12px;color:#1C1C1E;text-align:right;font-variant-numeric:tabular-nums;">${fmtInt(Math.round(t.applied))}</div>
+              <div style="font-size:12px;font-weight:600;text-align:right;color:${col};">${Math.round(pct)}%</div>
+              <div style="text-align:right;">
+                <span style="font-size:10px;font-weight:500;padding:3px 7px;border-radius:20px;background:${col}18;color:${col};border:0.5px solid ${col}40;">${statusLabel(pct)}</span>
+              </div>
+            </div>`;
           }).join('')}
-        </svg>
-
-        <div class="text-[11px] text-gray-500 mt-2">
-          Bubble size = total planned units. Fill intensity = % complete. Outline indicates risk band. Hover for details.
         </div>
+        <div style="font-size:11px;color:#AEAEB2;margin-top:8px;">Showing top ${Math.min(15,sorted.length)} of ${sorted.length} tickets by remaining units</div>
       </div>
     `;
 
@@ -5952,6 +5902,11 @@ async function handleSignOut() {
 
 </body>
 </html>
+
+
+
+
+
 
 
 
