@@ -132,11 +132,13 @@
 #page-dashboard:not(.hidden){ display:block; }
 /* Children visibility controlled individually — do NOT force display:block on all children */
 
-/* ── Week Hub: suppress flow module's own "Flow" title and date subheader ── */
-#page-flow .text-2xl { display:none !important; }
-#flow-sub { display:none !important; }
-/* But keep everything else visible */
-#page-flow .flex.items-center.justify-between.mb-2 > div:first-child { display:none !important; }
+/* ── Week Hub: suppress flow module's own header row entirely ── */
+/* The "Flow / date" title, subheader, and ← → Reset Download PDF row
+   are all hidden — replaced by the Week Hub header above */
+#page-flow > div > div:first-child,
+#page-flow .flex.items-center.justify-between.mb-2 {
+  display: none !important;
+}
 
 /* segmented toggle visuals (neutral) */
 .seg { color:#303030; }
@@ -487,7 +489,15 @@ window.__clerkOnLoad = function() {
     </div>
     <div id="wh-capsules-display" style="display:none;"></div>
   </div>
-  <div style="display:flex;align-items:center;gap:6px;">
+  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+    <!-- Flow week nav buttons (proxy to hidden flow-prev-week / flow-next-week) -->
+    <div style="display:flex;gap:4px;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:9px;padding:3px;">
+      <button onclick="var b=document.getElementById('flow-prev-week');if(b)b.click();" style="width:28px;height:28px;border:none;background:transparent;border-radius:6px;cursor:pointer;font-size:14px;color:#1C1C1E;display:flex;align-items:center;justify-content:center;" title="Previous week">←</button>
+      <button onclick="var b=document.getElementById('flow-next-week');if(b)b.click();" style="width:28px;height:28px;border:none;background:transparent;border-radius:6px;cursor:pointer;font-size:14px;color:#1C1C1E;display:flex;align-items:center;justify-content:center;" title="Next week">→</button>
+    </div>
+    <button onclick="var b=document.getElementById('flow-reset');if(b)b.click();" style="font-size:11px;font-weight:500;background:#F5F5F7;color:#1C1C1E;border:0.5px solid rgba(0,0,0,0.08);border-radius:7px;padding:6px 11px;cursor:pointer;">Reset view</button>
+    <button onclick="var b=document.getElementById('flow-download-pdf');if(b)b.click();" style="font-size:11px;font-weight:500;background:#F5F5F7;color:#1C1C1E;border:0.5px solid rgba(0,0,0,0.08);border-radius:7px;padding:6px 11px;cursor:pointer;">Download PDF</button>
+    <div style="width:0.5px;height:20px;background:rgba(0,0,0,0.08);margin:0 2px;"></div>
     <button id="wh-btn-upload" style="font-size:11px;font-weight:500;background:#1C1C1E;color:#fff;border:none;border-radius:7px;padding:7px 13px;cursor:pointer;display:flex;align-items:center;gap:5px;" onclick="document.getElementById('file-plan').click()">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m0-12 4 4m-4-4-4 4M4 17h16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" stroke-linecap="round" stroke-linejoin="round"/></svg>
       Upload Plan
@@ -5073,26 +5083,84 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 
 </script>
 <script>
-// ── Week Hub: Preserve flow module selection on first load ──
-// flow_live_additive.js defaults UI.selection.node to 'receiving' after first render.
-// We want 'milk' (Week Totals view) on first load. We hook into state:ready
-// and set the selection AFTER the flow module has run its first render.
-(function whSelectionFix(){
-  var _firstLoad = true;
+// ── Week Hub: Ops overview overlay in detail tile on first load ──
+// flow_live_additive.js always renders 'receiving' detail on first render.
+// We want the ops overview (Insights) to show instead on page load.
+// Strategy: after flow renders, inject ops overview HTML into flow-detail.
+// When user clicks a milestone node, flow-detail is replaced — that's correct.
+(function whDetailOverlay(){
+  var _overlayActive = false;
+  var _overlayEl = null;
+
+  function buildOverlayHTML(){
+    // Pull content from ops-insights-content (rendered by renderOpsInsights)
+    var src = document.getElementById('ops-insights-content');
+    if(src && src.innerHTML && src.innerHTML.trim().length > 20){
+      return src.innerHTML;
+    }
+    // Fallback: show a simple week summary from available state data
+    var plan = (window.state && window.state.plan) ? window.state.plan : [];
+    var planned = plan.reduce(function(s,p){return s+(Number(p.target_qty)||0);},0);
+    return '<div style="padding:12px 0;">' +
+      '<div style="font-size:14px;font-weight:500;color:#1C1C1E;margin-bottom:12px;">Week Overview</div>' +
+      '<div style="font-size:12px;color:#6E6E73;">Select a milestone node above to see details, or use the Insights view below.</div>' +
+      '<div style="margin-top:16px;font-size:12px;color:#1C1C1E;"><strong>Planned this week:</strong> ' + planned.toLocaleString() + ' units</div>' +
+      '</div>';
+  }
+
+  function injectOverlay(){
+    var detail = document.getElementById('flow-detail');
+    if(!detail) return;
+    if(_overlayActive) return; // already showing overlay
+    _overlayEl = document.createElement('div');
+    _overlayEl.id = 'wh-detail-overlay';
+    _overlayEl.style.cssText = 'padding:4px 0;';
+    _overlayEl.innerHTML = buildOverlayHTML();
+    // Replace detail content with overlay
+    detail.innerHTML = '';
+    detail.appendChild(_overlayEl);
+    _overlayActive = true;
+  }
+
+  function removeOverlay(){
+    _overlayActive = false;
+    _overlayEl = null;
+  }
+
+  // Watch flow-detail: when flow module replaces content (node click),
+  // the overlay is gone — mark it inactive
+  function setupDetailObserver(){
+    var detail = document.getElementById('flow-detail');
+    if(!detail) return;
+    var obs = new MutationObserver(function(){
+      // If wh-detail-overlay no longer exists, user clicked a node
+      if(!document.getElementById('wh-detail-overlay')){
+        removeOverlay();
+      }
+    });
+    obs.observe(detail, {childList:true});
+  }
+
+  // On state:ready: after flow module renders (500ms), inject overlay
+  var _firstRender = true;
   window.addEventListener('state:ready', function(){
-    if(!_firstLoad) return;
-    // Give flow module time to render, then check and correct if needed
+    if(!_firstRender) return;
     setTimeout(function(){
-      try {
-        // If flow module selected 'receiving' on its own, reset to 'milk'
-        // only on the very first load
-        if(window.UI && window.UI.selection && window.UI.selection.node === 'receiving' && _firstLoad){
-          // Don't override — receiving is actually a good default
-          // Just mark first load done
-        }
-        _firstLoad = false;
-      } catch(e){}
-    }, 300);
+      if(_firstRender){
+        _firstRender = false;
+        injectOverlay();
+        setupDetailObserver();
+      }
+    }, 600);
+  });
+
+  // Re-inject overlay when user navigates back to Week Hub
+  window.addEventListener('hashchange', function(){
+    var h = location.hash;
+    if(h === '#flow' || h === '#week-hub' || h === '#dashboard'){
+      _firstRender = true;
+      _overlayActive = false;
+    }
   });
 })();
 
@@ -5751,5 +5819,11 @@ async function handleSignOut() {
 
 </body>
 </html>
+
+
+
+
+
+
 
 
