@@ -138,8 +138,10 @@
 #flow-sub { display:none !important; }
 
 /* ── Week Hub: tighten flow/right tile heights, make detail tile prominent ── */
-#flow-journey svg { height: 380px !important; }
-@media (min-width: 1024px) { #flow-journey svg { height: 400px !important; } }
+#flow-journey svg { height: 440px !important; display:block; margin:0 auto; }
+@media (min-width: 1024px) { #flow-journey svg { height: 480px !important; } }
+#flow-journey { display:flex; justify-content:center; align-items:center; }
+#flow-top-tile { display:flex; flex-direction:column; align-items:stretch; }
 #flow-top-tile { padding: 8px 10px !important; }
 #flow-top-tile .flex.items-center.justify-between.mb-2 { margin-bottom: 6px !important; }
 /* Right tile: compact */
@@ -5141,7 +5143,8 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     detail.innerHTML = '';
     detail.appendChild(wrap);
   }
-  // Expose for pill onclick
+  // Expose globally — flow module calls this directly to avoid blink
+  window.__whInjectOps = syncOpsToDetail;
   window.whDetailOverlay_sync = syncOpsToDetail;
 
   // Wire fullscreen button for ops insights
@@ -5152,9 +5155,9 @@ window.addEventListener('popstate', () => show(getRouteHash()));
       if(!src) return;
       var modal = document.createElement('div');
       modal.id = 'wh-insights-modal';
-      modal.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.45);display:flex;align-items:flex-start;justify-content:center;padding:40px 24px;overflow-y:auto;';
+      modal.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.5);display:flex;align-items:flex-start;justify-content:center;padding:20px 16px;overflow-y:auto;';
       var card = document.createElement('div');
-      card.style.cssText = 'background:#fff;border-radius:14px;width:100%;max-width:1100px;padding:24px;position:relative;min-height:400px;';
+      card.style.cssText = 'background:#fff;border-radius:14px;width:100%;max-width:1400px;padding:28px 32px;position:relative;min-height:600px;';
       // Pills row
       var pillsHTML = '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:16px;" id="wh-modal-pills">'
         + [{v:'overview',l:'Overview'},{v:'supplier',l:'Facility'},{v:'facility',l:'Facility'},{v:'zendesk',l:'Zendesk'},{v:'freight',l:'Freight'},{v:'carton',l:'Carton'}].map(function(p){
@@ -5198,26 +5201,27 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     if(src && mc) mc.innerHTML = src.innerHTML;
   });
 
-  // Wire cloned pill clicks via event delegation on flow-detail
+  // Wire cloned pill clicks via event delegation
   document.addEventListener('click', function(e){
     var pill = e.target.closest('.wh-detail-pill');
     if(!pill) return;
     var view = pill.getAttribute('data-opsview');
     if(!view) return;
-    // Update active state on cloned pills
+    // Update active state
     document.querySelectorAll('.wh-detail-pill').forEach(function(p){ p.classList.remove('ops-pill--active'); });
     pill.classList.add('ops-pill--active');
-    // Also sync original pills
-    document.querySelectorAll('.ops-pill').forEach(function(p){
-      if(p.getAttribute('data-opsview') === view) p.classList.add('ops-pill--active');
-      else p.classList.remove('ops-pill--active');
-    });
-    // Render and mirror
     window._lastOpsView = view;
+    // Render ops insights
     if(typeof renderOpsInsights === 'function'){ try{ renderOpsInsights(view); }catch(e){} }
+    // Mirror to detail tile — re-fetch mirror element in case DOM changed
     var src = document.getElementById('ops-insights-content');
     var mirror = document.getElementById('wh-ops-content-mirror');
-    if(src && mirror) mirror.innerHTML = src.innerHTML;
+    if(src && mirror){
+      mirror.innerHTML = src.innerHTML;
+    } else if(src){
+      // Mirror element gone — re-sync full overview
+      syncOpsToDetail();
+    }
   });
 
   // Watch for flow module replacing detail content (node click)
@@ -5253,7 +5257,7 @@ window.addEventListener('popstate', () => show(getRouteHash()));
         clearTimeout(window._whDetailTimer);
         window._whDetailTimer = setTimeout(function(){
           if(!_userSelectedNode && isShowingPlaceholder()) syncOpsToDetail();
-        }, 20); // minimal delay — just enough for flow to finish writing
+        }, 0); // 0ms — inject synchronously on next tick
       }
     });
     _detailObserver.observe(detail, {childList:true});
