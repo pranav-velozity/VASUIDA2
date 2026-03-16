@@ -5115,7 +5115,10 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     if(!src || !src.innerHTML || src.innerHTML.trim().length < 20) return;
     // Build the detail panel with the ops pills bar + content
     var pillsBar = document.getElementById('ops-insights-subtitle')
-      ? ('<div style="font-size:13px;font-weight:500;color:#1C1C1E;margin-bottom:10px;">Insights</div>'
+      ? ('<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
+        + '<div style="font-size:13px;font-weight:500;color:#1C1C1E;">Insights</div>'
+        + '<button id="wh-insights-fullscreen" style="font-size:10px;color:#6E6E73;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:6px;padding:4px 10px;cursor:pointer;font-family:inherit;">Full screen</button>'
+        + '</div>'
         + '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:14px;" id="wh-ops-pills-clone">'
         + Array.from(document.querySelectorAll('.ops-pill')).map(function(p){
             var active = p.classList.contains('ops-pill--active') ? ' ops-pill--active' : '';
@@ -5133,6 +5136,60 @@ window.addEventListener('popstate', () => show(getRouteHash()));
   }
   // Expose for pill onclick
   window.whDetailOverlay_sync = syncOpsToDetail;
+
+  // Wire fullscreen button for ops insights
+  document.addEventListener('click', function(e){
+    if(e.target && e.target.id === 'wh-insights-fullscreen'){
+      // Build modal
+      var src = document.getElementById('ops-insights-content');
+      if(!src) return;
+      var modal = document.createElement('div');
+      modal.id = 'wh-insights-modal';
+      modal.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.45);display:flex;align-items:flex-start;justify-content:center;padding:40px 24px;overflow-y:auto;';
+      var card = document.createElement('div');
+      card.style.cssText = 'background:#fff;border-radius:14px;width:100%;max-width:1100px;padding:24px;position:relative;min-height:400px;';
+      // Pills row
+      var pillsHTML = '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:16px;" id="wh-modal-pills">'
+        + Array.from(document.querySelectorAll('.ops-pill')).map(function(p){
+            var active = p.classList.contains('ops-pill--active') ? ' ops-pill--active' : '';
+            var view = p.getAttribute('data-opsview') || '';
+            return '<button class="ops-pill wh-modal-pill' + active + '" data-opsview="' + view + '" style="height:28px;">' + p.innerHTML + '</button>';
+          }).join('') + '</div>';
+      card.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">'
+        + '<div style="font-size:16px;font-weight:600;color:#1C1C1E;">Insights</div>'
+        + '<button id="wh-modal-close" style="font-size:12px;color:#6E6E73;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:7px;padding:5px 12px;cursor:pointer;font-family:inherit;">Close</button>'
+        + '</div>'
+        + pillsHTML
+        + '<div id="wh-modal-content">' + src.innerHTML + '</div>';
+      modal.appendChild(card);
+      document.body.appendChild(modal);
+      // Close on backdrop click
+      modal.addEventListener('click', function(ev){
+        if(ev.target === modal || ev.target.id === 'wh-modal-close'){
+          modal.remove();
+        }
+      });
+    }
+  });
+
+  // Wire modal pill clicks
+  document.addEventListener('click', function(e){
+    var pill = e.target.closest('.wh-modal-pill');
+    if(!pill) return;
+    var view = pill.getAttribute('data-opsview');
+    if(!view) return;
+    document.querySelectorAll('.wh-modal-pill').forEach(function(p){ p.classList.remove('ops-pill--active'); });
+    pill.classList.add('ops-pill--active');
+    document.querySelectorAll('.ops-pill').forEach(function(p){
+      if(p.getAttribute('data-opsview') === view) p.classList.add('ops-pill--active');
+      else p.classList.remove('ops-pill--active');
+    });
+    window._lastOpsView = view;
+    if(typeof renderOpsInsights === 'function'){ try{ renderOpsInsights(view); }catch(e){} }
+    var src = document.getElementById('ops-insights-content');
+    var mc = document.getElementById('wh-modal-content');
+    if(src && mc) mc.innerHTML = src.innerHTML;
+  });
 
   // Wire cloned pill clicks via event delegation on flow-detail
   document.addEventListener('click', function(e){
@@ -5181,41 +5238,45 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     var detail = document.getElementById('flow-detail');
     if(!detail || _detailObserver) return;
     _detailObserver = new MutationObserver(function(){
+      // If user selected a node, stop — flow module content takes over
       if(_userSelectedNode) return;
+      // If ops overview is already showing, re-inject silently (no visible blink)
+      // by replacing innerHTML in-place rather than clearing the whole detail
       if(isShowingPlaceholder()){
         clearTimeout(window._whDetailTimer);
         window._whDetailTimer = setTimeout(function(){
           if(!_userSelectedNode && isShowingPlaceholder()) syncOpsToDetail();
-        }, 60);
+        }, 20); // minimal delay — just enough for flow to finish writing
       }
     });
     _detailObserver.observe(detail, {childList:true});
   }
 
-  // Detect user node clicks
+  // Detect user node clicks — any journey node click = user chose a node
   document.addEventListener('click', function(e){
     var node = e.target.closest('[data-journey-node],[data-flow-node]');
     if(node) _userSelectedNode = true;
   });
 
-  // Reset on Week Hub nav
+  // Reset when navigating back to Week Hub
   window.addEventListener('hashchange', function(){
     if(location.hash === '#flow'){
       _userSelectedNode = false;
-      _detailObserver = null;
+      _detailObserver = null; // restart fresh
       setTimeout(function(){
         startDetailWatcher();
         if(isShowingPlaceholder()) syncOpsToDetail();
-      }, 300);
+      }, 200);
     }
   });
 
-  // Start on state:ready
+  // On state:ready — only start watcher, don't re-inject if already showing
   window.addEventListener('state:ready', function(){
-    setTimeout(function(){
-      startDetailWatcher();
-      if(!_userSelectedNode && isShowingPlaceholder()) syncOpsToDetail();
-    }, 150);
+    startDetailWatcher();
+    // Only inject if placeholder is currently showing (not if ops overview is already there)
+    if(!_userSelectedNode && isShowingPlaceholder()){
+      syncOpsToDetail();
+    }
   });
 })();
 
