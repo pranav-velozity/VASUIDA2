@@ -4948,22 +4948,20 @@ detail.innerHTML = [
             </div>
           </div>
 
-          <div class="rounded-xl border p-3">
-            <div class="flex items-center justify-between">
-              <div class="text-sm font-semibold text-gray-700 flex items-center gap-2">
-                ${iconContainer()} <span>Containers (week-level)</span>
+          <div class="rounded-xl border p-3" style="background:#F9F9FB;">
+            <div class="flex items-center gap-3">
+              <div style="flex:1;">
+                <div class="text-sm font-semibold text-gray-700 flex items-center gap-2">
+                  ${iconContainer()} <span>Containers</span>
+                  ${weekContainers.length ? `<span style="font-size:10px;background:#1C1C1E;color:#fff;border-radius:4px;padding:1px 6px;">${weekContainers.length}</span>` : ''}
+                </div>
+                <div class="text-[11px] text-gray-500 mt-1">
+                  ${weekContainers.length ? weekContainers.slice(0,3).map(c => escapeHtml(String(c.container_id||'').trim()||'—')).join(' · ') + (weekContainers.length > 3 ? ` +${weekContainers.length-3} more` : '') : 'No containers added yet.'}
+                </div>
               </div>
-              <div class="flex items-center gap-2">
-                <button id="flow-wc-add" class="text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Add</button>
-                <button id="flow-wc-save" class="text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Save containers</button>
-              </div>
-            </div>
-            <div id="flow-wc-list" class="mt-3 flex flex-col gap-2">
-              ${contRows}
-            </div>
-            <div id="flow-wc-save-msg" class="text-xs text-gray-500 mt-2"></div>
-            <div class="text-[11px] text-gray-500 mt-2">
-              One container can map to multiple lanes. These containers feed Last Mile immediately.
+              <button onclick="openContainerManager('${escapeAttr(ws)}', '${escapeAttr(tz)}')" style="font-size:11px;font-weight:500;background:#1C1C1E;color:#fff;border:none;border-radius:7px;padding:7px 12px;cursor:pointer;white-space:nowrap;font-family:inherit;">
+                Manage Containers →
+              </button>
             </div>
           </div>
           </div>
@@ -5094,137 +5092,8 @@ detail.innerHTML = [
       });
     });
 
-    // Week-level Containers UI (add/remove/save)
-    const wcAdd = detail.querySelector('#flow-wc-add');
-    if (wcAdd && !wcAdd.dataset.bound) {
-      wcAdd.dataset.bound = '1';
-      wcAdd.addEventListener('click', () => {
-        const list = detail.querySelector('#flow-wc-list');
-        if (!list) return;
 
-        // Clone lane options from the first existing multi-select (rendered from data) to keep UX stable.
-        const protoSelect = detail.querySelector('.flow-wc-lanes');
-        const optionsHtml = protoSelect ? protoSelect.innerHTML : '';
-
-        const uid = (typeof crypto !== 'undefined' && crypto.randomUUID)
-          ? crypto.randomUUID()
-          : _uid('c');
-
-        const wrap = document.createElement('div');
-        wrap.className = 'flow-wc-row grid grid-cols-12 gap-2 items-end border rounded-lg p-2';
-        wrap.dataset.uid = uid;
-
-        wrap.innerHTML = `
-          <label class="col-span-12 sm:col-span-5 text-xs">
-            <div class="text-[11px] text-gray-500 mb-1">Lanes on this container</div>
-            <select class="flow-wc-lanes w-full px-2 py-1.5 border rounded-lg bg-white" multiple></select>
-            <div class="text-[11px] text-gray-500 mt-1">Tip: hold Ctrl/⌘ to select multiple</div>
-          </label>
-          <label class="col-span-12 sm:col-span-4 text-xs">
-            <div class="text-[11px] text-gray-500 mb-1">Container / AWB (free text)</div>
-            <input class="flow-wc-id w-full px-2 py-1.5 border rounded-lg" value="" placeholder="e.g. TGHU1234567 / 176-12345678"/>
-          </label>
-          <label class="col-span-6 sm:col-span-1 text-xs">
-            <div class="text-[11px] text-gray-500 mb-1">Size</div>
-            <select class="flow-wc-size w-full px-2 py-1.5 border rounded-lg bg-white">
-              <option value="20">20</option>
-              <option value="40" selected>40</option>
-            </select>
-          </label>
-          <label class="col-span-6 sm:col-span-2 text-xs">
-            <div class="text-[11px] text-gray-500 mb-1">Vessel</div>
-            <input class="flow-wc-vessel w-full px-2 py-1.5 border rounded-lg" value="" placeholder="e.g. MAERSK XYZ"/>
-          </label>
-          <label class="col-span-12 text-xs">
-            <div class="text-[11px] text-gray-500 mb-1">POs (optional, comma-separated)</div>
-            <input class="flow-wc-pos w-full px-2 py-1.5 border rounded-lg" value="" placeholder="WADA002089, WAAE002227"/>
-          </label>
-          <div class="col-span-12 flex justify-end">
-            <button class="flow-wc-remove text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Remove</button>
-          </div>
-        `;
-        list.appendChild(wrap);
-        const sel = wrap.querySelector('.flow-wc-lanes');
-        if (sel && optionsHtml) sel.innerHTML = optionsHtml;
-      });
-    }
-
-    detail.querySelectorAll('.flow-wc-remove').forEach(btn => {
-      if (btn.dataset.bound) return;
-      btn.dataset.bound = '1';
-      btn.addEventListener('click', (e) => {
-        e.preventDefault();
-        const row = btn.closest('.flow-wc-row');
-	      if (row) {
-	        // Track explicit removals so Save containers can delete them from the week store.
-	        try {
-	          const uid = String(row.dataset.uid || '').trim();
-	          if (uid) {
-	            window.__flowWcRemovedUids = window.__flowWcRemovedUids || new Set();
-	            window.__flowWcRemovedUids.add(uid);
-	          }
-	        } catch { /* ignore */ }
-	        row.remove();
-	      }
-      });
-    });
-
-    const wcSave = detail.querySelector('#flow-wc-save');
-    if (wcSave && !wcSave.dataset.bound) {
-      wcSave.dataset.bound = '1';
-      wcSave.addEventListener('click', () => {
-	        const state = loadIntlWeekContainers(ws);
-	        const updates = Array.from(detail.querySelectorAll('.flow-wc-row')).map(row => {
-          const uid = String(row.dataset.uid || '').trim() || _uid('c');
-          const container_id = String(row.querySelector('.flow-wc-id')?.value || '').trim();
-          const size_ft = String(row.querySelector('.flow-wc-size')?.value || '').trim();
-          const vessel = String(row.querySelector('.flow-wc-vessel')?.value || '').trim();
-          const pos = String(row.querySelector('.flow-wc-pos')?.value || '').trim();
-          const sel = row.querySelector('.flow-wc-lanes');
-          const lane_keys = sel && sel.options
-            ? uniqNonEmpty(Array.from(sel.options).filter(o => o.selected).map(o => o.value))
-            : [];
-          return {
-	            ...(state.containers || []).find(c => String(c.container_uid || c.uid || '').trim() === uid) || {},
-            container_uid: uid,
-            container_id,
-            size_ft,
-            vessel,
-            pos,
-            lane_keys,
-          };
-	        }).filter(c => c.container_id || c.vessel || (c.lane_keys && c.lane_keys.length) || c.pos);
-
-	        // Merge updates into prior week containers to avoid accidental overwrites.
-	        const prior = (state && Array.isArray(state.containers)) ? state.containers.slice() : [];
-	        const priorByUid = new Map(prior.map(c => [String(c.container_uid || c.uid || '').trim(), c]));
-	        const removed = (window.__flowWcRemovedUids instanceof Set) ? window.__flowWcRemovedUids : new Set();
-	        const next = [];
-	        // Keep existing containers unless explicitly removed.
-	        for (const c of prior) {
-	          const uid = String(c.container_uid || c.uid || '').trim();
-	          if (uid && removed.has(uid)) continue;
-	          next.push(c);
-	        }
-	        // Apply updates (replace existing by uid, else append)
-	        for (const u of updates) {
-	          const uid = String(u.container_uid || u.uid || '').trim();
-	          if (!uid) continue;
-	          const idx = next.findIndex(c => String(c.container_uid || c.uid || '').trim() === uid);
-	          if (idx >= 0) next[idx] = { ...(next[idx] || {}), ...u, container_uid: uid };
-	          else next.push(u);
-	        }
-
-	        saveIntlWeekContainers(ws, next);
-	        try { if (window.__flowWcRemovedUids instanceof Set) window.__flowWcRemovedUids.clear(); } catch { /* ignore */ }
-        const msg = detail.querySelector('#flow-wc-save-msg');
-        if (msg) msg.textContent = 'Saved';
-        setTimeout(() => refresh(), 10);
-      });
-    }
-
-
-    const saveBtn = detail.querySelector('#flow-intl-save');
+        const saveBtn = detail.querySelector('#flow-intl-save');
     if (saveBtn && !saveBtn.dataset.bound) {
       saveBtn.dataset.bound = '1';
       saveBtn.addEventListener('click', () => {
