@@ -5443,7 +5443,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=100" defer></script>
+<script src="/public/flow_live_additive.js?v=101" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -6017,7 +6017,7 @@ function guardRoute(hash) {
   };
 })();
 
-async function updateUI(user, session) {
+function updateUI(user, session) {
   const loginScreen = document.getElementById('auth-login-screen');
   const appContent  = document.getElementById('app-content');
   const userNameEl  = document.getElementById('user-name-display');
@@ -6043,32 +6043,7 @@ async function updateUI(user, session) {
       userOrgEl.textContent = org?.name || '';
     }
 
-    // ── Set facility from org slug — used by flow module for backend saves ──
-    // org_slug in Clerk maps to the facility ID (e.g. VOZ_UL, VOZ_KY)
-    const orgSlug = user.organizationMemberships?.[0]?.organization?.slug || '';
-    if (orgSlug) {
-      if (!window.state) window.state = {};
-      window.state.facility = orgSlug;
-      window.state.org = orgSlug;
-      console.log('[Auth] facility set from org slug:', orgSlug);
-    } else {
-      // Fallback: try to read from JWT claims via Clerk session
-      try {
-        const token = await window.Clerk.session.getToken();
-        if (token) {
-          const payload = JSON.parse(atob(token.split('.')[1]));
-          const slug = payload.org_slug || payload.org_id || '';
-          if (slug) {
-            if (!window.state) window.state = {};
-            window.state.facility = slug;
-            window.state.org = slug;
-            console.log('[Auth] facility set from JWT claim:', slug);
-          }
-        }
-      } catch(e) {
-        console.warn('[Auth] could not read org_slug from JWT:', e.message);
-      }
-    }
+
 
     // Apply role gating after a short tick so DOM is settled
     setTimeout(() => applyPNRoleGating(roleKey), 0);
