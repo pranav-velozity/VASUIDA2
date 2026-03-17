@@ -377,25 +377,16 @@ function iconContainer() {
 // Guardrail: when we "prime" from backend we suppress write-through to avoid loops.
 function getFacility() {
   try {
+    // 1. Plan data is always authoritative — facility_name from uploaded plan
+    const planFac = (window.state && Array.isArray(window.state.plan))
+      ? window.state.plan.map(p => String(p.facility_name || p.facility || '').trim()).find(Boolean)
+      : '';
+    if (planFac) return planFac;
+    // 2. Cached in state.facility (set from plan on setWeek)
     const f = (window.state && window.state.facility) ? String(window.state.facility).trim() : '';
     if (f) return f;
-    // For admin users, facility may be empty — derive from org or use a default
-    // so backend saves don't fail with 400 "facility required"
-    const org = (window.state && window.state.org) ? String(window.state.org).trim() : '';
-    if (org) return org;
-    // Last resort: use the user's org from Clerk metadata
-    try {
-      const meta = window.Clerk?.user?.publicMetadata;
-      if (meta && meta.facility) return String(meta.facility).trim();
-      if (meta && meta.org) return String(meta.org).trim();
-    } catch {}
-    // Final fallback for admin users — use org from state or default
-    const stateOrg = (window.state && window.state.org) ? String(window.state.org).trim() : '';
-    if (stateOrg) return stateOrg;
-    // Use selected facility filter if available
-    const selFac = document.getElementById('facility-filter')?.value || '';
-    if (selFac && selFac !== 'all') return selFac;
-    return 'VOZ_KY'; // default facility for admin
+    // 3. No plan loaded yet — return empty (patchFlowWeek will skip until plan is loaded)
+    return '';
   } catch {
     return '';
   }
