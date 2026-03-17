@@ -150,13 +150,16 @@
 #page-flow > div > .mt-3.text-xs { display:none !important; }
 
 /* ── Week Hub: tighten flow/right tile heights, make detail tile prominent ── */
-/* Linear timeline — tight tile heights */
-#flow-journey { width:100%; display:flex; justify-content:center; align-items:center; overflow:visible; padding:8px 0; }
+/* Linear timeline — compressed tile heights */
+#flow-journey { width:100%; display:flex; justify-content:center; align-items:center; overflow:visible; padding:4px 0; }
 #flow-journey svg { height: 140px !important; width:100% !important; display:block; overflow:visible; }
-#flow-top-tile { overflow:visible; min-height:0 !important; }
+#flow-top-tile { overflow:visible !important; min-height:0 !important; height:auto !important; padding:12px 14px !important; }
 #flow-top-tile.flow-tile--nodes { background:#ffffff !important; border-color:rgba(0,0,0,0.08) !important; }
-/* Remove min-height from detail tile so layout compresses */
-#flow-detail { min-height:320px; }
+/* Compress grid row containing the pipeline tiles */
+#page-flow .lg\:col-span-2 { min-height:0 !important; height:auto !important; }
+#page-flow .grid.grid-cols-1.gap-3 > div:first-child { height:auto !important; }
+/* Detail tile */
+#flow-detail { min-height:300px; }
 #flow-top-tile { padding: 8px 10px !important; }
 #flow-top-tile .flex.items-center.justify-between.mb-2 { margin-bottom: 6px !important; }
 /* Right tile: compact */
@@ -582,7 +585,7 @@ window.__clerkOnLoad = function() {
   <!-- flow_live_additive.js will replace this content with its skeleton -->
 
 <!-- Pre-booked Containers Modal -->
-<div id="prebook-modal" class="hidden" style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.4);display:none;align-items:center;justify-content:center;" onclick="if(event.target===this)this.classList.add('hidden')">
+<div id="prebook-modal" class="hidden" style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.4);display:none;align-items:center;justify-content:center;" onclick="if(event.target===this){this.classList.add('hidden');this.style.display='none';}">
   <div style="background:#fff;border-radius:14px;padding:28px 32px;width:100%;max-width:380px;position:relative;" onclick="event.stopPropagation()">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
       <div style="font-size:16px;font-weight:600;color:#1C1C1E;">Pre-booked Containers</div>
@@ -5105,6 +5108,14 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 
 </script>
 <script>
+// ── Pre-booked containers modal opener ──
+window.__openPrebookModal = function(){
+  var m = document.getElementById('prebook-modal');
+  if(!m) return;
+  m.classList.remove('hidden');
+  m.style.display = 'flex';
+};
+
 // ── Week Hub: Ops Insights in detail tile ──
 // On first render and whenever no node is selected, we mirror ops insights
 // into #flow-detail. When user clicks a node the flow module overwrites it.
@@ -5386,7 +5397,7 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=66" defer></script>
+<script src="/public/flow_live_additive.js?v=67" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -5962,6 +5973,10 @@ async function handleSignOut() {
 
 </body>
 </html>
+
+
+
+
 
 
 
