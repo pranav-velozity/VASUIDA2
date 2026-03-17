@@ -2257,11 +2257,9 @@ const [plan, summary, receiving] = await Promise.all([
   fetchReceiving(ws)
 ]);
 state.plan = Array.isArray(plan) ? plan : [];
-// Extract facility from plan rows so flow module can save to backend
-if (!state.facility) {
-  const planFac = (state.plan || []).map(p => String(p.facility_name || p.facility || '').trim()).find(Boolean);
-  if (planFac) state.facility = planFac;
-}
+// Always extract facility from plan rows — plan data is authoritative
+const planFac = (state.plan || []).map(p => String(p.facility_name || p.facility || '').trim()).find(Boolean);
+if (planFac) state.facility = planFac;
 
 // Summary-first: for normal dashboard operation we keep only PO rollups.
 // (Raw records are loaded only for explicit drilldowns.)
@@ -4482,6 +4480,13 @@ window.addEventListener('popstate', () => show(getRouteHash()));
     window.setWeek = async function () {
       var r = await oldSetWeek.apply(this, arguments);
       // At this point Ops has updated window.state.{weekStart, plan, records, bins}
+      // Re-derive facility from plan rows if still not set
+      if (!window.state?.facility) {
+        const planFac = (window.state?.plan || [])
+          .map(function(p){ return String(p.facility_name || p.facility || '').trim(); })
+          .find(Boolean);
+        if (planFac && window.state) window.state.facility = planFac;
+      }
       window.dispatchEvent(new Event('state:ready'));
       return r;
     };
@@ -5438,7 +5443,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=98" defer></script>
+<script src="/public/flow_live_additive.js?v=100" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -6012,7 +6017,7 @@ function guardRoute(hash) {
   };
 })();
 
-function updateUI(user, session) {
+async function updateUI(user, session) {
   const loginScreen = document.getElementById('auth-login-screen');
   const appContent  = document.getElementById('app-content');
   const userNameEl  = document.getElementById('user-name-display');
@@ -6036,6 +6041,33 @@ function updateUI(user, session) {
     if (userOrgEl) {
       const org = user.organizationMemberships?.[0]?.organization;
       userOrgEl.textContent = org?.name || '';
+    }
+
+    // ── Set facility from org slug — used by flow module for backend saves ──
+    // org_slug in Clerk maps to the facility ID (e.g. VOZ_UL, VOZ_KY)
+    const orgSlug = user.organizationMemberships?.[0]?.organization?.slug || '';
+    if (orgSlug) {
+      if (!window.state) window.state = {};
+      window.state.facility = orgSlug;
+      window.state.org = orgSlug;
+      console.log('[Auth] facility set from org slug:', orgSlug);
+    } else {
+      // Fallback: try to read from JWT claims via Clerk session
+      try {
+        const token = await window.Clerk.session.getToken();
+        if (token) {
+          const payload = JSON.parse(atob(token.split('.')[1]));
+          const slug = payload.org_slug || payload.org_id || '';
+          if (slug) {
+            if (!window.state) window.state = {};
+            window.state.facility = slug;
+            window.state.org = slug;
+            console.log('[Auth] facility set from JWT claim:', slug);
+          }
+        }
+      } catch(e) {
+        console.warn('[Auth] could not read org_slug from JWT:', e.message);
+      }
     }
 
     // Apply role gating after a short tick so DOM is settled
