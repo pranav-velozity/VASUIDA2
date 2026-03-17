@@ -378,7 +378,24 @@ function iconContainer() {
 function getFacility() {
   try {
     const f = (window.state && window.state.facility) ? String(window.state.facility).trim() : '';
-    return f; // <-- no hardcoded default
+    if (f) return f;
+    // For admin users, facility may be empty — derive from org or use a default
+    // so backend saves don't fail with 400 "facility required"
+    const org = (window.state && window.state.org) ? String(window.state.org).trim() : '';
+    if (org) return org;
+    // Last resort: use the user's org from Clerk metadata
+    try {
+      const meta = window.Clerk?.user?.publicMetadata;
+      if (meta && meta.facility) return String(meta.facility).trim();
+      if (meta && meta.org) return String(meta.org).trim();
+    } catch {}
+    // Final fallback for admin users — use org from state or default
+    const stateOrg = (window.state && window.state.org) ? String(window.state.org).trim() : '';
+    if (stateOrg) return stateOrg;
+    // Use selected facility filter if available
+    const selFac = document.getElementById('facility-filter')?.value || '';
+    if (selFac && selFac !== 'all') return selFac;
+    return 'VOZ_KY'; // default facility for admin
   } catch {
     return '';
   }
@@ -1879,15 +1896,19 @@ function computeManualNodeStatuses(ws, tz) {
           '<div id="fcm-tickets" style="display:flex;flex-direction:column;gap:6px;">' +
             uniqueTickets.map(t => {
               const checked = assignedTickets.has(t.ticket);
-              const modeIcon = t.freight === 'Air' ?
-                '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/></svg>' :
-                '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20a2.4 2.4 0 0 0 2 1 2.4 2.4 0 0 0 2-1 2.4 2.4 0 0 1 2-1 2.4 2.4 0 0 1 2 1 2.4 2.4 0 0 0 2 1 2.4 2.4 0 0 0 2-1 2.4 2.4 0 0 1 2-1 2.4 2.4 0 0 1 2 1"/><path d="M4 9l2-2h12l3 6H4z"/><path d="M10 7V5a2 2 0 0 1 4 0v2"/></svg>';
+              const isAir = t.freight === 'Air';
+              const modeColor = isAir ? '#4A90D9' : '#2E7D9E';
+              const modeBg = isAir ? 'rgba(74,144,217,0.1)' : 'rgba(46,125,158,0.1)';
+              const modeLabel = isAir ? 'Air' : 'Sea';
+              const modeIcon = isAir ?
+                '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="' + modeColor + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/></svg>' :
+                '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="' + modeColor + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20a2.4 2.4 0 0 0 2 1 2.4 2.4 0 0 0 2-1 2.4 2.4 0 0 1 2-1 2.4 2.4 0 0 1 2 1 2.4 2.4 0 0 0 2 1 2.4 2.4 0 0 0 2-1 2.4 2.4 0 0 1 2-1 2.4 2.4 0 0 1 2 1"/><path d="M4 9l2-2h12l3 6H4z"/><path d="M10 7V5a2 2 0 0 1 4 0v2"/></svg>';
               return '<label style="display:flex;align-items:center;gap:10px;background:' + (checked ? 'rgba(153,0,51,0.04)' : '#F9F9FB') + ';border:0.5px solid ' + (checked ? 'rgba(153,0,51,0.25)' : 'rgba(0,0,0,0.08)') + ';border-radius:8px;padding:10px 12px;cursor:pointer;transition:all .15s;">' +
                 '<input type="checkbox" data-ticket="' + escapeAttr(t.ticket) + '" data-lane-keys="' + escapeAttr(JSON.stringify(t.laneKeys)) + '" data-pos="' + escapeAttr(t.pos.join(',')) + '" ' + (checked ? 'checked' : '') + ' style="width:15px;height:15px;accent-color:#990033;cursor:pointer;flex-shrink:0;"/>' +
                 '<div style="min-width:0;flex:1;">' +
-                  '<div style="display:flex;align-items:center;gap:6px;">' +
+                  '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
                     '<span style="font-size:12px;font-weight:600;color:#1C1C1E;">#' + escapeHtml(t.ticket) + '</span>' +
-                    '<span style="color:#6E6E73;">' + modeIcon + '</span>' +
+                    '<span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:500;padding:2px 6px;border-radius:4px;background:' + modeBg + ';color:' + modeColor + ';">' + modeIcon + modeLabel + '</span>' +
                     '<span style="font-size:11px;color:#6E6E73;">' + escapeHtml(t.supplier) + '</span>' +
                   '</div>' +
                   '<div style="font-size:10px;color:#AEAEB2;margin-top:2px;">' + fmtInt(t.units) + ' units · ' + t.pos.length + ' PO' + (t.pos.length !== 1 ? 's' : '') + '</div>' +
@@ -4852,12 +4873,7 @@ detail.innerHTML = [
         <div id="flow-lane-editor-body" class="mt-3">
           <div style="display:grid;grid-template-columns:1fr auto;gap:3px;align-items:center;margin-bottom:10px;">
             <div class="text-sm font-semibold text-gray-700">Docs &amp; customs milestones</div>
-            <div style="display:flex;gap:6px;align-items:center;">
-              <button onclick="openContainerManager('${escapeAttr(ws)}', '${escapeAttr(tz)}')" style="font-size:10px;font-weight:500;background:#1C1C1E;color:#fff;border:none;border-radius:6px;padding:5px 10px;cursor:pointer;font-family:inherit;white-space:nowrap;">
-                ${iconContainer()} Containers${weekContainers.length ? ` (${weekContainers.length})` : ''}
-              </button>
-              <button type="button" id="flow-intl-copy-all" class="text-[11px] text-gray-600 underline hover:text-gray-800">Copy baselines</button>
-            </div>
+            <button type="button" id="flow-intl-copy-all" class="text-[11px] text-gray-600 underline hover:text-gray-800">Copy baselines</button>
           </div>
 
           <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px;align-items:start;">
