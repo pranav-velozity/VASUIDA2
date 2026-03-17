@@ -3024,10 +3024,7 @@ const signoffSection = (context) => {
             ${hRow(icon.warn, 'Missing POs', missing ? `<span class="text-red-700">${fmtInt(missing)}</span>` : fmtInt(missing))}
             <div class="text-[11px] text-gray-500 mt-2">Tip: use the Receiving page for the full list; this panel is the headline view.</div>
           </div>
-          <button onclick="if(typeof window.show==='function')window.show('#receiving')" style="width:100%;display:flex;align-items:center;justify-content:center;gap:8px;background:#1C1C1E;color:#fff;border:none;border-radius:10px;padding:11px 16px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;transition:opacity .15s;" onmouseover="this.style.opacity='.85'" onmouseout="this.style.opacity='1'">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-            Open Receiving page
-          </button>
+
         </div>
       `;
     };
