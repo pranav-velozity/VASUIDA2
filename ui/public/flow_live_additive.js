@@ -4096,7 +4096,7 @@ function renderTopNodes(ws, tz, receiving, vas, intl, manual) {
 
   detail.innerHTML = [
     header(title, receiving.level, subtitle),
-    `<div class="mt-2 flex justify-end"><button type="button" id="flow-receiving-fullscreen" class="text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Full screen</button></div>`,
+    `<div class="mt-2 flex justify-end"><button type="button" id="flow-receiving-fullscreen" class=" style="font-size:10px;color:#fff;background:#990033;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;">Full screen</button></div>`,
     bullets(insights),
     kpis,
     table(['Supplier', 'Progress', 'POs received', 'Planned units', 'Cartons In', 'Cartons Out'], supRows),
@@ -4250,7 +4250,7 @@ detail.innerHTML = [
         `<div class="mt-3 rounded-xl border p-3">
           <div class="flex items-center justify-between gap-2">
             <div class="text-sm font-semibold text-gray-700">Lanes</div>
-            <button type="button" id="flow-lanes-fullscreen" class="text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Full screen</button>
+            <button type="button" id="flow-lanes-fullscreen" class=" style="font-size:10px;color:#fff;background:#990033;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;">Full screen</button>
           </div>
           ${table(['Supplier', 'Zendesk', 'Freight', 'Applied', 'Cartons Out', 'Containers', 'Status'], rows)}
         </div>`,
