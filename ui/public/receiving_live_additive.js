@@ -1625,7 +1625,23 @@ function nowDateTimeLocalValue() { return dtLocalNow(); }
   } catch {}
 });
 
-window.addEventListener('hashchange', () => {
+// Expose global so show('#receiving') can call directly without hash manipulation
+  window.showReceivingPage = function() {
+    ['page-dashboard','page-intake','page-exec','page-flow'].forEach(function(id){
+      var el = document.getElementById(id);
+      if(el){ el.classList.add('hidden'); el.style.display='none'; }
+    });
+    var pageReceiving = ensureReceivingPage();
+    pageReceiving.classList.remove('hidden');
+    pageReceiving.style.display = 'block';
+    tick();
+  };
+  window.hideReceivingPage = function() {
+    var el = document.getElementById('page-receiving');
+    if(el){ el.classList.add('hidden'); el.style.display='none'; }
+  };
+
+  window.addEventListener('hashchange', () => {
     showReceivingIfHash();
   });
 
