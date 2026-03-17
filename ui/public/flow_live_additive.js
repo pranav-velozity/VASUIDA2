@@ -2204,7 +2204,7 @@ function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
       { id:'receiving', label:'Receiving', short:'RCV', level: receiving.level, upcoming: now < receiving.due },
       { id:'vas', label:'VAS', short:'VAS', level: vas.level, upcoming: now < vas.due },
       { id:'intl', label:'Transit & Clearing', short:'T&C', level: intl.level, upcoming: now < intl.originMax },
-      { id:'lastmile', label:'Last Mile', short:'LM', level: manual.levels.lastMile, upcoming: false },
+      { id:'lastmile', label:'Last Mile', short:'LM', level: manual.levels.lastMile, upcoming: now < (manual?.baselines?.lastMileMin ? new Date(manual.baselines.lastMileMin) : new Date(intl.originMax && intl.originMax instanceof Date ? intl.originMax.getTime() + 3*24*60*60*1000 : now.getTime() + 1)) },
     ];
 
     // Planned vs Actual (display only; never persisted)
@@ -2490,8 +2490,8 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
         milk:     null,
         receiving: { date: addDaysToWs(ws, 0),  label: 'Ex-factory' },
         vas:       { date: addDaysToWs(ws, 4),  label: 'VAS Due' },
-        intl:      { date: addDaysToWs(ws, 16), label: 'Transit' },
-        lastmile:  { date: addDaysToWs(ws, 19), label: 'FC Arrival' }
+        intl:      { date: addDaysToWs(ws, 19), label: 'Transit' },
+        lastmile:  { date: addDaysToWs(ws, 22), label: 'FC Arrival' }
       };
 
       // Status color — used ONLY for pills, not for nodes/lines
