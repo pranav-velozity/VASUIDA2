@@ -452,6 +452,7 @@ window.__clerkOnLoad = function() {
     <nav class="pn-nav-items" id="pn-nav-items">
       <a class="pn-nav-item active" href="#week-hub" id="nav-weekhub" onclick="event.preventDefault();window.show('#week-hub')">Week Hub</a>
       <a class="pn-nav-item" href="#receiving" id="nav-receiving" onclick="event.preventDefault();window.show('#receiving')">Receiving Ops</a>
+      <a class="pn-nav-item" href="#intake" id="nav-intake-pn" onclick="event.preventDefault();window.show('#intake')">VAS Ops</a>
       <a class="pn-nav-item" href="#exec" id="nav-exec" onclick="event.preventDefault();window.show('#exec')">Executive</a>
       <a class="pn-nav-item" href="#reports" id="nav-reports" onclick="event.preventDefault();window.show('#reports')">Reports &amp; Downloads</a>
     </nav>
@@ -5432,7 +5433,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=89" defer></script>
+<script src="/public/flow_live_additive.js?v=90" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -5772,6 +5773,8 @@ function syncPinpointNav(hash){
   items.forEach(el=>el.classList.remove('active'));
   if(hash==='#exec'){ const e=document.getElementById('nav-exec'); if(e) e.classList.add('active'); }
   else if(hash==='#reports'){ const r=document.getElementById('nav-reports'); if(r) r.classList.add('active'); }
+  else if(hash==='#receiving'){ const rec=document.getElementById('nav-receiving'); if(rec) rec.classList.add('active'); }
+  else if(hash==='#intake'){ const vas=document.getElementById('nav-intake-pn'); if(vas) vas.classList.add('active'); }
   else { const w=document.getElementById('nav-weekhub'); if(w) w.classList.add('active'); }
 }
 
@@ -6072,5 +6075,4 @@ async function handleSignOut() {
 
 </body>
 </html>
-
 
