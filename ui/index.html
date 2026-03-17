@@ -451,6 +451,7 @@ window.__clerkOnLoad = function() {
     </a>
     <nav class="pn-nav-items" id="pn-nav-items">
       <a class="pn-nav-item active" href="#week-hub" id="nav-weekhub" onclick="event.preventDefault();window.show('#week-hub')">Week Hub</a>
+      <a class="pn-nav-item" href="#receiving" id="nav-receiving" onclick="event.preventDefault();window.show('#receiving')">Receiving Ops</a>
       <a class="pn-nav-item" href="#exec" id="nav-exec" onclick="event.preventDefault();window.show('#exec')">Executive</a>
       <a class="pn-nav-item" href="#reports" id="nav-reports" onclick="event.preventDefault();window.show('#reports')">Reports &amp; Downloads</a>
     </nav>
@@ -3229,8 +3230,12 @@ if (h === '#intake') {
     try { window.renderIntake(); } catch (e) { console.warn('renderIntake failed', e); }
   }
   } else if (h === '#receiving') {
-    // Let receiving_live_additive.js handle everything via its hashchange listener
-    location.hash = '#receiving';
+    if(typeof window.showReceivingPage === 'function') {
+      window.showReceivingPage();
+    } else {
+      location.hash = '#receiving';
+    }
+    syncPinpointNav('#receiving');
   } else if (h === '#flow') {
     // #page-flow now lives inside #page-dashboard (Week Hub)
     const el = document.getElementById('page-dashboard');
@@ -5425,7 +5430,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=86" defer></script>
+<script src="/public/flow_live_additive.js?v=87" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
