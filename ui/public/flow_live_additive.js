@@ -1943,7 +1943,7 @@ function computeManualNodeStatuses(ws, tz) {
 
       <div class="grid grid-cols-1 gap-3">
         <!-- Top row: Journey map (2/3) + Insights (1/3) -->
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-3">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
           <!-- Journey map tile -->
           <div id="flow-top-tile" class="rounded-2xl border bg-white shadow-sm p-3 flow-tile--nodes lg:col-span-2">
             <div class="flex items-center justify-between mb-2">
