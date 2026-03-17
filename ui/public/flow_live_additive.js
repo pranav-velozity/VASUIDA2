@@ -2471,10 +2471,28 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
     // ── LINEAR TIMELINE RENDERER ──
     // Replaces S-curve SVG. S-curve is preserved in file-level comment above.
     (function renderLinearTimeline(){
-      var W = 900, H = 140;
+      var W = 900, H = 160;  // extra height for date labels above
       var padL = 60, padR = 60;
       var nodeX = [padL, padL + (W-padL-padR)*0.25, padL + (W-padL-padR)*0.5, padL + (W-padL-padR)*0.75, W-padR];
-      var nodeY = H/2;
+      var nodeY = H/2 + 10;  // push nodes down slightly to make room for dates above
+
+      // Milestone date calculations
+      var addDaysToWs = function(isoStr, days) {
+        var parts = isoStr.split('-').map(Number);
+        var d = new Date(parts[0], parts[1]-1, parts[2]);
+        d.setDate(d.getDate() + days);
+        var months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+        var day = d.getDate();
+        var suffix = (day===1||day===21||day===31)?'st':(day===2||day===22)?'nd':(day===3||day===23)?'rd':'th';
+        return months[d.getMonth()] + ', ' + day + suffix;
+      };
+      var milestoneDates = {
+        milk:     null,
+        receiving: { date: addDaysToWs(ws, 0),  label: 'Ex-factory' },
+        vas:       { date: addDaysToWs(ws, 4),  label: 'VAS Due' },
+        intl:      { date: addDaysToWs(ws, 16), label: 'Transit' },
+        lastmile:  { date: addDaysToWs(ws, 19), label: 'FC Arrival' }
+      };
 
       // Status color — used ONLY for pills, not for nodes/lines
       var colFor = function(level, upcoming) {
@@ -2567,10 +2585,18 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
           parts.push('<g transform="translate(' + (cx - iconOff) + ',' + (cy - iconOff) + ') scale(' + iconScale.toFixed(3) + ')" pointer-events="none"><path d="' + iconPath + '" fill="none" stroke="' + iconColor + '" stroke-width="' + (1.8/iconScale).toFixed(1) + '" stroke-linecap="round" stroke-linejoin="round"/></g>');
         }
 
-        // Label above node
+        // Date label above milestone name (not for Milk Run)
+        var mDate = milestoneDates[n.id];
         var labelY = cy - (isOngoing ? 23 : 19);
         var fw = isOngoing ? '600' : '500';
         var fc = isOngoing ? '#1C1C1E' : '#6E6E73';
+        if(mDate) {
+          // Date name (e.g. "Ex-factory") — small, muted, above the main label
+          parts.push('<text x="' + cx + '" y="' + (labelY - 16) + '" text-anchor="middle" font-size="8.5" font-weight="500" fill="#AEAEB2" pointer-events="none" letter-spacing="0.04em">' + mDate.label.toUpperCase() + '</text>');
+          // Date value (e.g. "Mar 16") — slightly larger, dark
+          parts.push('<text x="' + cx + '" y="' + (labelY - 5) + '" text-anchor="middle" font-size="10" font-weight="600" fill="' + (isOngoing ? '#1C1C1E' : '#6E6E73') + '" pointer-events="none">' + mDate.date + '</text>');
+        }
+        // Node name label
         parts.push('<text x="' + cx + '" y="' + labelY + '" text-anchor="middle" font-size="11" font-weight="' + fw + '" fill="' + fc + '" pointer-events="none">' + n.label + '</text>');
 
         // Status pill below — KEEP brand colors here (the only color element)
@@ -2584,7 +2610,7 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
         parts.push('<text x="' + cx + '" y="' + (pillY2+11) + '" text-anchor="middle" font-size="9" font-weight="600" fill="' + pillFg + '" pointer-events="none">' + st + '</text>');
       });
 
-      root.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="140" preserveAspectRatio="xMidYMid meet" style="display:block;overflow:visible;">' + parts.join('') + '</svg>';
+      root.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="160" preserveAspectRatio="xMidYMid meet" style="display:block;overflow:visible;">' + parts.join('') + '</svg>';
     })();
 
 
