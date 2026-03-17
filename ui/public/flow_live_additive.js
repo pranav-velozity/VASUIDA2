@@ -1951,6 +1951,7 @@ function computeManualNodeStatuses(ws, tz) {
               <div id="flow-day" class="text-xs text-gray-500"></div>
             </div>
             <div id="flow-journey" class="w-full"></div>
+            <div id="flow-actions" class="mt-3"></div>
           </div>
           <!-- Summary tile (right 1/3) -->
           <div class="rounded-2xl border bg-white shadow-sm p-3 lg:col-span-1" style="min-height:0;">
@@ -2580,6 +2581,132 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
 
   // ------------------------- Right tile (context panel) -------------------------
   // Default shows week plan vs actual totals; clicking a node switches to exceptions/deadlines for that node.
+  function renderActionItems(ws, receiving, vas, intl) {
+    var el = document.getElementById('flow-actions');
+    if(!el) return;
+
+    var actions = [];
+    var now = new Date();
+
+    // ── POs not received
+    var missingPOs = num(receiving.plannedPOs||0) - num(receiving.receivedPOs||0);
+    if(missingPOs > 0){
+      actions.push({
+        level: receiving.level === 'red' ? 'red' : 'yellow',
+        icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>',
+        text: missingPOs + ' PO' + (missingPOs>1?'s':'') + ' not yet received',
+        sub: fmtInt(num(receiving.plannedPOs)) + ' planned this week'
+      });
+    }
+
+    // ── Receiving deadline
+    if(receiving.due){
+      var dueDate = receiving.due instanceof Date ? receiving.due : new Date(receiving.due);
+      var daysUntil = Math.ceil((dueDate - now) / (1000*60*60*24));
+      if(daysUntil >= 0 && daysUntil <= 5 && missingPOs > 0){
+        actions.push({
+          level: daysUntil <= 1 ? 'red' : 'yellow',
+          icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
+          text: daysUntil === 0 ? 'Receiving deadline today' : 'Receiving deadline in ' + daysUntil + ' day' + (daysUntil>1?'s':''),
+          sub: fmtInTZ(dueDate, 'UTC')
+        });
+      }
+    }
+
+    // ── VAS completion
+    var vasPct = num(vas.completion||0) * 100;
+    var vasRemaining = num(vas.plannedUnits||0) - num(vas.appliedUnits||0);
+    if(vasRemaining > 0 && vasPct < 90){
+      actions.push({
+        level: vas.level === 'red' ? 'red' : 'yellow',
+        icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V6a2 2 0 0 1 2-2h6v16"/><path d="M14 20V10a2 2 0 0 1 2-2h4v12"/><path d="M7 8h2M7 11h2M7 14h2"/></svg>',
+        text: fmtInt(vasRemaining) + ' units not yet applied',
+        sub: Math.round(vasPct) + '% complete'
+      });
+    }
+
+    // ── Late POs
+    if(receiving.latePOs && num(receiving.latePOs) > 0){
+      actions.push({
+        level: 'yellow',
+        icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 9h10M7 13h6"/><path d="M6 3h12a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3H10l-4 3v-3H6a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3z"/></svg>',
+        text: fmtInt(receiving.latePOs) + ' PO' + (num(receiving.latePOs)>1?'s':'') + ' received late',
+        sub: 'After baseline deadline'
+      });
+    }
+
+    // ── Customs holds
+    if(intl.holds && num(intl.holds) > 0){
+      actions.push({
+        level: 'red',
+        icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+        text: fmtInt(intl.holds) + ' lane' + (num(intl.holds)>1?'s':'') + ' on customs hold',
+        sub: 'Transit & Clearing — action required'
+      });
+    }
+
+    // ── Missing docs / origin not cleared
+    if(intl.missingDocs && num(intl.missingDocs) > 0){
+      actions.push({
+        level: 'yellow',
+        icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>',
+        text: fmtInt(intl.missingDocs) + ' lane' + (num(intl.missingDocs)>1?'s':'') + ' missing docs',
+        sub: 'Packing list / origin clearance required'
+      });
+    } else if(intl.missingOriginClear && num(intl.missingOriginClear) > 0){
+      actions.push({
+        level: 'yellow',
+        icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
+        text: fmtInt(intl.missingOriginClear) + ' lane' + (num(intl.missingOriginClear)>1?'s':'') + ' not origin-cleared',
+        sub: 'Customs clearance pending at origin'
+      });
+    }
+
+    // ── Containers at sea / in transit
+    var weekContainers = loadIntlWeekContainers(ws);
+    var containers = Array.isArray(weekContainers && weekContainers.containers) ? weekContainers.containers : [];
+    var atSea = containers.filter(function(c){ return c.vessel && !c.arrived_at; });
+    var vessels = Array.from(new Set(atSea.map(function(c){ return c.vessel; }).filter(Boolean)));
+    if(atSea.length > 0){
+      actions.push({
+        level: 'green',
+        icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l.9-4.5L12 9l8.1 3.5.9 4.5"/><path d="M3 17c2 2 4 2 6 0s4-2 6 0 4 2 6 0"/><path d="M12 9V3"/></svg>',
+        text: fmtInt(atSea.length) + ' container' + (atSea.length>1?'s':'') + ' in transit',
+        sub: vessels.length > 0 ? 'Vessel' + (vessels.length>1?'s':'') + ': ' + vessels.slice(0,2).join(', ') + (vessels.length>2?' +' + (vessels.length-2):'') : 'En route'
+      });
+    }
+
+    // ── ETA window
+    if(intl.originMax && now < intl.originMax){
+      var etdStr = fmtInTZ(intl.originMin, tz) + (intl.originMax && intl.originMin !== intl.originMax ? ' – ' + fmtInTZ(intl.originMax, tz) : '');
+      actions.push({
+        level: 'green',
+        icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
+        text: 'ETD window: ' + etdStr,
+        sub: (intl.seaCount||0) + ' sea · ' + (intl.airCount||0) + ' air lanes'
+      });
+    }
+
+    if(actions.length === 0){
+      el.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:#F5F5F7;border-radius:10px;"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#97DC21" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg><span style="font-size:11px;color:#6E6E73;">All clear — no action items this week</span></div>';
+      return;
+    }
+
+    var colFor = function(level){ return level==='red' ? '#D61A3C' : level==='yellow' ? '#FFA203' : '#C8F902'; };
+
+    el.innerHTML = '<div style="display:flex;flex-direction:column;gap:6px;">'
+      + actions.map(function(a){
+          var col = colFor(a.level);
+          return '<div style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:#FAFAFA;border:0.5px solid rgba(0,0,0,0.06);border-left:3px solid ' + col + ';border-radius:0 8px 8px 0;">'
+            + '<div style="color:' + col + ';flex-shrink:0;">' + a.icon + '</div>'
+            + '<div style="min-width:0;">'
+            + '<div style="font-size:12px;font-weight:500;color:#1C1C1E;">' + a.text + '</div>'
+            + '<div style="font-size:10px;color:#AEAEB2;margin-top:1px;">' + a.sub + '</div>'
+            + '</div></div>';
+        }).join('')
+      + '</div>';
+  }
+
   function renderRightTile(ws, tz, receiving, vas, intl, manual) {
     const el = document.getElementById('flow-footer');
     if (!el) return;
@@ -2709,15 +2836,24 @@ const signoffSection = (context) => {
             ${hRow(icon.cartons, 'Cartons in – cartons out', `${fmtInt(cartonsIn)} – ${fmtInt(cartonsOut)}`)}
           </div>
 
-          ${pairRow(
-            hRow(icon.lane, 'Total lanes', fmtInt(lanesTotal)),
-            hRow(icon.ship, 'Total vessels', fmtInt(totalVessels))
-          )}
-
-          ${pairRow(
-            hRow(icon.cont, 'Total containers', fmtInt(totalContainers)),
-            hRow(icon.box, 'Total CBM', fmt2(cbm))
-          )}
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;">
+            <div style="background:#F5F5F7;border-radius:8px;padding:8px 10px;">
+              <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Lanes</div>
+              <div style="font-size:15px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;">${fmtInt(lanesTotal)}</div>
+            </div>
+            <div style="background:#F5F5F7;border-radius:8px;padding:8px 10px;">
+              <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Vessels</div>
+              <div style="font-size:15px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;">${fmtInt(totalVessels)}</div>
+            </div>
+            <div style="background:#F5F5F7;border-radius:8px;padding:8px 10px;">
+              <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Containers</div>
+              <div style="font-size:15px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;">${fmtInt(totalContainers)}</div>
+            </div>
+            <div style="background:#F5F5F7;border-radius:8px;padding:8px 10px;">
+              <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">CBM</div>
+              <div style="font-size:15px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;">${fmt2(cbm)}</div>
+            </div>
+          </div>
 
           <button onclick="window.__openPrebookModal()" style="width:100%;text-align:left;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:8px 10px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-family:inherit;">
             <span style="font-size:11px;color:#1C1C1E;font-weight:500;">Pre-booked containers</span>
@@ -2751,15 +2887,24 @@ const signoffSection = (context) => {
             ${hRow(icon.box, 'Planned CBM', fmt2(receivingCbmPlanned))}
           </div>
 
-          ${pairRow(
-            hRow(icon.lane, 'Total lanes', fmtInt(lanesTotal)),
-            hRow(icon.ship, 'Total vessels', fmtInt(totalVessels))
-          )}
-
-          ${pairRow(
-            hRow(icon.cont, 'Total containers', fmtInt(totalContainers)),
-            hRow(icon.box, 'Total CBM', fmt2(cbm))
-          )}
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;">
+            <div style="background:#F5F5F7;border-radius:8px;padding:8px 10px;">
+              <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Lanes</div>
+              <div style="font-size:15px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;">${fmtInt(lanesTotal)}</div>
+            </div>
+            <div style="background:#F5F5F7;border-radius:8px;padding:8px 10px;">
+              <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Vessels</div>
+              <div style="font-size:15px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;">${fmtInt(totalVessels)}</div>
+            </div>
+            <div style="background:#F5F5F7;border-radius:8px;padding:8px 10px;">
+              <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Containers</div>
+              <div style="font-size:15px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;">${fmtInt(totalContainers)}</div>
+            </div>
+            <div style="background:#F5F5F7;border-radius:8px;padding:8px 10px;">
+              <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">CBM</div>
+              <div style="font-size:15px;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;">${fmt2(cbm)}</div>
+            </div>
+          </div>
 
           <div class="rounded-2xl border bg-white p-3">
             <div class="text-xs font-semibold text-gray-700">Pre-booked containers</div>
@@ -5920,6 +6065,7 @@ if (signoff.vasComplete) {
     if (UI.selection.node === 'milk') UI.selection = { node: null, sub: null };
     renderDetail(ws, tz, receiving, vas, intl, manual);
     renderRightTile(ws, tz, receiving, vas, intl, manual);
+    renderActionItems(ws, receiving, vas, intl);
     highlightSelection();
     } catch (e) {
       console.warn('[flow] refresh failed', e);
