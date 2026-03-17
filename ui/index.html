@@ -3206,17 +3206,26 @@ function show(hash){
   if (h.startsWith('#/')) h = '#' + h.slice(2);
   if (!h) h = '#operations';
 
-  // Hide all pages first
+  // If navigating to receiving, let its own module handle everything
+  if(h === '#receiving') {
+    if(typeof window.showReceivingPage === 'function') {
+      window.showReceivingPage();
+      syncPinpointNav('#receiving');
+    } else {
+      // Module not ready yet — set hash and it will self-init
+      location.hash = '#receiving';
+    }
+    return;
+  }
+
+  // For all other pages: hide everything including receiving
   ['page-dashboard','page-intake','page-exec','page-receiving','page-flow'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     el.classList.add('hidden');
     el.style.display = 'none';
   });
-  // Also call receiving module's own hide (handles any internal state)
-  if(h !== '#receiving' && typeof window.hideReceivingPage === 'function') {
-    window.hideReceivingPage();
-  }
+  if(typeof window.hideReceivingPage === 'function') window.hideReceivingPage();
 
   // Show target page + render hooks
 if (h === '#intake') {
@@ -3229,13 +3238,6 @@ if (h === '#intake') {
     // Backward compatibility (optional)
     try { window.renderIntake(); } catch (e) { console.warn('renderIntake failed', e); }
   }
-  } else if (h === '#receiving') {
-    if(typeof window.showReceivingPage === 'function') {
-      window.showReceivingPage();
-    } else {
-      location.hash = '#receiving';
-    }
-    syncPinpointNav('#receiving');
   } else if (h === '#flow') {
     // #page-flow now lives inside #page-dashboard (Week Hub)
     const el = document.getElementById('page-dashboard');
@@ -5430,7 +5432,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=87" defer></script>
+<script src="/public/flow_live_additive.js?v=88" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -6035,11 +6037,5 @@ async function handleSignOut() {
 
 </body>
 </html>
-
-
-
-
-
-
 
 
