@@ -1,3 +1,21 @@
+/* ═══════════════ S-CURVE SVG PRESERVED ═══════════════
+        <svg viewBox="-180 0 1250 560" preserveAspectRatio="xMidYMid meet" aria-label="Journey map" style="width:100%; display:block;">
+
+          <!-- road shadow (subtle) -->
+          <path d="${roadPath}" fill="none" stroke="rgba(0,0,0,0.04)" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" transform="translate(1,1)"></path>
+          <!-- road base -->
+          <path d="${roadPath}" fill="none" stroke="#E5E5EA" stroke-width="52" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="${roadPath}" fill="none" stroke="#F2F2F7" stroke-width="43" stroke-linecap="round" stroke-linejoin="round" />
+          ${baseRoad}
+          ${segs}
+          ${dashed}
+          ${milestones}
+          ${ongoing}
+        </svg>
+      </div>
+    `;
+═══════════════ END S-CURVE SVG ═══════════════ */
+
 /* flow_live_additive.js (v61)
    - Additive "Flow" page module for VelOzity Pinpoint
    - Receiving + VAS are data-driven from existing endpoints
@@ -275,7 +293,7 @@ function statusLabel(level) {
 
 // Shared status color palette used across Flow renderers
 const levelColor = (level) => ({
-  green: '#a6d609',
+  green: '#C8F902',
   red: '#D61A3C',
   upcoming: '#E5E5EA',
   yellow: '#FFA203',
@@ -285,7 +303,7 @@ const levelColor = (level) => ({
 
 
 function strokeForLevel(level, upcoming=false) {
-    if (level === 'green') return upcoming ? 'rgba(200,249,2,0.25)' : '#a6d609';
+    if (level === 'green') return upcoming ? 'rgba(200,249,2,0.25)' : '#C8F902';
     if (level === 'yellow') return upcoming ? 'rgba(255,162,3,0.25)' : '#FFA203';
     if (level === 'red') return upcoming ? 'rgba(214,26,60,0.20)' : '#D61A3C';
     return '#E5E5EA';
@@ -2079,7 +2097,7 @@ function computeManualNodeStatuses(ws, tz) {
       const strokeForLevel = (level, upcoming) => {
         // Matte palette
         const map = {
-          green: '#a6d609',
+          green: '#C8F902',
           red:   '#D61A3C',
           gray:  '#9ca3af'
         };
@@ -2089,7 +2107,7 @@ function computeManualNodeStatuses(ws, tz) {
 
       const dotFillForLevel = (level, upcoming) => {
         const map = {
-          green: '#a6d609',
+          green: '#C8F902',
           red:   '#D61A3C',
           gray:  '#9ca3af'
         };
@@ -2227,7 +2245,7 @@ function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
     // - upcoming: distinct from At-Risk (cool neutral)
     // - future: capability not yet live
     const levelColor = (level) => ({
-      green: '#a6d609',
+      green: '#C8F902',
       red: '#D61A3C',
       upcoming: '#E5E5EA',
       yellow: '#FFA203',
@@ -2449,23 +2467,102 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
     const lmA = `${(manual.manual?.last_mile_open||0)}/${(manual.manual?.last_mile_total||0)} open`;
     const lmB = manual.manual?.delivered_at ? `Delivered set` : `Delivered (set)`;
 
-    root.innerHTML = `
-      <div class="w-full overflow-hidden">
-        <svg viewBox="-180 0 1250 560" preserveAspectRatio="xMidYMid meet" aria-label="Journey map" style="width:100%; display:block;">
+    // S-curve innerHTML call removed — linear renderer writes directly to root below
+    // (S-curve SVG preserved in file-level comment at top of file)
 
-          <!-- road shadow (subtle) -->
-          <path d="${roadPath}" fill="none" stroke="rgba(0,0,0,0.04)" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" transform="translate(1,1)"></path>
-          <!-- road base -->
-          <path d="${roadPath}" fill="none" stroke="#E5E5EA" stroke-width="52" stroke-linecap="round" stroke-linejoin="round" />
-          <path d="${roadPath}" fill="none" stroke="#F2F2F7" stroke-width="43" stroke-linecap="round" stroke-linejoin="round" />
-          ${baseRoad}
-          ${segs}
-          ${dashed}
-          ${milestones}
-          ${ongoing}
-        </svg>
-      </div>
-    `;
+    // ── LINEAR TIMELINE RENDERER ──
+    // Replaces S-curve SVG. S-curve is preserved in file-level comment above.
+    (function renderLinearTimeline(){
+      var W = 900, H = 140;
+      var padL = 60, padR = 60;
+      var nodeX = [padL, padL + (W-padL-padR)*0.25, padL + (W-padL-padR)*0.5, padL + (W-padL-padR)*0.75, W-padR];
+      var nodeY = H/2;
+
+      var colFor = function(level, upcoming) {
+        if(upcoming || level === 'gray' || level === 'future') return '#E5E5EA';
+        if(level === 'green') return '#C8F902';
+        if(level === 'yellow') return '#FFA203';
+        if(level === 'red') return '#D61A3C';
+        return '#AEAEB2';
+      };
+
+      // Inject animation CSS once
+      if(!document.getElementById('linear-pulse-style')){
+        var st = document.createElement('style');
+        st.id = 'linear-pulse-style';
+        st.textContent = [
+          '@keyframes lnPulse{0%{r:12;stroke-opacity:0.6;stroke-width:2}100%{r:26;stroke-opacity:0;stroke-width:0.5}}',
+          '@keyframes lnPulse2{0%{r:12;stroke-opacity:0.4;stroke-width:1.5}100%{r:32;stroke-opacity:0;stroke-width:0.5}}',
+          '.ln-pulse-ring-1{animation:lnPulse 2s ease-out infinite}',
+          '.ln-pulse-ring-2{animation:lnPulse2 2s ease-out infinite 0.7s}',
+          '@keyframes lnDash{to{stroke-dashoffset:-24}}',
+          '.ln-active-seg{animation:lnDash 1.2s linear infinite}'
+        ].join('');
+        document.head.appendChild(st);
+      }
+
+      var parts = [];
+
+      // Segments between nodes
+      for(var i = 0; i < nodes.length - 1; i++){
+        var x1 = nodeX[i], x2 = nodeX[i+1];
+        var nb = nodes[i+1];
+        var col = colFor(nb.level, nb.upcoming);
+        var isActive = (i+1 === ongoingIdx);
+        if(isActive){
+          parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="#E5E5EA" stroke-width="3" stroke-linecap="round"/>');
+          parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="' + col + '" stroke-width="3" stroke-linecap="round" stroke-dasharray="8 8" class="ln-active-seg"/>');
+        } else if(!nb.upcoming && nb.level !== 'gray'){
+          parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="' + col + '" stroke-width="3" stroke-linecap="round"/>');
+        } else {
+          parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="#E5E5EA" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 4"/>');
+        }
+      }
+
+      // Nodes
+      nodes.forEach(function(n, i){
+        var cx = nodeX[i], cy = nodeY;
+        var col = colFor(n.level, n.upcoming);
+        var isOngoing = (i === ongoingIdx);
+        var isDone = (!n.upcoming && n.level !== 'gray' && i < ongoingIdx);
+        var st = statusText(n);
+
+        // Pulse rings on ongoing
+        if(isOngoing){
+          parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="12" fill="none" stroke="' + col + '" class="ln-pulse-ring-1"/>');
+          parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="12" fill="none" stroke="' + col + '" class="ln-pulse-ring-2"/>');
+        }
+
+        var r = isOngoing ? 12 : 9;
+        var fill = isDone ? col : (isOngoing ? col : '#fff');
+        var stroke = n.upcoming ? '#AEAEB2' : col;
+        var sw = isOngoing ? '2.5' : '2';
+        parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + sw + '" data-journey-node="1" data-node="' + n.id + '" style="cursor:pointer;"/>');
+
+        if(isDone){
+          parts.push('<text x="' + cx + '" y="' + (cy+4) + '" text-anchor="middle" font-size="10" fill="#1C1C1E" pointer-events="none">✓</text>');
+        }
+
+        // Label above node
+        var labelY = cy - (isOngoing ? 22 : 18);
+        var fw = isOngoing ? '700' : '500';
+        var fc = isOngoing ? '#1C1C1E' : '#6E6E73';
+        parts.push('<text x="' + cx + '" y="' + labelY + '" text-anchor="middle" font-size="11" font-weight="' + fw + '" fill="' + fc + '" pointer-events="none">' + n.label + '</text>');
+
+        // Status pill below
+        var pillW = Math.max(52, st.length * 6.5 + 14);
+        var pillX = cx - pillW/2;
+        var pillY2 = cy + (isOngoing ? 20 : 16);
+        var pillBg = isOngoing ? col : (n.upcoming ? '#F2F2F7' : col + '22');
+        var pillFg = (n.level === 'green' || n.level === 'yellow') ? '#1C1C1E' : (n.level === 'red' ? '#D61A3C' : '#6E6E73');
+        parts.push('<rect x="' + pillX + '" y="' + pillY2 + '" width="' + pillW + '" height="16" rx="8" fill="' + pillBg + '" data-journey-node="1" data-node="' + n.id + '" style="cursor:pointer;"/>');
+        parts.push('<text x="' + cx + '" y="' + (pillY2+11) + '" text-anchor="middle" font-size="9" font-weight="600" fill="' + pillFg + '" pointer-events="none">' + st + '</text>');
+      });
+
+      root.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="140" preserveAspectRatio="xMidYMid meet" style="display:block;overflow:visible;">' + parts.join('') + '</svg>';
+    })();
+
+
 
     // Click handlers (use existing selection + detail render; never assume)
     try {
@@ -2557,14 +2654,14 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
       return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
     };
 
-    const lvlColor = (lvl) => (lvl === 'red' ? '#D61A3C' : (lvl === 'yellow' ? '#FFA203' : (lvl === 'green' ? '#a6d609' : '#AEAEB2')));
+    const lvlColor = (lvl) => (lvl === 'red' ? '#D61A3C' : (lvl === 'yellow' ? '#FFA203' : (lvl === 'green' ? '#C8F902' : '#AEAEB2')));
 
     const health = (() => {
       const worst = [
-        { label: 'Receiving', color: receiving?.color || lvlColor(receiving?.level) || '#a6d609' },
-        { label: 'VAS', color: vas?.color || lvlColor(vas?.level) || '#a6d609' },
-        { label: 'Transit', color: intl?.color || lvlColor(intl?.level) || '#a6d609' },
-        { label: 'Last Mile', color: lvlColor(manual?.levels?.lastMile) || '#a6d609' },
+        { label: 'Receiving', color: receiving?.color || lvlColor(receiving?.level) || '#C8F902' },
+        { label: 'VAS', color: vas?.color || lvlColor(vas?.level) || '#C8F902' },
+        { label: 'Transit', color: intl?.color || lvlColor(intl?.level) || '#C8F902' },
+        { label: 'Last Mile', color: lvlColor(manual?.levels?.lastMile) || '#C8F902' },
       ].reduce((acc, n) => severityRank(n.color) > severityRank(acc.color) ? n : acc);
       const band = _bandFromColor(worst.color);
       const label = (band === 'green') ? 'On Track' : (band === 'yellow') ? 'At Risk' : (band === 'red') ? 'Delayed' : 'Upcoming';
@@ -2622,19 +2719,10 @@ const signoffSection = (context) => {
             hRow(icon.box, 'Total CBM', fmt2(cbm))
           )}
 
-          <div class="rounded-xl border bg-gray-50 p-2">
-            <div class="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-2">Pre-booked containers</div>
-            <div class="grid grid-cols-2 gap-2">
-              <label class="block">
-                <div class="text-[10px] text-gray-500">20 ft</div>
-                <input id="prebook-20" type="number" min="0" class="mt-0.5 w-full rounded-lg border px-2 py-1 text-xs" value="${fmtInt(prebook.c20)}" />
-              </label>
-              <label class="block">
-                <div class="text-[10px] text-gray-500">40 ft</div>
-                <input id="prebook-40" type="number" min="0" class="mt-0.5 w-full rounded-lg border px-2 py-1 text-xs" value="${fmtInt(prebook.c40)}" />
-              </label>
-            </div>
-          </div>
+          <button onclick="document.getElementById('prebook-modal').classList.remove('hidden')" style="width:100%;text-align:left;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:8px 10px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-family:inherit;">
+            <span style="font-size:11px;color:#1C1C1E;font-weight:500;">Pre-booked containers</span>
+            <span style="font-size:11px;color:#6E6E73;">20ft: ${fmtInt(prebook.c20)} · 40ft: ${fmtInt(prebook.c40)} <span style="color:#AEAEB2;margin-left:4px;">›</span></span>
+          </button>
 
           
 
@@ -5019,7 +5107,7 @@ function statusStroke(color){
   const band = _bandFromColor(color);
   if (band === "red") return "#D61A3C";
   if (band === "yellow") return "#FFA203";
-  if (band === "green") return "#a6d609";
+  if (band === "green") return "#C8F902";
   return "#9ca3af";
 }
 
@@ -5081,7 +5169,7 @@ function renderFooterTrends(el, nodes, weekKey) {
     { id: 'intl', color: (intl && intl.color) || levelColor(intl.level || 'green') },
     { id: 'lm', color: levelColor((manual.levels && manual.levels.lastMile) || manual.levels?.lastmile || 'green') },
   ];
-  const worst = nodeColors.reduce((acc, n) => severityRank(n.color) > severityRank(acc.color) ? n : acc, nodeColors[0] || { color: '#a6d609' });
+  const worst = nodeColors.reduce((acc, n) => severityRank(n.color) > severityRank(acc.color) ? n : acc, nodeColors[0] || { color: '#C8F902' });
   const pillText = (colorToStatus(worst.color) || 'On Track');
 
   el.innerHTML = `
@@ -5611,7 +5699,7 @@ function buildReportHTML(cache) {
           .w-28 { width: 112px; }
           .h-2 { height: 8px; }
           .h-full { height: 100%; }
-          .bg-emerald-400 { background: #a6d609; }
+          .bg-emerald-400 { background: #C8F902; }
 
           /* Keep metric rows on a single line in PDF (Week totals) */
           .flex.items-center.justify-between > div:last-child { white-space: nowrap; }
