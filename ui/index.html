@@ -156,8 +156,8 @@
 #flow-top-tile { overflow:visible !important; min-height:0 !important; height:auto !important; padding:12px 14px !important; }
 #flow-top-tile.flow-tile--nodes { background:#ffffff !important; border-color:rgba(0,0,0,0.08) !important; }
 /* Compress grid row containing the pipeline tiles */
-#page-flow .lg\:col-span-2 { min-height:0 !important; height:auto !important; }
-#page-flow .grid.grid-cols-1.gap-3 > div:first-child { height:auto !important; }
+#page-flow .lg\:col-span-2 { min-height:0 !important; height:auto !important; align-self:start !important; }
+#page-flow .grid.lg\:grid-cols-3 { align-items:start !important; }
 /* Detail tile */
 #flow-detail { min-height:300px; }
 #flow-top-tile { padding: 8px 10px !important; }
@@ -5397,7 +5397,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=67" defer></script>
+<script src="/public/flow_live_additive.js?v=68" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
