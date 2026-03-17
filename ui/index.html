@@ -399,11 +399,12 @@ window.__clerkOnLoad = function() {
   main.vo-wrap{padding:16px 24px !important;}
 
   /* ── Pulse Bar ── */
-  .pulse-bar{position:fixed;bottom:0;left:0;right:0;z-index:50;background:#fff;border-top:0.5px solid rgba(0,0,0,0.08);padding:10px 24px;display:none;align-items:center;gap:14px;}
+  .pulse-bar{position:fixed;bottom:0;left:0;right:0;z-index:50;background:#fff;border-top:0.5px solid rgba(0,0,0,0.08);border-left:3px solid #990033;padding:10px 24px;display:none;align-items:center;gap:14px;box-shadow:0 -4px 24px rgba(0,0,0,0.07);}
   .pulse-bar.visible{display:flex;}
   .pulse-name{font-family:'ADLaM Display',serif;font-size:14px;color:#990033;white-space:nowrap;}
   .pulse-divider{width:0.5px;height:18px;background:rgba(0,0,0,0.1);flex-shrink:0;}
-  .pulse-input-wrap{flex:1;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:9px 14px;font-size:12px;color:#AEAEB2;cursor:text;font-family:inherit;}
+  .pulse-input-wrap{flex:1;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:9px 14px;font-size:12px;color:#1C1C1E;cursor:text;font-family:inherit;transition:border-color .15s,box-shadow .15s;}
+  .pulse-input-wrap:focus{outline:none;border-color:rgba(153,0,51,0.35);box-shadow:0 0 0 3px rgba(153,0,51,0.08);}
   .pulse-send{width:32px;height:32px;border-radius:8px;background:#1C1C1E;display:flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer;border:none;}
   .pulse-send svg{pointer-events:none;}
 
@@ -422,8 +423,8 @@ window.__clerkOnLoad = function() {
   .pulse-orb{animation:orbPulse 2.4s ease-in-out infinite;}
 
   /* Pulse expanded panel */
-  .pulse-panel{position:fixed;bottom:53px;left:0;right:0;z-index:49;background:#fff;border-top:0.5px solid rgba(0,0,0,0.08);max-height:380px;display:none;flex-direction:column;}
-  .pulse-panel.open{display:flex;}
+  .pulse-panel{position:fixed;bottom:53px;left:0;right:0;z-index:49;background:#fff;border-top:0.5px solid rgba(0,0,0,0.08);max-height:0;overflow:hidden;display:flex;flex-direction:column;transition:max-height .3s cubic-bezier(0.4,0,0.2,1),box-shadow .3s;}
+  .pulse-panel.open{max-height:380px;box-shadow:0 -8px 32px rgba(0,0,0,0.08);}
   .pulse-chat{flex:1;overflow-y:auto;padding:16px 24px;display:flex;flex-direction:column;gap:10px;}
   .pulse-msg{font-size:12px;line-height:1.55;max-width:60%;}
   .pulse-msg.ai{color:#3c3c43;background:#F5F5F7;border-radius:4px 10px 10px 10px;padding:9px 12px;align-self:flex-start;}
@@ -5397,7 +5398,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=72" defer></script>
+<script src="/public/flow_live_additive.js?v=73" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -5420,7 +5421,10 @@ window.__openPrebookModal = function(){
   <span class="pulse-name">Pulse</span>
   <div class="pulse-divider"></div>
   <input type="text" class="pulse-input-wrap" id="pulse-input-display" placeholder="Ask anything about this week's ops…" onclick="togglePulse(true)" style="outline:none;border:0.5px solid rgba(0,0,0,0.08);"/>
-  <button class="pulse-send" onclick="togglePulse(true)" aria-label="Open Pulse">
+  <button id="pulse-minimize" onclick="togglePulse(false)" aria-label="Minimize Pulse" style="display:none;width:32px;height:32px;border-radius:8px;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);cursor:pointer;flex-shrink:0;align-items:center;justify-content:center;">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 5l5 5 5-5" stroke="#6E6E73" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+  <button class="pulse-send" id="pulse-open-btn" onclick="pulseSendOrOpen()" aria-label="Send or Open Pulse">
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10M8 3l4 4-4 4" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
 </div>
@@ -5429,10 +5433,36 @@ window.__openPrebookModal = function(){
 // ── Pulse panel toggle ──
 function togglePulse(open){
   const panel=document.getElementById('pulse-panel');
+  const minBtn=document.getElementById('pulse-minimize');
   if(!panel) return;
-  if(open) panel.classList.add('open');
-  else panel.classList.remove('open');
+  if(open){
+    panel.classList.add('open');
+    if(minBtn) minBtn.style.display='flex';
+    // Focus input
+    setTimeout(function(){ var inp=document.getElementById('pulse-input-display'); if(inp) inp.focus(); },50);
+  } else {
+    panel.classList.remove('open');
+    if(minBtn) minBtn.style.display='none';
+  }
 }
+
+function pulseSendOrOpen(){
+  const panel=document.getElementById('pulse-panel');
+  const inp=document.getElementById('pulse-input-display');
+  if(panel && panel.classList.contains('open') && inp && inp.value.trim()){
+    pulseSend();
+  } else {
+    togglePulse(true);
+  }
+}
+
+// Escape key to minimize
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'){
+    const panel=document.getElementById('pulse-panel');
+    if(panel && panel.classList.contains('open')) togglePulse(false);
+  }
+});
 
 // ── Pulse: add message to chat ──
 function pulseAddMessage(text, role){
