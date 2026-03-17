@@ -2581,7 +2581,7 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
 
   // ------------------------- Right tile (context panel) -------------------------
   // Default shows week plan vs actual totals; clicking a node switches to exceptions/deadlines for that node.
-  function renderActionItems(ws, receiving, vas, intl) {
+  function renderActionItems(ws, tz, receiving, vas, intl) {
     var el = document.getElementById('flow-actions');
     if(!el) return;
 
@@ -6065,7 +6065,7 @@ if (signoff.vasComplete) {
     if (UI.selection.node === 'milk') UI.selection = { node: null, sub: null };
     renderDetail(ws, tz, receiving, vas, intl, manual);
     renderRightTile(ws, tz, receiving, vas, intl, manual);
-    renderActionItems(ws, receiving, vas, intl);
+    renderActionItems(ws, tz, receiving, vas, intl);
     highlightSelection();
     } catch (e) {
       console.warn('[flow] refresh failed', e);
