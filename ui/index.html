@@ -131,7 +131,7 @@
     .wkcap .t{font-size:10px;margin-top:2px;color:#AEAEB2;font-variant-numeric:tabular-nums;}
     .wkcap.active .t{color:#6E6E73;}
     .wkcap .bar{height:3px;border-radius:9999px;background:rgba(0,0,0,0.05);overflow:hidden;margin-top:5px;}
-    .wkcap .bar>div{height:3px;border-radius:9999px;background:#a6d609;width:0%;transition:width .6s ease;}
+    .wkcap .bar>div{height:3px;border-radius:9999px;background:#C8F902;width:0%;transition:width .6s ease;}
     @keyframes capIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:translateY(0)}}
     .wkcap{animation:capIn .25s ease both;}
 
@@ -143,14 +143,20 @@
 #page-flow div:has(> #flow-sub),
 #page-flow div:has(> #flow-prev-week) { display:none !important; }
 #flow-sub { display:none !important; }
+/* Rename "End-to-end nodes" to "VAS Visibility Tower" via CSS content trick */
+#flow-top-tile .text-sm.font-semibold { font-size:0 !important; }
+#flow-top-tile .text-sm.font-semibold::before { content:"VAS Visibility Tower"; font-size:13px; font-weight:500; color:#1C1C1E; }
+/* Remove flow module footnote */
+#page-flow > div > .mt-3.text-xs { display:none !important; }
 
 /* ── Week Hub: tighten flow/right tile heights, make detail tile prominent ── */
-/* Flow visual: centered, moved up */
-#flow-journey { width:100%; display:flex; justify-content:center; align-items:center; overflow:hidden; padding-top:4%; }
-#flow-journey svg { height: 520px !important; width:100% !important; display:block; }
-@media (min-width: 1024px) { #flow-journey svg { height: 560px !important; } }
-#flow-top-tile { overflow:hidden; }
+/* Linear timeline — tight tile heights */
+#flow-journey { width:100%; display:flex; justify-content:center; align-items:center; overflow:visible; padding:8px 0; }
+#flow-journey svg { height: 140px !important; width:100% !important; display:block; overflow:visible; }
+#flow-top-tile { overflow:visible; min-height:0 !important; }
 #flow-top-tile.flow-tile--nodes { background:#ffffff !important; border-color:rgba(0,0,0,0.08) !important; }
+/* Remove min-height from detail tile so layout compresses */
+#flow-detail { min-height:320px; }
 #flow-top-tile { padding: 8px 10px !important; }
 #flow-top-tile .flex.items-center.justify-between.mb-2 { margin-bottom: 6px !important; }
 /* Right tile: compact */
@@ -574,6 +580,28 @@ window.__clerkOnLoad = function() {
      flow-detail (bottom tile). All its functionality is 100% intact. -->
 <section id="page-flow" style="display:block;">
   <!-- flow_live_additive.js will replace this content with its skeleton -->
+
+<!-- Pre-booked Containers Modal -->
+<div id="prebook-modal" class="hidden" style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.4);display:none;align-items:center;justify-content:center;" onclick="if(event.target===this)this.classList.add('hidden')">
+  <div style="background:#fff;border-radius:14px;padding:28px 32px;width:100%;max-width:380px;position:relative;" onclick="event.stopPropagation()">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+      <div style="font-size:16px;font-weight:600;color:#1C1C1E;">Pre-booked Containers</div>
+      <button onclick="var m=document.getElementById('prebook-modal');m.classList.add('hidden');m.style.display='none';" style="font-size:12px;color:#6E6E73;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:7px;padding:5px 12px;cursor:pointer;font-family:inherit;">Close</button>
+    </div>
+    <div style="font-size:11px;color:#6E6E73;margin-bottom:16px;">Plan inputs for this week — stored locally, used for container pre-booking estimates.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px;">
+      <label>
+        <div style="font-size:11px;font-weight:500;color:#1C1C1E;margin-bottom:6px;">20 ft containers</div>
+        <input id="prebook-20" type="number" min="0" style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:9px 12px;font-size:14px;font-family:inherit;outline:none;" placeholder="0"/>
+      </label>
+      <label>
+        <div style="font-size:11px;font-weight:500;color:#1C1C1E;margin-bottom:6px;">40 ft containers</div>
+        <input id="prebook-40" type="number" min="0" style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:9px 12px;font-size:14px;font-family:inherit;outline:none;" placeholder="0"/>
+      </label>
+    </div>
+    <button onclick="var m=document.getElementById('prebook-modal');m.classList.add('hidden');m.style.display='none';" style="width:100%;background:#1C1C1E;color:#fff;border:none;border-radius:9px;padding:12px;font-size:13px;font-weight:500;cursor:pointer;font-family:inherit;">Save</button>
+  </div>
+</div>
 </section>
 
 <!-- ================= UID Intake ================= -->
@@ -4437,7 +4465,7 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 
   // ── Constants ────────────────────────────────────────────────────────────────
   const BRAND       = '#990033';
-  const GREEN_VIS   = '#a6d609';
+  const GREEN_VIS   = '#C8F902';
   const GREEN_TEXT  = '#97DC21';
   const DARK        = '#1C1C1E';
   const MID         = '#6E6E73';
@@ -5358,7 +5386,7 @@ window.addEventListener('popstate', () => show(getRouteHash()));
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=65" defer></script>
+<script src="/public/flow_live_additive.js?v=66" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -5934,10 +5962,6 @@ async function handleSignOut() {
 
 </body>
 </html>
-
-
-
-
 
 
 
