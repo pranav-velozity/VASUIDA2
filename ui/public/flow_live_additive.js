@@ -413,7 +413,10 @@ async function fetchFlowWeek(ws, facility) {
 
 async function patchFlowWeek(ws, patch, facility) {
   const f = String(facility || getFacility() || '').trim();
-  if (!ws || !f || !patch || typeof patch !== 'object') return null; // <-- require facility
+  if (!ws || !f || !patch || typeof patch !== 'object') {
+    console.warn('[flow] patchFlowWeek skipped — ws:', ws, 'facility:', f, 'patch:', typeof patch, 'state.facility:', window.state?.facility, 'state.org:', window.state?.org);
+    return null;
+  }
   if (window.__FLOW_SUPPRESS_BACKEND_WRITE__) return null;
   try {
     return await api(`/flow/week/${encodeURIComponent(ws)}?facility=${encodeURIComponent(f)}`, {
@@ -422,7 +425,7 @@ async function patchFlowWeek(ws, patch, facility) {
       body: JSON.stringify(patch),
     });
   } catch (e) {
-    console.warn('[flow] backend patch failed', e);
+    console.warn('[flow] backend patch failed — url:', `/flow/week/${ws}?facility=${f}`, 'error:', e.message || e);
     return null;
   }
 }
@@ -2516,14 +2519,18 @@ function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
 
     const now = new Date();
 
-    // Determine operational "ongoing" index (same logic as before)
-    let ongoingIdx = 2; // default VAS
-    if ((receiving.receivedPOs || 0) < (receiving.plannedPOs || 0)) {
-      ongoingIdx = 1;
-    } else {
-      const intlInWindow = (intl.originMin instanceof Date) ? (now >= intl.originMin) : false;
-      ongoingIdx = intlInWindow ? 3 : 2;
-    }
+    // Determine ALL active node indices — multiple can be active simultaneously
+    // (e.g. Receiving and VAS run in parallel in real operations)
+    const intlInWindow = (intl.originMin instanceof Date) ? (now >= intl.originMin) : false;
+    const vasActive = (vas.appliedUnits || 0) > 0;
+    const receivingInProgress = (receiving.receivedPOs || 0) < (receiving.plannedPOs || 0);
+    const activeNodes = new Set();
+    if (intlInWindow) activeNodes.add(3);
+    if (vasActive) activeNodes.add(2);
+    if (receivingInProgress) activeNodes.add(1);
+    if (activeNodes.size === 0) activeNodes.add(1); // default
+    // ongoingIdx = furthest active node (for segment animation)
+    var ongoingIdx = Math.max(...activeNodes);
 
     // Node model (milk disabled)
     const nodes = [
@@ -2869,16 +2876,14 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
         var x1 = nodeX[i], x2 = nodeX[i+1];
         var nb = nodes[i+1];
         var col = colFor(nb.level, nb.upcoming);
-        var isActive = (i+1 === ongoingIdx);
+        // Animate segment if destination node is active OR if both endpoints are active
+        var isActive = activeNodes.has(i+1) || (activeNodes.has(i) && activeNodes.has(i+1));
         if(isActive){
-          // Active segment: solid dark + animated dash overlay
           parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="#E5E5EA" stroke-width="2" stroke-linecap="round"/>');
           parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="' + lineActive + '" stroke-width="2" stroke-linecap="round" stroke-dasharray="12 5" class="ln-active-seg"/>');
         } else if(!nb.upcoming && nb.level !== 'gray'){
-          // Completed segment: solid dark
           parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="' + lineActive + '" stroke-width="2" stroke-linecap="round"/>');
         } else {
-          // Upcoming: light dotted
           parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="' + lineUpcoming + '" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="4 5"/>');
         }
       }
@@ -2891,16 +2896,18 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
         var isDone = (!n.upcoming && n.level !== 'gray' && i < ongoingIdx);
         var st = statusText(n);
 
-        // Pulse rings — black rings for ongoing nodes
-        if(isOngoing){
+        // Pulse rings — on ALL active nodes (not just furthest)
+        var isActiveNode = activeNodes.has(i);
+        if(isActiveNode){
           parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="14" fill="none" stroke="' + nodeCol + '" class="ln-pulse-ring-1"/>');
           parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="14" fill="none" stroke="' + nodeCol + '" class="ln-pulse-ring-2"/>');
         }
 
-        // Node circle — always white fill, black stroke (dark for active/done, gray for upcoming)
-        var r = isOngoing ? 13 : 10;
-        var nStroke = (n.upcoming && !isOngoing) ? nodeGray : nodeCol;
-        var nSW = isOngoing ? '2' : '1.5';
+        // Node circle
+        var isOngoing = isActiveNode; // treat all active nodes as "ongoing" for sizing
+        var r = isActiveNode ? 13 : 10;
+        var nStroke = (n.upcoming && !isActiveNode) ? nodeGray : nodeCol;
+        var nSW = isActiveNode ? '2' : '1.5';
         parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="#fff" stroke="' + nStroke + '" stroke-width="' + nSW + '" data-journey-node="1" data-node="' + n.id + '" style="cursor:pointer;"/>');
 
         // Icon inside circle
@@ -2914,8 +2921,10 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
 
         // Date label above milestone name (not for Milk Run)
         var mDate = milestoneDates[n.id];
-        var fw = isOngoing ? '600' : '500';
-        var fc = isOngoing ? '#1C1C1E' : '#6E6E73';
+        var fw = isActiveNode ? '600' : '500';
+        var fc = isActiveNode ? '#1C1C1E' : '#6E6E73';
+        // Override upcoming flag for active nodes — they're in progress
+        if(isActiveNode && n.upcoming) n = Object.assign({}, n, {upcoming: false});
 
         // Fixed vertical stack (all measured from nodeY / cy):
         // cy - 58: date type label (EX-FACTORY)
