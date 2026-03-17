@@ -120,18 +120,18 @@
     .cell{width:100%;padding:.4rem .5rem;border:0;outline:none}
     .cell:focus{box-shadow:0 0 0 3px rgba(59,130,246,.25)}
     .th{font-size:.75rem;font-weight:600;color:#F0D731}
-    /* Week capsule */
-    .wkcap{border-radius:10px;border:0.5px solid rgba(0,0,0,0.08);padding:8px 10px;width:72px;background:#fff;cursor:pointer;transition:border-color .18s,transform .18s;position:relative;overflow:hidden;}
-    .wkcap:hover{border-color:rgba(0,0,0,0.18);transform:translateY(-1px);}
-    .wkcap.active{border-color:rgba(153,0,51,0.4);}
-    .wkcap.active::after{content:'';position:absolute;bottom:0;left:0;right:0;height:2.5px;background:#990033;border-radius:0 0 10px 10px;}
-    .wkcap .m{font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;}
+    /* Week capsule — compact horizontal card style */
+    .wkcap{border-radius:8px;border:0.5px solid rgba(0,0,0,0.08);padding:6px 10px;width:80px;background:#fff;cursor:pointer;transition:border-color .15s,box-shadow .15s;position:relative;overflow:hidden;text-align:left;}
+    .wkcap:hover{border-color:rgba(0,0,0,0.18);box-shadow:0 2px 8px rgba(0,0,0,0.06);}
+    .wkcap.active{border-color:rgba(153,0,51,0.5);background:#fff;}
+    .wkcap.active::before{content:'';position:absolute;top:0;left:0;bottom:0;width:3px;background:#990033;border-radius:8px 0 0 8px;}
+    .wkcap .m{font-size:9px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.08em;line-height:1;}
     .wkcap.active .m{color:#990033;}
-    .wkcap .d{font-size:17px;font-weight:600;color:#1C1C1E;line-height:1.15;letter-spacing:-0.02em;}
-    .wkcap .t{font-size:10px;margin-top:2px;color:#AEAEB2;font-variant-numeric:tabular-nums;}
+    .wkcap .d{font-size:18px;font-weight:700;color:#1C1C1E;line-height:1.1;letter-spacing:-0.03em;margin-top:1px;}
+    .wkcap .t{font-size:9px;color:#AEAEB2;font-variant-numeric:tabular-nums;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
     .wkcap.active .t{color:#6E6E73;}
-    .wkcap .bar{height:3px;border-radius:9999px;background:rgba(0,0,0,0.05);overflow:hidden;margin-top:5px;}
-    .wkcap .bar>div{height:3px;border-radius:9999px;background:#C8F902;width:0%;transition:width .6s ease;}
+    .wkcap .bar{height:2px;border-radius:9999px;background:rgba(0,0,0,0.05);overflow:hidden;margin-top:4px;}
+    .wkcap .bar>div{height:2px;border-radius:9999px;background:#C8F902;width:0%;transition:width .6s ease;}
     @keyframes capIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:translateY(0)}}
     .wkcap{animation:capIn .25s ease both;}
 
@@ -384,7 +384,7 @@ window.__clerkOnLoad = function() {
   .pn-brand-p{color:#990033;}
   .pn-nav-items{display:flex;align-items:center;gap:2px;padding:4px;background:#F5F5F7;border-radius:10px;border:0.5px solid rgba(0,0,0,0.06);}
   .pn-nav-item{font-size:12px;font-weight:500;color:#6E6E73;padding:6px 14px;border-radius:7px;text-decoration:none;transition:background .15s,color .15s;white-space:nowrap;cursor:pointer;}
-  .pn-nav-item.active{background:#fff;color:#1C1C1E;box-shadow:0 1px 3px rgba(0,0,0,0.08),0 1px 2px rgba(0,0,0,0.04);}
+  .pn-nav-item.active{background:#990033;color:#fff;box-shadow:0 2px 8px rgba(153,0,51,0.25);}
   .pn-nav-item:hover:not(.active){background:rgba(0,0,0,0.04);color:#1C1C1E;}
   .pn-user{display:flex;align-items:center;gap:10px;}
   .pn-user-info{text-align:right;}
@@ -443,7 +443,7 @@ window.__clerkOnLoad = function() {
 <header class="pn-nav">
   <div class="pn-wrap">
     <a class="pn-brand" href="#week-hub">
-      <span class="pn-brand-v">VelOzity</span><span class="pn-brand-p">&nbsp;Pinpoint</span>
+      <span class="pn-brand-v">VelOzity</span><span class="pn-brand-p">&nbsp;Pinpoint</span><span style="color:#990033;font-size:13px;margin-left:4px;opacity:0.7;">&rsaquo;&rsaquo;</span>
     </a>
     <nav class="pn-nav-items" id="pn-nav-items">
       <a class="pn-nav-item active" href="#week-hub" id="nav-weekhub" onclick="event.preventDefault();window.show('#week-hub')">Week Hub</a>
@@ -1062,9 +1062,9 @@ function computeBinQA(ws, records=[], bins=[]) {
     el.setAttribute('data-week-id', id);
     el.style.borderColor = (id === state.weekStart ? BRAND : 'rgba(0,0,0,.12)');
     el.innerHTML = `
-      <div class="m" style="color:${id === state.weekStart ? BRAND : '#AEAEB2'}">${mon}</div>
+      <div class="m">${mon}</div>
       <div class="d">${day}</div>
-      <div class="t" id="cap-total-${id}">${fmtInt(stats.planned || 0)}</div>
+      <div class="t" id="cap-total-${id}">${stats.planned ? fmtInt(stats.planned) + ' u' : '—'}</div>
       <div class="bar"><div id="cap-bar-${id}"></div></div>
     `;
     el.onclick = () => { $('#week-start').value = id; setWeek(id); };
@@ -5152,7 +5152,7 @@ window.__openPrebookModal = function(){
     var pillsBar = document.getElementById('ops-insights-subtitle')
       ? ('<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
         + '<div style="font-size:13px;font-weight:500;color:#1C1C1E;">Insights</div>'
-        + '<button id="wh-insights-fullscreen" style="font-size:10px;color:#6E6E73;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:6px;padding:4px 10px;cursor:pointer;font-family:inherit;">Full screen</button>'
+        + '<button id="wh-insights-fullscreen" style="font-size:10px;color:#fff;background:#990033;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;letter-spacing:.02em;">Full screen</button>'
         + '</div>'
         + '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:14px;" id="wh-ops-pills-clone">'
         + [
@@ -5405,7 +5405,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=79" defer></script>
+<script src="/public/flow_live_additive.js?v=80" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -6010,6 +6010,11 @@ async function handleSignOut() {
 
 </body>
 </html>
+
+
+
+
+
 
 
 
