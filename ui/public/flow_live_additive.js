@@ -421,8 +421,13 @@ async function patchFlowWeek(ws, patch, facility) {
   }
 }
 // Prime local week-scoped stores from backend once per (ws, facility).
-async function primeFlowWeekFromBackend(ws) {
-  const f = getFacility();
+async function primeFlowWeekFromBackend(ws, facilityOverride) {
+  // Try plan data first (most reliable), then override param, then getFacility()
+  const planFac = (window.state && Array.isArray(window.state.plan))
+    ? window.state.plan.map(p => String(p.facility_name || p.facility || '').trim()).find(Boolean)
+    : '';
+  const f = planFac || String(facilityOverride || getFacility() || '').trim();
+  if (!f) return; // no facility = can't fetch
   window.__FLOW_PRIMED__ = window.__FLOW_PRIMED__ || {};
   const key = `${ws}::${f}`;
 
