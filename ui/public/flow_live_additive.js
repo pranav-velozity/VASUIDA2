@@ -2507,12 +2507,12 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
         var st = document.createElement('style');
         st.id = 'linear-pulse-style';
         st.textContent = [
-          '@keyframes lnPulse{0%{r:12;stroke-opacity:0.6;stroke-width:2}100%{r:26;stroke-opacity:0;stroke-width:0.5}}',
-          '@keyframes lnPulse2{0%{r:12;stroke-opacity:0.4;stroke-width:1.5}100%{r:32;stroke-opacity:0;stroke-width:0.5}}',
-          '.ln-pulse-ring-1{animation:lnPulse 2s ease-out infinite}',
-          '.ln-pulse-ring-2{animation:lnPulse2 2s ease-out infinite 0.7s}',
-          '@keyframes lnDash{to{stroke-dashoffset:-24}}',
-          '.ln-active-seg{animation:lnDash 1.2s linear infinite}'
+          '@keyframes lnPulse{0%{r:12;stroke-opacity:0}15%{stroke-opacity:0.5;stroke-width:1.8}100%{r:28;stroke-opacity:0;stroke-width:0.3}}',
+          '@keyframes lnPulse2{0%{r:12;stroke-opacity:0}15%{stroke-opacity:0.3;stroke-width:1.5}100%{r:34;stroke-opacity:0;stroke-width:0.3}}',
+          '.ln-pulse-ring-1{animation:lnPulse 2.8s ease-in-out infinite}',
+          '.ln-pulse-ring-2{animation:lnPulse2 2.8s ease-in-out infinite 1.1s}',
+          '@keyframes lnFlow{0%{stroke-dashoffset:0}100%{stroke-dashoffset:-32}}',
+          '.ln-active-seg{animation:lnFlow 2.4s cubic-bezier(0.45,0,0.55,1) infinite}'
         ].join('');
         document.head.appendChild(st);
       }
@@ -2528,7 +2528,7 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
         if(isActive){
           // Active segment: solid dark + animated dash overlay
           parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="#E5E5EA" stroke-width="2" stroke-linecap="round"/>');
-          parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="' + lineActive + '" stroke-width="2" stroke-linecap="round" stroke-dasharray="8 8" class="ln-active-seg"/>');
+          parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="' + lineActive + '" stroke-width="2" stroke-linecap="round" stroke-dasharray="12 5" class="ln-active-seg"/>');
         } else if(!nb.upcoming && nb.level !== 'gray'){
           // Completed segment: solid dark
           parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="' + lineActive + '" stroke-width="2" stroke-linecap="round"/>');
