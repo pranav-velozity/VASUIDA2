@@ -2257,6 +2257,11 @@ const [plan, summary, receiving] = await Promise.all([
   fetchReceiving(ws)
 ]);
 state.plan = Array.isArray(plan) ? plan : [];
+// Extract facility from plan rows so flow module can save to backend
+if (!state.facility) {
+  const planFac = (state.plan || []).map(p => String(p.facility_name || p.facility || '').trim()).find(Boolean);
+  if (planFac) state.facility = planFac;
+}
 
 // Summary-first: for normal dashboard operation we keep only PO rollups.
 // (Raw records are loaded only for explicit drilldowns.)
@@ -5433,7 +5438,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=96" defer></script>
+<script src="/public/flow_live_additive.js?v=98" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -6075,6 +6080,11 @@ async function handleSignOut() {
 
 </body>
 </html>
+
+
+
+
+
 
 
 
