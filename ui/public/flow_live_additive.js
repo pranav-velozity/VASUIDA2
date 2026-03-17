@@ -2511,8 +2511,8 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
           '@keyframes lnPulse2{0%{r:12;stroke-opacity:0}15%{stroke-opacity:0.3;stroke-width:1.5}100%{r:34;stroke-opacity:0;stroke-width:0.3}}',
           '.ln-pulse-ring-1{animation:lnPulse 2.8s ease-in-out infinite}',
           '.ln-pulse-ring-2{animation:lnPulse2 2.8s ease-in-out infinite 1.1s}',
-          '@keyframes lnFlow{0%{stroke-dashoffset:0}100%{stroke-dashoffset:-32}}',
-          '.ln-active-seg{animation:lnFlow 2.4s cubic-bezier(0.45,0,0.55,1) infinite}'
+          '@keyframes lnFlow{0%{stroke-dashoffset:0}100%{stroke-dashoffset:-17}}',
+          '.ln-active-seg{animation:lnFlow 1.8s linear infinite}'
         ].join('');
         document.head.appendChild(st);
       }
