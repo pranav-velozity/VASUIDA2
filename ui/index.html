@@ -3214,12 +3214,8 @@ function show(hash){
 
   // Show target page + render hooks
 if (h === '#intake') {
-  const el = document.getElementById('page-intake');
-  el && el.classList.remove('hidden');
-  if(location.hash !== '#intake') {
-    history.pushState(null, '', '#intake');
-    window.dispatchEvent(new HashChangeEvent('hashchange'));
-  }
+  // Let intake module handle via hashchange
+  location.hash = '#intake';
   // New: Intake module entrypoint
   if (window.IntakePage && typeof window.IntakePage.show === 'function') {
     try { window.IntakePage.show(); } catch (e) { console.warn('IntakePage.show failed', e); }
@@ -3228,13 +3224,8 @@ if (h === '#intake') {
     try { window.renderIntake(); } catch (e) { console.warn('renderIntake failed', e); }
   }
   } else if (h === '#receiving') {
-    const el = document.getElementById('page-receiving');
-    el && el.classList.remove('hidden');
-    // Set hash so receiving_live_additive.js picks it up via hashchange
-    if(location.hash !== '#receiving') {
-      history.pushState(null, '', '#receiving');
-      window.dispatchEvent(new HashChangeEvent('hashchange'));
-    }
+    // Let receiving_live_additive.js handle everything via its hashchange listener
+    location.hash = '#receiving';
   } else if (h === '#flow') {
     // #page-flow now lives inside #page-dashboard (Week Hub)
     const el = document.getElementById('page-dashboard');
@@ -5428,7 +5419,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=84" defer></script>
+<script src="/public/flow_live_additive.js?v=85" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
