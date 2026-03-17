@@ -1955,9 +1955,6 @@ function computeManualNodeStatuses(ws, tz) {
           </div>
           <!-- Summary tile (right 1/3) -->
           <div class="rounded-2xl border bg-white shadow-sm p-3 lg:col-span-1" style="min-height:0;">
-            <div class="flex items-center justify-between mb-2">
-              <div class="text-sm font-semibold text-gray-700">Week totals</div>
-            </div>
             <div id="flow-footer"></div>
           </div>
         </div>
@@ -2479,12 +2476,30 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
       var nodeX = [padL, padL + (W-padL-padR)*0.25, padL + (W-padL-padR)*0.5, padL + (W-padL-padR)*0.75, W-padR];
       var nodeY = H/2;
 
+      // Status color — used ONLY for pills, not for nodes/lines
       var colFor = function(level, upcoming) {
         if(upcoming || level === 'gray' || level === 'future') return '#E5E5EA';
         if(level === 'green') return '#C8F902';
         if(level === 'yellow') return '#FFA203';
         if(level === 'red') return '#D61A3C';
         return '#AEAEB2';
+      };
+      // Node/line color — always black/white
+      var nodeCol = '#1C1C1E';   // active/done node fill/stroke
+      var nodeGray = '#C7C7CC'; // upcoming node stroke
+      var lineActive = '#1C1C1E';
+      var lineUpcoming = '#E5E5EA';
+
+      // Icon paths for each milestone node
+      var nodeIcon = function(id) {
+        var icons = {
+          milk:      'M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M9 22V12h6v10',
+          receiving: 'M21 8l-9-5-9 5 9 5 9-5z M3 8v8l9 5 9-5V8 M12 13v8',
+          vas:       'M4 20V6a2 2 0 0 1 2-2h6v16 M14 20V10a2 2 0 0 1 2-2h4v12 M7 8h2 M7 11h2',
+          intl:      'M3 17l.9-4.5L12 9l8.1 3.5.9 4.5 M3 17c2 2 4 2 6 0s4-2 6 0 4 2 6 0',
+          lastmile:  'M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z M12 11.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z'
+        };
+        return icons[id] || '';
       };
 
       // Inject animation CSS once
@@ -2511,12 +2526,15 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
         var col = colFor(nb.level, nb.upcoming);
         var isActive = (i+1 === ongoingIdx);
         if(isActive){
-          parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="#E5E5EA" stroke-width="3" stroke-linecap="round"/>');
-          parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="' + col + '" stroke-width="3" stroke-linecap="round" stroke-dasharray="8 8" class="ln-active-seg"/>');
+          // Active segment: solid dark + animated dash overlay
+          parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="#E5E5EA" stroke-width="2" stroke-linecap="round"/>');
+          parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="' + lineActive + '" stroke-width="2" stroke-linecap="round" stroke-dasharray="8 8" class="ln-active-seg"/>');
         } else if(!nb.upcoming && nb.level !== 'gray'){
-          parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="' + col + '" stroke-width="3" stroke-linecap="round"/>');
+          // Completed segment: solid dark
+          parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="' + lineActive + '" stroke-width="2" stroke-linecap="round"/>');
         } else {
-          parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="#E5E5EA" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 4"/>');
+          // Upcoming: light dotted
+          parts.push('<line x1="' + x1 + '" y1="' + nodeY + '" x2="' + x2 + '" y2="' + nodeY + '" stroke="' + lineUpcoming + '" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="4 5"/>');
         }
       }
 
@@ -2528,34 +2546,40 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
         var isDone = (!n.upcoming && n.level !== 'gray' && i < ongoingIdx);
         var st = statusText(n);
 
-        // Pulse rings on ongoing
+        // Pulse rings — black rings for ongoing nodes
         if(isOngoing){
-          parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="12" fill="none" stroke="' + col + '" class="ln-pulse-ring-1"/>');
-          parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="12" fill="none" stroke="' + col + '" class="ln-pulse-ring-2"/>');
+          parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="14" fill="none" stroke="' + nodeCol + '" class="ln-pulse-ring-1"/>');
+          parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="14" fill="none" stroke="' + nodeCol + '" class="ln-pulse-ring-2"/>');
         }
 
-        var r = isOngoing ? 12 : 9;
-        var fill = isDone ? col : (isOngoing ? col : '#fff');
-        var stroke = n.upcoming ? '#AEAEB2' : col;
-        var sw = isOngoing ? '2.5' : '2';
-        parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + sw + '" data-journey-node="1" data-node="' + n.id + '" style="cursor:pointer;"/>');
+        // Node circle — always white fill, black stroke (dark for active/done, gray for upcoming)
+        var r = isOngoing ? 13 : 10;
+        var nStroke = (n.upcoming && !isOngoing) ? nodeGray : nodeCol;
+        var nSW = isOngoing ? '2' : '1.5';
+        parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="#fff" stroke="' + nStroke + '" stroke-width="' + nSW + '" data-journey-node="1" data-node="' + n.id + '" style="cursor:pointer;"/>');
 
-        if(isDone){
-          parts.push('<text x="' + cx + '" y="' + (cy+4) + '" text-anchor="middle" font-size="10" fill="#1C1C1E" pointer-events="none">✓</text>');
+        // Icon inside circle
+        var iconPath = nodeIcon(n.id);
+        var iconColor = (n.upcoming && !isOngoing) ? nodeGray : nodeCol;
+        if(iconPath){
+          var iconScale = (r * 2 * 0.55) / 24; // scale 24px icon to fit circle
+          var iconOff = r * 0.55;
+          parts.push('<g transform="translate(' + (cx - iconOff) + ',' + (cy - iconOff) + ') scale(' + iconScale.toFixed(3) + ')" pointer-events="none"><path d="' + iconPath + '" fill="none" stroke="' + iconColor + '" stroke-width="' + (1.8/iconScale).toFixed(1) + '" stroke-linecap="round" stroke-linejoin="round"/></g>');
         }
 
         // Label above node
-        var labelY = cy - (isOngoing ? 22 : 18);
-        var fw = isOngoing ? '700' : '500';
+        var labelY = cy - (isOngoing ? 23 : 19);
+        var fw = isOngoing ? '600' : '500';
         var fc = isOngoing ? '#1C1C1E' : '#6E6E73';
         parts.push('<text x="' + cx + '" y="' + labelY + '" text-anchor="middle" font-size="11" font-weight="' + fw + '" fill="' + fc + '" pointer-events="none">' + n.label + '</text>');
 
-        // Status pill below
+        // Status pill below — KEEP brand colors here (the only color element)
         var pillW = Math.max(52, st.length * 6.5 + 14);
         var pillX = cx - pillW/2;
-        var pillY2 = cy + (isOngoing ? 20 : 16);
-        var pillBg = isOngoing ? col : (n.upcoming ? '#F2F2F7' : col + '22');
+        var pillY2 = cy + (isOngoing ? 21 : 17);
+        var pillBg = n.upcoming ? '#F2F2F7' : col + (col.length === 7 ? '28' : '');
         var pillFg = (n.level === 'green' || n.level === 'yellow') ? '#1C1C1E' : (n.level === 'red' ? '#D61A3C' : '#6E6E73');
+        if(n.upcoming) pillFg = '#AEAEB2';
         parts.push('<rect x="' + pillX + '" y="' + pillY2 + '" width="' + pillW + '" height="16" rx="8" fill="' + pillBg + '" data-journey-node="1" data-node="' + n.id + '" style="cursor:pointer;"/>');
         parts.push('<text x="' + cx + '" y="' + (pillY2+11) + '" text-anchor="middle" font-size="9" font-weight="600" fill="' + pillFg + '" pointer-events="none">' + st + '</text>');
       });
@@ -2828,8 +2852,7 @@ const signoffSection = (context) => {
 
     const weekTotalsView = () => {
       return `
-        ${header('Week plan vs actual', `Week of ${ws}`)}
-        <div class="mt-3 space-y-3">
+        <div class="space-y-3">
           <div class="rounded-2xl border bg-gray-50 p-3">
             ${hRow(icon.po, 'POs planned – received', `${fmtInt(recPlannedPOs)} – ${fmtInt(recReceivedPOs)}`)}
             ${hRow(icon.units, 'Units planned – applied', `${fmtInt(plannedUnits)} – ${fmtInt(appliedUnits)}`)}
