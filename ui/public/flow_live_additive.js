@@ -2719,7 +2719,7 @@ const signoffSection = (context) => {
             hRow(icon.box, 'Total CBM', fmt2(cbm))
           )}
 
-          <button onclick="document.getElementById('prebook-modal').classList.remove('hidden')" style="width:100%;text-align:left;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:8px 10px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-family:inherit;">
+          <button onclick="window.__openPrebookModal()" style="width:100%;text-align:left;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:8px 10px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-family:inherit;">
             <span style="font-size:11px;color:#1C1C1E;font-weight:500;">Pre-booked containers</span>
             <span style="font-size:11px;color:#6E6E73;">20ft: ${fmtInt(prebook.c20)} · 40ft: ${fmtInt(prebook.c40)} <span style="color:#AEAEB2;margin-left:4px;">›</span></span>
           </button>
