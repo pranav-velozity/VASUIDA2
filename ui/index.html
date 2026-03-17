@@ -120,20 +120,23 @@
     .cell{width:100%;padding:.4rem .5rem;border:0;outline:none}
     .cell:focus{box-shadow:0 0 0 3px rgba(59,130,246,.25)}
     .th{font-size:.75rem;font-weight:600;color:#F0D731}
-    /* Week capsule — compact horizontal card style */
-    .wkcap{border-radius:8px;border:0.5px solid rgba(0,0,0,0.08);padding:6px 10px;width:80px;background:#fff;cursor:pointer;transition:border-color .15s,box-shadow .15s;position:relative;overflow:hidden;text-align:left;}
-    .wkcap:hover{border-color:rgba(0,0,0,0.18);box-shadow:0 2px 8px rgba(0,0,0,0.06);}
-    .wkcap.active{border-color:rgba(153,0,51,0.5);background:#fff;}
-    .wkcap.active::before{content:'';position:absolute;top:0;left:0;bottom:0;width:3px;background:#990033;border-radius:8px 0 0 8px;}
-    .wkcap .m{font-size:9px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.08em;line-height:1;}
+    /* Week capsule — SVG ring outline progress */
+    .wkcap{border-radius:10px;border:none;padding:0;width:58px;height:58px;background:transparent;cursor:pointer;transition:transform .15s,filter .15s;position:relative;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+    .wkcap:hover{transform:translateY(-2px);filter:drop-shadow(0 3px 8px rgba(0,0,0,0.12));}
+    .wkcap svg.cap-ring{position:absolute;inset:0;width:100%;height:100%;overflow:visible;}
+    .wkcap .cap-inner{position:relative;z-index:1;text-align:center;pointer-events:none;}
+    .wkcap .m{font-size:8px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;line-height:1;display:block;}
     .wkcap.active .m{color:#990033;}
-    .wkcap .d{font-size:18px;font-weight:700;color:#1C1C1E;line-height:1.1;letter-spacing:-0.03em;margin-top:1px;}
-    .wkcap .t{font-size:9px;color:#AEAEB2;font-variant-numeric:tabular-nums;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .wkcap .d{font-size:16px;font-weight:700;color:#1C1C1E;line-height:1.05;letter-spacing:-0.03em;display:block;}
+    .wkcap .t{font-size:8px;color:#AEAEB2;font-variant-numeric:tabular-nums;display:block;margin-top:1px;}
     .wkcap.active .t{color:#6E6E73;}
-    .wkcap .bar{height:2px;border-radius:9999px;background:rgba(0,0,0,0.05);overflow:hidden;margin-top:4px;}
-    .wkcap .bar>div{height:2px;border-radius:9999px;background:#C8F902;width:0%;transition:width .6s ease;}
-    @keyframes capIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:translateY(0)}}
-    .wkcap{animation:capIn .25s ease both;}
+    /* Ring track */
+    .cap-ring-track{fill:none;stroke:rgba(0,0,0,0.07);stroke-width:2.5;}
+    /* Ring progress — default gray */
+    .cap-ring-prog{fill:none;stroke:#C8F902;stroke-width:2.5;stroke-linecap:round;transition:stroke-dashoffset .6s ease;transform-origin:center;transform:rotate(-90deg);}
+    .wkcap.active .cap-ring-prog{stroke:#990033;}
+    @keyframes capIn{from{opacity:0;transform:scale(0.88)}to{opacity:1;transform:scale(1)}}
+    .wkcap{animation:capIn .2s ease both;}
 
 /* Respect .hidden; only style when visible */
 #page-dashboard:not(.hidden){ display:block; }
@@ -520,16 +523,16 @@ window.__clerkOnLoad = function() {
 <span class="hidden" id="vo-footer-text"></span>
 
 <!-- ── Week Hub Header Tile ── -->
-<div id="wh-header" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:14px 20px;display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px;flex-wrap:wrap;">
+<div id="wh-header" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:8px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;flex-wrap:wrap;">
 
   <!-- Left: Brand + week date + capsules right after -->
   <div style="display:flex;align-items:center;gap:14px;flex:1;min-width:0;flex-wrap:wrap;">
     <div style="flex-shrink:0;">
-      <div style="font-size:18px;font-weight:600;color:#1C1C1E;letter-spacing:-0.02em;line-height:1;">Week Hub</div>
-      <input id="wh-week-display" type="date" style="font-size:10px;color:#AEAEB2;border:none;background:transparent;font-family:inherit;cursor:pointer;padding:0;margin-top:3px;outline:none;" onchange="if(typeof window.setWeek==='function')window.setWeek(this.value)"/>
+      <div style="font-size:15px;font-weight:600;color:#1C1C1E;letter-spacing:-0.02em;line-height:1;">Week Hub</div>
+      <input id="wh-week-display" type="date" style="font-size:9px;color:#AEAEB2;border:none;background:transparent;font-family:inherit;cursor:pointer;padding:0;margin-top:2px;outline:none;" onchange="if(typeof window.setWeek==='function')window.setWeek(this.value)"/>
     </div>
     <!-- Week capsules immediately after title -->
-    <div id="wh-capsules-display" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+    <div id="wh-capsules-display" style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;"></div>
   </div>
 
   <!-- Right: Actions -->
@@ -1060,22 +1063,33 @@ function computeBinQA(ws, records=[], bins=[]) {
     const el = document.createElement('button');
     el.className = 'wkcap' + (id === state.weekStart ? ' active' : '');
     el.setAttribute('data-week-id', id);
-    el.style.borderColor = (id === state.weekStart ? BRAND : 'rgba(0,0,0,.12)');
-    el.innerHTML = `
-      <div class="m">${mon}</div>
-      <div class="d">${day}</div>
-      <div class="t" id="cap-total-${id}">${stats.planned ? fmtInt(stats.planned) + ' u' : '—'}</div>
-      <div class="bar"><div id="cap-bar-${id}"></div></div>
-    `;
-    el.onclick = () => { $('#week-start').value = id; setWeek(id); };
-    r.appendChild(el);
 
     const p = (stats.planned > 0)
       ? Math.min(100, Math.round(((stats.applied || 0) * 100) / stats.planned))
       : 0;
 
-    const bar = el.querySelector(`#cap-bar-${id}`);
-    if (bar) bar.style.width = `${p}%`;
+    // SVG ring: r=26, circumference=2π*26≈163.4
+    const R = 26, CX = 29, CY = 29;
+    const circ = 2 * Math.PI * R;
+    const offset = circ * (1 - p / 100);
+    const isActive = id === state.weekStart;
+
+    el.innerHTML = `
+      <svg class="cap-ring" viewBox="0 0 58 58">
+        <circle class="cap-ring-track" cx="${CX}" cy="${CY}" r="${R}"/>
+        <circle class="cap-ring-prog" cx="${CX}" cy="${CY}" r="${R}"
+          stroke-dasharray="${circ.toFixed(1)}"
+          stroke-dashoffset="${offset.toFixed(1)}"
+          style="transform:rotate(-90deg);transform-origin:${CX}px ${CY}px;${p===0?'opacity:0.3':''}"/>
+      </svg>
+      <div class="cap-inner">
+        <span class="m">${mon}</span>
+        <span class="d">${day}</span>
+        <span class="t" id="cap-total-${id}">${stats.planned ? fmtInt(stats.planned)+'u' : '—'}</span>
+      </div>
+    `;
+    el.onclick = () => { $('#week-start').value = id; setWeek(id); };
+    r.appendChild(el);
   });
 }
 
@@ -5405,7 +5419,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=80" defer></script>
+<script src="/public/flow_live_additive.js?v=82" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -6010,10 +6024,6 @@ async function handleSignOut() {
 
 </body>
 </html>
-
-
-
-
 
 
 
