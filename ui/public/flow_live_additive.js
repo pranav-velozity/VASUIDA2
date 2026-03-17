@@ -1698,6 +1698,308 @@ function computeManualNodeStatuses(ws, tz) {
   }
 
 
+
+  // ── Container Manager Modal ──
+  // Full-screen modal to add/edit containers, assign Zendesk tickets (auto-fills POs),
+  // and visualise what's been assigned. Replaces the inline container editor.
+  function openContainerManager(ws, tz) {
+    const ctx = window.__FLOW_INTL_CTX__ || null;
+    if (!ctx) return;
+
+    const lanes = Array.isArray(ctx.lanes) ? ctx.lanes : [];
+    const weekState = loadIntlWeekContainers(ws);
+    let containers = Array.isArray(weekState && weekState.containers) ? weekState.containers.slice() : [];
+
+    // ── Build/reuse modal shell ──
+    let modal = document.getElementById('flow-container-manager');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'flow-container-manager';
+      modal.style.cssText = 'position:fixed;inset:0;z-index:10000;display:none;';
+      modal.innerHTML = `
+        <div style="position:absolute;inset:0;background:rgba(0,0,0,0.5);" id="fcm-backdrop"></div>
+        <div style="position:absolute;inset:12px;background:#fff;border-radius:16px;box-shadow:0 24px 64px rgba(0,0,0,0.18);display:flex;flex-direction:column;overflow:hidden;">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:0.5px solid rgba(0,0,0,0.08);flex-shrink:0;">
+            <div>
+              <div style="font-size:16px;font-weight:600;color:#1C1C1E;letter-spacing:-0.01em;">Container Manager</div>
+              <div id="fcm-subtitle" style="font-size:11px;color:#AEAEB2;margin-top:2px;"></div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <button id="fcm-add-btn" style="font-size:12px;font-weight:500;background:#1C1C1E;color:#fff;border:none;border-radius:8px;padding:8px 16px;cursor:pointer;display:flex;align-items:center;gap:6px;">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                Add Container
+              </button>
+              <button id="fcm-close" style="font-size:12px;color:#6E6E73;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:8px 14px;cursor:pointer;">Close</button>
+            </div>
+          </div>
+          <div style="display:flex;flex:1;overflow:hidden;">
+            <!-- Left: container list -->
+            <div id="fcm-list" style="width:340px;flex-shrink:0;border-right:0.5px solid rgba(0,0,0,0.08);overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;background:#F9F9FB;"></div>
+            <!-- Right: editor -->
+            <div id="fcm-editor" style="flex:1;overflow-y:auto;padding:20px;"></div>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      document.getElementById('fcm-backdrop').onclick = closeContainerManager;
+      document.getElementById('fcm-close').onclick = closeContainerManager;
+    }
+
+    // ── Render the modal ──
+    function render() {
+      const subtitle = document.getElementById('fcm-subtitle');
+      if (subtitle) subtitle.textContent = 'Week of ' + ws + '  •  ' + containers.length + ' container' + (containers.length !== 1 ? 's' : '');
+
+      renderList();
+      if (editingUid) renderEditor(editingUid);
+      else renderEditorEmpty();
+    }
+
+    // ── Left panel: container cards ──
+    function renderList() {
+      const list = document.getElementById('fcm-list');
+      if (!list) return;
+
+      if (!containers.length) {
+        list.innerHTML = '<div style="font-size:12px;color:#AEAEB2;text-align:center;padding:32px 16px;">No containers yet.<br>Click <b>Add Container</b> to start.</div>';
+        return;
+      }
+
+      list.innerHTML = containers.map(c => {
+        const cid = String(c.container_id || '').trim() || '(no ID)';
+        const size = String(c.size_ft || '').trim() || '—';
+        const vessel = String(c.vessel || '').trim() || '—';
+        const laneKeys = Array.isArray(c.lane_keys) ? c.lane_keys : [];
+        const assignedLanes = lanes.filter(l => laneKeys.includes(l.key));
+        const tickets = [...new Set(assignedLanes.map(l => l.ticket).filter(t => t && t !== 'NO_TICKET'))];
+        const isEditing = editingUid === String(c.container_uid || '');
+        const totalUnits = assignedLanes.reduce((s, l) => s + (l.plannedUnits || 0), 0);
+
+        return '<div data-cuid="' + escapeAttr(String(c.container_uid || '')) + '" class="fcm-card" style="background:#fff;border:0.5px solid ' + (isEditing ? '#990033' : 'rgba(0,0,0,0.08)') + ';border-radius:10px;padding:12px;cursor:pointer;transition:border-color .15s;">' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">' +
+            '<div style="font-size:13px;font-weight:600;color:#1C1C1E;">' + escapeHtml(cid) + '</div>' +
+            '<div style="font-size:10px;background:#F5F5F7;border-radius:4px;padding:2px 6px;color:#6E6E73;">' + size + 'ft</div>' +
+          '</div>' +
+          '<div style="font-size:11px;color:#6E6E73;margin-top:3px;">' + escapeHtml(vessel) + '</div>' +
+          (tickets.length ? '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;">' + tickets.map(t => '<span style="font-size:10px;background:rgba(153,0,51,0.08);color:#990033;border:0.5px solid rgba(153,0,51,0.2);border-radius:4px;padding:2px 6px;">#' + escapeHtml(t) + '</span>').join('') + '</div>' : '') +
+          (totalUnits ? '<div style="font-size:10px;color:#AEAEB2;margin-top:4px;">' + fmtInt(totalUnits) + ' planned units</div>' : '') +
+          '<div style="display:flex;gap:6px;margin-top:8px;">' +
+            '<button data-cuid="' + escapeAttr(String(c.container_uid || '')) + '" data-action="edit" style="flex:1;font-size:11px;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:6px;padding:5px;cursor:pointer;">Edit</button>' +
+            '<button data-cuid="' + escapeAttr(String(c.container_uid || '')) + '" data-action="remove" style="font-size:11px;background:rgba(214,26,60,0.06);border:0.5px solid rgba(214,26,60,0.2);color:#D61A3C;border-radius:6px;padding:5px 10px;cursor:pointer;">Remove</button>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+      // Wire card buttons
+      list.querySelectorAll('[data-action="edit"]').forEach(btn => {
+        btn.onclick = (e) => { e.stopPropagation(); editingUid = btn.getAttribute('data-cuid'); render(); };
+      });
+      list.querySelectorAll('[data-action="remove"]').forEach(btn => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          const uid = btn.getAttribute('data-cuid');
+          containers = containers.filter(c => String(c.container_uid || '') !== uid);
+          if (editingUid === uid) editingUid = null;
+          saveContainers();
+          render();
+        };
+      });
+    }
+
+    // ── Right panel: empty state ──
+    function renderEditorEmpty() {
+      const ed = document.getElementById('fcm-editor');
+      if (!ed) return;
+      ed.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;gap:12px;color:#AEAEB2;">' +
+        '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-4 0v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>' +
+        '<div style="font-size:13px;">Select a container to edit, or add a new one</div>' +
+        '</div>';
+    }
+
+    // ── Right panel: editor ──
+    function renderEditor(uid) {
+      const ed = document.getElementById('fcm-editor');
+      if (!ed) return;
+      const c = uid === '__new__' ? { container_uid: '__new__', container_id: '', size_ft: '40', vessel: '', pos: '', lane_keys: [] } :
+        containers.find(x => String(x.container_uid || '') === uid);
+      if (!c) { renderEditorEmpty(); return; }
+
+      const laneKeys = Array.isArray(c.lane_keys) ? c.lane_keys : [];
+
+      // Build zendesk ticket list from lanes
+      const ticketLanes = lanes.filter(l => l.ticket && l.ticket !== 'NO_TICKET');
+      const uniqueTickets = [];
+      const seenTickets = new Set();
+      ticketLanes.forEach(l => {
+        if (!seenTickets.has(l.ticket)) {
+          seenTickets.add(l.ticket);
+          const lanesForTicket = lanes.filter(x => x.ticket === l.ticket);
+          const pos = [...new Set(lanesForTicket.flatMap(x => Array.from(x.plannedPOs || [])))];
+          const units = lanesForTicket.reduce((s, x) => s + (x.plannedUnits || 0), 0);
+          const freight = lanesForTicket[0]?.freight || 'Sea';
+          const supplier = lanesForTicket[0]?.supplier || '';
+          const ticketLaneKeys = lanesForTicket.map(x => x.key);
+          uniqueTickets.push({ ticket: l.ticket, supplier, freight, units, pos, laneKeys: ticketLaneKeys });
+        }
+      });
+
+      // Which tickets are currently assigned to this container
+      const assignedTickets = new Set(
+        uniqueTickets.filter(t => t.laneKeys.some(k => laneKeys.includes(k))).map(t => t.ticket)
+      );
+
+      ed.innerHTML =
+        '<div style="max-width:600px;">' +
+        '<div style="font-size:14px;font-weight:600;color:#1C1C1E;margin-bottom:16px;">' + (uid === '__new__' ? 'New Container' : 'Edit Container') + '</div>' +
+
+        // Container details
+        '<div style="display:grid;grid-template-columns:1fr 80px;gap:10px;margin-bottom:10px;">' +
+          '<label style="display:block;">' +
+            '<div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Container # / AWB</div>' +
+            '<input id="fcm-cid" value="' + escapeAttr(String(c.container_id || '')) + '" placeholder="e.g. TGHU1234567" style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:9px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;"/>' +
+          '</label>' +
+          '<label style="display:block;">' +
+            '<div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Size</div>' +
+            '<select id="fcm-size" style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:9px 10px;font-size:13px;font-family:inherit;background:#fff;outline:none;">' +
+              '<option value="20"' + (String(c.size_ft) === '20' ? ' selected' : '') + '>20 ft</option>' +
+              '<option value="40"' + (String(c.size_ft) !== '20' ? ' selected' : '') + '>40 ft</option>' +
+            '</select>' +
+          '</label>' +
+        '</div>' +
+
+        '<label style="display:block;margin-bottom:16px;">' +
+          '<div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Vessel Name</div>' +
+          '<input id="fcm-vessel" value="' + escapeAttr(String(c.vessel || '')) + '" placeholder="e.g. MAERSK SEALAND" style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:9px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;"/>' +
+        '</label>' +
+
+        // Zendesk assignment
+        '<div style="margin-bottom:8px;">' +
+          '<div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;">Assign Zendesk Tickets</div>' +
+          '<div style="font-size:11px;color:#6E6E73;margin-bottom:10px;">Selecting a ticket auto-assigns all its POs to this container.</div>' +
+          '<div id="fcm-tickets" style="display:flex;flex-direction:column;gap:6px;">' +
+            uniqueTickets.map(t => {
+              const checked = assignedTickets.has(t.ticket);
+              const modeIcon = t.freight === 'Air' ?
+                '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/></svg>' :
+                '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20a2.4 2.4 0 0 0 2 1 2.4 2.4 0 0 0 2-1 2.4 2.4 0 0 1 2-1 2.4 2.4 0 0 1 2 1 2.4 2.4 0 0 0 2 1 2.4 2.4 0 0 0 2-1 2.4 2.4 0 0 1 2-1 2.4 2.4 0 0 1 2 1"/><path d="M4 9l2-2h12l3 6H4z"/><path d="M10 7V5a2 2 0 0 1 4 0v2"/></svg>';
+              return '<label style="display:flex;align-items:center;gap:10px;background:' + (checked ? 'rgba(153,0,51,0.04)' : '#F9F9FB') + ';border:0.5px solid ' + (checked ? 'rgba(153,0,51,0.25)' : 'rgba(0,0,0,0.08)') + ';border-radius:8px;padding:10px 12px;cursor:pointer;transition:all .15s;">' +
+                '<input type="checkbox" data-ticket="' + escapeAttr(t.ticket) + '" data-lane-keys="' + escapeAttr(JSON.stringify(t.laneKeys)) + '" data-pos="' + escapeAttr(t.pos.join(',')) + '" ' + (checked ? 'checked' : '') + ' style="width:15px;height:15px;accent-color:#990033;cursor:pointer;flex-shrink:0;"/>' +
+                '<div style="min-width:0;flex:1;">' +
+                  '<div style="display:flex;align-items:center;gap:6px;">' +
+                    '<span style="font-size:12px;font-weight:600;color:#1C1C1E;">#' + escapeHtml(t.ticket) + '</span>' +
+                    '<span style="color:#6E6E73;">' + modeIcon + '</span>' +
+                    '<span style="font-size:11px;color:#6E6E73;">' + escapeHtml(t.supplier) + '</span>' +
+                  '</div>' +
+                  '<div style="font-size:10px;color:#AEAEB2;margin-top:2px;">' + fmtInt(t.units) + ' units · ' + t.pos.length + ' PO' + (t.pos.length !== 1 ? 's' : '') + '</div>' +
+                '</div>' +
+              '</label>';
+            }).join('') +
+          '</div>' +
+        '</div>' +
+
+        // POs (auto-filled, editable)
+        '<label style="display:block;margin-top:14px;">' +
+          '<div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">POs on this container <span style="font-weight:400;text-transform:none;">(auto-filled from Zendesk, editable)</span></div>' +
+          '<textarea id="fcm-pos" rows="3" placeholder="POs auto-fill when Zendesk tickets are selected above, or enter manually..." style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:9px 12px;font-size:12px;font-family:inherit;outline:none;resize:vertical;box-sizing:border-box;">' + escapeHtml(String(c.pos || '')) + '</textarea>' +
+        '</label>' +
+
+        // Save button
+        '<div style="display:flex;gap:8px;margin-top:16px;">' +
+          '<button id="fcm-save" style="flex:1;background:#1C1C1E;color:#fff;border:none;border-radius:9px;padding:12px;font-size:13px;font-weight:500;cursor:pointer;font-family:inherit;">Save Container</button>' +
+          (uid !== '__new__' ? '<button id="fcm-cancel" style="background:#F5F5F7;color:#6E6E73;border:0.5px solid rgba(0,0,0,0.08);border-radius:9px;padding:12px 16px;font-size:13px;cursor:pointer;font-family:inherit;">Cancel</button>' : '') +
+        '</div>' +
+        '<div id="fcm-msg" style="font-size:11px;color:#AEAEB2;margin-top:6px;text-align:center;"></div>' +
+        '</div>';
+
+      // Focus first input
+      setTimeout(() => { const el = document.getElementById('fcm-cid'); if(el) el.focus(); }, 50);
+
+      // Wire ticket checkboxes — auto-update POs textarea
+      ed.querySelectorAll('[data-ticket]').forEach(cb => {
+        cb.onchange = () => {
+          const allChecked = ed.querySelectorAll('[data-ticket]:checked');
+          const allPos = new Set();
+          allChecked.forEach(el => {
+            (el.getAttribute('data-pos') || '').split(',').map(p => p.trim()).filter(Boolean).forEach(p => allPos.add(p));
+          });
+          const posField = document.getElementById('fcm-pos');
+          if (posField) posField.value = [...allPos].join(', ');
+          // Update card border color
+          const lbl = cb.closest('label');
+          if (lbl) {
+            lbl.style.background = cb.checked ? 'rgba(153,0,51,0.04)' : '#F9F9FB';
+            lbl.style.borderColor = cb.checked ? 'rgba(153,0,51,0.25)' : 'rgba(0,0,0,0.08)';
+          }
+        };
+      });
+
+      // Save
+      const saveBtn = document.getElementById('fcm-save');
+      if (saveBtn) saveBtn.onclick = () => {
+        const cidVal = (document.getElementById('fcm-cid')?.value || '').trim();
+        const sizeVal = document.getElementById('fcm-size')?.value || '40';
+        const vesselVal = (document.getElementById('fcm-vessel')?.value || '').trim();
+        const posVal = (document.getElementById('fcm-pos')?.value || '').trim();
+
+        // Collect assigned lane keys from checked tickets
+        const checkedCbs = ed.querySelectorAll('[data-ticket]:checked');
+        const assignedLaneKeys = [];
+        checkedCbs.forEach(cb => {
+          try { JSON.parse(cb.getAttribute('data-lane-keys') || '[]').forEach(k => { if (!assignedLaneKeys.includes(k)) assignedLaneKeys.push(k); }); } catch {}
+        });
+
+        if (uid === '__new__') {
+          containers.push({
+            container_uid: _uid('c'),
+            container_id: cidVal,
+            size_ft: sizeVal,
+            vessel: vesselVal,
+            pos: posVal,
+            lane_keys: assignedLaneKeys,
+          });
+          editingUid = null;
+        } else {
+          containers = containers.map(x => String(x.container_uid || '') === uid ? {
+            ...x, container_id: cidVal, size_ft: sizeVal, vessel: vesselVal, pos: posVal, lane_keys: assignedLaneKeys
+          } : x);
+          editingUid = null;
+        }
+        saveContainers();
+        render();
+      };
+
+      // Cancel
+      const cancelBtn = document.getElementById('fcm-cancel');
+      if (cancelBtn) cancelBtn.onclick = () => { editingUid = null; render(); };
+    }
+
+    function saveContainers() {
+      saveIntlWeekContainers(ws, containers);
+    }
+
+    let editingUid = null;
+
+    // Add button
+    const addBtn = document.getElementById('fcm-add-btn');
+    if (addBtn) {
+      addBtn.onclick = () => { editingUid = '__new__'; render(); };
+    }
+
+    // Show modal
+    modal.style.display = 'block';
+    render();
+  }
+
+  function closeContainerManager() {
+    const m = document.getElementById('flow-container-manager');
+    if (m) m.style.display = 'none';
+    // Refresh the intl detail view after changes
+    const ctx = window.__FLOW_INTL_CTX__;
+    if (ctx && typeof renderDetail === 'function') {
+      try { renderDetail(ctx.ws, ctx.tz, window.__FLOW_RCV__, window.__FLOW_VAS__, ctx.intl, window.__FLOW_MANUAL__); } catch {}
+    }
+  }
+
   function openIntlOverviewModal(ws, tz) {
     const ctx = window.__FLOW_INTL_CTX__ || null;
     if (!ctx || !ctx.lanes) return;
@@ -4263,7 +4565,10 @@ detail.innerHTML = [
         `<div class="mt-3 rounded-xl border p-3">
           <div class="flex items-center justify-between gap-2">
             <div class="text-sm font-semibold text-gray-700">Lanes</div>
-            <button type="button" id="flow-lanes-fullscreen" style="font-size:10px;color:#fff;background:#990033;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;">Full screen</button>
+            <div style="display:flex;gap:6px;">
+              <button type="button" id="flow-containers-btn" style="font-size:10px;color:#fff;background:#1C1C1E;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;">Manage Containers</button>
+              <button type="button" id="flow-lanes-fullscreen" style="font-size:10px;color:#fff;background:#990033;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;">Full screen</button>
+            </div>
           </div>
           ${table(['Supplier', 'Zendesk', 'Freight', 'Applied', 'Cartons Out', 'Containers', 'Status'], rows)}
         </div>`,
@@ -4711,6 +5016,16 @@ detail.innerHTML = [
         e.preventDefault();
         e.stopPropagation();
         openIntlOverviewModal(ws, getBizTZ());
+      });
+    }
+
+    const containersBtn = detail.querySelector('#flow-containers-btn');
+    if (containersBtn && !containersBtn.dataset.bound) {
+      containersBtn.dataset.bound = '1';
+      containersBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openContainerManager(ws, getBizTZ());
       });
     }
 
