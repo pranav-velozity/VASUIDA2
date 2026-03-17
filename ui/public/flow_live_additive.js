@@ -4850,120 +4850,105 @@ detail.innerHTML = [
 
 
         <div id="flow-lane-editor-body" class="mt-3">
-          <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          <div class="rounded-xl border p-3">
-            <div class="flex items-center justify-between">
-              <div class="text-sm font-semibold text-gray-700">Docs & customs milestones</div>
+          <div style="display:grid;grid-template-columns:1fr auto;gap:3px;align-items:center;margin-bottom:10px;">
+            <div class="text-sm font-semibold text-gray-700">Docs &amp; customs milestones</div>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <button onclick="openContainerManager('${escapeAttr(ws)}', '${escapeAttr(tz)}')" style="font-size:10px;font-weight:500;background:#1C1C1E;color:#fff;border:none;border-radius:6px;padding:5px 10px;cursor:pointer;font-family:inherit;white-space:nowrap;">
+                ${iconContainer()} Containers${weekContainers.length ? ` (${weekContainers.length})` : ''}
+              </button>
               <button type="button" id="flow-intl-copy-all" class="text-[11px] text-gray-600 underline hover:text-gray-800">Copy baselines</button>
             </div>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
-              <label class="text-sm">
-                <div class="text-xs text-gray-500 mb-1">Packing list ready</div>
-                <input id="flow-intl-pack" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${pack}"/>
-                <div class="mt-1 text-[11px] text-gray-500 flex items-center justify-between gap-2">
-                  <span>Baseline: <span class="font-mono">${basePack}</span></span>
-                  <button type="button" class="flow-intl-copy text-[11px] underline hover:text-gray-700" data-target="flow-intl-pack" data-val="${basePack}">Copy</button>
-                </div>
-              </label>
+          </div>
 
-              <label class="text-sm">
-                <div class="text-xs text-gray-500 mb-1">Shipment #</div>
-                <input id="flow-intl-shipment" type="text" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(String(manual.shipmentNumber || manual.shipment || ''))}" placeholder="Free text"/>
-              </label>
+          <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px;align-items:start;">
 
-              <label class="text-sm">
-                <div class="text-xs text-gray-500 mb-1">Origin customs cleared</div>
-                <input id="flow-intl-originclr" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${originClr}"/>
-                <div class="mt-1 text-[11px] text-gray-500 flex items-center justify-between gap-2">
-                  <span>Baseline: <span class="font-mono">${baseOriginClr}</span></span>
-                  <button type="button" class="flow-intl-copy text-[11px] underline hover:text-gray-700" data-target="flow-intl-originclr" data-val="${baseOriginClr}">Copy</button>
-                </div>
-              </label>
-
-              <label class="text-sm">
-                <div class="text-xs text-gray-500 mb-1">HBL</div>
-                <input id="flow-intl-hbl" type="text" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(String(manual.hbl || ''))}" placeholder="Free text"/>
-              </label>
-
-              <label class="text-sm">
-                <div class="text-xs text-gray-500 mb-1">Departed origin</div>
-                <input id="flow-intl-departed" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${departed}"/>
-                <div class="mt-1 text-[11px] text-gray-500 flex items-center justify-between gap-2">
-                  <span>Baseline: <span class="font-mono">${baseDeparted}</span></span>
-                  <button type="button" class="flow-intl-copy text-[11px] underline hover:text-gray-700" data-target="flow-intl-departed" data-val="${baseDeparted}">Copy</button>
-                </div>
-              </label>
-
-              <label class="text-sm">
-                <div class="text-xs text-gray-500 mb-1">MBL</div>
-                <input id="flow-intl-mbl" type="text" class="w-full px-2 py-1.5 border rounded-lg" value="${escapeAttr(String(manual.mbl || ''))}" placeholder="Free text"/>
-              </label>
-
-              <label class="text-sm">
-                <div class="text-xs text-gray-500 mb-1">Arrived destination</div>
-                <input id="flow-intl-arrived" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${arrived}"/>
-                <div class="mt-1 text-[11px] text-gray-500 flex items-center justify-between gap-2">
-                  <span>Baseline: <span class="font-mono">${baseArrived}</span></span>
-                  <button type="button" class="flow-intl-copy text-[11px] underline hover:text-gray-700" data-target="flow-intl-arrived" data-val="${baseArrived}">Copy</button>
-                </div>
-              </label>
-
-              <div class="hidden md:block"></div>
-
-              <label class="text-sm">
-                <div class="text-xs text-gray-500 mb-1">Destination customs cleared</div>
-                <input id="flow-intl-destclr" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${destClr}"/>
-                <div class="mt-1 text-[11px] text-gray-500 flex items-center justify-between gap-2">
-                  <span>Baseline: <span class="font-mono">${baseDestClr}</span></span>
-                  <button type="button" class="flow-intl-copy text-[11px] underline hover:text-gray-700" data-target="flow-intl-destclr" data-val="${baseDestClr}">Copy</button>
-                </div>
-              </label>
-
-              <label class="text-sm">
-                <div class="text-xs text-gray-500 mb-1">ETA FC</div>
-                <input id="flow-intl-etafc" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${etaFC}"/>
-              </label>
-
-              <label class="text-sm">
-                <div class="text-xs text-gray-500 mb-1">Latest arrival date</div>
-                <input id="flow-intl-latestarrival" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg" value="${latestArrivalDate}"/>
-              </label>
-
-              <div class="flex items-center gap-3 md:pt-6">
-                <label class="text-sm flex items-center gap-2">
-                  <input id="flow-intl-hold" type="checkbox" class="h-4 w-4" ${hold ? 'checked' : ''}/>
-                  <span>Customs hold</span>
-                </label>
+            <div style="grid-column:span 1;">
+              <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">Packing list ready</div>
+              <input id="flow-intl-pack" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg text-xs" value="${pack}"/>
+              <div style="margin-top:3px;display:flex;align-items:center;justify-content:space-between;">
+                <span class="text-[10px] text-gray-400 font-mono">${basePack||'—'}</span>
+                <button type="button" class="flow-intl-copy text-[10px] text-gray-400 hover:text-gray-600" data-target="flow-intl-pack" data-val="${basePack}">↙</button>
               </div>
             </div>
 
-<label class="text-sm mt-3 block">
-              <div class="text-xs text-gray-500 mb-1">Note (optional)</div>
-              <textarea id="flow-intl-note" rows="2" class="w-full px-2 py-1.5 border rounded-lg" placeholder="Quick update for the team...">${escapeHtml(note)}</textarea>
+            <div style="grid-column:span 1;">
+              <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">Origin cleared</div>
+              <input id="flow-intl-originclr" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg text-xs" value="${originClr}"/>
+              <div style="margin-top:3px;display:flex;align-items:center;justify-content:space-between;">
+                <span class="text-[10px] text-gray-400 font-mono">${baseOriginClr||'—'}</span>
+                <button type="button" class="flow-intl-copy text-[10px] text-gray-400 hover:text-gray-600" data-target="flow-intl-originclr" data-val="${baseOriginClr}">↙</button>
+              </div>
+            </div>
+
+            <div style="grid-column:span 1;">
+              <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">Departed origin</div>
+              <input id="flow-intl-departed" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg text-xs" value="${departed}"/>
+              <div style="margin-top:3px;display:flex;align-items:center;justify-content:space-between;">
+                <span class="text-[10px] text-gray-400 font-mono">${baseDeparted||'—'}</span>
+                <button type="button" class="flow-intl-copy text-[10px] text-gray-400 hover:text-gray-600" data-target="flow-intl-departed" data-val="${baseDeparted}">↙</button>
+              </div>
+            </div>
+
+            <div style="grid-column:span 1;">
+              <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">Arrived dest.</div>
+              <input id="flow-intl-arrived" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg text-xs" value="${arrived}"/>
+              <div style="margin-top:3px;display:flex;align-items:center;justify-content:space-between;">
+                <span class="text-[10px] text-gray-400 font-mono">${baseArrived||'—'}</span>
+                <button type="button" class="flow-intl-copy text-[10px] text-gray-400 hover:text-gray-600" data-target="flow-intl-arrived" data-val="${baseArrived}">↙</button>
+              </div>
+            </div>
+
+            <div style="grid-column:span 1;">
+              <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">Dest. cleared</div>
+              <input id="flow-intl-destclr" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg text-xs" value="${destClr}"/>
+              <div style="margin-top:3px;display:flex;align-items:center;justify-content:space-between;">
+                <span class="text-[10px] text-gray-400 font-mono">${baseDestClr||'—'}</span>
+                <button type="button" class="flow-intl-copy text-[10px] text-gray-400 hover:text-gray-600" data-target="flow-intl-destclr" data-val="${baseDestClr}">↙</button>
+              </div>
+            </div>
+
+            <div style="grid-column:span 1;">
+              <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">ETA FC</div>
+              <input id="flow-intl-etafc" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg text-xs" value="${etaFC}"/>
+              <div style="margin-top:3px;"><span class="text-[10px] text-gray-400">—</span></div>
+            </div>
+
+            <div style="grid-column:span 1;">
+              <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">Latest arrival</div>
+              <input id="flow-intl-latestarrival" type="datetime-local" class="w-full px-2 py-1.5 border rounded-lg text-xs" value="${latestArrivalDate}"/>
+              <div style="margin-top:3px;"><span class="text-[10px] text-gray-400">—</span></div>
+            </div>
+
+          </div>
+
+          <div style="display:grid;grid-template-columns:120px 120px 120px 1fr auto;gap:8px;align-items:end;margin-top:10px;">
+            <label class="text-sm">
+              <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">Shipment #</div>
+              <input id="flow-intl-shipment" type="text" class="w-full px-2 py-1.5 border rounded-lg text-xs" value="${escapeAttr(String(manual.shipmentNumber || manual.shipment || ''))}" placeholder="Free text"/>
             </label>
-
-            <div class="flex items-center justify-between mt-3">
-              <div id="flow-intl-save-msg" class="text-xs text-gray-500"></div>
-              <button id="flow-intl-save" data-lane="${escapeAttr(lane.key)}" class="px-3 py-1.5 rounded-lg text-sm border bg-white hover:bg-gray-50">Save lane</button>
-            </div>
+            <label class="text-sm">
+              <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">HBL</div>
+              <input id="flow-intl-hbl" type="text" class="w-full px-2 py-1.5 border rounded-lg text-xs" value="${escapeAttr(String(manual.hbl || ''))}" placeholder="Free text"/>
+            </label>
+            <label class="text-sm">
+              <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">MBL</div>
+              <input id="flow-intl-mbl" type="text" class="w-full px-2 py-1.5 border rounded-lg text-xs" value="${escapeAttr(String(manual.mbl || ''))}" placeholder="Free text"/>
+            </label>
+            <label class="text-sm flex items-end pb-1.5 gap-2">
+              <input id="flow-intl-hold" type="checkbox" class="h-4 w-4" ${hold ? 'checked' : ''}/>
+              <span class="text-xs text-gray-600">Customs hold</span>
+            </label>
+            <div></div>
           </div>
 
-          <div class="rounded-xl border p-3" style="background:#F9F9FB;">
-            <div class="flex items-center gap-3">
-              <div style="flex:1;">
-                <div class="text-sm font-semibold text-gray-700 flex items-center gap-2">
-                  ${iconContainer()} <span>Containers</span>
-                  ${weekContainers.length ? `<span style="font-size:10px;background:#1C1C1E;color:#fff;border-radius:4px;padding:1px 6px;">${weekContainers.length}</span>` : ''}
-                </div>
-                <div class="text-[11px] text-gray-500 mt-1">
-                  ${weekContainers.length ? weekContainers.slice(0,3).map(c => escapeHtml(String(c.container_id||'').trim()||'—')).join(' · ') + (weekContainers.length > 3 ? ` +${weekContainers.length-3} more` : '') : 'No containers added yet.'}
-                </div>
-              </div>
-              <button onclick="openContainerManager('${escapeAttr(ws)}', '${escapeAttr(tz)}')" style="font-size:11px;font-weight:500;background:#1C1C1E;color:#fff;border:none;border-radius:7px;padding:7px 12px;cursor:pointer;white-space:nowrap;font-family:inherit;">
-                Manage Containers →
-              </button>
-            </div>
-          </div>
+          <label class="text-sm mt-3 block">
+            <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">Note (optional)</div>
+            <textarea id="flow-intl-note" rows="2" class="w-full px-2 py-1.5 border rounded-lg text-xs" placeholder="Quick update for the team...">${escapeHtml(note)}</textarea>
+          </label>
+
+          <div class="flex items-center justify-between mt-3">
+            <div id="flow-intl-save-msg" class="text-xs text-gray-500"></div>
+            <button id="flow-intl-save" data-lane="${escapeAttr(lane.key)}" style="font-size:12px;font-weight:500;background:#1C1C1E;color:#fff;border:none;border-radius:8px;padding:8px 18px;cursor:pointer;font-family:inherit;">Save lane</button>
           </div>
         </div>
       </div>
@@ -5123,9 +5108,13 @@ detail.innerHTML = [
         };
         saveIntlLaneManual(ws, key, obj);
         const msg = detail.querySelector('#flow-intl-save-msg');
-        if (msg) msg.textContent = 'Saved';
-        // Refresh to recompute lane level + badges
-        setTimeout(() => refresh(), 10);
+        if (msg) { msg.textContent = 'Saved ✓'; msg.style.color = '#6E6E73'; }
+        // DO NOT call refresh() — it destroys the form while user is editing
+        // Instead just re-render the lanes table header quietly
+        try {
+          const ctx = window.__FLOW_INTL_CTX__;
+          if (ctx) window.__FLOW_INTL_CTX__ = { ...ctx }; // signal stale
+        } catch(e) {}
       });
     }
   }
