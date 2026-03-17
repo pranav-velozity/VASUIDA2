@@ -2909,10 +2909,23 @@ const signoffSection = (context) => {
             </div>
           </div>
 
-          <button onclick="window.__openPrebookModal()" style="width:100%;text-align:left;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:8px 10px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-family:inherit;">
-            <span style="font-size:11px;color:#1C1C1E;font-weight:500;">Pre-booked containers</span>
-            <span style="font-size:11px;color:#6E6E73;">20ft: ${fmtInt(prebook.c20)} · 40ft: ${fmtInt(prebook.c40)} <span style="color:#AEAEB2;margin-left:4px;">›</span></span>
-          </button>
+          <div style="background:#F5F5F7;border-radius:8px;padding:7px 10px;">
+            <div style="font-size:9px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px;">Pre-booked containers</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+              <label style="display:block;">
+                <div style="font-size:9px;color:#AEAEB2;margin-bottom:2px;">20 ft</div>
+                <input id="prebook-20" type="number" min="0" value="${prebook.c20||0}"
+                  style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:6px;padding:5px 8px;font-size:12px;font-weight:600;color:#1C1C1E;background:#fff;font-family:inherit;outline:none;box-sizing:border-box;"
+                  onfocus="this.style.borderColor='rgba(153,0,51,0.4)'" onblur="this.style.borderColor='rgba(0,0,0,0.12)'"/>
+              </label>
+              <label style="display:block;">
+                <div style="font-size:9px;color:#AEAEB2;margin-bottom:2px;">40 ft</div>
+                <input id="prebook-40" type="number" min="0" value="${prebook.c40||0}"
+                  style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:6px;padding:5px 8px;font-size:12px;font-weight:600;color:#1C1C1E;background:#fff;font-family:inherit;outline:none;box-sizing:border-box;"
+                  onfocus="this.style.borderColor='rgba(153,0,51,0.4)'" onblur="this.style.borderColor='rgba(0,0,0,0.12)'"/>
+              </label>
+            </div>
+          </div>
 
           
 
