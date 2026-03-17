@@ -130,6 +130,7 @@
     .wkcap .d{font-size:16px;font-weight:700;color:#1C1C1E;line-height:1.05;letter-spacing:-0.03em;display:block;}
     .wkcap .t{font-size:8px;color:#AEAEB2;font-variant-numeric:tabular-nums;display:block;margin-top:1px;}
     .wkcap.active .t{color:#6E6E73;}
+    .wkcap.active::after{content:'';position:absolute;bottom:-5px;left:50%;transform:translateX(-50%);width:20px;height:2.5px;background:#990033;border-radius:9999px;}
     /* Ring track */
     .cap-ring-track{fill:none;stroke:rgba(0,0,0,0.07);stroke-width:2.5;}
     /* Ring progress — default gray */
@@ -5419,7 +5420,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=82" defer></script>
+<script src="/public/flow_live_additive.js?v=83" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -6024,6 +6025,10 @@ async function handleSignOut() {
 
 </body>
 </html>
+
+
+
+
 
 
 
