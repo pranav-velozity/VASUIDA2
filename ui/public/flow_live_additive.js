@@ -3074,6 +3074,10 @@ const signoffSection = (context) => {
             <div class="text-xs font-semibold text-gray-700">Focus</div>
             <div class="text-sm text-gray-800 mt-1">Watch remaining units vs the due window${lateBy ? ` (now ${fmtInt(lateBy)}h past due)` : ''}. Use the bottom tile for supplier/PO detail.</div>
           </div>
+          <button onclick="window.show('#intake')" style="width:100%;display:flex;align-items:center;justify-content:center;gap:8px;background:#1C1C1E;color:#fff;border:none;border-radius:10px;padding:11px 16px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;" onmouseover="this.style.opacity='.85'" onmouseout="this.style.opacity='1'">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            Open VAS Ops
+          </button>
         </div>
       `;
     };
@@ -3103,10 +3107,6 @@ const signoffSection = (context) => {
             ${hRow(icon.warn, 'Missing docs', docs ? `<span class="text-amber-700">${fmtInt(docs)}</span>` : fmtInt(docs))}
             ${hRow(icon.warn, 'Not origin-cleared', notCleared ? `<span class="text-amber-700">${fmtInt(notCleared)}</span>` : fmtInt(notCleared))}
           </div>
-          <button onclick="window.show('#intake')" style="width:100%;display:flex;align-items:center;justify-content:center;gap:8px;background:#1C1C1E;color:#fff;border:none;border-radius:10px;padding:11px 16px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;" onmouseover="this.style.opacity='.85'" onmouseout="this.style.opacity='1'">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-            Open VAS Ops
-          </button>
         </div>
       `;
     };
