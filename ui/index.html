@@ -5432,7 +5432,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=88" defer></script>
+<script src="/public/flow_live_additive.js?v=89" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -5705,7 +5705,42 @@ document.addEventListener('DOMContentLoaded', function(){
       return;
     }
 
-    // ── Receiving / Intake / Flow — delegate to original ──
+    // ── Receiving Ops ──
+    if(h==='#receiving'){
+      _pnHideAll();
+      _pnSetHash('#receiving');
+      if(typeof window.showReceivingPage==='function'){
+        window.showReceivingPage();
+      } else {
+        // Module not loaded yet — wait for it
+        var _recInterval = setInterval(function(){
+          if(typeof window.showReceivingPage==='function'){
+            clearInterval(_recInterval);
+            window.showReceivingPage();
+          }
+        }, 50);
+        setTimeout(function(){ clearInterval(_recInterval); }, 3000);
+      }
+      syncPinpointNav('#receiving');
+      return;
+    }
+
+    // ── Intake / VAS Processing ──
+    if(h==='#intake'){
+      _pnHideAll();
+      _pnSetHash('#intake');
+      const ip=document.getElementById('page-intake');
+      if(ip){ip.classList.remove('hidden');ip.style.display='block';}
+      if(window.IntakePage&&typeof window.IntakePage.show==='function'){
+        try{window.IntakePage.show();}catch(e){}
+      } else if(typeof window.renderIntake==='function'){
+        try{window.renderIntake();}catch(e){}
+      }
+      syncPinpointNav('#intake');
+      return;
+    }
+
+    // ── Everything else — delegate to original ──
     _pnSetHash(h);
     if(typeof origShow==='function') origShow(h);
   };
@@ -5717,7 +5752,7 @@ document.addEventListener('DOMContentLoaded', function(){
     if(_pnShowBusy) return; // guard re-entrancy
     const h = typeof getRouteHash==='function' ? getRouteHash() : location.hash;
     // Only handle hashes our router owns — let exec/flow/receiving handle their own
-    if(h==='#exec'||h==='#reports'||h==='#week-hub'||h==='#dashboard'||h==='#operations'||h==='#flow'){
+    if(h==='#exec'||h==='#reports'||h==='#week-hub'||h==='#dashboard'||h==='#operations'||h==='#flow'||h==='#receiving'||h==='#intake'){
       _pnShowBusy=true;
       try{ window.show(h); }finally{ setTimeout(function(){_pnShowBusy=false;},100); }
     }
