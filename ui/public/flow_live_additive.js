@@ -275,7 +275,7 @@ function statusLabel(level) {
 
 // Shared status color palette used across Flow renderers
 const levelColor = (level) => ({
-  green: '#C8F902',
+  green: '#a6d609',
   red: '#D61A3C',
   upcoming: '#E5E5EA',
   yellow: '#FFA203',
@@ -285,7 +285,7 @@ const levelColor = (level) => ({
 
 
 function strokeForLevel(level, upcoming=false) {
-    if (level === 'green') return upcoming ? 'rgba(200,249,2,0.25)' : '#C8F902';
+    if (level === 'green') return upcoming ? 'rgba(200,249,2,0.25)' : '#a6d609';
     if (level === 'yellow') return upcoming ? 'rgba(255,162,3,0.25)' : '#FFA203';
     if (level === 'red') return upcoming ? 'rgba(214,26,60,0.20)' : '#D61A3C';
     return '#E5E5EA';
@@ -2079,7 +2079,7 @@ function computeManualNodeStatuses(ws, tz) {
       const strokeForLevel = (level, upcoming) => {
         // Matte palette
         const map = {
-          green: '#C8F902',
+          green: '#a6d609',
           red:   '#D61A3C',
           gray:  '#9ca3af'
         };
@@ -2089,7 +2089,7 @@ function computeManualNodeStatuses(ws, tz) {
 
       const dotFillForLevel = (level, upcoming) => {
         const map = {
-          green: '#C8F902',
+          green: '#a6d609',
           red:   '#D61A3C',
           gray:  '#9ca3af'
         };
@@ -2227,7 +2227,7 @@ function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
     // - upcoming: distinct from At-Risk (cool neutral)
     // - future: capability not yet live
     const levelColor = (level) => ({
-      green: '#C8F902',
+      green: '#a6d609',
       red: '#D61A3C',
       upcoming: '#E5E5EA',
       yellow: '#FFA203',
@@ -2557,14 +2557,14 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
       return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
     };
 
-    const lvlColor = (lvl) => (lvl === 'red' ? '#D61A3C' : (lvl === 'yellow' ? '#FFA203' : (lvl === 'green' ? '#C8F902' : '#AEAEB2')));
+    const lvlColor = (lvl) => (lvl === 'red' ? '#D61A3C' : (lvl === 'yellow' ? '#FFA203' : (lvl === 'green' ? '#a6d609' : '#AEAEB2')));
 
     const health = (() => {
       const worst = [
-        { label: 'Receiving', color: receiving?.color || lvlColor(receiving?.level) || '#C8F902' },
-        { label: 'VAS', color: vas?.color || lvlColor(vas?.level) || '#C8F902' },
-        { label: 'Transit', color: intl?.color || lvlColor(intl?.level) || '#C8F902' },
-        { label: 'Last Mile', color: lvlColor(manual?.levels?.lastMile) || '#C8F902' },
+        { label: 'Receiving', color: receiving?.color || lvlColor(receiving?.level) || '#a6d609' },
+        { label: 'VAS', color: vas?.color || lvlColor(vas?.level) || '#a6d609' },
+        { label: 'Transit', color: intl?.color || lvlColor(intl?.level) || '#a6d609' },
+        { label: 'Last Mile', color: lvlColor(manual?.levels?.lastMile) || '#a6d609' },
       ].reduce((acc, n) => severityRank(n.color) > severityRank(acc.color) ? n : acc);
       const band = _bandFromColor(worst.color);
       const label = (band === 'green') ? 'On Track' : (band === 'yellow') ? 'At Risk' : (band === 'red') ? 'Delayed' : 'Upcoming';
@@ -5019,7 +5019,7 @@ function statusStroke(color){
   const band = _bandFromColor(color);
   if (band === "red") return "#D61A3C";
   if (band === "yellow") return "#FFA203";
-  if (band === "green") return "#C8F902";
+  if (band === "green") return "#a6d609";
   return "#9ca3af";
 }
 
@@ -5081,7 +5081,7 @@ function renderFooterTrends(el, nodes, weekKey) {
     { id: 'intl', color: (intl && intl.color) || levelColor(intl.level || 'green') },
     { id: 'lm', color: levelColor((manual.levels && manual.levels.lastMile) || manual.levels?.lastmile || 'green') },
   ];
-  const worst = nodeColors.reduce((acc, n) => severityRank(n.color) > severityRank(acc.color) ? n : acc, nodeColors[0] || { color: '#C8F902' });
+  const worst = nodeColors.reduce((acc, n) => severityRank(n.color) > severityRank(acc.color) ? n : acc, nodeColors[0] || { color: '#a6d609' });
   const pillText = (colorToStatus(worst.color) || 'On Track');
 
   el.innerHTML = `
@@ -5611,7 +5611,7 @@ function buildReportHTML(cache) {
           .w-28 { width: 112px; }
           .h-2 { height: 8px; }
           .h-full { height: 100%; }
-          .bg-emerald-400 { background: #C8F902; }
+          .bg-emerald-400 { background: #a6d609; }
 
           /* Keep metric rows on a single line in PDF (Week totals) */
           .flex.items-center.justify-between > div:last-child { white-space: nowrap; }
