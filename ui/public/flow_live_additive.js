@@ -2471,10 +2471,10 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
     // ── LINEAR TIMELINE RENDERER ──
     // Replaces S-curve SVG. S-curve is preserved in file-level comment above.
     (function renderLinearTimeline(){
-      var W = 900, H = 160;  // extra height for date labels above
+      var W = 900, H = 200;  // tall enough for date + label above + pill below
       var padL = 60, padR = 60;
       var nodeX = [padL, padL + (W-padL-padR)*0.25, padL + (W-padL-padR)*0.5, padL + (W-padL-padR)*0.75, W-padR];
-      var nodeY = H/2 + 10;  // push nodes down slightly to make room for dates above
+      var nodeY = 120;  // fixed vertical position — leaves 80px above for dates, 80px below for pills
 
       // Milestone date calculations
       var addDaysToWs = function(isoStr, days) {
@@ -2587,17 +2587,22 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
 
         // Date label above milestone name (not for Milk Run)
         var mDate = milestoneDates[n.id];
-        var labelY = cy - (isOngoing ? 23 : 19);
         var fw = isOngoing ? '600' : '500';
         var fc = isOngoing ? '#1C1C1E' : '#6E6E73';
+
+        // Fixed vertical stack (all measured from nodeY / cy):
+        // cy - 58: date type label (EX-FACTORY)
+        // cy - 44: date value (March, 16th)
+        // cy - 28: node name (Receiving)
+        // cy:      circle
+        // cy + 17/21: pill
+
         if(mDate) {
-          // Date name (e.g. "Ex-factory") — small, muted, above the main label
-          parts.push('<text x="' + cx + '" y="' + (labelY - 16) + '" text-anchor="middle" font-size="8.5" font-weight="500" fill="#AEAEB2" pointer-events="none" letter-spacing="0.04em">' + mDate.label.toUpperCase() + '</text>');
-          // Date value (e.g. "Mar 16") — slightly larger, dark
-          parts.push('<text x="' + cx + '" y="' + (labelY - 5) + '" text-anchor="middle" font-size="10" font-weight="600" fill="' + (isOngoing ? '#1C1C1E' : '#6E6E73') + '" pointer-events="none">' + mDate.date + '</text>');
+          parts.push('<text x="' + cx + '" y="' + (cy - 58) + '" text-anchor="middle" font-size="8" font-weight="500" fill="#AEAEB2" pointer-events="none">' + mDate.label.toUpperCase() + '</text>');
+          parts.push('<text x="' + cx + '" y="' + (cy - 44) + '" text-anchor="middle" font-size="10" font-weight="600" fill="' + (isOngoing ? '#1C1C1E' : '#AEAEB2') + '" pointer-events="none">' + mDate.date + '</text>');
         }
-        // Node name label
-        parts.push('<text x="' + cx + '" y="' + labelY + '" text-anchor="middle" font-size="11" font-weight="' + fw + '" fill="' + fc + '" pointer-events="none">' + n.label + '</text>');
+        // Node name
+        parts.push('<text x="' + cx + '" y="' + (cy - 28) + '" text-anchor="middle" font-size="11" font-weight="' + fw + '" fill="' + fc + '" pointer-events="none">' + n.label + '</text>');
 
         // Status pill below — KEEP brand colors here (the only color element)
         var pillW = Math.max(52, st.length * 6.5 + 14);
@@ -2610,7 +2615,7 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
         parts.push('<text x="' + cx + '" y="' + (pillY2+11) + '" text-anchor="middle" font-size="9" font-weight="600" fill="' + pillFg + '" pointer-events="none">' + st + '</text>');
       });
 
-      root.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="160" preserveAspectRatio="xMidYMid meet" style="display:block;overflow:visible;">' + parts.join('') + '</svg>';
+      root.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="200" preserveAspectRatio="xMidYMid meet" style="display:block;overflow:visible;">' + parts.join('') + '</svg>';
     })();
 
 
