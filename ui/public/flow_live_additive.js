@@ -1762,6 +1762,10 @@ function computeManualNodeStatuses(ws, tz) {
       document.getElementById('fcm-close').onclick = closeContainerManager;
     }
 
+    // Re-sync containers from latest localStorage state (cross-browser)
+    const freshState = loadIntlWeekContainers(ws);
+    containers = Array.isArray(freshState && freshState.containers) ? freshState.containers.slice() : containers;
+
     // ── Render the modal ──
     function render() {
       const subtitle = document.getElementById('fcm-subtitle');
@@ -2525,7 +2529,7 @@ function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
     const nodes = [
       { id:'milk', label:'Milk Run', short:'MR', level:'gray', upcoming:true, disabled:true },
       { id:'receiving', label:'Receiving', short:'RCV', level: receiving.level, upcoming: now < receiving.due },
-      { id:'vas', label:'VAS', short:'VAS', level: vas.level, upcoming: now < vas.due },
+      { id:'vas', label:'VAS', short:'VAS', level: vas.level, upcoming: now < vas.due && !(vas.appliedUnits > 0) },
       { id:'intl', label:'Transit & Clearing', short:'T&C', level: intl.level, upcoming: now < intl.originMax },
       { id:'lastmile', label:'Last Mile', short:'LM', level: manual.levels.lastMile, upcoming: now < (manual?.baselines?.lastMileMin ? new Date(manual.baselines.lastMileMin) : new Date(intl.originMax && intl.originMax instanceof Date ? intl.originMax.getTime() + 3*24*60*60*1000 : now.getTime() + 1)) },
     ];
@@ -4245,7 +4249,7 @@ function renderTopNodes(ws, tz, receiving, vas, intl, manual) {
     ].filter(Boolean);
     const vasCard = nodeCard({
       id: 'vas',
-      upcoming: now < vas.due,
+      upcoming: now < vas.due && !(vas.appliedUnits > 0),
       title: 'VAS Processing',
       subtitle: `Due ${fmtInTZ(vas.due, tz)}`,
       level: vas.level,
@@ -6192,8 +6196,15 @@ async function refresh() {
           await primeFlowWeekFromBackend(wsNow);
           const after = String(window.__FLOW_PRIMED__?.[`${wsNow}::${getFacility()}`] || '');
           if (after && after !== before) {
-            // Re-render to reflect changes pulled from backend.
-            refresh();
+            // Only refresh if user is not actively editing intl fields
+            const activeEl = document.activeElement;
+            const isEditingIntl = activeEl && (
+              activeEl.id && activeEl.id.startsWith('flow-intl-') ||
+              activeEl.closest && activeEl.closest('#flow-lane-editor-body')
+            );
+            if (!isEditingIntl) {
+              refresh();
+            }
           }
         } catch {}
       }, 5000);
@@ -6378,10 +6389,17 @@ if (signoff.vasComplete) {
   window.addEventListener('state:ready', () => {
     ensureFlowPageExists();
     showHideByHash();
-    // Only render when visible to avoid extra network chatter.
     const hash = (location.hash || '').toLowerCase();
     const show = hash === '#flow' || hash.startsWith('#flow');
-    if (show) refresh();
+    if (show) {
+      // Guard: don't refresh while user is editing intl lane fields
+      const activeEl = document.activeElement;
+      const isEditing = activeEl && (
+        (activeEl.id && activeEl.id.startsWith('flow-intl-')) ||
+        (activeEl.closest && activeEl.closest('#flow-lane-editor-body'))
+      );
+      if (!isEditing) refresh();
+    }
   });
 
   window.addEventListener('hashchange', () => {
