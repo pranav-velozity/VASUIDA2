@@ -3210,7 +3210,12 @@ function show(hash){
     const el = document.getElementById(id);
     if (!el) return;
     el.classList.add('hidden');
+    el.style.display = 'none';
   });
+  // Also call receiving module's own hide (handles any internal state)
+  if(h !== '#receiving' && typeof window.hideReceivingPage === 'function') {
+    window.hideReceivingPage();
+  }
 
   // Show target page + render hooks
 if (h === '#intake') {
@@ -3248,7 +3253,8 @@ if (h === '#intake') {
   ['page-dashboard','page-intake','page-exec','page-receiving'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
-    el.style.display = el.classList.contains('hidden') ? 'none' : 'block';
+    const isHidden = el.classList.contains('hidden');
+    el.style.display = isHidden ? 'none' : (id === 'page-receiving' ? 'block' : 'block');
   });
 
   // Nav highlight helper (different baselines use different function names).
@@ -5419,7 +5425,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=85" defer></script>
+<script src="/public/flow_live_additive.js?v=86" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
