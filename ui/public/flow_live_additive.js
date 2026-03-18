@@ -410,11 +410,15 @@ async function patchFlowWeek(ws, patch, facility) {
   }
   if (window.__FLOW_SUPPRESS_BACKEND_WRITE__) return null;
   try {
-    return await api(`/flow/week/${encodeURIComponent(ws)}?facility=${encodeURIComponent(f)}`, {
+    const body = JSON.stringify(patch);
+    console.log('[flow] patchFlowWeek sending — ws:', ws, 'facility:', f, 'body:', body);
+    const result = await api(`/flow/week/${encodeURIComponent(ws)}?facility=${encodeURIComponent(f)}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(patch),
+      body: body,
     });
+    console.log('[flow] patchFlowWeek result:', JSON.stringify(result));
+    return result;
   } catch (e) {
     console.warn('[flow] backend patch failed — url:', `/flow/week/${ws}?facility=${f}`, 'error:', e.message || e);
     return null;
