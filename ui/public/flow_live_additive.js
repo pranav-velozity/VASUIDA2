@@ -375,123 +375,123 @@ function iconContainer() {
 //   POST /flow/week/:weekStart?facility=LKWF   { ...patch }
 //
 // Guardrail: when we "prime" from backend we suppress write-through to avoid loops.
-function getFacility() {
-  try {
-    // 1. Plan data is always authoritative — facility_name from uploaded plan
+  function getFacility() {
+    try {
+      // 1. Plan data is always authoritative — facility_name from uploaded plan
+      const planFac = (window.state && Array.isArray(window.state.plan))
+        ? window.state.plan.map(p => String(p.facility_name || p.facility || '').trim()).find(Boolean)
+        : '';
+      if (planFac) return planFac;
+      // 2. Cached in state.facility (set from plan on setWeek)
+      const f = (window.state && window.state.facility) ? String(window.state.facility).trim() : '';
+      if (f) return f;
+      // 3. No plan loaded yet — return empty (patchFlowWeek will skip until plan is loaded)
+      return '';
+    } catch {
+      return '';
+    }
+  }
+
+  async function fetchFlowWeek(ws, facility) {
+    const f = String(facility || getFacility() || '').trim();
+    if (!ws || !f) return null; // <-- don't call backend without a real facility
+    try {
+      return await api(`/flow/week/${encodeURIComponent(ws)}?facility=${encodeURIComponent(f)}`);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function patchFlowWeek(ws, patch, facility) {
+    const f = String(facility || getFacility() || '').trim();
+    if (!ws || !f || !patch || typeof patch !== 'object') {
+      console.warn('[flow] patchFlowWeek skipped — ws:', ws, 'facility:', f, 'patch:', typeof patch, 'state.facility:', window.state?.facility, 'state.org:', window.state?.org);
+      return null;
+    }
+    try {
+      const body = JSON.stringify(patch);
+      console.log('[flow] patchFlowWeek sending — ws:', ws, 'facility:', f, 'body:', body);
+      const result = await api(`/flow/week/${encodeURIComponent(ws)}?facility=${encodeURIComponent(f)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: body,
+      });
+      console.log('[flow] patchFlowWeek result:', JSON.stringify(result));
+      return result;
+    } catch (e) {
+      console.warn('[flow] backend patch failed — url:', `/flow/week/${ws}?facility=${f}`, 'error:', e.message || e);
+      return null;
+    }
+  }
+  // Prime local week-scoped stores from backend once per (ws, facility).
+  async function primeFlowWeekFromBackend(ws, facilityOverride) {
+    // Try plan data first (most reliable), then override param, then getFacility()
     const planFac = (window.state && Array.isArray(window.state.plan))
       ? window.state.plan.map(p => String(p.facility_name || p.facility || '').trim()).find(Boolean)
       : '';
-    if (planFac) return planFac;
-    // 2. Cached in state.facility (set from plan on setWeek)
-    const f = (window.state && window.state.facility) ? String(window.state.facility).trim() : '';
-    if (f) return f;
-    // 3. No plan loaded yet — return empty (patchFlowWeek will skip until plan is loaded)
-    return '';
-  } catch {
-    return '';
+    const f = planFac || String(facilityOverride || getFacility() || '').trim();
+    if (!f) return; // no facility = can't fetch
+    window.__FLOW_PRIMED__ = window.__FLOW_PRIMED__ || {};
+    const key = `${ws}::${f}`;
+
+    // Re-prime when backend data changes (enables cross-browser sync without a full reload).
+    // We store the last observed `updated_at` per (week, facility).
+    const lastSeen = window.__FLOW_PRIMED__[key] || '';
+    const r = await fetchFlowWeek(ws, f);
+    const updatedAt = (r && (r.updated_at || r.updatedAt)) ? String(r.updated_at || r.updatedAt) : '';
+    if (updatedAt && lastSeen === updatedAt) return;
+    window.__FLOW_PRIMED__[key] = updatedAt || String(Date.now());
+
+    const d = r && r.data ? r.data : null;
+    if (!d) return;
+
+    // Mirror into localStorage WITHOUT triggering backend writes.
+    // (localStorage.setItem doesn't call patchFlowWeek directly)
+    try {
+      // Week sign-off
+      if ('receivingComplete' in d || 'vasComplete' in d || 'receivingAt' in d || 'vasAt' in d) {
+        try {
+          const o = {
+            receivingComplete: !!d.receivingComplete,
+            vasComplete: !!d.vasComplete,
+            receivingAt: d.receivingAt || null,
+            vasAt: d.vasAt || null,
+            updatedAt: (r.updated_at || r.updatedAt || null),
+          };
+          localStorage.setItem(weekSignoffKey(ws), JSON.stringify(o));
+        } catch {}
+      }
+
+      // Pre-booked containers
+      if (d.prebook && typeof d.prebook === 'object') {
+        try { localStorage.setItem(prebookKey(ws), JSON.stringify({ c20: num(d.prebook.c20 || 0), c40: num(d.prebook.c40 || 0) })); } catch {}
+      }
+
+      // Intl lane manual data (map laneKey -> obj)
+      if (d.intl_lanes && typeof d.intl_lanes === 'object') {
+        try {
+          for (const [laneKey, obj] of Object.entries(d.intl_lanes)) {
+            if (!laneKey) continue;
+            localStorage.setItem(intlStorageKey(ws, laneKey), JSON.stringify(obj || {}));
+          }
+        } catch {}
+      }
+
+      // Week-level intl containers
+      if (d.intl_weekcontainers) {
+        try {
+          const arr = Array.isArray(d.intl_weekcontainers) ? d.intl_weekcontainers : (Array.isArray(d.intl_weekcontainers.containers) ? d.intl_weekcontainers.containers : []);
+          const state = { containers: arr || [], _v: 1, _fromBackend: true };
+          localStorage.setItem(intlWeekContainersKey(ws), JSON.stringify(state));
+        } catch {}
+      }
+
+      // Last Mile receipts
+      if (d.lastmile_receipts && typeof d.lastmile_receipts === 'object') {
+        try { localStorage.setItem(lastMileReceiptsKey(ws), JSON.stringify(d.lastmile_receipts || {})); } catch {}
+      }
+    } catch {}
   }
-}
-
-async function fetchFlowWeek(ws, facility) {
-  const f = String(facility || getFacility() || '').trim();
-  if (!ws || !f) return null; // <-- don't call backend without a real facility
-  try {
-    return await api(`/flow/week/${encodeURIComponent(ws)}?facility=${encodeURIComponent(f)}`);
-  } catch (e) {
-    return null;
-  }
-}
-
-async function patchFlowWeek(ws, patch, facility) {
-  const f = String(facility || getFacility() || '').trim();
-  if (!ws || !f || !patch || typeof patch !== 'object') {
-    console.warn('[flow] patchFlowWeek skipped — ws:', ws, 'facility:', f, 'patch:', typeof patch, 'state.facility:', window.state?.facility, 'state.org:', window.state?.org);
-    return null;
-  }
-  try {
-    const body = JSON.stringify(patch);
-    console.log('[flow] patchFlowWeek sending — ws:', ws, 'facility:', f, 'body:', body);
-    const result = await api(`/flow/week/${encodeURIComponent(ws)}?facility=${encodeURIComponent(f)}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: body,
-    });
-    console.log('[flow] patchFlowWeek result:', JSON.stringify(result));
-    return result;
-  } catch (e) {
-    console.warn('[flow] backend patch failed — url:', `/flow/week/${ws}?facility=${f}`, 'error:', e.message || e);
-    return null;
-  }
-}
-// Prime local week-scoped stores from backend once per (ws, facility).
-async function primeFlowWeekFromBackend(ws, facilityOverride) {
-  // Try plan data first (most reliable), then override param, then getFacility()
-  const planFac = (window.state && Array.isArray(window.state.plan))
-    ? window.state.plan.map(p => String(p.facility_name || p.facility || '').trim()).find(Boolean)
-    : '';
-  const f = planFac || String(facilityOverride || getFacility() || '').trim();
-  if (!f) return; // no facility = can't fetch
-  window.__FLOW_PRIMED__ = window.__FLOW_PRIMED__ || {};
-  const key = `${ws}::${f}`;
-
-  // Re-prime when backend data changes (enables cross-browser sync without a full reload).
-  // We store the last observed `updated_at` per (week, facility).
-  const lastSeen = window.__FLOW_PRIMED__[key] || '';
-  const r = await fetchFlowWeek(ws, f);
-  const updatedAt = (r && (r.updated_at || r.updatedAt)) ? String(r.updated_at || r.updatedAt) : '';
-  if (updatedAt && lastSeen === updatedAt) return;
-  window.__FLOW_PRIMED__[key] = updatedAt || String(Date.now());
-
-  const d = r && r.data ? r.data : null;
-  if (!d) return;
-
-  // Mirror into localStorage WITHOUT triggering backend writes.
-  // (localStorage.setItem doesn't call patchFlowWeek directly)
-  try {
-    // Week sign-off
-    if ('receivingComplete' in d || 'vasComplete' in d || 'receivingAt' in d || 'vasAt' in d) {
-      try {
-        const o = {
-          receivingComplete: !!d.receivingComplete,
-          vasComplete: !!d.vasComplete,
-          receivingAt: d.receivingAt || null,
-          vasAt: d.vasAt || null,
-          updatedAt: (r.updated_at || r.updatedAt || null),
-        };
-        localStorage.setItem(weekSignoffKey(ws), JSON.stringify(o));
-      } catch {}
-    }
-
-    // Pre-booked containers
-    if (d.prebook && typeof d.prebook === 'object') {
-      try { localStorage.setItem(prebookKey(ws), JSON.stringify({ c20: num(d.prebook.c20 || 0), c40: num(d.prebook.c40 || 0) })); } catch {}
-    }
-
-    // Intl lane manual data (map laneKey -> obj)
-    if (d.intl_lanes && typeof d.intl_lanes === 'object') {
-      try {
-        for (const [laneKey, obj] of Object.entries(d.intl_lanes)) {
-          if (!laneKey) continue;
-          localStorage.setItem(intlStorageKey(ws, laneKey), JSON.stringify(obj || {}));
-        }
-      } catch {}
-    }
-
-    // Week-level intl containers
-    if (d.intl_weekcontainers) {
-      try {
-        const arr = Array.isArray(d.intl_weekcontainers) ? d.intl_weekcontainers : (Array.isArray(d.intl_weekcontainers.containers) ? d.intl_weekcontainers.containers : []);
-        const state = { containers: arr || [], _v: 1, _fromBackend: true };
-        localStorage.setItem(intlWeekContainersKey(ws), JSON.stringify(state));
-      } catch {}
-    }
-
-    // Last Mile receipts
-    if (d.lastmile_receipts && typeof d.lastmile_receipts === 'object') {
-      try { localStorage.setItem(lastMileReceiptsKey(ws), JSON.stringify(d.lastmile_receipts || {})); } catch {}
-    }
-  } catch {}
-}
 
   function uniq(arr) {
     return Array.from(new Set((arr || []).filter(Boolean)));
