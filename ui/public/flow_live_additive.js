@@ -417,6 +417,10 @@ function iconContainer() {
         body: body,
       });
       console.log('[flow] patchFlowWeek result:', JSON.stringify(result));
+      // Reset primed key so next poll fetches freshly saved data from backend
+      if (result && result.ok) {
+        if (window.__FLOW_PRIMED__) delete window.__FLOW_PRIMED__[`${ws}::${f}`];
+      }
       return result;
     } catch (e) {
       console.warn('[flow] backend patch failed — url:', `/flow/week/${ws}?facility=${f}`, 'error:', e.message || e);
@@ -444,6 +448,8 @@ function iconContainer() {
 
     const d = r && r.data ? r.data : null;
     if (!d) return;
+    // Don't overwrite localStorage with empty data — backend may not have received the save yet
+    if (typeof d === 'object' && Object.keys(d).length === 0) return;
 
     // Mirror into localStorage WITHOUT triggering backend writes.
     // (localStorage.setItem doesn't call patchFlowWeek directly)
