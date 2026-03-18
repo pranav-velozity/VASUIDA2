@@ -408,7 +408,6 @@ async function patchFlowWeek(ws, patch, facility) {
     console.warn('[flow] patchFlowWeek skipped — ws:', ws, 'facility:', f, 'patch:', typeof patch, 'state.facility:', window.state?.facility, 'state.org:', window.state?.org);
     return null;
   }
-  if (window.__FLOW_SUPPRESS_BACKEND_WRITE__) return null;
   try {
     const body = JSON.stringify(patch);
     console.log('[flow] patchFlowWeek sending — ws:', ws, 'facility:', f, 'body:', body);
@@ -446,8 +445,8 @@ async function primeFlowWeekFromBackend(ws, facilityOverride) {
   const d = r && r.data ? r.data : null;
   if (!d) return;
 
-  // Mirror into localStorage WITHOUT generating timestamps automatically.
-  window.__FLOW_SUPPRESS_BACKEND_WRITE__ = true;
+  // Mirror into localStorage WITHOUT triggering backend writes.
+  // (localStorage.setItem doesn't call patchFlowWeek directly)
   try {
     // Week sign-off
     if ('receivingComplete' in d || 'vasComplete' in d || 'receivingAt' in d || 'vasAt' in d) {
@@ -491,9 +490,7 @@ async function primeFlowWeekFromBackend(ws, facilityOverride) {
     if (d.lastmile_receipts && typeof d.lastmile_receipts === 'object') {
       try { localStorage.setItem(lastMileReceiptsKey(ws), JSON.stringify(d.lastmile_receipts || {})); } catch {}
     }
-  } finally {
-    window.__FLOW_SUPPRESS_BACKEND_WRITE__ = false;
-  }
+  } catch {}
 }
 
   function uniq(arr) {
@@ -1349,7 +1346,8 @@ function saveWeekSignoff(ws, next) {
 
       laneRows.push({
         ...lane,
-        plannedPOs: lane.plannedPOs.size,
+        plannedPOs: Array.from(lane.plannedPOs), // keep as array for Container Manager PO assignment
+        plannedPOsCount: lane.plannedPOs.size,
         plannedUnits,
         appliedUnits,
         cartonsOut,
