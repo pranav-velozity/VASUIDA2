@@ -362,6 +362,11 @@ app.post('/flow/week/:weekStart',
   writeOpLimiter,
   auditLog('edit_flow'),
   (req, res) => {
+    // ← ADD THESE THREE LINES RIGHT HERE:
+  console.log('[DEBUG] content-type:', req.headers['content-type']);
+  console.log('[DEBUG] content-length:', req.headers['content-length']);
+  console.log('[DEBUG] body:', JSON.stringify(req.body));
+    
   const wsIn = String(req.params.weekStart || '').trim();
   const facility = normFacility(req.query.facility);
   if (!facility) return res.status(400).json({ error: 'facility required' });
