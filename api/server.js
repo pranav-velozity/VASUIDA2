@@ -369,7 +369,8 @@ app.post('/flow/week/:weekStart',
   const monday = mondayOfLoose(wsIn);
   if (!monday) return res.status(400).json({ error: 'invalid weekStart' });
 
-  const patch = (req.body && typeof req.body === 'object') ? req.body : null;
+  console.log('[DEBUG] POST /flow/week body:', JSON.stringify(req.body), 'type:', typeof req.body);
+const patch = (req.body && typeof req.body === 'object') ? req.body : null;
   if (!patch) return res.status(400).json({ error: 'patch object required' });
 
   const existingRow = flowWeekGet.get(facility, monday);
