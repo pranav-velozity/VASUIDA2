@@ -356,11 +356,18 @@ function iconContainer() {
     const base = getApiBase();
     const url = `${base}${path}`;
     const merged = Object.assign({}, opts);
-    merged.headers = Object.assign(
-      { 'Content-Type': 'application/json' },
+    // Normalize all header keys to lowercase to prevent duplicates
+    // (e.g. Content-Type + content-type both becoming application/json, application/json)
+    const normHeaders = {};
+    const allHeaders = Object.assign(
+      { 'content-type': 'application/json' },
       opts.headers || {},
-      token ? { 'Authorization': 'Bearer ' + token } : {}
+      token ? { 'authorization': 'Bearer ' + token } : {}
     );
+    for (const [k, v] of Object.entries(allHeaders)) {
+      normHeaders[k.toLowerCase()] = v;
+    }
+    merged.headers = normHeaders;
     const res = await fetch(url, merged);
     if (!res.ok) throw new Error(await res.text());
     const ct = res.headers.get('content-type') || '';
@@ -413,7 +420,6 @@ function iconContainer() {
       console.log('[flow] patchFlowWeek sending — ws:', ws, 'facility:', f, 'body:', body);
       const result = await api(`/flow/week/${encodeURIComponent(ws)}?facility=${encodeURIComponent(f)}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
         body: body,
       });
       console.log('[flow] patchFlowWeek result:', JSON.stringify(result));
