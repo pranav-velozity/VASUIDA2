@@ -3,6 +3,18 @@
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
+const Anthropic = require('@anthropic-ai/sdk');
+
+// ── Anthropic client (lazy-init so server starts even if key not set) ──
+let _anthropic = null;
+function getAnthropic() {
+  if (!_anthropic) {
+    const key = process.env.ANTHROPIC_API_KEY;
+    if (!key) throw new Error('ANTHROPIC_API_KEY env var not set');
+    _anthropic = new Anthropic({ apiKey: key });
+  }
+  return _anthropic;
+}
 const cors = require('cors');
 const ExcelJS = require('exceljs');
 const Database = require('better-sqlite3');
@@ -309,6 +321,279 @@ Never perform write operations. You are read-only.`;
 
 
 
+
+
+// ===== AI / Pulse Endpoints =====
+
+// Rate limiter for AI endpoints — 30 req/min per IP
+const aiLimiter = rateLimit({ windowMs: 60*1000, max: 30, standardHeaders: true, legacyHeaders: false });
+
+// ── Helper: build a compact ops context snapshot ──
+function buildOpsContext(facility, weekStart) {
+  try {
+    // Current week plan
+    const planRow = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(weekStart);
+    const planRows = planRow ? (safeJsonParse(planRow.data, []) || []) : [];
+
+    const planned_units  = planRows.reduce((s,p) => s + (Number(p.target_qty)||0), 0);
+    const unique_pos     = new Set(planRows.map(p=>p.po_number).filter(Boolean)).size;
+    const unique_sups    = new Set(planRows.map(p=>p.supplier_name).filter(Boolean)).size;
+    const air_planned    = planRows.filter(p=>(p.freight_type||'').toLowerCase()==='air').reduce((s,p)=>s+(Number(p.target_qty)||0),0);
+    const sea_planned    = planRows.filter(p=>(p.freight_type||'').toLowerCase()==='sea').reduce((s,p)=>s+(Number(p.target_qty)||0),0);
+
+    // Applied this week
+    const wsDate = new Date(weekStart+'T00:00:00Z');
+    const weDate = new Date(wsDate); weDate.setUTCDate(weDate.getUTCDate()+6);
+    const we = weDate.toISOString().slice(0,10);
+    const applied_units = db.prepare(`SELECT COUNT(*) as n FROM records WHERE date_local >= ? AND date_local <= ? AND status='complete'`).get(weekStart, we)?.n || 0;
+    const unique_bins   = db.prepare(`SELECT COUNT(DISTINCT mobile_bin) as n FROM records WHERE date_local >= ? AND date_local <= ? AND status='complete'`).get(weekStart, we)?.n || 0;
+
+    // Receiving
+    const recvRows = db.prepare('SELECT po_number, received_at_local FROM receiving WHERE week_start = ?').all(weekStart);
+    const received_pos = recvRows.length;
+    let late_pos = 0;
+    const dueDateByPO = new Map(planRows.filter(p=>p.po_number&&p.due_date).map(p=>[String(p.po_number).trim(),String(p.due_date)]));
+    for (const r of recvRows) {
+      const po = String(r.po_number||'').trim();
+      const due = dueDateByPO.get(po);
+      if (r.received_at_local && due && r.received_at_local.slice(0,10) > due.slice(0,10)) late_pos++;
+    }
+
+    // Supplier breakdown
+    const supMap = new Map();
+    for (const p of planRows) {
+      const s = String(p.supplier_name||'').trim()||'Unknown';
+      if (!supMap.has(s)) supMap.set(s, {planned:0,applied:0});
+      supMap.get(s).planned += Number(p.target_qty)||0;
+    }
+    const recRows2 = db.prepare(`SELECT po_number FROM records WHERE date_local >= ? AND date_local <= ? AND status='complete'`).all(weekStart, we);
+    const poToSup  = new Map(planRows.map(p=>[String(p.po_number||'').trim(), String(p.supplier_name||'').trim()||'Unknown']));
+    for (const r of recRows2) {
+      const sup = poToSup.get(String(r.po_number||'').trim());
+      if (sup && supMap.has(sup)) supMap.get(sup).applied++;
+    }
+    const suppliers = Array.from(supMap.entries()).map(([name,d])=>({
+      name, planned:d.planned, applied:d.applied,
+      pct: d.planned>0 ? Math.round(d.applied/d.planned*100) : 0
+    })).sort((a,b)=>b.planned-a.planned);
+
+    // Flow week (transit/container data)
+    const flowRow = db.prepare('SELECT data FROM flow_week WHERE facility=? AND week_start=?').get(facility, weekStart);
+    const flowData = flowRow ? (safeJsonParse(flowRow.data,{})||{}) : {};
+    const intl_lanes = flowData.intl_lanes || {};
+    const laneCount  = Object.keys(intl_lanes).length;
+    const etaDates   = Object.values(intl_lanes).map(l=>l&&l.eta_fc).filter(Boolean).sort();
+    const nextEtaFC  = etaDates.pop() || null;
+
+    const completion_pct = planned_units > 0 ? Math.round(applied_units/planned_units*100) : 0;
+    const otr_pct = unique_pos > 0 ? Math.round((received_pos - late_pos) / unique_pos * 100) : null;
+
+    return {
+      facility, week_start: weekStart, week_end: we,
+      planned_units, applied_units, completion_pct,
+      unique_pos, unique_sups, received_pos, late_pos,
+      otr_pct, unique_bins,
+      air_planned, sea_planned,
+      suppliers: suppliers.slice(0,8),
+      active_lanes: laneCount,
+      next_eta_fc: nextEtaFC,
+    };
+  } catch(e) {
+    console.error('[buildOpsContext]', e);
+    return { facility, week_start: weekStart };
+  }
+}
+
+// POST /pulse/chat — conversational AI assistant (global, any page)
+app.post('/pulse/chat',
+  authenticateRequest,
+  aiLimiter,
+  async (req, res) => {
+  try {
+    const { messages, context } = req.body || {};
+    if (!messages || !Array.isArray(messages) || !messages.length) {
+      return res.status(400).json({ error: 'messages array required' });
+    }
+
+    const facility = normFacility(context?.facility || '');
+    const weekStart = context?.week_start || '';
+    const userRole  = String(context?.role || 'User');
+    const orgName   = String(context?.org || 'VelOzity');
+
+    // Build live ops context snapshot
+    let opsCtx = {};
+    if (facility && weekStart) {
+      opsCtx = buildOpsContext(facility, weekStart);
+    }
+
+    // Build system prompt using concatenation to avoid nested template literal issues
+    const opsLines = [];
+    if (Object.keys(opsCtx).length > 2) {
+      opsLines.push('## Live operations data for this week');
+      opsLines.push('- Planned units: ' + ((opsCtx.planned_units||0).toLocaleString()));
+      opsLines.push('- Applied units: ' + ((opsCtx.applied_units||0).toLocaleString()) + ' (' + (opsCtx.completion_pct||0) + '% complete)');
+      opsLines.push('- Unique POs: ' + (opsCtx.unique_pos||'--') + ' across ' + (opsCtx.unique_sups||'--') + ' manufacturers');
+      opsLines.push('- POs received: ' + (opsCtx.received_pos||0) + ' (' + (opsCtx.late_pos||0) + ' late, ' + (opsCtx.otr_pct!=null ? opsCtx.otr_pct+'% on time' : '--') + ')');
+      opsLines.push('- Unique carton bins processed: ' + ((opsCtx.unique_bins||0).toLocaleString()));
+      opsLines.push('- Air freight: ' + ((opsCtx.air_planned||0).toLocaleString()) + ' units | Sea: ' + ((opsCtx.sea_planned||0).toLocaleString()) + ' units');
+      opsLines.push('- Active transit lanes: ' + (opsCtx.active_lanes||0) + (opsCtx.next_eta_fc ? ' | Next ETA FC: '+opsCtx.next_eta_fc : ''));
+      opsLines.push('- Manufacturer breakdown:');
+      (opsCtx.suppliers||[]).forEach(s => opsLines.push('  - '+s.name+': '+(s.applied||0).toLocaleString()+'/'+(s.planned||0).toLocaleString()+' units ('+s.pct+'%)'));
+    } else {
+      opsLines.push('(No week data loaded - user may not have navigated to Week Hub yet)');
+    }
+    const roleRestriction = userRole === 'Client'
+      ? 'Only discuss data for this org. Do not reveal admin-level views or other orgs.'
+      : userRole === 'Facility' ? 'Executive dashboard is not available to this role.' : 'Full access.';
+    const systemPrompt = [
+      'You are Pulse, the AI operations assistant embedded in VelOzity Pinpoint, a real-time warehouse UID operations platform used by '+orgName+'.',
+      '',
+      '## Your role',
+      'You help operations teams understand their warehouse performance: throughput, PO status, VAS processing, receiving health, shipment tracking, and exceptions. You are concise, direct, and use numbers. You never perform write operations.',
+      '',
+      '## Current context',
+      '- Facility: ' + (facility || 'not loaded'),
+      '- Week: ' + (weekStart || 'not loaded'),
+      '- User role: ' + userRole,
+      '',
+      opsLines.join('\n'),
+      '',
+      '## Guidelines',
+      '- Lead with the most important number or insight',
+      '- If asked about a specific PO or SKU, note that you have week-level aggregates and suggest they check Week Hub for line-level detail',
+      '- Role restrictions: ' + roleRestriction,
+      '- Format responses in plain text, no markdown headers or bullet symbols, just clean prose with line breaks where needed',
+      '- Keep responses under 150 words unless the user asks for detail',
+    ].join('\n');
+
+    const anthropic = getAnthropic();
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 600,
+      system: systemPrompt,
+      messages: messages.map(m => ({ role: m.role, content: m.content }))
+    });
+
+    const reply = response.content.find(b => b.type === 'text')?.text || 'No response.';
+    res.json({ reply });
+
+  } catch(e) {
+    console.error('[/pulse/chat]', e);
+    if (e.message?.includes('ANTHROPIC_API_KEY')) {
+      return res.status(503).json({ error: 'AI service not configured' });
+    }
+    res.status(500).json({ error: 'AI service error: ' + (e.message || e) });
+  }
+});
+
+// POST /ai/pulse — generate exec Improvement Intelligence insights via Claude
+app.post('/ai/pulse',
+  authenticateRequest,
+  aiLimiter,
+  async (req, res) => {
+  try {
+    const { weeks, facility } = req.body || {};
+    if (!weeks || !Array.isArray(weeks) || !weeks.length) {
+      return res.status(400).json({ error: 'weeks array required' });
+    }
+
+    // Compute baseline (top 25% weeks)
+    const daysArr = weeks.map(w=>w.avg_days_to_apply).filter(v=>v!=null).sort((a,b)=>a-b);
+    const otrArr  = weeks.map(w=>w.on_time_receiving_pct).filter(v=>v!=null).sort((a,b)=>b-a);
+    const thruArr = weeks.map(w=>w.planned_units>0?w.applied_units/w.planned_units*100:0).sort((a,b)=>b-a);
+    const q = arr => arr.length ? arr[Math.floor(arr.length*0.25)] : null;
+    const baseline = {
+      avg_days_to_apply:     q(daysArr),
+      on_time_receiving_pct: q(otrArr),
+      throughput_pct:        q(thruArr),
+    };
+
+    const totPl   = weeks.reduce((s,w)=>s+(w.planned_units||0),0);
+    const totAp   = weeks.reduce((s,w)=>s+(w.applied_units||0),0);
+    const totAir  = weeks.reduce((s,w)=>s+(w.air_units||0),0);
+    const totSea  = weeks.reduce((s,w)=>s+(w.sea_units||0),0);
+    const avgDays = daysArr.length ? daysArr.reduce((a,b)=>a+b,0)/daysArr.length : null;
+    const avgOTR  = otrArr.length  ? otrArr.reduce((a,b)=>a+b,0)/otrArr.length   : null;
+    const lateArr = weeks.map(w=>w.late_pos||0);
+    const avgLate = lateArr.reduce((a,b)=>a+b,0)/weeks.length;
+
+    // Supplier aggregates
+    const supMap = new Map();
+    weeks.forEach(w=>(w.suppliers||[]).forEach(s=>{
+      if(!supMap.has(s.supplier)) supMap.set(s.supplier,{planned:0,applied:0});
+      const m=supMap.get(s.supplier); m.planned+=(s.planned||0); m.applied+=(s.applied||0);
+    }));
+    const supRows = Array.from(supMap.entries())
+      .map(([name,d])=>({name, pct:d.planned>0?Math.min(100,Math.round(d.applied/d.planned*100)):0, planned:d.planned}))
+      .filter(s=>s.planned>200).sort((a,b)=>b.planned-a.planned);
+
+    // Build data prompt safely without nested template literals
+    const weekLines = weeks.map(w => {
+      const pct = w.planned_units>0 ? Math.round(w.applied_units/w.planned_units*100) : 0;
+      const days = w.avg_days_to_apply!=null ? w.avg_days_to_apply.toFixed(1)+'d' : '--';
+      const otr  = w.on_time_receiving_pct!=null ? Math.round(w.on_time_receiving_pct)+'%' : '--';
+      return '- '+w.week_start+': planned '+(w.planned_units||0).toLocaleString()+', applied '+(w.applied_units||0).toLocaleString()+' ('+pct+'%), recv->VAS '+days+', on-time '+otr+', late POs '+(w.late_pos||0);
+    }).join('\n');
+    const supLines = supRows.map(s => '- '+s.name+': '+s.pct+'% completion ('+s.planned.toLocaleString()+' units planned)').join('\n') || 'No manufacturer data';
+    const airPct2  = (totAir+totSea)>0 ? Math.round(totAir/(totAir+totSea)*100) : 0;
+    const dataPrompt = [
+      'You are analysing VelOzity Pinpoint operations data for facility '+facility+' over '+weeks.length+' weeks.',
+      '',
+      '## Aggregate performance',
+      '- Total planned units: '+totPl.toLocaleString(),
+      '- Total applied units: '+totAp.toLocaleString()+' ('+(totPl>0?Math.round(totAp/totPl*100):0)+'% completion)',
+      '- Avg days receiving -> VAS complete: '+(avgDays!=null?avgDays.toFixed(1)+'d':'no data'),
+      '- Best-week baseline (top 25%): '+(baseline.avg_days_to_apply!=null?baseline.avg_days_to_apply.toFixed(1)+'d':'no data'),
+      '- On-time receiving avg: '+(avgOTR!=null?Math.round(avgOTR)+'%':'no data')+' (best-week: '+(baseline.on_time_receiving_pct!=null?Math.round(baseline.on_time_receiving_pct)+'%':'no data')+')',
+      '- Avg late POs per week: '+avgLate.toFixed(1),
+      '- Air freight: '+totAir.toLocaleString()+' units ('+airPct2+'%) | Sea: '+totSea.toLocaleString()+' units',
+      '',
+      '## Week-by-week',
+      weekLines,
+      '',
+      '## Manufacturer performance',
+      supLines,
+      '',
+      'Generate exactly 5 operational improvement insights for VelOzity warehouse operations team. These insights are about VelOzity internal operations, not blame on manufacturers. Manufacturers are external partners whose patterns affect VelOzity throughput.',
+      '',
+      'For each insight return a JSON object with these exact fields:',
+      '- category: one of "time-to-live", "throughput", or "risk"',
+      '- priority: one of "high", "medium", or "low"',
+      '- title: short punchy title (max 8 words)',
+      '- observation: what the data shows (1-2 sentences, use specific numbers)',
+      '- impact: the operational consequence if unaddressed (1 sentence, start with a number or %)',
+      '- action: concrete next step for VelOzity ops team (1-2 sentences)',
+      '',
+      'Respond ONLY with a JSON array of 5 objects. No markdown, no explanation, just the array.',
+    ].join('\n');
+
+    const anthropic = getAnthropic();
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1200,
+      messages: [{ role: 'user', content: dataPrompt }]
+    });
+
+    const raw = response.content.find(b=>b.type==='text')?.text || '[]';
+    let insights;
+    try {
+      const clean = raw.replace(/^```json\s*/,'').replace(/```\s*$/,'').trim();
+      insights = JSON.parse(clean);
+    } catch(e) {
+      console.error('[/ai/pulse] JSON parse failed:', raw.slice(0,200));
+      return res.status(500).json({ error: 'Failed to parse AI response' });
+    }
+
+    res.json({ insights });
+
+  } catch(e) {
+    console.error('[/ai/pulse]', e);
+    if (e.message?.includes('ANTHROPIC_API_KEY')) {
+      return res.status(503).json({ error: 'AI service not configured' });
+    }
+    res.status(500).json({ error: 'AI service error: '+(e.message||e) });
+  }
+});
 
 
 // ===== Executive Summary API =====
