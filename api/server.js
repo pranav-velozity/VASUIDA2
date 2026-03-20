@@ -325,8 +325,7 @@ Never perform write operations. You are read-only.`;
 
 // ===== AI / Pulse Endpoints =====
 
-// Rate limiter for AI endpoints — 30 req/min per IP
-const aiLimiter = rateLimit({ windowMs: 60*1000, max: 30, standardHeaders: true, legacyHeaders: false });
+// AI endpoints use the existing writeOpLimiter (defined in middleware/rateLimiter)
 
 // ── Helper: build a compact ops context snapshot ──
 function buildOpsContext(facility, weekStart) {
@@ -407,7 +406,7 @@ function buildOpsContext(facility, weekStart) {
 // POST /pulse/chat — conversational AI assistant (global, any page)
 app.post('/pulse/chat',
   authenticateRequest,
-  aiLimiter,
+  writeOpLimiter,
   async (req, res) => {
   try {
     const { messages, context } = req.body || {};
@@ -489,7 +488,7 @@ app.post('/pulse/chat',
 // POST /ai/pulse — generate exec Improvement Intelligence insights via Claude
 app.post('/ai/pulse',
   authenticateRequest,
-  aiLimiter,
+  writeOpLimiter,
   async (req, res) => {
   try {
     const { weeks, facility } = req.body || {};
