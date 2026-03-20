@@ -255,6 +255,14 @@ app.get('/events/scan', (req, res) => {
 // --- Health ---
 app.get('/health', (req, res) => res.json({ ok: true, now: new Date().toISOString() }));
 
+// --- Debug: show flow_week facilities and week_starts (admin only) ---
+app.get('/debug/flow_weeks', authenticateRequest, (req, res) => {
+  const role = req.auth?.orgRole || '';
+  if (role !== 'org:admin_auth') return res.status(403).json({ error: 'Admin only' });
+  const rows = db.prepare('SELECT facility, week_start, updated_at, length(data) as data_len FROM flow_week ORDER BY week_start DESC LIMIT 20').all();
+  res.json({ rows });
+});
+
 // ── Pulse AI endpoints moved to /ai section below ──
 
 
@@ -318,8 +326,18 @@ app.get('/pulse/context',
       const recvRows = db.prepare('SELECT * FROM receiving WHERE week_start = ?').all(ws);
 
       // ── Flow week (lanes + containers) ──
-      const flowRow = db.prepare('SELECT data FROM flow_week WHERE facility = ? AND week_start = ?').get(facility, ws);
+      // Try exact facility match first, then fall back to any facility for this week
+      let flowRow = db.prepare('SELECT data FROM flow_week WHERE facility = ? AND week_start = ?').get(facility, ws);
+      if (!flowRow) {
+        // Facility key in flow_week may differ slightly from plan — try any row for this week
+        flowRow = db.prepare('SELECT data FROM flow_week WHERE week_start = ? ORDER BY updated_at DESC LIMIT 1').get(ws);
+        if (flowRow) console.log('[pulse/context] flow_week facility fallback used for week', ws);
+      }
       const flowData = safeJsonParse(flowRow?.data, {}) || {};
+      // Debug: log what we found
+      const laneCount = Object.keys((flowData.intl_lanes && typeof flowData.intl_lanes === 'object') ? flowData.intl_lanes : {}).length;
+      const contArr2 = (() => { const wc = flowData.intl_weekcontainers; return Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []); })();
+      if (laneCount === 0 && contArr2.length === 0) console.log('[pulse/context] no lanes/containers found for week', ws, '- flowRow:', !!flowRow);
 
       // ── Build PO summary (join plan + applied + receiving) ──
       const poMap = new Map();
@@ -596,17 +614,34 @@ app.post('/pulse/chat',
     lines.push('- If asked about something not in the 12-week window, say so clearly');
     lines.push('- Keep responses under 200 words unless user asks for detail. Use plain text, no markdown symbols.');
 
-    const systemPrompt = lines.join('\n');
+    // Split prompt: static ops data (cacheable) + dynamic context (not cached)
+    // Cache only kicks in when content is identical across requests.
+    // The ops data block is static for the whole session — perfect for caching.
+    // The role/facility/week line is tiny and dynamic — sent uncached each time.
+
+    // Find where the ops data starts (after the user context lines)
+    const opsDataStartIdx = lines.findIndex(l => l.startsWith('## Operations data'));
+    const staticLines  = opsDataStartIdx >= 0 ? lines.slice(opsDataStartIdx) : lines;
+    const dynamicLines = opsDataStartIdx >= 0 ? lines.slice(0, opsDataStartIdx) : [];
+
+    const staticBlock  = staticLines.join('\n');
+    const dynamicBlock = dynamicLines.join('\n');
 
     const anthropic = getAnthropic();
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 800,
       system: [
+        // Static ops data — cached for the session (content identical across turns)
         {
           type: 'text',
-          text: systemPrompt,
+          text: staticBlock,
           cache_control: { type: 'ephemeral' }
+        },
+        // Dynamic context — small, changes per request, not cached
+        {
+          type: 'text',
+          text: dynamicBlock,
         }
       ],
       messages: messages.map(m => ({ role: m.role, content: m.content })),
