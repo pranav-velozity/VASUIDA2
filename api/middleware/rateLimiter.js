@@ -40,8 +40,24 @@ const uploadLimiter = rateLimit({
   }
 });
 
+// AI / Pulse rate limiter — generous for conversational use
+// 120 requests per 15 min (~8 messages/min) — enough for active chat sessions
+// Admin and API roles always skipped
+const aiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 120,
+  message: { error: 'Too many AI requests, please wait a moment before continuing' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => {
+    const role = req.auth?.orgRole;
+    return role === 'org:admin_auth' || role === 'org:api_auth';
+  }
+});
+
 module.exports = {
   apiLimiter,
   writeOpLimiter,
-  uploadLimiter
+  uploadLimiter,
+  aiLimiter
 };
