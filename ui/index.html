@@ -5443,7 +5443,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=108" defer></script>
+<script src="/public/flow_live_additive.js?v=109" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -5805,8 +5805,8 @@ function renderReportsPage(container){
       </div>
       <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px;">
         ${reportCard('Applied UIDs Export','All applied UID records for the selected week, filterable by PO and SKU.','XLSX','Admin · Supplier','btn-dl-week-applied')}
-        ${reportCard('PO × SKU Summary','Unit counts grouped by PO and SKU with completion status.','XLSX','Admin · Supplier','ops-dl-posku')}
-        ${reportCard('SKU Summary','Aggregated unit totals by SKU across all POs for the week.','XLSX','Admin · Supplier','ops-dl-po')}
+        ${reportCard('PO × SKU Summary','Unit counts grouped by PO and SKU with completion status.','XLSX','Admin · Supplier','btn-dl-posku')}
+        ${reportCard('SKU Summary','Aggregated unit totals by SKU across all POs for the week.','XLSX','Admin · Supplier','btn-dl-po')}
       </div>
     </div>
 
@@ -5820,8 +5820,8 @@ function renderReportsPage(container){
         <span style="font-size:10px;color:#AEAEB2;">Transit &amp; delivery tracking</span>
       </div>
       <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(2,1fr);gap:10px;">
-        ${reportCard('Shipment Summary','High-level view of all shipments — status, units, PO count per shipment.','XLSX','Admin · Client','ops-dl-ship-summary')}
-        ${reportCard('Shipment Details','Line-by-line shipment detail including container, routing and delivery dates.','XLSX','Admin · Client','ops-dl-ship-detail')}
+        ${reportCard('Shipment Summary','High-level view of all shipments — status, units, PO count per shipment.','XLSX','Admin · Client','btn-ship-summary')}
+        ${reportCard('Shipment Details','Line-by-line shipment detail including container, routing and delivery dates.','XLSX','Admin · Client','btn-ship-detail')}
       </div>
     </div>
 
@@ -5835,18 +5835,35 @@ function renderReportsPage(container){
         <span style="font-size:10px;color:#AEAEB2;">Weekly ops overview</span>
       </div>
       <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(2,1fr);gap:10px;">
-        ${reportCard('Ops Summary Report','Full week summary — throughput, completion rate, at-risk POs, receiving status.','PDF','Admin only','flow-download-pdf')}
-        ${reportCard('Mobile Bin Export','Full bin manifest with unit counts, weights, and QA status.','XLSX','Admin only','ops-dl-mobile-bin')}
+        ${reportCard('Ops Summary Report','Full week summary — throughput, completion rate, at-risk POs, receiving status.','PDF','Admin only','__pdf-direct__')}
+        ${reportCard('Mobile Bin Export','Full bin manifest with unit counts, weights, and QA status.','XLSX','Admin only','__mobile-bin-direct__')}
       </div>
     </div>
   </div>`;
 
-  // Wire buttons — proxy clicks to existing hidden buttons
+  // Wire buttons — proxy clicks to existing hidden buttons or direct functions
   container.querySelectorAll('[data-proxy]').forEach(btn=>{
     btn.addEventListener('click',function(){
-      const target = document.getElementById(this.dataset.proxy);
+      const proxyId = this.dataset.proxy;
+      // Direct function calls for buttons not in main DOM
+      if(proxyId === '__mobile-bin-direct__'){
+        if(typeof downloadMobileBins === 'function') downloadMobileBins();
+        else console.warn('[Reports] downloadMobileBins not found');
+        return;
+      }
+      if(proxyId === '__pdf-direct__'){
+        // flow-download-pdf lives inside the flow module DOM
+        const pdfBtn = document.getElementById('flow-download-pdf');
+        if(pdfBtn){ pdfBtn.click(); return; }
+        // Fallback: trigger window.print() on the flow page
+        if(typeof window.print === 'function'){ window.print(); return; }
+        console.warn('[Reports] PDF download not available — navigate to Week Hub first');
+        alert('Please navigate to the Week Hub page first, then use the PDF download from there.');
+        return;
+      }
+      const target = document.getElementById(proxyId);
       if(target) target.click();
-      else console.warn('[Reports] proxy target not found:', this.dataset.proxy);
+      else console.warn('[Reports] proxy target not found:', proxyId);
     });
   });
 }
