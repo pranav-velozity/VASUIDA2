@@ -274,8 +274,8 @@ app.get('/pulse/context',
   try {
     const facilityHint = normFacility(req.query.facility || '');
 
-    // ── Resolve facility + find last 12 monday week-starts ──
-    const allPlans = db.prepare('SELECT week_start, data FROM plans ORDER BY week_start DESC LIMIT 20').all();
+    // ── Resolve facility + find last 4 week-starts ──
+    const allPlans = db.prepare('SELECT week_start, data FROM plans ORDER BY week_start DESC LIMIT 6').all();
     let facility = facilityHint;
     if (!facility) {
       for (const row of allPlans) {
@@ -285,13 +285,13 @@ app.get('/pulse/context',
       }
     }
 
-    // Get 12 most recent weeks that have plan data
+    // Get 4 most recent weeks that have plan data
     const weeks = [];
     for (const row of allPlans) {
       const rows = safeJsonParse(row.data, []) || [];
       if (rows.length > 0) {
         weeks.push(row.week_start);
-        if (weeks.length >= 12) break;
+        if (weeks.length >= 4) break;
       }
     }
     weeks.reverse(); // chronological order
@@ -530,7 +530,7 @@ app.post('/pulse/chat',
     lines.push('');
     lines.push('## Your role');
     lines.push('You help the VelOzity operations team understand warehouse performance across receiving, VAS processing, transit, and FC delivery.');
-    lines.push('You have FULL access to the last 12 weeks of detailed operations data below. Use it to answer any question specifically and accurately.');
+    lines.push('You have FULL access to the last 4 weeks of detailed operations data below. Use it to answer any question specifically and accurately.');
     lines.push('Be concise and direct. Lead with numbers. Do not hedge when the data is clear.');
     lines.push('You are read-only — guide users to the UI for any changes (e.g. "Update that in Week Hub → Transit & Clearing").');
     lines.push('');
@@ -541,7 +541,7 @@ app.post('/pulse/chat',
     lines.push('');
 
     if (weeks.length > 0) {
-      lines.push('## Operations data — last ' + weeks.length + ' weeks (' + weeks[0].week_start + ' to ' + weeks[weeks.length-1].week_start + ')');
+      lines.push('## Operations data — last ' + weeks.length + ' weeks (' + weeks[0].week_start + ' to ' + weeks[weeks.length-1].week_start + ') [most recent 4 weeks]');
       lines.push('');
 
       for (const w of weeks) {
