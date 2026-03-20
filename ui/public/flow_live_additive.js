@@ -559,24 +559,13 @@ function iconContainer() {
   }
 
   async function loadRecords(ws, tz) {
-    const s = window.state || {};
-
-    // state.bins from /bins/weeks/:ws contains mobile_bin — same source the Carton view uses.
-    // Prefer bins over raw records fetch for carton-out accuracy.
-    if (s.weekStart === ws && Array.isArray(s.bins) && s.bins.length) {
-      // Merge bins into state.records (summaries) so computeCartonStatsFromRecords
-      // can find mobile_bin. Return combined array.
-      const summaries = Array.isArray(s.records) ? s.records : [];
-      return [...summaries, ...s.bins];
-    }
-
-    // Derive week range in ISO; keep it simple: ws..ws+6
+    // Always fetch raw records — they have both po_number AND mobile_bin
+    // state.records are PO-level summaries with no mobile_bin so cannot be used
     const wsD = new Date(`${ws}T00:00:00Z`);
     const weD = new Date(wsD.getTime());
     weD.setUTCDate(weD.getUTCDate() + 6);
     const from = `${ws}T00:00:00.000Z`;
     const to = `${isoDate(weD)}T23:59:59.999Z`;
-
     try { const r = await api(`/records?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&status=complete&limit=65000`); const a = asArray(r); if (a && a.length) return a; } catch {}
     try { const r = await api(`/records?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&limit=65000`); return asArray(r); } catch {}
     return [];
@@ -646,10 +635,6 @@ function iconContainer() {
 
 
 function computeCartonStatsFromRecords(records) {
-  // Match receiving_live_additive.js exactly:
-  // - Records are usually already status=complete from the query, but be safe if status exists.
-  // - PO: r.po_number || r.po || r.PO
-  // - Mobile bin: r.mobile_bin || r.bin || r.mobileBin
   const sets = new Map(); // po -> Set(mobile_bin)
   const arr = asArray(records);
   for (const r of arr) {
@@ -667,6 +652,15 @@ function computeCartonStatsFromRecords(records) {
   for (const [po, set] of sets.entries()) {
     cartonsOutByPO.set(po, set.size);
     cartonsOutTotal += set.size;
+  }
+  // Fallback: if raw records had no mobile_bin, count unique bins from state.bins
+  if (cartonsOutTotal === 0 && window.state && Array.isArray(window.state.bins) && window.state.bins.length) {
+    const allBins = new Set();
+    for (const b of window.state.bins) {
+      const mb = String(b.mobile_bin || b.bin || '').trim();
+      if (mb) allBins.add(mb);
+    }
+    cartonsOutTotal = allBins.size;
   }
   return { cartonsOutByPO, cartonsOutTotal };
 }
