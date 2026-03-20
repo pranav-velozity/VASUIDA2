@@ -5452,7 +5452,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=111" defer></script>
+<script src="/public/flow_live_additive.js?v=113" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -5840,26 +5840,55 @@ async function downloadConsolidatedReport() {
     try {
       const p = new URLSearchParams({ from: ws, to: we, status: 'complete' });
       const resp = await api(`/summary/po_sku?${p.toString()}`).catch(()=>({}));
-      const poRows = joinPOProgress(plan, (() => {
-        const m = new Map();
-        for(const r of resp?.rows||[]){ if(r.po) m.set(String(r.po).trim(), r); }
-        return m;
-      })());
+      // joinPOProgress expects Map<po, number> — aggregate units by PO
+      const byPO = new Map();
+      for(const r of resp?.rows||[]){
+        const po = String(r.po||'').trim();
+        if(!po) continue;
+        byPO.set(po, (byPO.get(po)||0) + (Number(r.units)||0));
+      }
+      const poRows = joinPOProgress(plan, byPO);
       const rows = buildDiscrepancyPO(poRows, plan);
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'SKU Summary');
     } catch(e){ console.warn('SKU sheet failed', e); }
 
-    // ── Sheet 4: Mobile Bins — same as downloadMobileBins ──
+    // ── Sheet 4: Mobile Bins — unique bins from records (all scanned bins) ──
     try {
-      let bins = Array.isArray(state.bins) ? state.bins : [];
-      if(!bins.length){
-        try{ const r = await api(`/bins/weeks/${encodeURIComponent(ws)}`); bins = Array.isArray(r)?r:(r.bins||[]); }catch{}
+      // Fetch raw records to get all unique mobile_bin values with po_number
+      const from = `${ws}T00:00:00.000Z`;
+      const weD = new Date(ws); weD.setDate(weD.getDate()+6);
+      const to = `${weD.toISOString().slice(0,10)}T23:59:59.999Z`;
+      let rawRecs = [];
+      try {
+        const r = await api(`/records?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&status=complete&limit=65000`);
+        rawRecs = Array.isArray(r) ? r : (r.records || r.data || r.rows || []);
+      } catch(e){ console.warn('records fetch failed', e); }
+
+      // Also get bin manifest for weight data
+      let binManifest = Array.isArray(state.bins) ? state.bins : [];
+      if(!binManifest.length){
+        try{ const r = await api(`/bins/weeks/${encodeURIComponent(ws)}`); binManifest = Array.isArray(r)?r:(r.bins||[]); }catch{}
       }
+      const weightByBin = new Map(binManifest.map(b=>[String(b.mobile_bin||'').trim(), Number(b.weight_kg||0)]));
+      const unitsByBin = new Map(binManifest.map(b=>[String(b.mobile_bin||'').trim(), Number(b.total_units||0)]));
+
       const poToSup = new Map(plan.map(p=>[String(p.po_number||'').trim(), String(p.supplier_name||'').trim()]));
-      const binRows = bins.filter(b=>String(b.mobile_bin||'').trim()).map(b => ({
-        Supplier: String(b.supplier_name||poToSup.get(String(b.po_number||'').trim())||''),
-        PO: String(b.po_number||''), Mobile_Bin: String(b.mobile_bin||''),
-        Weight_kg: Number(b.weight_kg||0), Units: Number(b.total_units||0)
+
+      // Deduplicate by mobile_bin — one row per unique bin
+      const seen = new Map(); // mobile_bin -> {po, supplier}
+      for(const r of rawRecs){
+        const mb = String(r.mobile_bin||r.bin||'').trim();
+        const po = String(r.po_number||r.po||'').trim();
+        if(!mb) continue;
+        if(!seen.has(mb)) seen.set(mb, { po, supplier: poToSup.get(po)||'' });
+      }
+
+      const binRows = Array.from(seen.entries()).map(([mb, meta]) => ({
+        Supplier: meta.supplier,
+        PO: meta.po,
+        Mobile_Bin: mb,
+        Weight_kg: weightByBin.get(mb) || 0,
+        Units: unitsByBin.get(mb) || 0
       }));
       binRows.sort((a,b)=>(a.Supplier||'').localeCompare(b.Supplier||'')||(a.PO||'').localeCompare(b.PO||''));
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(binRows), 'Mobile Bins');
