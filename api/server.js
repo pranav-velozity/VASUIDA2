@@ -602,8 +602,6 @@ app.post('/pulse/chat',
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 800,
-      // Use ephemeral cache on system prompt — subsequent messages in same session
-      // hit the cache and only pay for the new message tokens (~500 vs ~31K)
       system: [
         {
           type: 'text',
@@ -612,7 +610,8 @@ app.post('/pulse/chat',
         }
       ],
       messages: messages.map(m => ({ role: m.role, content: m.content })),
-      betas: ['prompt-caching-2024-07-31'],
+    }, {
+      headers: { 'anthropic-beta': 'prompt-caching-2024-07-31' }
     });
 
     const reply = response.content.find(b => b.type === 'text')?.text || 'No response.';
@@ -722,7 +721,8 @@ app.post('/ai/pulse',
           ]
         }
       ],
-      betas: ['prompt-caching-2024-07-31'],
+    }, {
+      headers: { 'anthropic-beta': 'prompt-caching-2024-07-31' }
     });
 
     const raw = response.content.find(b=>b.type==='text')?.text || '[]';
