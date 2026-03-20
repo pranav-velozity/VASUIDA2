@@ -4480,6 +4480,43 @@ window.addEventListener('state:ready', () => {
       }
     }
   } catch (e) { console.warn('[OPS] state:ready render failed:', e); }
+
+  // ── Pre-warm Pulse cache silently after Week Hub loads ──
+  // Fires a background request to create the prompt cache (~31K tokens)
+  // so the user's first real message only consumes ~800 cached tokens.
+  // Runs once per session — skips if cache already warmed.
+  if (!window._pulseCacheWarmed) {
+    window._pulseCacheWarmed = true;
+    setTimeout(async function pulseCacheWarm() {
+      try {
+        // First load the 12-week context
+        await pulseLoadContext();
+        if (!window._pulseSessionContext) return; // no data yet, skip
+
+        const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
+        let token = null;
+        if (window.Clerk?.session) { try { token = await window.Clerk.session.getToken(); } catch(_){} }
+
+        const facility = ((window.state?.plan)||[]).map(p=>String(p.facility_name||p.facility||'').trim()).find(Boolean)
+          || String(window.state?.facility||'').trim() || '';
+
+        // Silent warm-up message — creates the cache, response discarded
+        await fetch(apiBase + '/pulse/chat', {
+          method: 'POST',
+          headers: Object.assign({'Content-Type':'application/json'}, token ? {'Authorization':'Bearer '+token} : {}),
+          body: JSON.stringify({
+            messages: [{ role: 'user', content: 'hello' }],
+            pulseContext: window._pulseSessionContext,
+            currentWeek: { facility, week_start: window.state?.weekStart || '' },
+          })
+        });
+        console.log('[Pulse] cache pre-warmed — first real message will be instant');
+      } catch(e) {
+        // Silent fail — pre-warm is best-effort, won't affect user experience
+        console.warn('[Pulse] cache pre-warm failed silently:', e.message);
+      }
+    }, 3000); // wait 3s after state:ready so page load completes first
+  }
 });
 
 window.addEventListener('hashchange', () => show(getRouteHash()));
