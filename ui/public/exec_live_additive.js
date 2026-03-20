@@ -96,7 +96,7 @@
           <div id="exec-thru-summary" style="font-size:11px;color:#AEAEB2;"></div>
         </div>
         <div style="font-size:10px;color:#AEAEB2;margin-bottom:16px;">Planned vs applied units · completion %</div>
-        <canvas id="chart-throughput" height="170"></canvas>
+        <div id="chart-throughput-svg" style="width:100%;"></div>
       </div>
       <div class="exec-chart-card" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:20px;">
         <div style="font-size:13px;font-weight:600;color:#1C1C1E;margin-bottom:2px;">Receiving Health</div>
@@ -120,15 +120,15 @@
     </div>
 
     <!-- Radar: full width, 50/50 -->
-    <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:24px;display:grid;grid-template-columns:1fr 1fr;gap:32px;align-items:center;">
-      <div>
-        <div style="font-size:13px;font-weight:600;color:#1C1C1E;margin-bottom:2px;">Performance Radar</div>
-        <div style="font-size:10px;color:#AEAEB2;margin-bottom:20px;">Actual vs best-week baseline · 100 = best achieved</div>
-        <div style="position:relative;">
-          <canvas id="chart-radar" style="display:block;width:100%;max-width:360px;height:300px;"></canvas>
+    <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:24px;display:grid;grid-template-columns:55fr 45fr;gap:24px;align-items:center;">
+      <div style="display:flex;flex-direction:column;align-items:flex-end;padding-left:15%;">
+        <div style="width:100%;">
+          <div style="font-size:13px;font-weight:600;color:#1C1C1E;margin-bottom:2px;">Performance Radar</div>
+          <div style="font-size:10px;color:#AEAEB2;margin-bottom:16px;">Actual vs best-week baseline · 100 = best achieved</div>
         </div>
+        <canvas id="chart-radar" style="display:block;width:100%;max-width:432px;height:360px;"></canvas>
       </div>
-      <div id="exec-radar-legend" style="display:flex;flex-direction:column;gap:16px;"></div>
+      <div id="exec-radar-legend" style="display:flex;flex-direction:column;gap:14px;"></div>
     </div>
   </div>
 
@@ -249,23 +249,7 @@
     const sumEl = el('exec-thru-summary');
     if (sumEl) sumEl.textContent = `${fmtN(totAp)} / ${fmtN(totPl)} total`;
 
-    _mkChart('chart-throughput', { type:'bar', data:{ labels, datasets:[
-      { label:'Planned', data:_weeks.map(w=>w.planned_units), backgroundColor:'rgba(0,0,0,0.06)', borderRadius:4, borderSkipped:false, order:2 },
-      { label:'Applied', data:_weeks.map(w=>w.applied_units), backgroundColor:'#C8F902', borderRadius:4, borderSkipped:false, order:2 },
-      { label:'Completion %', data:_weeks.map(w=>w.planned_units>0?Math.round(w.applied_units/w.planned_units*100):null),
-        type:'line', borderColor:BRAND, backgroundColor:'transparent', borderWidth:2.5,
-        pointBackgroundColor:'#fff', pointBorderColor:BRAND, pointBorderWidth:2, pointRadius:4,
-        yAxisID:'y2', order:1, spanGaps:false, tension:0.3 },
-    ]}, options:{
-      plugins:{ legend:{ display:true, position:'top', align:'end', labels:{font:{size:10},boxWidth:8,padding:12,usePointStyle:true} } },
-      scales:{
-        x:{ ticks:{font:{size:10}}, grid:{display:false} },
-        y:{ ticks:{font:{size:10}}, grid:{color:'rgba(0,0,0,0.04)'}, beginAtZero:true },
-        y2:{ position:'right', min:0, max:100, ticks:{font:{size:10},callback:v=>v+'%'}, grid:{display:false} }
-      },
-      responsive:true, maintainAspectRatio:true,
-      animation:{ duration:800, easing:'easeOutQuart' }
-    }});
+    _renderThroughputSVG(labels);
 
     // Chart 2: Receiving Health — custom SVG dot chart (not Chart.js bar)
     _renderReceivingDots(baseline);
@@ -294,14 +278,17 @@
     if (!hasPipe) { const c=el('chart-pipeline'); if(c){const ctx=c.getContext('2d');ctx.save();ctx.fillStyle='#AEAEB2';ctx.font='11px sans-serif';ctx.textAlign='center';ctx.fillText('Populates as receiving & VAS data accumulates',c.width/2,90);ctx.restore();} }
 
     // Chart 4: Air vs Sea — smooth stacked area
+    // Air = warm amber/orange | Sea = deep emerald — maximally distinct
+    const AIR_WARM = '#F97316'; // orange
+    const SEA_DEEP = '#059669'; // emerald
     _mkChart('chart-airvsea', { type:'line', data:{ labels, datasets:[
-      { label:'Air', data:_weeks.map(w=>w.air_units||0), borderColor:AIR_COL,
-        backgroundColor:'rgba(74,144,217,0.15)', borderWidth:2, pointRadius:3,
-        pointBackgroundColor:'#fff', pointBorderColor:AIR_COL, pointBorderWidth:2,
+      { label:'✈ Air', data:_weeks.map(w=>w.air_units||0), borderColor:AIR_WARM,
+        backgroundColor:'rgba(249,115,22,0.12)', borderWidth:2.5, pointRadius:4,
+        pointBackgroundColor:'#fff', pointBorderColor:AIR_WARM, pointBorderWidth:2,
         fill:true, tension:0.35 },
-      { label:'Sea', data:_weeks.map(w=>w.sea_units||0), borderColor:SEA_COL,
-        backgroundColor:'rgba(46,125,158,0.25)', borderWidth:2, pointRadius:3,
-        pointBackgroundColor:'#fff', pointBorderColor:SEA_COL, pointBorderWidth:2,
+      { label:'⛴ Sea', data:_weeks.map(w=>w.sea_units||0), borderColor:SEA_DEEP,
+        backgroundColor:'rgba(5,150,105,0.12)', borderWidth:2.5, pointRadius:4,
+        pointBackgroundColor:'#fff', pointBorderColor:SEA_DEEP, pointBorderWidth:2,
         fill:true, tension:0.35 },
     ]}, options:{
       plugins:{ legend:{display:true,position:'top',align:'end',labels:{font:{size:10},boxWidth:8,padding:12,usePointStyle:true}} },
@@ -317,6 +304,94 @@
     _renderRadar(baseline);
   }
 
+  // Throughput: custom SVG slope chart — area fill shows cumulative progress
+  function _renderThroughputSVG(labels) {
+    const container = el('chart-throughput-svg'); if (!container) return;
+    const W = container.offsetWidth || 400, H = 190;
+    const pad = {t:24, b:32, l:8, r:44};
+    const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b;
+    const n = _weeks.length;
+    if (!n) { container.innerHTML='<div style="font-size:11px;color:#AEAEB2;text-align:center;padding:40px 0;">No data</div>'; return; }
+
+    const maxPl = Math.max(..._weeks.map(w=>w.planned_units||0), 1);
+    const xs = _weeks.map((_,i) => pad.l + (i/(Math.max(n-1,1)))*cW);
+    const yPl = _weeks.map(w => pad.t + (1 - (w.planned_units||0)/maxPl)*cH);
+    const yAp = _weeks.map(w => pad.t + (1 - (w.applied_units||0)/maxPl)*cH);
+    const yPct= _weeks.map(w => w.planned_units>0 ? Math.round(w.applied_units/w.planned_units*100) : null);
+
+    // Build smooth path using cubic bezier
+    const smooth = (pts) => {
+      if (pts.length < 2) return `M${pts[0][0]},${pts[0][1]}`;
+      let d = `M${pts[0][0]},${pts[0][1]}`;
+      for (let i=1; i<pts.length; i++) {
+        const cp1x = pts[i-1][0] + (pts[i][0]-pts[i-1][0])*0.4;
+        const cp1y = pts[i-1][1];
+        const cp2x = pts[i][0] - (pts[i][0]-pts[i-1][0])*0.4;
+        const cp2y = pts[i][1];
+        d += ` C${cp1x},${cp1y} ${cp2x},${cp2y} ${pts[i][0]},${pts[i][1]}`;
+      }
+      return d;
+    };
+
+    const plPts  = xs.map((x,i)=>[x, yPl[i]]);
+    const apPts  = xs.map((x,i)=>[x, yAp[i]]);
+    const baseY  = pad.t + cH;
+
+    // Applied fill path (close bottom)
+    const apFill = smooth(apPts) + ` L${xs[n-1]},${baseY} L${xs[0]},${baseY} Z`;
+    const plPath = smooth(plPts);
+    const apPath = smooth(apPts);
+
+    let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`;
+
+    // Subtle grid lines
+    for (let i=0; i<=4; i++) {
+      const gy = pad.t + (i/4)*cH;
+      svg += `<line x1="${pad.l}" y1="${gy}" x2="${W-pad.r}" y2="${gy}" stroke="rgba(0,0,0,0.04)" stroke-width="1"/>`;
+      const v = Math.round(maxPl*(1-i/4));
+      svg += `<text x="${W-pad.r+4}" y="${gy+3}" font-size="9" fill="#AEAEB2">${v>999?Math.round(v/1000)+'k':v}</text>`;
+    }
+
+    // Applied area fill
+    svg += `<path d="${apFill}" fill="#C8F902" opacity="0.18"/>`;
+
+    // Gap between planned and applied (fill with brand)
+    const gapFill = smooth(plPts) + ` L${xs[n-1]},${yAp[n-1]}` + smooth(apPts.slice().reverse().map(p=>p)) + ` Z`;
+    // Actually: area between planned line and applied line
+    const gapPath = smooth(plPts) + ` ${apPts.slice().reverse().map((p,i)=>i===0?`L${p[0]},${p[1]}`:`L${p[0]},${p[1]}`).join(' ')} Z`;
+    svg += `<path d="${gapPath}" fill="${BRAND}" opacity="0.06"/>`;
+
+    // Planned line — dashed subtle
+    svg += `<path d="${plPath}" fill="none" stroke="rgba(0,0,0,0.15)" stroke-width="1.5" stroke-dasharray="5,3"/>`;
+
+    // Applied line — solid bold brand green
+    svg += `<path d="${apPath}" fill="none" stroke="#8DB800" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
+
+    // Dots + completion % labels
+    _weeks.forEach((w,i) => {
+      const pct = yPct[i];
+      const x = xs[i], y = yAp[i];
+      // Dot
+      svg += `<circle cx="${x}" cy="${y}" r="4" fill="#fff" stroke="#8DB800" stroke-width="2"/>`;
+      // Completion % above dot
+      if (pct!=null) {
+        const col = pct>=90?'#22C55E':pct>=70?'#F59E0B':BRAND;
+        svg += `<text x="${x}" y="${y-10}" font-size="9" font-weight="700" fill="${col}" text-anchor="middle">${pct}%</text>`;
+      }
+      // Week label
+      svg += `<text x="${x}" y="${H-4}" font-size="9" fill="#AEAEB2" text-anchor="middle">${labels[i]}</text>`;
+    });
+
+    // Legend
+    svg += `<circle cx="${pad.l+8}" cy="8" r="4" fill="#8DB800"/>`;
+    svg += `<text x="${pad.l+16}" y="12" font-size="9" fill="#6E6E73">Applied</text>`;
+    svg += `<line x1="${pad.l+68}" y1="8" x2="${pad.l+80}" y2="8" stroke="rgba(0,0,0,0.2)" stroke-width="1.5" stroke-dasharray="4,2"/>`;
+    svg += `<text x="${pad.l+84}" y="12" font-size="9" fill="#6E6E73">Planned</text>`;
+
+    svg += '</svg>';
+    container.innerHTML = svg;
+  }
+
   // Receiving health: custom dot/bubble SVG — no bar chart
   function _renderReceivingDots(baseline) {
     const container = el('chart-receiving-dots'); if (!container) return;
@@ -326,8 +401,8 @@
     const hasOTR = weeks.some(w=>w.on_time_receiving_pct!=null);
     if (!hasOTR) { container.innerHTML='<div style="font-size:11px;color:#AEAEB2;text-align:center;padding:32px 0;">Receiving date data not yet available</div>'; return; }
 
-    const W=container.offsetWidth||280, dotH=200;
-    const pad={t:16,b:32,l:12,r:12};
+    const W=container.offsetWidth||280, dotH=240;
+    const pad={t:56,b:32,l:12,r:12}; // increased top pad to center dots in tile
     const n=weeks.length;
     const colW=(W-pad.l-pad.r)/Math.max(n,1);
     const baselineY = baseline.on_time_receiving_pct!=null ? (1-baseline.on_time_receiving_pct/100)*(dotH-pad.t-pad.b)+pad.t : null;
