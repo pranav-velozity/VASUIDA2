@@ -5452,7 +5452,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=113" defer></script>
+<script src="/public/flow_live_additive.js?v=114" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -5919,6 +5919,137 @@ async function downloadConsolidatedReport() {
   }
 }
 
+
+async function downloadPOContainer() {
+  const ws = state.weekStart || '';
+  if(!ws){ alert('No week selected.'); return; }
+  try {
+    const plan = Array.isArray(state.plan) ? state.plan : [];
+    // Load containers from localStorage (primed from backend)
+    const contKey = `flow:intl_weekcontainers:${ws}`;
+    let contState = {};
+    try { contState = JSON.parse(localStorage.getItem(contKey)||'{}'); } catch{}
+    const containers = Array.isArray(contState.containers) ? contState.containers : [];
+
+    // Load lane manual data to get zendesk from lane keys
+    // lane key format: "Supplier||Zendesk||Freight"
+    const rows = [];
+    for(const c of containers){
+      const cid = String(c.container_id||'').trim() || '—';
+      const vessel = String(c.vessel||'').trim() || '—';
+      const size = String(c.size_ft||'').trim() ? String(c.size_ft)+'ft' : '—';
+      const laneKeys = Array.isArray(c.lane_keys) ? c.lane_keys : [];
+      const pos = String(c.pos||'').split(',').map(p=>p.trim()).filter(Boolean);
+
+      if(!laneKeys.length && !pos.length){
+        rows.push({ 'Container / AWB': cid, 'Vessel': vessel, 'Size': size,
+          'Zendesk': '', 'Freight': '', 'Supplier': '', 'PO': '', 'SKU': '', 'Planned Units': '' });
+        continue;
+      }
+
+      // Expand each lane key
+      for(const lk of laneKeys){
+        const parts = lk.split('||');
+        const supplier = parts[0]||'';
+        const zendesk = parts[1]||'';
+        const freight = parts[2]||'';
+        // Find POs in plan for this lane
+        const lanePOs = plan
+          .filter(p => {
+            const ps = (p.supplier_name||'').trim();
+            const pz = String(p.zendesk_ticket||'').trim();
+            const pf = (p.freight_type||'').trim();
+            return ps.toLowerCase().includes(supplier.toLowerCase().slice(0,8)) &&
+                   pz === zendesk && pf === freight;
+          });
+        if(lanePOs.length){
+          for(const p of lanePOs){
+            rows.push({
+              'Container / AWB': cid, 'Vessel': vessel, 'Size': size,
+              'Zendesk': zendesk, 'Freight': freight, 'Supplier': p.supplier_name||supplier,
+              'PO': p.po_number||'', 'SKU': p.sku_code||'', 'Planned Units': Number(p.target_qty||0)
+            });
+          }
+        } else {
+          rows.push({ 'Container / AWB': cid, 'Vessel': vessel, 'Size': size,
+            'Zendesk': zendesk, 'Freight': freight, 'Supplier': supplier, 'PO': '', 'SKU': '', 'Planned Units': '' });
+        }
+      }
+    }
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'PO Container AWB');
+    XLSX.writeFile(wb, `PO_Container_AWB_${ws}.xlsx`);
+  } catch(e){ console.error('PO Container download failed', e); alert('Download failed: '+(e.message||e)); }
+}
+
+async function downloadTransitClearing() {
+  const ws = state.weekStart || '';
+  if(!ws){ alert('No week selected.'); return; }
+  try {
+    const plan = Array.isArray(state.plan) ? state.plan : [];
+
+    // Load containers
+    const contKey = `flow:intl_weekcontainers:${ws}`;
+    let contState = {};
+    try { contState = JSON.parse(localStorage.getItem(contKey)||'{}'); } catch{}
+    const containers = Array.isArray(contState.containers) ? contState.containers : [];
+
+    // Load all lane manual data from localStorage
+    const fmtDate = (v) => {
+      if(!v) return '';
+      try { return new Date(v).toISOString().slice(0,10); } catch{ return String(v); }
+    };
+
+    const rows = [];
+    for(const c of containers){
+      const cid = String(c.container_id||'').trim() || '—';
+      const vessel = String(c.vessel||'').trim() || '—';
+      const size = String(c.size_ft||'').trim() ? String(c.size_ft)+'ft' : '—';
+      const laneKeys = Array.isArray(c.lane_keys) ? c.lane_keys : [];
+
+      for(const lk of laneKeys){
+        const parts = lk.split('||');
+        const supplier = parts[0]||'';
+        const zendesk = parts[1]||'';
+        const freight = parts[2]||'';
+
+        // Load lane manual dates from localStorage
+        const laneStorageKey = `flow:intl:${ws}:${lk}`;
+        let manual = {};
+        try { manual = JSON.parse(localStorage.getItem(laneStorageKey)||'{}'); } catch{}
+
+        // Find POs for this lane
+        const lanePOs = [...new Set(plan
+          .filter(p => String(p.zendesk_ticket||'').trim() === zendesk && (p.freight_type||'').trim() === freight)
+          .map(p => p.po_number).filter(Boolean))];
+
+        rows.push({
+          'Container / AWB': cid, 'Vessel': vessel, 'Size': size,
+          'Zendesk': zendesk, 'Freight': freight, 'Supplier': supplier,
+          'POs': lanePOs.join(', '),
+          'Packing List Ready': fmtDate(manual.packing_list_ready_at),
+          'Origin Customs Cleared': fmtDate(manual.origin_customs_cleared_at),
+          'Departed Origin': fmtDate(manual.departed_at),
+          'Arrived Destination': fmtDate(manual.arrived_at),
+          'Dest Customs Cleared': fmtDate(manual.dest_customs_cleared_at),
+          'ETA FC': fmtDate(manual.eta_fc),
+          'Latest Arrival Date': fmtDate(manual.latest_arrival_date),
+          'Customs Hold': manual.customs_hold ? 'Yes' : 'No',
+          'Shipment #': String(manual.shipmentNumber||manual.shipment||''),
+          'HBL': String(manual.hbl||''),
+          'MBL': String(manual.mbl||''),
+          'Note': String(manual.note||'')
+        });
+      }
+    }
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Transit Clearing Status');
+    XLSX.writeFile(wb, `Transit_Clearing_${ws}.xlsx`);
+  } catch(e){ console.error('Transit Clearing download failed', e); alert('Download failed: '+(e.message||e)); }
+}
+
 function renderReportsPage(container){
   container.innerHTML = `
   <div style="padding:4px 0 20px;">
@@ -5930,34 +6061,37 @@ function renderReportsPage(container){
       </button>
     </div>
 
-    <!-- VAS Processing -->
+    <!-- VAS Processing — 4 reports -->
     <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;overflow:hidden;margin-bottom:14px;">
       <div style="padding:12px 18px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:space-between;">
         <div style="font-size:12px;font-weight:500;color:#1C1C1E;display:flex;align-items:center;gap:8px;">
           <span>VAS Processing</span>
-          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">3 reports</span>
+          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">4 reports</span>
         </div>
         <span style="font-size:10px;color:#AEAEB2;">UID scanning &amp; labelling</span>
       </div>
-      <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(3,1fr);gap:10px;">
+      <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(4,1fr);gap:10px;">
         ${reportCard('Applied UIDs Export','All applied UID records for the selected week, filterable by PO and SKU.','XLSX','Admin · Supplier','btn-dl-week-applied')}
         ${reportCard('PO × SKU Summary','Unit counts grouped by PO and SKU with completion status.','XLSX','Admin · Supplier','btn-dl-posku')}
-        ${reportCard('SKU Summary','Aggregated unit totals by SKU across all POs for the week.','XLSX','Admin · Supplier','btn-dl-po')}
+        ${reportCard('PO Summary','Aggregated unit totals by PO across all SKUs for the week.','XLSX','Admin · Supplier','btn-dl-po')}
+        ${reportCard('Mobile Bin Export','All unique scanned bins with supplier, PO, weight and unit counts.','XLSX','Admin · Supplier','__mobile-bin-direct__')}
       </div>
     </div>
 
-    <!-- Shipment -->
+    <!-- Shipment — 4 reports -->
     <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;overflow:hidden;margin-bottom:14px;">
       <div style="padding:12px 18px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:space-between;">
         <div style="font-size:12px;font-weight:500;color:#1C1C1E;display:flex;align-items:center;gap:8px;">
           <span>Shipment</span>
-          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">2 reports</span>
+          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">4 reports</span>
         </div>
         <span style="font-size:10px;color:#AEAEB2;">Transit &amp; delivery tracking</span>
       </div>
-      <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(2,1fr);gap:10px;">
+      <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(4,1fr);gap:10px;">
         ${reportCard('Shipment Summary','High-level view of all shipments — status, units, PO count per shipment.','XLSX','Admin · Client','btn-ship-summary')}
         ${reportCard('Shipment Details','Line-by-line shipment detail including container, routing and delivery dates.','XLSX','Admin · Client','btn-ship-detail')}
+        ${reportCard('PO Container / AWB','By container — all Zendesk tickets, POs, SKUs and units assigned to each container.','XLSX','Admin · Client','__po-container-direct__')}
+        ${reportCard('Transit & Clearing Status','Full transit detail — container info plus all milestone dates for each lane.','XLSX','Admin · Client','__transit-clearing-direct__')}
       </div>
     </div>
 
@@ -5966,13 +6100,12 @@ function renderReportsPage(container){
       <div style="padding:12px 18px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:space-between;">
         <div style="font-size:12px;font-weight:500;color:#1C1C1E;display:flex;align-items:center;gap:8px;">
           <span>Operations</span>
-          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">2 reports</span>
+          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">1 report</span>
         </div>
         <span style="font-size:10px;color:#AEAEB2;">Weekly ops overview</span>
       </div>
       <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(2,1fr);gap:10px;">
         ${reportCard('Ops Summary Report','Full week summary — throughput, completion rate, at-risk POs, receiving status.','PDF','Admin only','__pdf-direct__')}
-        ${reportCard('Mobile Bin Export','Full bin manifest with unit counts, weights, and QA status.','XLSX','Admin only','__mobile-bin-direct__')}
       </div>
     </div>
   </div>`;
@@ -5985,6 +6118,14 @@ function renderReportsPage(container){
       if(proxyId === '__mobile-bin-direct__'){
         if(typeof downloadMobileBins === 'function') downloadMobileBins();
         else console.warn('[Reports] downloadMobileBins not found');
+        return;
+      }
+      if(proxyId === '__po-container-direct__'){
+        if(typeof downloadPOContainer === 'function') downloadPOContainer();
+        return;
+      }
+      if(proxyId === '__transit-clearing-direct__'){
+        if(typeof downloadTransitClearing === 'function') downloadTransitClearing();
         return;
       }
       if(proxyId === '__pdf-direct__'){
