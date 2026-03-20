@@ -310,6 +310,243 @@ Never perform write operations. You are read-only.`;
 
 
 
+
+// ===== Executive Summary API =====
+// GET /exec/summary?from=2026-01-06&to=2026-04-14&facility=VOZ_UL
+// Returns per-week aggregated data for the Executive dashboard.
+// Joins: plans + records + receiving + bins + flow_week
+app.get('/exec/summary',
+  authenticateRequest,
+  auditLog('view_exec_summary'),
+  (req, res) => {
+  const facility = normFacility(req.query.facility);
+  if (!facility) return res.status(400).json({ error: 'facility required' });
+
+  const fromRaw = String(req.query.from || '').trim();
+  const toRaw   = String(req.query.to   || '').trim();
+  if (!fromRaw || !toRaw) return res.status(400).json({ error: 'from and to required' });
+
+  // Normalise to Monday-aligned week starts within range
+  const fromDate = new Date(fromRaw + 'T00:00:00Z');
+  const toDate   = new Date(toRaw   + 'T00:00:00Z');
+  if (isNaN(fromDate) || isNaN(toDate)) return res.status(400).json({ error: 'invalid date range' });
+
+  // Collect all Monday week-starts in range
+  const weeks = [];
+  const cursor = new Date(fromDate);
+  // Snap to Monday
+  const dow = cursor.getUTCDay();
+  cursor.setUTCDate(cursor.getUTCDate() + (dow === 0 ? -6 : 1 - dow));
+  while (cursor <= toDate) {
+    weeks.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 7);
+  }
+  if (!weeks.length) return res.json({ weeks: [] });
+
+  const result = [];
+
+  for (const ws of weeks) {
+    // Week end (Sunday)
+    const wsDate = new Date(ws + 'T00:00:00Z');
+    const weDate = new Date(wsDate); weDate.setUTCDate(weDate.getUTCDate() + 6);
+    const we = weDate.toISOString().slice(0, 10);
+
+    // ── 1. Plan rows (JSON blob) ──
+    const planRow = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(ws);
+    const planRows = planRow ? (safeJsonParse(planRow.data, []) || []) : [];
+
+    let planned_units = 0;
+    let air_units = 0;
+    let sea_units = 0;
+    const plannedPOSet = new Set();
+    const supplierMap = new Map(); // supplier -> { planned, air, sea, pos: Set }
+
+    for (const p of planRows) {
+      const qty = Number(p.target_qty || 0) || 0;
+      const freight = String(p.freight_type || '').trim().toLowerCase();
+      const supplier = String(p.supplier_name || '').trim() || 'Unknown';
+      const po = String(p.po_number || '').trim();
+
+      planned_units += qty;
+      if (freight === 'air') air_units += qty;
+      else sea_units += qty;
+      if (po) plannedPOSet.add(po);
+
+      if (!supplierMap.has(supplier)) supplierMap.set(supplier, { planned: 0, applied: 0, air: 0, sea: 0, pos: new Set(), receivedAt: null, vasAt: null });
+      const s = supplierMap.get(supplier);
+      s.planned += qty;
+      if (freight === 'air') s.air += qty; else s.sea += qty;
+      if (po) s.pos.add(po);
+    }
+
+    // ── 2. Records (applied units + VAS completion dates) ──
+    const recRows = db.prepare(
+      `SELECT po_number, mobile_bin, completed_at FROM records WHERE date_local >= ? AND date_local <= ? AND status = 'complete'`
+    ).all(ws, we);
+
+    let applied_units = 0;
+    const appliedPOSet = new Set();
+    const vasDateByPO = new Map();   // po -> latest completed_at
+    const mobileBinSet = new Set();  // unique bins = cartons out
+
+    for (const r of recRows) {
+      const po = String(r.po_number || '').trim();
+      applied_units++;
+      if (po) {
+        appliedPOSet.add(po);
+        const prev = vasDateByPO.get(po) || '';
+        const cur  = String(r.completed_at || '').trim();
+        if (cur > prev) vasDateByPO.set(po, cur);
+      }
+      const mb = String(r.mobile_bin || '').trim();
+      if (mb) mobileBinSet.add(mb);
+    }
+
+    // Per-supplier applied units
+    for (const p of planRows) {
+      const supplier = String(p.supplier_name || '').trim() || 'Unknown';
+      const po = String(p.po_number || '').trim();
+      if (!po || !supplierMap.has(supplier)) continue;
+      // Count applied from records for this PO
+      const poApplied = recRows.filter(r => String(r.po_number||'').trim() === po).length;
+      supplierMap.get(supplier).applied += poApplied;
+    }
+
+    // ── 3. Receiving rows ──
+    const recvRows = db.prepare(
+      `SELECT po_number, supplier_name, received_at_local, cartons_received FROM receiving WHERE week_start = ?`
+    ).all(ws);
+
+    const receivedPOSet = new Set();
+    const recvDateByPO = new Map(); // po -> received_at_local
+    let cartons_in = 0;
+
+    for (const r of recvRows) {
+      const po = String(r.po_number || '').trim();
+      if (po) {
+        receivedPOSet.add(po);
+        if (r.received_at_local) recvDateByPO.set(po, String(r.received_at_local));
+      }
+      cartons_in += Number(r.cartons_received || 0) || 0;
+    }
+
+    // Late POs: received but after plan due_date
+    let late_pos = 0;
+    const dueDateByPO = new Map();
+    for (const p of planRows) {
+      const po = String(p.po_number || '').trim();
+      if (po && p.due_date) dueDateByPO.set(po, String(p.due_date));
+    }
+    for (const po of receivedPOSet) {
+      const recvDate = recvDateByPO.get(po);
+      const dueDate = dueDateByPO.get(po);
+      if (recvDate && dueDate && recvDate.slice(0, 10) > dueDate.slice(0, 10)) late_pos++;
+    }
+
+    // ── 4. Bins (weight) ──
+    const binRows = db.prepare(
+      `SELECT mobile_bin, weight_kg, total_units FROM bins WHERE week_start = ?`
+    ).all(ws);
+
+    let total_weight_kg = 0;
+    let bin_count = 0;
+    for (const b of binRows) {
+      if (b.weight_kg != null) { total_weight_kg += Number(b.weight_kg) || 0; bin_count++; }
+    }
+    const avg_weight_kg = bin_count > 0 ? Math.round((total_weight_kg / bin_count) * 100) / 100 : 0;
+
+    // ── 5. Flow week (transit dates + containers + last mile) ──
+    const flowRow = db.prepare(
+      `SELECT data FROM flow_week WHERE facility = ? AND week_start = ?`
+    ).get(facility, ws);
+    const flowData = flowRow ? (safeJsonParse(flowRow.data, {}) || {}) : {};
+
+    // ETA FC and transit dates from intl_lanes
+    const intl_lanes = (flowData.intl_lanes && typeof flowData.intl_lanes === 'object') ? flowData.intl_lanes : {};
+    const etaDates = [];
+    const transitDaysList = [];
+
+    for (const [laneKey, manual] of Object.entries(intl_lanes)) {
+      if (!manual || typeof manual !== 'object') continue;
+      if (manual.eta_fc) etaDates.push(String(manual.eta_fc));
+
+      // Transit days: departed → arrived
+      if (manual.departed_at && manual.arrived_at) {
+        try {
+          const dep = new Date(manual.departed_at);
+          const arr = new Date(manual.arrived_at);
+          const days = Math.round((arr - dep) / (1000 * 60 * 60 * 24));
+          if (days > 0 && days < 120) transitDaysList.push(days);
+        } catch {}
+      }
+    }
+
+    // Avg days receiving → VAS per PO
+    const daysToApplyList = [];
+    for (const po of appliedPOSet) {
+      const recvDate = recvDateByPO.get(po);
+      const vasDate  = vasDateByPO.get(po);
+      if (recvDate && vasDate) {
+        try {
+          const rv = new Date(recvDate.slice(0, 10) + 'T00:00:00Z');
+          const vd = new Date(vasDate.slice(0, 10) + 'T00:00:00Z');
+          const days = Math.round((vd - rv) / (1000 * 60 * 60 * 24));
+          if (days >= 0 && days < 60) daysToApplyList.push(days);
+        } catch {}
+      }
+    }
+    const avg_days_to_apply = daysToApplyList.length
+      ? Math.round((daysToApplyList.reduce((a, b) => a + b, 0) / daysToApplyList.length) * 10) / 10
+      : null;
+
+    const avg_transit_days = transitDaysList.length
+      ? Math.round((transitDaysList.reduce((a, b) => a + b, 0) / transitDaysList.length) * 10) / 10
+      : null;
+
+    const eta_fc = etaDates.sort().pop() || null; // latest ETA FC this week
+
+    // On-time receiving % this week
+    const on_time_receiving_pct = plannedPOSet.size > 0
+      ? Math.round(((receivedPOSet.size - late_pos) / plannedPOSet.size) * 100)
+      : null;
+
+    // Supplier breakdown
+    const suppliers = Array.from(supplierMap.entries()).map(([name, s]) => ({
+      supplier: name,
+      planned: s.planned,
+      applied: s.applied,
+      air: s.air,
+      sea: s.sea,
+      po_count: s.pos.size,
+      avg_days_to_apply: null, // computed client-side from per-PO data if needed
+    }));
+
+    result.push({
+      week_start: ws,
+      week_end: we,
+      planned_units,
+      applied_units,
+      planned_pos: plannedPOSet.size,
+      received_pos: receivedPOSet.size,
+      late_pos,
+      on_time_receiving_pct,
+      cartons_in,
+      cartons_out: mobileBinSet.size,
+      avg_weight_kg,
+      total_weight_kg: Math.round(total_weight_kg * 100) / 100,
+      air_units,
+      sea_units,
+      avg_days_to_apply,
+      avg_transit_days,
+      eta_fc,
+      suppliers,
+    });
+  }
+
+  return res.json({ facility, from: fromRaw, to: toRaw, weeks: result });
+});
+
+
 // ===== Flow Week API (facility-scoped, week-scoped) =====
 
 // GET /flow/week/:weekStart?facility=LKWF
@@ -362,11 +599,6 @@ app.post('/flow/week/:weekStart',
   writeOpLimiter,
   auditLog('edit_flow'),
   (req, res) => {
-    // ← ADD THESE THREE LINES RIGHT HERE:
-  console.log('[DEBUG] content-type:', req.headers['content-type']);
-  console.log('[DEBUG] content-length:', req.headers['content-length']);
-  console.log('[DEBUG] body:', JSON.stringify(req.body));
-    
   const wsIn = String(req.params.weekStart || '').trim();
   const facility = normFacility(req.query.facility);
   if (!facility) return res.status(400).json({ error: 'facility required' });
@@ -374,8 +606,7 @@ app.post('/flow/week/:weekStart',
   const monday = mondayOfLoose(wsIn);
   if (!monday) return res.status(400).json({ error: 'invalid weekStart' });
 
-  console.log('[DEBUG] POST /flow/week body:', JSON.stringify(req.body), 'type:', typeof req.body);
-const patch = (req.body && typeof req.body === 'object') ? req.body : null;
+  const patch = (req.body && typeof req.body === 'object') ? req.body : null;
   if (!patch) return res.status(400).json({ error: 'patch object required' });
 
   const existingRow = flowWeekGet.get(facility, monday);
