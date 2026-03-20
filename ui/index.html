@@ -338,15 +338,19 @@ window.__clerkOnLoad = function() {
       // Operational ping nodes
       var PING_COL = '#990033';
       var stages=[
-        {label:'Receiving'},
         {label:'VAS Processing'},
         {label:'Transit'},
         {label:'Clearing'},
         {label:'Last Mile'},
         {label:'Intake'},
-        {label:'Container'},
+        {label:'Container Tracking'},
         {label:'Carton Tracking'},
         {label:'Units Tracking'},
+        {label:'Freight Management'},
+        {label:'First-to Last Mile'},
+        {label:'Inventory Consolidation'},
+        {label:'Inventory Deconsolidation'},
+        {label:'Bonded Warehouse'},
         {label:'AI Pulse'},
       ];
 
@@ -401,7 +405,7 @@ window.__clerkOnLoad = function() {
         r4.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:0.5px solid '+PING_COL+';animation:pingRing2 '+dur+'ms '+420+'ms ease-out forwards;';
         // Center dot
         var dot = document.createElement('div');
-        dot.style.cssText = 'position:absolute;top:50%;left:50%;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;background:'+PING_COL+';box-shadow:0 0 14px rgba(153,0,51,0.9);';
+        dot.style.cssText = 'position:absolute;top:50%;left:50%;width:15px;height:15px;margin:-7.5px 0 0 -7.5px;border-radius:50%;background:'+PING_COL+';box-shadow:0 0 18px rgba(153,0,51,0.95);';
 
         // Label
         var lbl = document.createElement('div');
