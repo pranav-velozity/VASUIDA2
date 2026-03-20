@@ -493,6 +493,58 @@ app.get('/exec/summary',
       if (!wc) return [];
       return Array.isArray(wc) ? wc : (Array.isArray(wc.containers) ? wc.containers : []);
     })();
+
+    // Container utilisation: units per container by size
+    const cont20 = [], cont40 = [];
+    for (const c of containers) {
+      const size = String(c.size_ft || '40').trim();
+      // Get POs on this container
+      const cPOs = String(c.pos || '').split(',').map(p => p.trim().toUpperCase()).filter(Boolean);
+      // Also check lane_keys for POs via plan
+      const laneKeys = Array.isArray(c.lane_keys) ? c.lane_keys : [];
+      const allPOs = new Set(cPOs);
+      // Add POs from plan that match this container's lane keys
+      for (const p of planRows) {
+        const po = String(p.po_number || '').trim();
+        if (!po) continue;
+        const supplier = String(p.supplier_name || '').trim();
+        const zendesk  = String(p.zendesk_ticket || '').trim();
+        const freight  = String(p.freight_type || '').trim();
+        const lk = `${supplier}||${zendesk}||${freight}`;
+        // Normalised match — check if any lane key contains this combination
+        if (laneKeys.some(k => k.includes(zendesk) && k.includes(freight))) {
+          allPOs.add(po);
+        }
+      }
+      // Sum planned units for these POs
+      let units = 0;
+      for (const po of allPOs) {
+        for (const p of planRows) {
+          if (String(p.po_number || '').trim() === po) {
+            units += Number(p.target_qty || 0) || 0;
+          }
+        }
+      }
+      // Fallback: use applied units from records for these POs
+      if (units === 0) {
+        for (const po of allPOs) {
+          const recCount = recRows.filter(r => String(r.po_number||'').trim() === po).length;
+          units += recCount;
+        }
+      }
+      if (size === '20') cont20.push(units);
+      else cont40.push(units);
+    }
+
+    const avg_units_per_20ft = cont20.length
+      ? Math.round(cont20.reduce((a,b)=>a+b,0) / cont20.length)
+      : null;
+    const avg_units_per_40ft = cont40.length
+      ? Math.round(cont40.reduce((a,b)=>a+b,0) / cont40.length)
+      : null;
+    const count_20ft = cont20.length;
+    const count_40ft = cont40.length;
+
     const etaFcDate = etaDates.sort().pop() || null;
     for (const c of containers) {
       // Last mile delivery date stored as delivery_local or delivered_at
@@ -579,6 +631,10 @@ app.get('/exec/summary',
       avg_days_end_to_end,
       avg_transit_days,
       eta_fc,
+      avg_units_per_20ft,
+      avg_units_per_40ft,
+      count_20ft,
+      count_40ft,
       suppliers,
     });
   }
