@@ -98,7 +98,19 @@
       <div id="chart-ttl" style="width:100%;"></div>
     </div>
 
-    <!-- Row 2: Throughput (wide) + Receiving Health -->
+    <!-- Row 2: Performance Radar (moved here per request) -->
+    <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:24px;margin-bottom:16px;">
+      <div style="font-size:13px;font-weight:600;color:#1C1C1E;margin-bottom:2px;">Performance Radar</div>
+      <div style="font-size:10px;color:#AEAEB2;margin-bottom:20px;">Actual vs best-week baseline · 100 = best achieved</div>
+      <div style="display:grid;grid-template-columns:420px 1fr;gap:32px;align-items:center;">
+        <div style="margin-left:15%;width:360px;height:360px;flex-shrink:0;">
+          <canvas id="chart-radar" width="360" height="360" style="display:block;width:360px;height:360px;"></canvas>
+        </div>
+        <div id="exec-radar-legend" style="display:flex;flex-direction:column;gap:14px;"></div>
+      </div>
+    </div>
+
+    <!-- Row 3: Throughput (wide) + Receiving Health -->
     <div style="display:grid;grid-template-columns:3fr 2fr;gap:16px;margin-bottom:16px;">
       <div class="exec-chart-card" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:20px;">
         <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:2px;">
@@ -123,23 +135,16 @@
         <canvas id="chart-airvsea" height="170"></canvas>
       </div>
       <div class="exec-chart-card" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:20px;">
-        <div style="font-size:13px;font-weight:600;color:#1C1C1E;margin-bottom:2px;">Processing Pace</div>
-        <div style="font-size:10px;color:#AEAEB2;margin-bottom:16px;">Avg days receiving → VAS complete per week</div>
-        <canvas id="chart-pipeline" height="170"></canvas>
+        <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:2px;">
+          <div style="font-size:13px;font-weight:600;color:#1C1C1E;">Container Utilisation</div>
+          <div id="exec-cont-summary" style="font-size:11px;color:#AEAEB2;"></div>
+        </div>
+        <div style="font-size:10px;color:#AEAEB2;margin-bottom:16px;">Avg units per container · 20ft vs 40ft week over week</div>
+        <canvas id="chart-container-util" height="170"></canvas>
       </div>
     </div>
 
-    <!-- Radar: full width, 50/50 -->
-    <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:24px;">
-      <div style="font-size:13px;font-weight:600;color:#1C1C1E;margin-bottom:2px;">Performance Radar</div>
-      <div style="font-size:10px;color:#AEAEB2;margin-bottom:20px;">Actual vs best-week baseline · 100 = best achieved</div>
-      <div style="display:grid;grid-template-columns:420px 1fr;gap:32px;align-items:center;">
-        <div style="margin-left:15%;width:360px;height:360px;flex-shrink:0;">
-          <canvas id="chart-radar" width="360" height="360" style="display:block;width:360px;height:360px;"></canvas>
-        </div>
-        <div id="exec-radar-legend" style="display:flex;flex-direction:column;gap:14px;"></div>
-      </div>
-    </div>
+
   </div>
 
   <!-- Intelligence Panel -->
@@ -267,26 +272,46 @@
     // Chart 2: Receiving Health — custom SVG dot chart (not Chart.js bar)
     _renderReceivingDots(baseline);
 
-    // Processing Pace (smooth line — receiving → VAS)
-    const pipeData = _weeks.map(w=>w.avg_days_to_apply);
-    _mkChart('chart-pipeline', { type:'line', data:{ labels, datasets:[
-      { label:'Recv→VAS days', data:pipeData, borderColor:BRAND, backgroundColor:'rgba(153,0,51,0.07)',
-        borderWidth:2.5, pointBackgroundColor:'#fff', pointBorderColor:BRAND, pointBorderWidth:2,
-        pointRadius:4, fill:true, tension:0.4, spanGaps:false },
-      ...(baseline.avg_days_to_apply!=null ? [{
-        label:'Best-week', data:_weeks.map(()=>baseline.avg_days_to_apply),
-        borderColor:'rgba(0,0,0,0.18)', borderDash:[5,4], borderWidth:1.5,
-        pointRadius:0, fill:false, backgroundColor:'transparent'
-      }]:[]),
+    // Container Utilisation — avg units per container by size
+    const COL_20 = '#8B5CF6'; // violet — matches TTL seg2
+    const COL_40 = '#06B6D4'; // cyan — matches TTL seg3
+    const has20 = _weeks.some(w=>w.avg_units_per_20ft!=null);
+    const has40 = _weeks.some(w=>w.avg_units_per_40ft!=null);
+    _mkChart('chart-container-util', { type:'bar', data:{ labels, datasets:[
+      // Count bars (subtle, background)
+      { label:'20ft count', data:_weeks.map(w=>w.count_20ft||0),
+        backgroundColor:'rgba(139,92,246,0.12)', borderRadius:3, yAxisID:'yCount', order:3 },
+      { label:'40ft count', data:_weeks.map(w=>w.count_40ft||0),
+        backgroundColor:'rgba(6,182,212,0.12)', borderRadius:3, yAxisID:'yCount', order:3 },
+      // Units per container lines (primary metric)
+      { label:'Avg units / 20ft', data:_weeks.map(w=>w.avg_units_per_20ft),
+        type:'line', borderColor:COL_20, backgroundColor:'transparent',
+        borderWidth:2.5, pointBackgroundColor:'#fff', pointBorderColor:COL_20,
+        pointBorderWidth:2, pointRadius:4, yAxisID:'y', order:1, spanGaps:false, tension:0.3 },
+      { label:'Avg units / 40ft', data:_weeks.map(w=>w.avg_units_per_40ft),
+        type:'line', borderColor:COL_40, backgroundColor:'transparent',
+        borderWidth:2.5, pointBackgroundColor:'#fff', pointBorderColor:COL_40,
+        pointBorderWidth:2, pointRadius:4, yAxisID:'y', order:2, spanGaps:false, tension:0.3 },
     ]}, options:{
       plugins:{ legend:{display:true,position:'top',align:'end',labels:{font:{size:10},boxWidth:8,padding:10,usePointStyle:true}} },
       scales:{
         x:{ ticks:{font:{size:10}}, grid:{display:false} },
-        y:{ ticks:{font:{size:10},callback:v=>v+'d'}, grid:{color:'rgba(0,0,0,0.04)'}, beginAtZero:true }
+        y:{ position:'left', ticks:{font:{size:10}}, grid:{color:'rgba(0,0,0,0.04)'}, beginAtZero:true, title:{display:true,text:'Units/container',font:{size:9},color:'#AEAEB2'} },
+        yCount:{ position:'right', ticks:{font:{size:10},callback:v=>v+' ctrs'}, grid:{display:false}, beginAtZero:true }
       },
       responsive:true, maintainAspectRatio:true,
       animation:{ duration:900, easing:'easeOutQuart' }
     }});
+    // Update summary
+    const contSumEl = el('exec-cont-summary');
+    if (contSumEl) {
+      const avg40 = _weeks.map(w=>w.avg_units_per_40ft).filter(v=>v!=null);
+      const avg20 = _weeks.map(w=>w.avg_units_per_20ft).filter(v=>v!=null);
+      const parts = [];
+      if (avg40.length) parts.push('40ft avg '+Math.round(avg40.reduce((a,b)=>a+b,0)/avg40.length)+' units');
+      if (avg20.length) parts.push('20ft avg '+Math.round(avg20.reduce((a,b)=>a+b,0)/avg20.length)+' units');
+      contSumEl.textContent = parts.join(' · ') || 'Populates as containers are assigned';
+    }
 
     // Chart 4: Air vs Sea — smooth stacked area
     // Air = warm amber/orange | Sea = deep emerald — maximally distinct
@@ -324,8 +349,8 @@
     const n = _weeks.length; if (!n) { container.innerHTML=''; return; }
 
     const SEG1_COL = '#C8F902';    // Receiving → VAS (brand green)
-    const SEG2_COL = '#F97316';    // VAS → ETA FC (orange)
-    const SEG3_COL = '#059669';    // ETA FC → Delivery (emerald)
+    const SEG2_COL = '#8B5CF6';    // VAS → ETA FC (violet/purple)
+    const SEG3_COL = '#06B6D4';    // ETA FC → Delivery (cyan)
     const EMPTY_COL= '#F0F0F2';    // segment not yet available
 
     // Max total for scale
