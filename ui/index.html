@@ -3301,9 +3301,18 @@ function wireOpsDownloads(){
   if(mb) mb.onclick = downloadMobileBins;
 }
 
-function downloadMobileBins(){
+async function downloadMobileBins(){
   try{
-    const bins = Array.isArray(state.bins) ? state.bins : [];
+    // Fetch bins if not loaded (e.g. called from Reports page directly)
+    let bins = Array.isArray(state.bins) ? state.bins : [];
+    const ws = state.weekStart || '';
+    if(!bins.length && ws){
+      try{
+        const r = await api(`/bins/weeks/${encodeURIComponent(ws)}`);
+        bins = Array.isArray(r) ? r : (r.bins || []);
+        state.bins = bins;
+      }catch(e){ console.warn('bins fetch failed', e); }
+    }
     const plan = Array.isArray(state.plan) ? state.plan : [];
     // Plan-based supplier lookup as fallback (bins API now returns po_number + supplier_name directly)
     const poToSupplier = new Map(plan.map(p => [String(p.po_number||p.po||'').trim(), String(p.supplier_name||p.supplier||p.vendor||p.vendor_name||p.factory||'').trim()]));
@@ -5443,7 +5452,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=109" defer></script>
+<script src="/public/flow_live_additive.js?v=110" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
 
@@ -5789,10 +5798,155 @@ function syncPinpointNav(hash){
 }
 
 // ── Reports page renderer ──
+
+async function downloadConsolidatedReport() {
+  const ws = state.weekStart || '';
+  const we = (() => { try { const d=new Date(ws); d.setDate(d.getDate()+6); return d.toISOString().slice(0,10); } catch{ return ws; } })();
+  if(!ws){ alert('No week selected. Please navigate to Week Hub first.'); return; }
+
+  const btn = document.getElementById('btn-consolidated-download');
+  if(btn){ btn.textContent = 'Preparing...'; btn.disabled = true; }
+
+  try {
+    const wb = XLSX.utils.book_new();
+
+    // ── Sheet 1: Applied UIDs ──
+    try {
+      const token = window.Clerk?.session ? await window.Clerk.session.getToken() : null;
+      const url = `${apiBase}/export/applied?from=${encodeURIComponent(ws)}&to=${encodeURIComponent(we)}&status=complete`;
+      const res = await fetch(url, { headers: token ? {'Authorization':'Bearer '+token} : {} });
+      if(res.ok){
+        const text = await res.text();
+        const rows = text.trim().split('\n').map(r => r.split(',').map(c => c.replace(/^"|"$/g,'')));
+        const headers = rows[0] || [];
+        const data = rows.slice(1).map(r => { const o={}; headers.forEach((h,i)=>o[h]=r[i]||''); return o; });
+        const ws1 = XLSX.utils.json_to_sheet(data, {header: headers});
+        XLSX.utils.book_append_sheet(wb, ws1, 'Applied UIDs');
+      }
+    } catch(e){ console.warn('Applied UIDs sheet failed', e); }
+
+    // ── Sheet 2: PO × SKU Summary ──
+    try {
+      const plan = Array.isArray(state.plan) ? state.plan : [];
+      const records = Array.isArray(state.records) ? state.records : [];
+      const agg = aggregate(records);
+      const poskuRows = [];
+      for(const p of plan){
+        const po = String(p.po_number||p.po||'').trim();
+        const sku = String(p.sku_code||p.sku||'').trim();
+        if(!po||!sku) continue;
+        const k = `${po}||${sku}`;
+        const applied = (agg.byPOSKU && agg.byPOSKU.get ? agg.byPOSKU.get(k) : 0) || 0;
+        poskuRows.push({ PO: po, SKU: sku, Supplier: String(p.supplier_name||''), Planned: Number(p.target_qty||0), Applied: applied, Discrepancy: applied - Number(p.target_qty||0) });
+      }
+      const ws2 = XLSX.utils.json_to_sheet(poskuRows);
+      XLSX.utils.book_append_sheet(wb, ws2, 'PO x SKU Summary');
+    } catch(e){ console.warn('PO×SKU sheet failed', e); }
+
+    // ── Sheet 3: SKU Summary ──
+    try {
+      const plan = Array.isArray(state.plan) ? state.plan : [];
+      const records = Array.isArray(state.records) ? state.records : [];
+      const agg = aggregate(records);
+      const bySkuPlanned = new Map();
+      const bySkuApplied = new Map();
+      for(const p of plan){
+        const sku = String(p.sku_code||p.sku||'').trim();
+        if(!sku) continue;
+        bySkuPlanned.set(sku, (bySkuPlanned.get(sku)||0) + Number(p.target_qty||0));
+      }
+      if(agg.bySKU) for(const [sku, v] of agg.bySKU.entries()){
+        bySkuApplied.set(sku, (bySkuApplied.get(sku)||0) + (typeof v==='number' ? v : (v.applied||v||0)));
+      }
+      const skuRows = Array.from(new Set([...bySkuPlanned.keys(), ...bySkuApplied.keys()])).map(sku => ({
+        SKU: sku, Planned: bySkuPlanned.get(sku)||0, Applied: bySkuApplied.get(sku)||0
+      }));
+      const ws3 = XLSX.utils.json_to_sheet(skuRows);
+      XLSX.utils.book_append_sheet(wb, ws3, 'SKU Summary');
+    } catch(e){ console.warn('SKU sheet failed', e); }
+
+    // ── Sheet 4: Mobile Bins ──
+    try {
+      let bins = Array.isArray(state.bins) ? state.bins : [];
+      if(!bins.length){
+        try{ const r = await api(`/bins/weeks/${encodeURIComponent(ws)}`); bins = Array.isArray(r)?r:(r.bins||[]); }catch{}
+      }
+      const plan = Array.isArray(state.plan) ? state.plan : [];
+      const poToSup = new Map(plan.map(p=>[String(p.po_number||'').trim(), String(p.supplier_name||'').trim()]));
+      const binRows = bins.filter(b=>String(b.mobile_bin||'').trim()).map(b => ({
+        Supplier: String(b.supplier_name||poToSup.get(String(b.po_number||'').trim())||''),
+        PO: String(b.po_number||''), Mobile_Bin: String(b.mobile_bin||''),
+        Weight_kg: Number(b.weight_kg||0), Units: Number(b.total_units||0)
+      }));
+      const ws4 = XLSX.utils.json_to_sheet(binRows);
+      XLSX.utils.book_append_sheet(wb, ws4, 'Mobile Bins');
+    } catch(e){ console.warn('Mobile bins sheet failed', e); }
+
+    // ── Sheet 5: Shipment Summary ──
+    try {
+      const plan = Array.isArray(state.plan) ? state.plan : [];
+      const records = Array.isArray(state.records) ? state.records : [];
+      const agg = aggregate(records);
+      const byZendesk = new Map();
+      for(const p of plan){
+        const zd = String(p.zendesk_ticket||p.zendesk||'').trim() || 'NO_TICKET';
+        const po = String(p.po_number||'').trim();
+        const sup = String(p.supplier_name||'').trim();
+        const freight = String(p.freight_type||'').trim();
+        if(!byZendesk.has(zd)) byZendesk.set(zd, {Zendesk:zd, Supplier:sup, Freight:freight, Planned:0, Applied:0, POs:new Set()});
+        const z = byZendesk.get(zd);
+        z.Planned += Number(p.target_qty||0);
+        z.POs.add(po);
+        if(agg.byPO) z.Applied += (agg.byPO.get ? (agg.byPO.get(po)||0) : 0);
+      }
+      const shipRows = Array.from(byZendesk.values()).map(z => ({
+        Zendesk: z.Zendesk, Supplier: z.Supplier, Freight: z.Freight,
+        PO_Count: z.POs.size, Planned_Units: z.Planned, Applied_Units: z.Applied,
+        Completion_Pct: z.Planned > 0 ? Math.round(z.Applied/z.Planned*100)+'%' : '0%'
+      }));
+      const ws5 = XLSX.utils.json_to_sheet(shipRows);
+      XLSX.utils.book_append_sheet(wb, ws5, 'Shipment Summary');
+    } catch(e){ console.warn('Shipment summary sheet failed', e); }
+
+    // ── Sheet 6: Shipment Details ──
+    try {
+      const plan = Array.isArray(state.plan) ? state.plan : [];
+      const records = Array.isArray(state.records) ? state.records : [];
+      const agg = aggregate(records);
+      const detailRows = plan.map(p => {
+        const po = String(p.po_number||'').trim();
+        const applied = (agg.byPO && agg.byPO.get ? agg.byPO.get(po)||0 : 0);
+        return {
+          PO: po, SKU: String(p.sku_code||''), Supplier: String(p.supplier_name||''),
+          Zendesk: String(p.zendesk_ticket||''), Freight: String(p.freight_type||''),
+          Planned: Number(p.target_qty||0), Applied: applied,
+          Due_Date: String(p.due_date||''), Start_Date: String(p.start_date||'')
+        };
+      });
+      const ws6 = XLSX.utils.json_to_sheet(detailRows);
+      XLSX.utils.book_append_sheet(wb, ws6, 'Shipment Details');
+    } catch(e){ console.warn('Shipment details sheet failed', e); }
+
+    // ── Write file ──
+    XLSX.writeFile(wb, `Pinpoint_Report_${ws}.xlsx`);
+
+  } catch(err){
+    console.error('Consolidated download failed', err);
+    alert('Consolidated download failed: ' + (err.message || err));
+  } finally {
+    if(btn){ btn.textContent = 'Download All (Excel)'; btn.disabled = false; }
+  }
+}
 function renderReportsPage(container){
   container.innerHTML = `
   <div style="padding:4px 0 20px;">
-    <div style="font-size:22px;font-weight:600;color:#1C1C1E;letter-spacing:-0.02em;margin-bottom:20px;">Reports &amp; Downloads</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+      <div style="font-size:22px;font-weight:600;color:#1C1C1E;letter-spacing:-0.02em;">Reports &amp; Downloads</div>
+      <button id="btn-consolidated-download" onclick="downloadConsolidatedReport()" style="display:flex;align-items:center;gap:8px;background:#1C1C1E;color:#fff;border:none;border-radius:9px;padding:10px 18px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;">
+        <svg width="13" height="13" viewBox="0 0 12 12" fill="none"><path d="M6 1v7M3 5l3 3 3-3M1 10h10" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Download All (Excel)
+      </button>
+    </div>
 
     <!-- VAS Processing -->
     <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;overflow:hidden;margin-bottom:14px;">
