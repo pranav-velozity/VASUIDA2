@@ -387,26 +387,26 @@ window.__clerkOnLoad = function() {
 
         // Outer ring 1
         var r1 = document.createElement('div');
-        r1.style.cssText = 'position:absolute;top:50%;left:50%;width:28px;height:28px;margin:-14px 0 0 -14px;border-radius:50%;border:2px solid '+PING_COL+';animation:pingRing '+(dur*0.8)+'ms ease-out forwards;';
+        r1.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:2px solid '+PING_COL+';animation:pingRing '+(dur*0.8)+'ms ease-out forwards;';
 
         // Outer ring 2
         var r2 = document.createElement('div');
-        r2.style.cssText = 'position:absolute;top:50%;left:50%;width:28px;height:28px;margin:-14px 0 0 -14px;border-radius:50%;border:1.5px solid '+PING_COL+';animation:pingRing2 '+(dur*0.7)+'ms '+150+'ms ease-out forwards;';
+        r2.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:1.5px solid '+PING_COL+';animation:pingRing2 '+(dur*0.7)+'ms '+150+'ms ease-out forwards;';
 
         // Ring 3
         var r3 = document.createElement('div');
-        r3.style.cssText = 'position:absolute;top:50%;left:50%;width:28px;height:28px;margin:-14px 0 0 -14px;border-radius:50%;border:1px solid '+PING_COL+';animation:pingRing '+(dur*0.9)+'ms '+280+'ms ease-out forwards;';
+        r3.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:1px solid '+PING_COL+';animation:pingRing '+(dur*0.9)+'ms '+280+'ms ease-out forwards;';
         // Ring 4
         var r4 = document.createElement('div');
-        r4.style.cssText = 'position:absolute;top:50%;left:50%;width:28px;height:28px;margin:-14px 0 0 -14px;border-radius:50%;border:0.5px solid '+PING_COL+';animation:pingRing2 '+dur+'ms '+420+'ms ease-out forwards;';
+        r4.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:0.5px solid '+PING_COL+';animation:pingRing2 '+dur+'ms '+420+'ms ease-out forwards;';
         // Center dot
         var dot = document.createElement('div');
         dot.style.cssText = 'position:absolute;top:50%;left:50%;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;background:'+PING_COL+';box-shadow:0 0 14px rgba(153,0,51,0.9);';
 
         // Label
         var lbl = document.createElement('div');
-        lbl.style.cssText = 'position:absolute;top:calc(50% + 18px);left:50%;transform:translateX(-50%);white-space:nowrap;animation:pingLabel '+dur+'ms ease forwards;';
-        lbl.innerHTML = '<div style="font-family:\'ADLaM Display\',serif;font-size:14px;color:#fff;letter-spacing:0.1em;text-transform:uppercase;text-shadow:0 2px 12px rgba(0,0,0,0.95);">'+stage.label+'</div>';
+        lbl.style.cssText = 'position:absolute;top:calc(50% + 22px);left:50%;transform:translateX(-50%);white-space:nowrap;animation:pingLabel '+dur+'ms ease forwards;';
+        lbl.innerHTML = '<div style="font-family:\'ADLaM Display\',serif;font-size:18px;color:#fff;letter-spacing:0.1em;text-transform:uppercase;text-shadow:0 2px 14px rgba(0,0,0,0.98);">'+stage.label+'</div>';
 
         wrap.appendChild(r1);
         wrap.appendChild(r2);
