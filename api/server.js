@@ -333,35 +333,25 @@ app.get('/pulse/context',
       const recvRows = db.prepare('SELECT * FROM receiving WHERE week_start = ?').all(ws);
 
       // ── Flow week (lanes + containers) ──
-      // Try exact facility match first, then fall back to any facility for this week
-      let flowRow = db.prepare('SELECT data FROM flow_week WHERE facility = ? AND week_start = ?').get(facility, ws);
-      if (!flowRow) {
-        // Facility key in flow_week may differ slightly from plan — try any row for this week
-        flowRow = db.prepare('SELECT data FROM flow_week WHERE week_start = ? ORDER BY updated_at DESC LIMIT 1').get(ws);
-        if (flowRow) console.log('[pulse/context] flow_week facility fallback used for week', ws);
-      }
-      const flowData = safeJsonParse(flowRow?.data, {}) || {};
-      // Debug: log what we found
-      const laneCount = Object.keys((flowData.intl_lanes && typeof flowData.intl_lanes === 'object') ? flowData.intl_lanes : {}).length;
-      const contArr2 = (() => { const wc = flowData.intl_weekcontainers; return Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []); })();
-      if (laneCount === 0 && contArr2.length === 0) {
-        console.log('[pulse/context] no lanes/containers found for week', ws, '- flowRow:', !!flowRow);
-        if (flowRow) {
-          // Log the top-level keys so we can see the actual structure
-          const topKeys = Object.keys(flowData);
-          console.log('[pulse/context] flow_week top-level keys:', JSON.stringify(topKeys));
-          // Check common variants for containers
-          const wcKeys = ['intl_weekcontainers','weekcontainers','containers','intl_containers'];
-          for (const k of wcKeys) {
-            if (flowData[k] !== undefined) console.log('[pulse/context] found key', k, ':', JSON.stringify(flowData[k]).slice(0,200));
-          }
-          // Check common variants for lanes
-          const laneKeys = ['intl_lanes','lanes','transit_lanes'];
-          for (const k of laneKeys) {
-            if (flowData[k] !== undefined) console.log('[pulse/context] found lane key', k, '- count:', typeof flowData[k] === 'object' ? Object.keys(flowData[k]).length : 'n/a');
+      // Fetch ALL rows for this week and merge them — data may be split across
+      // multiple rows with different facility keys (prebook, intl_lanes etc. saved separately)
+      const allFlowRows = db.prepare('SELECT facility, data FROM flow_week WHERE week_start = ?').all(ws);
+      const flowData = {};
+      for (const row of allFlowRows) {
+        const d = safeJsonParse(row.data, {}) || {};
+        // Merge all rows — intl_lanes gets deep-merged, everything else overwrites
+        for (const [k, v] of Object.entries(d)) {
+          if (k === 'intl_lanes' && v && typeof v === 'object' && !Array.isArray(v)) {
+            flowData.intl_lanes = Object.assign({}, flowData.intl_lanes || {}, v);
+          } else {
+            flowData[k] = v;
           }
         }
       }
+      const laneCount = Object.keys((flowData.intl_lanes && typeof flowData.intl_lanes === 'object') ? flowData.intl_lanes : {}).length;
+      const contArr2 = (() => { const wc = flowData.intl_weekcontainers; return Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []); })();
+      console.log('[pulse/context] week', ws, '- merged', allFlowRows.length, 'flow_week rows | lanes:', laneCount, '| containers:', contArr2.length);
+
 
       // ── Build PO summary (join plan + applied + receiving) ──
       const poMap = new Map();
@@ -444,10 +434,9 @@ app.get('/pulse/context',
       const received_pos  = pos.filter(p=>p.received).length;
       const late_pos      = pos.filter(p=>p.received && p.due_date && p.received_date && p.received_date.slice(0,10) > p.due_date).length;
 
-      // Log what we found for debugging
       console.log('[pulse/context] week', ws,
         '| facility:', facility,
-        '| flowRow found:', !!flowRow,
+        '| flow rows merged:', allFlowRows.length,
         '| lanes:', lanes.length,
         '| containers:', containers.length,
         '| pos:', pos.length
