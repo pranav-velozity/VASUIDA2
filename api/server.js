@@ -461,27 +461,53 @@ app.get('/exec/summary',
     ).get(facility, ws);
     const flowData = flowRow ? (safeJsonParse(flowRow.data, {}) || {}) : {};
 
-    // ETA FC and transit dates from intl_lanes
+    // ── Flow week: intl_lanes + containers ──
     const intl_lanes = (flowData.intl_lanes && typeof flowData.intl_lanes === 'object') ? flowData.intl_lanes : {};
     const etaDates = [];
-    const transitDaysList = [];
+    const vasToEtaList = []; // Segment 2: VAS complete → ETA FC
+
+    // Latest VAS completion across all applied POs this week
+    const allVasDates = Array.from(vasDateByPO.values()).filter(Boolean).sort();
+    const latestVasDate = allVasDates.length ? allVasDates[allVasDates.length - 1] : null;
 
     for (const [laneKey, manual] of Object.entries(intl_lanes)) {
       if (!manual || typeof manual !== 'object') continue;
-      if (manual.eta_fc) etaDates.push(String(manual.eta_fc));
+      if (manual.eta_fc) {
+        etaDates.push(String(manual.eta_fc));
+        // Segment 2: VAS complete → ETA FC per lane
+        if (latestVasDate) {
+          try {
+            const vd = new Date(latestVasDate.slice(0, 10) + 'T00:00:00Z');
+            const ed = new Date(String(manual.eta_fc).slice(0, 10) + 'T00:00:00Z');
+            const days = Math.round((ed - vd) / (1000 * 60 * 60 * 24));
+            if (days > 0 && days < 120) vasToEtaList.push(days);
+          } catch {}
+        }
+      }
+    }
 
-      // Transit days: departed → arrived
-      if (manual.departed_at && manual.arrived_at) {
+    // Segment 3: ETA FC → FC Delivery (from last mile container delivery dates)
+    const etaToDeliveryList = [];
+    const containers = (() => {
+      const wc = flowData.intl_weekcontainers;
+      if (!wc) return [];
+      return Array.isArray(wc) ? wc : (Array.isArray(wc.containers) ? wc.containers : []);
+    })();
+    const etaFcDate = etaDates.sort().pop() || null;
+    for (const c of containers) {
+      // Last mile delivery date stored as delivery_local or delivered_at
+      const delivDate = c.delivery_local || c.delivered_at || c.delivery_date || null;
+      if (delivDate && etaFcDate) {
         try {
-          const dep = new Date(manual.departed_at);
-          const arr = new Date(manual.arrived_at);
-          const days = Math.round((arr - dep) / (1000 * 60 * 60 * 24));
-          if (days > 0 && days < 120) transitDaysList.push(days);
+          const eta = new Date(String(etaFcDate).slice(0, 10) + 'T00:00:00Z');
+          const del = new Date(String(delivDate).slice(0, 10) + 'T00:00:00Z');
+          const days = Math.round((del - eta) / (1000 * 60 * 60 * 24));
+          if (days >= 0 && days < 60) etaToDeliveryList.push(days);
         } catch {}
       }
     }
 
-    // Avg days receiving → VAS per PO
+    // Segment 1: Receiving → VAS complete
     const daysToApplyList = [];
     for (const po of appliedPOSet) {
       const recvDate = recvDateByPO.get(po);
@@ -495,15 +521,26 @@ app.get('/exec/summary',
         } catch {}
       }
     }
+
     const avg_days_to_apply = daysToApplyList.length
       ? Math.round((daysToApplyList.reduce((a, b) => a + b, 0) / daysToApplyList.length) * 10) / 10
       : null;
 
-    const avg_transit_days = transitDaysList.length
-      ? Math.round((transitDaysList.reduce((a, b) => a + b, 0) / transitDaysList.length) * 10) / 10
+    const avg_days_vas_to_eta = vasToEtaList.length
+      ? Math.round((vasToEtaList.reduce((a, b) => a + b, 0) / vasToEtaList.length) * 10) / 10
       : null;
 
-    const eta_fc = etaDates.sort().pop() || null; // latest ETA FC this week
+    const avg_days_eta_to_delivery = etaToDeliveryList.length
+      ? Math.round((etaToDeliveryList.reduce((a, b) => a + b, 0) / etaToDeliveryList.length) * 10) / 10
+      : null;
+
+    // Total end-to-end days (only if all 3 segments available)
+    const avg_days_end_to_end = (avg_days_to_apply != null && avg_days_vas_to_eta != null)
+      ? Math.round(((avg_days_to_apply + avg_days_vas_to_eta + (avg_days_eta_to_delivery || 0)) * 10)) / 10
+      : null;
+
+    const avg_transit_days = avg_days_vas_to_eta; // keep for backward compat
+    const eta_fc = etaFcDate;
 
     // On-time receiving % this week
     const on_time_receiving_pct = plannedPOSet.size > 0
@@ -537,6 +574,9 @@ app.get('/exec/summary',
       air_units,
       sea_units,
       avg_days_to_apply,
+      avg_days_vas_to_eta,
+      avg_days_eta_to_delivery,
+      avg_days_end_to_end,
       avg_transit_days,
       eta_fc,
       suppliers,
