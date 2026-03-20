@@ -18,7 +18,8 @@
     "exceljs": "^4.4.0",
     "express": "^4.19.2",
     "@clerk/clerk-sdk-node": "^5.0.0",
-    "express-rate-limit": "^7.1.5"
+    "express-rate-limit": "^7.1.5",
+    "@anthropic-ai/sdk": "^0.30.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
