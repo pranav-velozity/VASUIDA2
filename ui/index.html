@@ -4562,7 +4562,7 @@ window.addEventListener('popstate', () => show(getRouteHash()));
   }
 })();
 </script>
-<script src="/public/exec_live_additive.js?v=15" defer></script>
+<script src="/public/exec_live_additive.js?v=16" defer></script>
 <script>
 /*
  * Pinpoint Exec Range Extension (exec_range_additive.js)
@@ -5603,6 +5603,9 @@ function pulseShowLoading(){
   return div;
 }
 
+// ── Pulse: conversation history ──
+if(!window._pulseHistory) window._pulseHistory = [];
+
 // ── Pulse: send message ──
 async function pulseSend(){
   const input = document.getElementById('pulse-input-display');
@@ -5614,10 +5617,14 @@ async function pulseSend(){
   pulseAddMessage(text, 'user');
   const loading = pulseShowLoading();
 
-  // Build context
-  const role = window._pnPulseRole || 'User';
-  const org  = document.getElementById('user-org-display')?.textContent || '';
-  const week = window.state?.weekStart || '';
+  // Add to history
+  window._pulseHistory.push({role:'user', content: text});
+  // Keep last 20 turns
+  if(window._pulseHistory.length > 20) window._pulseHistory = window._pulseHistory.slice(-20);
+
+  // Build rich context
+  const facility = ((window.state?.plan)||[]).map(p=>String(p.facility_name||p.facility||'').trim()).find(Boolean)
+    || String(window.state?.facility||'').trim() || '';
 
   try {
     const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
@@ -5628,21 +5635,13 @@ async function pulseSend(){
       method:'POST',
       headers:{'Content-Type':'application/json', ...(token?{'Authorization':'Bearer '+token}:{})},
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
-        system: `You are Pulse, the AI operations assistant for VelOzity Pinpoint — a warehouse UID operations platform.
-Current user role: ${role}
-Current org: ${org}
-Current week: ${week}
-API base: ${apiBase}
-
-You help users understand their warehouse operations — throughput, PO status, exceptions, shipment tracking.
-Keep responses concise and actionable. Use numbers when available from context.
-${role==='Client'?'You can only discuss data relevant to this org. Do not reveal data from other orgs or admin-level views.':''}
-${role==='Facility'?'You can only discuss data relevant to this org. The Executive page is not available to your role.':''}
-Never perform write operations. You are read-only.
-If asked for something outside your scope, acknowledge and redirect to what you CAN help with.`,
-        messages: [{role:'user', content: text}]
+        messages: window._pulseHistory,
+        context: {
+          facility,
+          week_start: window.state?.weekStart || '',
+          role: window._pnPulseRole || 'User',
+          org: document.getElementById('user-org-display')?.textContent || '',
+        }
       })
     });
 
@@ -5656,8 +5655,10 @@ If asked for something outside your scope, acknowledge and redirect to what you 
     }
 
     const data = await resp.json();
-    const reply = data.content?.find(b=>b.type==='text')?.text || 'No response.';
+    const reply = data.reply || data.content?.find(b=>b.type==='text')?.text || 'No response.';
     pulseAddMessage(reply, 'ai');
+    // Add AI reply to history
+    window._pulseHistory.push({role:'assistant', content: reply});
 
   } catch(e){
     if(loading) loading.remove();
