@@ -120,15 +120,15 @@
     </div>
 
     <!-- Radar: full width, 50/50 -->
-    <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:24px;display:grid;grid-template-columns:55fr 45fr;gap:24px;align-items:center;">
-      <div style="display:flex;flex-direction:column;align-items:flex-end;padding-left:15%;">
-        <div style="width:100%;">
-          <div style="font-size:13px;font-weight:600;color:#1C1C1E;margin-bottom:2px;">Performance Radar</div>
-          <div style="font-size:10px;color:#AEAEB2;margin-bottom:16px;">Actual vs best-week baseline · 100 = best achieved</div>
+    <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:24px;">
+      <div style="font-size:13px;font-weight:600;color:#1C1C1E;margin-bottom:2px;">Performance Radar</div>
+      <div style="font-size:10px;color:#AEAEB2;margin-bottom:20px;">Actual vs best-week baseline · 100 = best achieved</div>
+      <div style="display:grid;grid-template-columns:420px 1fr;gap:32px;align-items:center;">
+        <div style="margin-left:15%;width:360px;height:360px;flex-shrink:0;">
+          <canvas id="chart-radar" width="360" height="360" style="display:block;width:360px;height:360px;"></canvas>
         </div>
-        <canvas id="chart-radar" style="display:block;width:100%;max-width:432px;height:360px;"></canvas>
+        <div id="exec-radar-legend" style="display:flex;flex-direction:column;gap:14px;"></div>
       </div>
-      <div id="exec-radar-legend" style="display:flex;flex-direction:column;gap:14px;"></div>
     </div>
   </div>
 
@@ -475,7 +475,7 @@
     ]}, options:{
       plugins:{ legend:{display:false} },
       scales:{ r:{ min:0, max:100, ticks:{display:false,stepSize:25}, grid:{color:'rgba(0,0,0,0.06)'}, angleLines:{color:'rgba(0,0,0,0.06)'}, pointLabels:{font:{size:11,weight:'500'},color:'#6E6E73'} } },
-      responsive:true, maintainAspectRatio:false,
+      responsive:false, maintainAspectRatio:false,
       animation:{ duration:1000, easing:'easeOutQuart' }
     }});
 
