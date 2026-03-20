@@ -335,14 +335,13 @@ app.get('/pulse/context',
           due_date: p.due_date || '',
           skus: [],
           planned: 0,
-          applied: 0,
+          applied: appliedByPO.get(po) || 0,  // set ONCE — records are per-PO not per-SKU
           received: false,
           received_date: null,
           cartons_received: 0,
         });
         const entry = poMap.get(po);
         entry.planned += Number(p.target_qty || 0) || 0;
-        entry.applied += appliedByPO.get(po) || 0;
         if (sku) entry.skus.push({ sku, planned: Number(p.target_qty||0)||0 });
       }
       // Merge receiving
@@ -603,8 +602,17 @@ app.post('/pulse/chat',
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 800,
-      system: systemPrompt,
-      messages: messages.map(m => ({ role: m.role, content: m.content }))
+      // Use ephemeral cache on system prompt — subsequent messages in same session
+      // hit the cache and only pay for the new message tokens (~500 vs ~31K)
+      system: [
+        {
+          type: 'text',
+          text: systemPrompt,
+          cache_control: { type: 'ephemeral' }
+        }
+      ],
+      messages: messages.map(m => ({ role: m.role, content: m.content })),
+      betas: ['prompt-caching-2024-07-31'],
     });
 
     const reply = response.content.find(b => b.type === 'text')?.text || 'No response.';
@@ -702,7 +710,19 @@ app.post('/ai/pulse',
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 1200,
-      messages: [{ role: 'user', content: dataPrompt }]
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: dataPrompt,
+              cache_control: { type: 'ephemeral' }
+            }
+          ]
+        }
+      ],
+      betas: ['prompt-caching-2024-07-31'],
     });
 
     const raw = response.content.find(b=>b.type==='text')?.text || '[]';
