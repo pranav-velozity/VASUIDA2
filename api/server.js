@@ -22,7 +22,7 @@ const { randomUUID } = require('crypto');
 
 // 🔐 Security Middleware
 const { authenticateRequest, requireRole, autoFilterResponse, optionalAuth, authenticateApiKey } = require('./middleware/auth');
-const { apiLimiter, writeOpLimiter, uploadLimiter } = require('./middleware/rateLimiter');
+const { apiLimiter, writeOpLimiter, uploadLimiter, aiLimiter } = require('./middleware/rateLimiter');
 const { validateRecordInput, validateBulkInput } = require('./middleware/validation');
 const { auditLog } = require('./middleware/auditLog');
 
@@ -269,6 +269,7 @@ app.get('/health', (req, res) => res.json({ ok: true, now: new Date().toISOStrin
 // Called once per session on first PULSE open. Returns everything Claude needs.
 app.get('/pulse/context',
   authenticateRequest,
+  aiLimiter,
   async (req, res) => {
   try {
     const facilityHint = normFacility(req.query.facility || '');
@@ -503,7 +504,7 @@ function buildOpsContext(facility, weekStart) {
 // POST /pulse/chat — full-fidelity conversational assistant
 app.post('/pulse/chat',
   authenticateRequest,
-  writeOpLimiter,
+  aiLimiter,
   async (req, res) => {
   try {
     const { messages, pulseContext, currentWeek } = req.body || {};
@@ -619,7 +620,7 @@ app.post('/pulse/chat',
 // POST /ai/pulse — generate exec Improvement Intelligence insights via Claude
 app.post('/ai/pulse',
   authenticateRequest,
-  writeOpLimiter,
+  aiLimiter,
   async (req, res) => {
   try {
     const { weeks, facility } = req.body || {};
