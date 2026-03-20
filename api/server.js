@@ -255,12 +255,19 @@ app.get('/events/scan', (req, res) => {
 // --- Health ---
 app.get('/health', (req, res) => res.json({ ok: true, now: new Date().toISOString() }));
 
-// --- Debug: show flow_week facilities and week_starts (admin only) ---
+// --- Debug: show flow_week facilities and week_starts ---
 app.get('/debug/flow_weeks', authenticateRequest, (req, res) => {
-  const role = req.auth?.orgRole || '';
-  if (role !== 'org:admin_auth') return res.status(403).json({ error: 'Admin only' });
   const rows = db.prepare('SELECT facility, week_start, updated_at, length(data) as data_len FROM flow_week ORDER BY week_start DESC LIMIT 20').all();
-  res.json({ rows });
+  // Also show a sample of what lanes/containers exist
+  const detail = rows.slice(0,5).map(r => {
+    const fw = db.prepare('SELECT data FROM flow_week WHERE facility=? AND week_start=?').get(r.facility, r.week_start);
+    const d = safeJsonParse(fw?.data, {}) || {};
+    const lanes = Object.keys(d.intl_lanes || {}).length;
+    const wc = d.intl_weekcontainers;
+    const conts = Array.isArray(wc) ? wc.length : (Array.isArray(wc?.containers) ? wc.containers.length : 0);
+    return { ...r, lanes, containers: conts };
+  });
+  res.json({ rows: detail });
 });
 
 // ── Pulse AI endpoints moved to /ai section below ──
@@ -337,7 +344,24 @@ app.get('/pulse/context',
       // Debug: log what we found
       const laneCount = Object.keys((flowData.intl_lanes && typeof flowData.intl_lanes === 'object') ? flowData.intl_lanes : {}).length;
       const contArr2 = (() => { const wc = flowData.intl_weekcontainers; return Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []); })();
-      if (laneCount === 0 && contArr2.length === 0) console.log('[pulse/context] no lanes/containers found for week', ws, '- flowRow:', !!flowRow);
+      if (laneCount === 0 && contArr2.length === 0) {
+        console.log('[pulse/context] no lanes/containers found for week', ws, '- flowRow:', !!flowRow);
+        if (flowRow) {
+          // Log the top-level keys so we can see the actual structure
+          const topKeys = Object.keys(flowData);
+          console.log('[pulse/context] flow_week top-level keys:', JSON.stringify(topKeys));
+          // Check common variants for containers
+          const wcKeys = ['intl_weekcontainers','weekcontainers','containers','intl_containers'];
+          for (const k of wcKeys) {
+            if (flowData[k] !== undefined) console.log('[pulse/context] found key', k, ':', JSON.stringify(flowData[k]).slice(0,200));
+          }
+          // Check common variants for lanes
+          const laneKeys = ['intl_lanes','lanes','transit_lanes'];
+          for (const k of laneKeys) {
+            if (flowData[k] !== undefined) console.log('[pulse/context] found lane key', k, '- count:', typeof flowData[k] === 'object' ? Object.keys(flowData[k]).length : 'n/a');
+          }
+        }
+      }
 
       // ── Build PO summary (join plan + applied + receiving) ──
       const poMap = new Map();
@@ -419,6 +443,15 @@ app.get('/pulse/context',
       const applied_total = pos.reduce((s,p)=>s+p.applied,0);
       const received_pos  = pos.filter(p=>p.received).length;
       const late_pos      = pos.filter(p=>p.received && p.due_date && p.received_date && p.received_date.slice(0,10) > p.due_date).length;
+
+      // Log what we found for debugging
+      console.log('[pulse/context] week', ws,
+        '| facility:', facility,
+        '| flowRow found:', !!flowRow,
+        '| lanes:', lanes.length,
+        '| containers:', containers.length,
+        '| pos:', pos.length
+      );
 
       weekData.push({
         week_start: ws,
@@ -579,7 +612,7 @@ app.post('/pulse/chat',
 
         // Lanes/transit
         if (Array.isArray(w.lanes) && w.lanes.length > 0) {
-          lines.push('Transit lanes:');
+          lines.push('Transit lanes (' + w.lanes.length + ' total):');
           for (const l of w.lanes) {
             const dates = [
               l.departed      ? 'departed ' + l.departed.slice(0,10)         : null,
@@ -591,14 +624,20 @@ app.post('/pulse/chat',
             lines.push('  Lane: ' + l.supplier + ' | Zendesk: ' + (l.zendesk||'—') + ' | ' + (l.freight||'') + (l.shipment_number ? ' | Shipment: '+l.shipment_number : '') + (l.hbl ? ' | HBL: '+l.hbl : '') + (dates ? ' | ' + dates : ' | no transit dates yet'));
           }
           lines.push('');
+        } else {
+          lines.push('Transit lanes: none recorded for this week');
+          lines.push('');
         }
 
         // Containers
         if (Array.isArray(w.containers) && w.containers.length > 0) {
-          lines.push('Containers:');
+          lines.push('Containers (' + w.containers.length + ' total):');
           for (const c of w.containers) {
-            lines.push('  ' + c.container_id + ' | ' + (c.size_ft||'40') + 'ft | Vessel: ' + (c.vessel||'—') + ' | POs: ' + (c.pos.join(', ')||'none assigned'));
+            lines.push('  Container: ' + c.container_id + ' | Size: ' + (c.size_ft||'40') + 'ft | Vessel: ' + (c.vessel||'—') + ' | POs assigned: ' + (c.pos.join(', ')||'none') + ' | Lane keys: ' + (c.lane_keys||[]).join('; '));
           }
+          lines.push('');
+        } else {
+          lines.push('Containers: none recorded for this week');
           lines.push('');
         }
       }
