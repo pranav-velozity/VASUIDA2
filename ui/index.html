@@ -5552,6 +5552,8 @@ function togglePulse(open){
   if(open){
     panel.classList.add('open');
     if(minBtn) minBtn.style.display='flex';
+    // Pre-load context in background
+    if(typeof pulseLoadContext==='function') pulseLoadContext();
     // Focus input
     setTimeout(function(){ var inp=document.getElementById('pulse-input-display'); if(inp) inp.focus(); },50);
   } else {
@@ -5603,8 +5605,35 @@ function pulseShowLoading(){
   return div;
 }
 
-// ── Pulse: conversation history ──
+// ── Pulse: conversation history + session context ──
 if(!window._pulseHistory) window._pulseHistory = [];
+if(!window._pulseSessionContext) window._pulseSessionContext = null;
+if(!window._pulseContextLoading) window._pulseContextLoading = false;
+
+// Fetch full 12-week context once per session
+async function pulseLoadContext() {
+  if (window._pulseSessionContext || window._pulseContextLoading) return;
+  window._pulseContextLoading = true;
+  try {
+    const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
+    let token = null;
+    if(window.Clerk?.session){ try{ token = await window.Clerk.session.getToken(); }catch(_){} }
+    const facility = ((window.state?.plan)||[]).map(p=>String(p.facility_name||p.facility||'').trim()).find(Boolean)
+      || String(window.state?.facility||'').trim() || '';
+    const url = apiBase + '/pulse/context' + (facility ? '?facility='+encodeURIComponent(facility) : '');
+    const resp = await fetch(url, {
+      headers: Object.assign({'Content-Type':'application/json'}, token?{'Authorization':'Bearer '+token}:{})
+    });
+    if (resp.ok) {
+      window._pulseSessionContext = await resp.json();
+      console.log('[Pulse] context loaded:', window._pulseSessionContext.facility, window._pulseSessionContext.weeks?.length, 'weeks');
+    }
+  } catch(e) {
+    console.warn('[Pulse] context load failed:', e);
+  } finally {
+    window._pulseContextLoading = false;
+  }
+}
 
 // ── Pulse: send message ──
 async function pulseSend(){
@@ -5617,14 +5646,18 @@ async function pulseSend(){
   pulseAddMessage(text, 'user');
   const loading = pulseShowLoading();
 
-  // Add to history
+  // Add to history (keep last 20 turns)
   window._pulseHistory.push({role:'user', content: text});
-  // Keep last 20 turns
   if(window._pulseHistory.length > 20) window._pulseHistory = window._pulseHistory.slice(-20);
 
-  // Build rich context
-  const facility = ((window.state?.plan)||[]).map(p=>String(p.facility_name||p.facility||'').trim()).find(Boolean)
-    || String(window.state?.facility||'').trim() || '';
+  // Ensure 12-week context is loaded (cached after first call)
+  await pulseLoadContext();
+
+  // Current week snapshot
+  const currentWeek = {
+    facility: ((window.state?.plan)||[]).map(p=>String(p.facility_name||p.facility||'').trim()).find(Boolean) || String(window.state?.facility||'').trim() || '',
+    week_start: window.state?.weekStart || '',
+  };
 
   try {
     const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
@@ -5636,12 +5669,8 @@ async function pulseSend(){
       headers:{'Content-Type':'application/json', ...(token?{'Authorization':'Bearer '+token}:{})},
       body: JSON.stringify({
         messages: window._pulseHistory,
-        context: {
-          facility,
-          week_start: window.state?.weekStart || '',
-          role: window._pnPulseRole || 'User',
-          org: document.getElementById('user-org-display')?.textContent || '',
-        }
+        pulseContext: window._pulseSessionContext || null,
+        currentWeek,
       })
     });
 
