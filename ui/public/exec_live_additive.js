@@ -88,7 +88,17 @@
     <!-- KPIs -->
     <div id="exec-kpis" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px;"></div>
 
-    <!-- Row 1: Throughput (wide) + Receiving Health (dot chart) -->
+    <!-- Row 1: Avg Time to Live — full width segmented timeline -->
+    <div class="exec-chart-card" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:20px;margin-bottom:16px;">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:2px;">
+        <div style="font-size:13px;font-weight:600;color:#1C1C1E;">Avg Time to Live</div>
+        <div id="exec-ttl-summary" style="font-size:11px;color:#AEAEB2;"></div>
+      </div>
+      <div style="font-size:10px;color:#AEAEB2;margin-bottom:16px;">Avg days from receiving to FC delivery · 3 segments per week</div>
+      <div id="chart-ttl" style="width:100%;"></div>
+    </div>
+
+    <!-- Row 2: Throughput (wide) + Receiving Health -->
     <div style="display:grid;grid-template-columns:3fr 2fr;gap:16px;margin-bottom:16px;">
       <div class="exec-chart-card" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:20px;">
         <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:2px;">
@@ -105,17 +115,17 @@
       </div>
     </div>
 
-    <!-- Row 2: Pipeline line + Air vs Sea area -->
+    <!-- Row 3: Air vs Sea (full width without pipeline since TTL replaces it) -->
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
-      <div class="exec-chart-card" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:20px;">
-        <div style="font-size:13px;font-weight:600;color:#1C1C1E;margin-bottom:2px;">Processing Pace</div>
-        <div style="font-size:10px;color:#AEAEB2;margin-bottom:16px;">Avg days receiving → VAS complete</div>
-        <canvas id="chart-pipeline" height="170"></canvas>
-      </div>
       <div class="exec-chart-card" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:20px;">
         <div style="font-size:13px;font-weight:600;color:#1C1C1E;margin-bottom:2px;">Air vs Sea Mix</div>
         <div style="font-size:10px;color:#AEAEB2;margin-bottom:16px;">Unit volume by freight mode</div>
         <canvas id="chart-airvsea" height="170"></canvas>
+      </div>
+      <div class="exec-chart-card" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:20px;">
+        <div style="font-size:13px;font-weight:600;color:#1C1C1E;margin-bottom:2px;">Processing Pace</div>
+        <div style="font-size:10px;color:#AEAEB2;margin-bottom:16px;">Avg days receiving → VAS complete per week</div>
+        <canvas id="chart-pipeline" height="170"></canvas>
       </div>
     </div>
 
@@ -243,7 +253,10 @@
     _destroyCharts();
     const labels = _weeks.map(w=>shortWk(w.week_start));
 
-    // Chart 1: Throughput — clean bars with smooth completion line
+    // Chart 0: Avg Time to Live — segmented horizontal timeline per week
+    _renderTTLChart(labels);
+
+    // Chart 1: Throughput — smooth slope SVG
     const totPl = _weeks.reduce((s,w)=>s+(w.planned_units||0),0);
     const totAp = _weeks.reduce((s,w)=>s+(w.applied_units||0),0);
     const sumEl = el('exec-thru-summary');
@@ -254,20 +267,19 @@
     // Chart 2: Receiving Health — custom SVG dot chart (not Chart.js bar)
     _renderReceivingDots(baseline);
 
-    // Chart 3: Processing Pace — smooth area line
+    // Processing Pace (smooth line — receiving → VAS)
     const pipeData = _weeks.map(w=>w.avg_days_to_apply);
-    const hasPipe  = pipeData.some(v=>v!=null);
     _mkChart('chart-pipeline', { type:'line', data:{ labels, datasets:[
-      { label:'Days', data:pipeData, borderColor:BRAND, backgroundColor:'rgba(153,0,51,0.08)',
+      { label:'Recv→VAS days', data:pipeData, borderColor:BRAND, backgroundColor:'rgba(153,0,51,0.07)',
         borderWidth:2.5, pointBackgroundColor:'#fff', pointBorderColor:BRAND, pointBorderWidth:2,
-        pointRadius:4, fill:true, tension:0.35, spanGaps:false },
+        pointRadius:4, fill:true, tension:0.4, spanGaps:false },
       ...(baseline.avg_days_to_apply!=null ? [{
         label:'Best-week', data:_weeks.map(()=>baseline.avg_days_to_apply),
-        borderColor:'rgba(0,0,0,0.2)', borderDash:[5,4], borderWidth:1.5,
+        borderColor:'rgba(0,0,0,0.18)', borderDash:[5,4], borderWidth:1.5,
         pointRadius:0, fill:false, backgroundColor:'transparent'
       }]:[]),
     ]}, options:{
-      plugins:{ legend:{display:true,position:'top',align:'end',labels:{font:{size:10},boxWidth:8,padding:12,usePointStyle:true}} },
+      plugins:{ legend:{display:true,position:'top',align:'end',labels:{font:{size:10},boxWidth:8,padding:10,usePointStyle:true}} },
       scales:{
         x:{ ticks:{font:{size:10}}, grid:{display:false} },
         y:{ ticks:{font:{size:10},callback:v=>v+'d'}, grid:{color:'rgba(0,0,0,0.04)'}, beginAtZero:true }
@@ -275,7 +287,6 @@
       responsive:true, maintainAspectRatio:true,
       animation:{ duration:900, easing:'easeOutQuart' }
     }});
-    if (!hasPipe) { const c=el('chart-pipeline'); if(c){const ctx=c.getContext('2d');ctx.save();ctx.fillStyle='#AEAEB2';ctx.font='11px sans-serif';ctx.textAlign='center';ctx.fillText('Populates as receiving & VAS data accumulates',c.width/2,90);ctx.restore();} }
 
     // Chart 4: Air vs Sea — smooth stacked area
     // Air = warm amber/orange | Sea = deep emerald — maximally distinct
@@ -302,6 +313,135 @@
 
     // Radar: large, full-tile
     _renderRadar(baseline);
+  }
+
+  // Time to Live: custom SVG segmented horizontal bar per week
+  function _renderTTLChart(labels) {
+    const container = el('chart-ttl'); if (!container) return;
+    const W = container.offsetWidth || 600, H = 200;
+    const pad = {t:20, b:36, l:8, r:120};
+    const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b;
+    const n = _weeks.length; if (!n) { container.innerHTML=''; return; }
+
+    const SEG1_COL = '#C8F902';    // Receiving → VAS (brand green)
+    const SEG2_COL = '#F97316';    // VAS → ETA FC (orange)
+    const SEG3_COL = '#059669';    // ETA FC → Delivery (emerald)
+    const EMPTY_COL= '#F0F0F2';    // segment not yet available
+
+    // Max total for scale
+    const totals = _weeks.map(w => {
+      const s1 = w.avg_days_to_apply || 0;
+      const s2 = w.avg_days_vas_to_eta || 0;
+      const s3 = w.avg_days_eta_to_delivery || 0;
+      return s1 + s2 + s3;
+    });
+    const maxDays = Math.max(...totals, 1);
+
+    const rowH = Math.floor((cH) / n);
+    const rowPad = Math.max(3, Math.floor(rowH * 0.18));
+
+    let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`;
+
+    // Subtle vertical grid at 25% intervals
+    for (let i=1; i<=4; i++) {
+      const gx = pad.l + (i/4)*cW;
+      svg += `<line x1="${gx}" y1="${pad.t}" x2="${gx}" y2="${pad.t+cH}" stroke="rgba(0,0,0,0.05)" stroke-width="1"/>`;
+      const v = Math.round(maxDays*(i/4));
+      svg += `<text x="${gx}" y="${pad.t-4}" font-size="9" fill="#AEAEB2" text-anchor="middle">${v}d</text>`;
+    }
+
+    _weeks.forEach((w, i) => {
+      const y = pad.t + i * rowH + rowPad;
+      const barH = rowH - rowPad*2;
+      const s1 = w.avg_days_to_apply || 0;
+      const s2 = w.avg_days_vas_to_eta || 0;
+      const s3 = w.avg_days_eta_to_delivery || 0;
+      const total = s1 + s2 + s3;
+      const label = labels[i];
+
+      // If no data at all, show empty placeholder bar
+      if (total === 0 && !s1 && !s2 && !s3) {
+        svg += `<rect x="${pad.l}" y="${y}" width="${cW}" height="${barH}" rx="4" fill="${EMPTY_COL}"/>`;
+        svg += `<text x="${pad.l + cW/2}" y="${y + barH/2 + 3}" font-size="9" fill="#AEAEB2" text-anchor="middle">Data pending</text>`;
+        svg += `<text x="${W - pad.r + 6}" y="${y + barH/2 + 3}" font-size="9" fill="#AEAEB2">${label}</text>`;
+        return;
+      }
+
+      let curX = pad.l;
+      const seg = (days, col, label2, isLast) => {
+        if (!days) return;
+        const segW = (days / maxDays) * cW;
+        svg += `<rect x="${curX}" y="${y}" width="${segW}" height="${barH}" rx="${isLast?'0 4 4 0':'0'}" fill="${col}" opacity="0.9"/>`;
+        if (segW > 22) svg += `<text x="${curX + segW/2}" y="${y + barH/2 + 3}" font-size="9" font-weight="600" fill="#fff" text-anchor="middle">${days.toFixed(1)}d</text>`;
+        curX += segW;
+      };
+
+      // Round left corners on first segment
+      if (s1) {
+        const segW = (s1 / maxDays) * cW;
+        svg += `<rect x="${pad.l}" y="${y}" width="${segW}" height="${barH}" rx="4" fill="${SEG1_COL}" opacity="0.9"/>`;
+        // Override right corners to square
+        svg += `<rect x="${pad.l + segW - 4}" y="${y}" width="4" height="${barH}" fill="${SEG1_COL}" opacity="0.9"/>`;
+        if (segW > 22) svg += `<text x="${pad.l + segW/2}" y="${y + barH/2 + 3}" font-size="9" font-weight="600" fill="#1C1C1E" text-anchor="middle">${s1.toFixed(1)}d</text>`;
+        curX = pad.l + segW;
+      }
+      if (s2) {
+        const segW = (s2 / maxDays) * cW;
+        svg += `<rect x="${curX}" y="${y}" width="${segW}" height="${barH}" fill="${SEG2_COL}" opacity="0.9"/>`;
+        if (segW > 22) svg += `<text x="${curX + segW/2}" y="${y + barH/2 + 3}" font-size="9" font-weight="600" fill="#fff" text-anchor="middle">${s2.toFixed(1)}d</text>`;
+        curX += segW;
+      }
+      if (s3) {
+        const segW = (s3 / maxDays) * cW;
+        svg += `<rect x="${curX}" y="${y}" width="${segW}" height="${barH}" rx="0 4 4 0" fill="${SEG3_COL}" opacity="0.9"/>`;
+        // Fix right corners
+        svg += `<rect x="${curX}" y="${y}" width="4" height="${barH}" fill="${SEG3_COL}" opacity="0.9"/>`;
+        if (segW > 22) svg += `<text x="${curX + segW/2}" y="${y + barH/2 + 3}" font-size="9" font-weight="600" fill="#fff" text-anchor="middle">${s3.toFixed(1)}d</text>`;
+        curX += segW;
+      }
+
+      // Show empty segments as ghost blocks
+      if (!s2 && s1) {
+        const ghostX = curX;
+        const ghostW = Math.min(40, cW - (curX - pad.l));
+        if (ghostW > 0) {
+          svg += `<rect x="${ghostX}" y="${y}" width="${ghostW}" height="${barH}" fill="${EMPTY_COL}" rx="0 2 2 0"/>`;
+          svg += `<text x="${ghostX + ghostW/2}" y="${y + barH/2 + 3}" font-size="8" fill="#AEAEB2" text-anchor="middle">?</text>`;
+        }
+      }
+
+      // Total label + week label on right
+      const totalStr = total > 0 ? total.toFixed(1)+'d total' : '—';
+      svg += `<text x="${W - pad.r + 8}" y="${y + barH/2 - 2}" font-size="9" font-weight="600" fill="#1C1C1E">${totalStr}</text>`;
+      svg += `<text x="${W - pad.r + 8}" y="${y + barH/2 + 9}" font-size="8" fill="#AEAEB2">${label}</text>`;
+    });
+
+    // Legend at bottom
+    const legendY = H - 8;
+    const items = [
+      {col: SEG1_COL, label: 'Receiving → VAS'},
+      {col: SEG2_COL, label: 'VAS → ETA FC'},
+      {col: SEG3_COL, label: 'ETA FC → Delivery'},
+    ];
+    let lx = pad.l;
+    items.forEach(item => {
+      svg += `<rect x="${lx}" y="${legendY-7}" width="10" height="6" rx="2" fill="${item.col}"/>`;
+      svg += `<text x="${lx+14}" y="${legendY}" font-size="9" fill="#6E6E73">${item.label}</text>`;
+      lx += 115;
+    });
+
+    svg += '</svg>';
+    container.innerHTML = svg;
+
+    // Update summary tile
+    const ttlSummary = el('exec-ttl-summary');
+    if (ttlSummary) {
+      const avgTotal = _weeks.reduce((s,w)=>{
+        const t=(w.avg_days_to_apply||0)+(w.avg_days_vas_to_eta||0)+(w.avg_days_eta_to_delivery||0);
+        return s+t;
+      }, 0) / Math.max(_weeks.filter(w=>w.avg_days_to_apply).length, 1);
+      ttlSummary.textContent = avgTotal > 0 ? `avg ${avgTotal.toFixed(1)}d end-to-end` : 'segments populate as data is entered';
+    }
   }
 
   // Throughput: custom SVG slope chart — area fill shows cumulative progress
