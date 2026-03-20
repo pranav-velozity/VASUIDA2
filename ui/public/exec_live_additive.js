@@ -206,7 +206,7 @@
     const baseline = computeBaseline(_weeks);
     _renderKPIs(baseline);
     _renderCharts(baseline);
-    _renderInsights(baseline);
+    _renderInsights(); // async — calls Claude
   }
 
   // ── KPIs ──────────────────────────────────────────────────────
@@ -686,16 +686,44 @@
     </div>`;
   }
 
-  function _renderInsights(baseline) {
+  async function _renderInsights() {
     const list=el('exec-insights-list'); if(!list) return;
-    const insights=_computeInsights(baseline);
-    const pri={high:3,medium:2,low:1};
-    insights.sort((a,b)=>(pri[b.priority]||0)-(pri[a.priority]||0));
-    list.innerHTML=insights.length?insights.map(_insightCard).join('')
-      :'<div style="font-size:11px;color:#AEAEB2;text-align:center;padding:20px;">No insights yet — data builds as more weeks accumulate.</div>';
+
+    // Skeleton loading state
+    list.innerHTML='<div style="display:flex;flex-direction:column;gap:10px;">'
+      +[1,2,3].map(()=>'<div style="background:#F5F5F7;border-radius:10px;height:110px;opacity:0.6;"></div>').join('')
+      +'</div>';
+
+    try {
+      const facility=((window.state?.plan)||[]).map(p=>String(p.facility_name||p.facility||'').trim()).find(Boolean)
+        ||String(window.state?.facility||'').trim()||'';
+      const token=await _getToken();
+      const resp=await fetch(_apiBase+'/ai/pulse',{
+        method:'POST',
+        headers:Object.assign({'content-type':'application/json'},token?{'authorization':'Bearer '+token}:{}),
+        body:JSON.stringify({weeks:_weeks,facility})
+      });
+      if(!resp.ok) throw new Error('HTTP '+resp.status);
+      const data=await resp.json();
+      const insights=Array.isArray(data.insights)?data.insights:[];
+      const pri={high:3,medium:2,low:1};
+      insights.sort((a,b)=>(pri[b.priority]||0)-(pri[a.priority]||0));
+      list.innerHTML=insights.length
+        ?insights.map(_insightCard).join('')
+        :'<div style="font-size:11px;color:#AEAEB2;text-align:center;padding:20px;">No insights returned.</div>';
+    } catch(e) {
+      console.error('[exec] Claude insights failed',e);
+      // Graceful fallback to computed insights
+      const baseline=computeBaseline(_weeks);
+      const fallback=_computeInsightsFallback(baseline);
+      const pri={high:3,medium:2,low:1};
+      fallback.sort((a,b)=>(pri[b.priority]||0)-(pri[a.priority]||0));
+      list.innerHTML='<div style="font-size:10px;color:#AEAEB2;padding:8px 12px;background:#F9F9FB;border-radius:7px;margin-bottom:8px;">AI insights offline — showing computed analysis</div>'
+        +(fallback.length?fallback.map(_insightCard).join(''):'');
+    }
   }
 
-  function _computeInsights(baseline) {
+  function _computeInsightsFallback(baseline) {
     const ins=[], weeks=_weeks; if(!weeks.length) return ins;
     const last4=weeks.slice(-4);
 
