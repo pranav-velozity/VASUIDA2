@@ -560,7 +560,15 @@ function iconContainer() {
 
   async function loadRecords(ws, tz) {
     const s = window.state || {};
-    if (s.weekStart === ws && Array.isArray(s.records) && s.records.length) return s.records;
+
+    // state.bins from /bins/weeks/:ws contains mobile_bin — same source the Carton view uses.
+    // Prefer bins over raw records fetch for carton-out accuracy.
+    if (s.weekStart === ws && Array.isArray(s.bins) && s.bins.length) {
+      // Merge bins into state.records (summaries) so computeCartonStatsFromRecords
+      // can find mobile_bin. Return combined array.
+      const summaries = Array.isArray(s.records) ? s.records : [];
+      return [...summaries, ...s.bins];
+    }
 
     // Derive week range in ISO; keep it simple: ws..ws+6
     const wsD = new Date(`${ws}T00:00:00Z`);
@@ -569,8 +577,6 @@ function iconContainer() {
     const from = `${ws}T00:00:00.000Z`;
     const to = `${isoDate(weD)}T23:59:59.999Z`;
 
-    // Use the endpoint that Receiving stabilized for carton out, but we need all statuses for progress.
-    // Prefer complete for performance, but fall back to all if API supports.
     try { const r = await api(`/records?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&status=complete&limit=65000`); const a = asArray(r); if (a && a.length) return a; } catch {}
     try { const r = await api(`/records?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&limit=65000`); return asArray(r); } catch {}
     return [];
