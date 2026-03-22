@@ -6312,12 +6312,21 @@ async function downloadPOContainer() {
         });
         if(resp.ok){
           const d = await resp.json();
-          const intl = d.intl_lanes && typeof d.intl_lanes === 'object' ? d.intl_lanes : {};
+          const flowData = {};
+          for (const facVal of Object.values(d.facilities || {})) {
+            const fd = (facVal && typeof facVal.data === 'object') ? facVal.data : {};
+            for (const [k, v] of Object.entries(fd)) {
+              if (k === 'intl_lanes' && v && typeof v === 'object' && !Array.isArray(v)) {
+                flowData.intl_lanes = Object.assign({}, flowData.intl_lanes || {}, v);
+              } else { flowData[k] = v; }
+            }
+          }
+          const intl = flowData.intl_lanes && typeof flowData.intl_lanes === 'object' ? flowData.intl_lanes : {};
           lanes = Object.entries(intl).map(([lk, manual]) => {
             const parts = lk.split('||');
             return { key: lk, supplier: parts[0]||'', zendesk: parts[1]||'', freight: parts[2]||'', manual: manual||{} };
           });
-          const wc = d.intl_weekcontainers;
+          const wc = flowData.intl_weekcontainers;
           containers = Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []);
         }
       } catch(fe){ console.warn('[POContainer] fallback fetch failed', fe); }
@@ -6394,12 +6403,21 @@ async function downloadTransitClearing() {
         });
         if(resp.ok){
           const d = await resp.json();
-          const intl = d.intl_lanes && typeof d.intl_lanes === 'object' ? d.intl_lanes : {};
+          const flowData = {};
+          for (const facVal of Object.values(d.facilities || {})) {
+            const fd = (facVal && typeof facVal.data === 'object') ? facVal.data : {};
+            for (const [k, v] of Object.entries(fd)) {
+              if (k === 'intl_lanes' && v && typeof v === 'object' && !Array.isArray(v)) {
+                flowData.intl_lanes = Object.assign({}, flowData.intl_lanes || {}, v);
+              } else { flowData[k] = v; }
+            }
+          }
+          const intl = flowData.intl_lanes && typeof flowData.intl_lanes === 'object' ? flowData.intl_lanes : {};
           lanes = Object.entries(intl).map(([lk, manual]) => {
             const parts = lk.split('||');
             return { key: lk, supplier: parts[0]||'', zendesk: parts[1]||'', freight: parts[2]||'', manual: manual||{} };
           });
-          const wc = d.intl_weekcontainers;
+          const wc = flowData.intl_weekcontainers;
           containers = Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []);
         }
       } catch(fe){ console.warn('[TransitClearing] fallback fetch failed', fe); }
@@ -6516,11 +6534,15 @@ function renderReportsPage(container){
         </div>
         <span style="font-size:10px;color:#AEAEB2;">UID scanning &amp; labelling</span>
       </div>
-      <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(4,1fr);gap:10px;">
-        ${reportCard('Applied UIDs Export','All applied UID records for the selected week, filterable by PO and SKU.','XLSX','Admin · Supplier','btn-dl-week-applied')}
-        ${reportCard('PO × SKU Summary','Unit counts grouped by PO and SKU with completion status.','XLSX','Admin · Supplier','btn-dl-posku')}
-        ${reportCard('PO Summary','Aggregated unit totals by PO across all SKUs for the week.','XLSX','Admin · Supplier','btn-dl-po')}
-        ${reportCard('Mobile Bin Export','All unique scanned bins with supplier, PO, weight and unit counts.','XLSX','Admin · Supplier','__mobile-bin-direct__')}
+      <div style="padding:8px 12px;display:flex;flex-direction:column;gap:0;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;">
+          <div style="padding:6px;">${reportCard('Applied UIDs Export','All applied UID records for the selected week, filterable by PO and SKU.','XLSX','Admin · Supplier','btn-dl-week-applied')}</div>
+          <div style="padding:6px;background:rgba(0,0,0,0.015);border-radius:8px;">${reportCard('PO × SKU Summary','Unit counts grouped by PO and SKU with completion status.','XLSX','Admin · Supplier','btn-dl-posku')}</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;background:rgba(0,0,0,0.015);border-radius:8px;margin-top:2px;">
+          <div style="padding:6px;">${reportCard('PO Summary','Aggregated unit totals by PO across all SKUs for the week.','XLSX','Admin · Supplier','btn-dl-po')}</div>
+          <div style="padding:6px;">${reportCard('Mobile Bin Export','All unique scanned bins with supplier, PO, weight and unit counts.','XLSX','Admin · Supplier','__mobile-bin-direct__')}</div>
+        </div>
       </div>
     </div>
 
@@ -6533,11 +6555,15 @@ function renderReportsPage(container){
         </div>
         <span style="font-size:10px;color:#AEAEB2;">Transit &amp; delivery tracking</span>
       </div>
-      <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(4,1fr);gap:10px;">
-        ${reportCard('Shipment Summary','High-level view of all shipments — status, units, PO count per shipment.','XLSX','Admin · Client','btn-ship-summary')}
-        ${reportCard('Shipment Details','Line-by-line shipment detail including container, routing and delivery dates.','XLSX','Admin · Client','btn-ship-detail')}
-        ${reportCard('PO Container / AWB','By container — all Zendesk tickets, POs, SKUs and units assigned to each container.','XLSX','Admin · Client','__po-container-direct__')}
-        ${reportCard('Transit & Clearing Status','Full transit detail — container info plus all milestone dates for each lane.','XLSX','Admin · Client','__transit-clearing-direct__')}
+      <div style="padding:8px 12px;display:flex;flex-direction:column;gap:0;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;">
+          <div style="padding:6px;">${reportCard('Shipment Summary','High-level view of all shipments — status, units, PO count per shipment.','XLSX','Admin · Client','btn-ship-summary')}</div>
+          <div style="padding:6px;background:rgba(0,0,0,0.015);border-radius:8px;">${reportCard('Shipment Details','Line-by-line shipment detail including container, routing and delivery dates.','XLSX','Admin · Client','btn-ship-detail')}</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;background:rgba(0,0,0,0.015);border-radius:8px;margin-top:2px;">
+          <div style="padding:6px;">${reportCard('PO Container / AWB','By container — all Zendesk tickets, POs, SKUs and units assigned to each container.','XLSX','Admin · Client','__po-container-direct__')}</div>
+          <div style="padding:6px;">${reportCard('Transit & Clearing Status','Full transit detail — container info plus all milestone dates for each lane.','XLSX','Admin · Client','__transit-clearing-direct__')}</div>
+        </div>
       </div>
     </div>
 
@@ -6600,26 +6626,19 @@ function renderReportsPage(container){
     const base = window._reportsWeek || state.weekStart || '';
     if (label) label.textContent = 'Downloading data for week of ' + base;
 
-    // Show 5 weeks centred on _reportsWeek
     const offsets = [-14, -7, 0, 7, 14];
-    offsets.forEach(n => {
-      const id = addDaysISO(base, n);
+    const weekIds = offsets.map(n => addDaysISO(base, n));
+
+    // Render capsules immediately with what we know, then update async
+    function buildCap(id, stats) {
       const d = new Date(id + 'T00:00:00');
       const day = String(d.getDate()).padStart(2, '0');
       const mon = d.toLocaleString('en-US', { month: 'short' }).toUpperCase().slice(0, 3);
       const isActive = id === base;
-
-      // Get totals from state if available
-      const stats = (id === state.weekStart)
-        ? { planned: (state.plan||[]).reduce((s,p)=>s+(Number(p.target_qty)||0),0),
-            applied: (state.records||[]).reduce((s,r)=>s+(Number(r.units||r.total_units)||0),0) }
-        : { planned: 0, applied: 0 };
       const p = stats.planned > 0 ? Math.min(100, Math.round(stats.applied*100/stats.planned)) : 0;
-
       const R = 26, CX = 29, CY = 29;
       const circ = 2 * Math.PI * R;
       const offset = circ * (1 - p / 100);
-
       const btn = document.createElement('button');
       btn.className = 'wkcap' + (isActive ? ' active' : '');
       btn.setAttribute('data-rp-week', id);
@@ -6634,14 +6653,50 @@ function renderReportsPage(container){
         <div class="cap-inner">
           <span class="m">${mon}</span>
           <span class="d">${day}</span>
-          <span class="t">${stats.planned ? fmtInt(stats.planned)+'u' : '—'}</span>
+          <span class="t" id="rp-cap-t-${id}">${stats.planned ? fmtInt(stats.planned)+'u' : '—'}</span>
         </div>`;
-      btn.onclick = () => {
-        window._reportsWeek = id;
-        rpRenderCapsules();
-      };
-      capContainer.appendChild(btn);
+      btn.onclick = () => { window._reportsWeek = id; rpRenderCapsules(); };
+      return btn;
+    }
+
+    // Initial render — use state data for current week, blanks for others
+    weekIds.forEach(id => {
+      const stats = (id === state.weekStart)
+        ? { planned: (state.plan||[]).reduce((s,p)=>s+(Number(p.target_qty)||0),0),
+            applied: (state.records||[]).reduce((s,r)=>s+(Number(r.units||r.total_units)||0),0) }
+        : { planned: 0, applied: 0 };
+      capContainer.appendChild(buildCap(id, stats));
     });
+
+    // Async: fetch planned totals for each week from /plan/weeks endpoint
+    (async () => {
+      try {
+        const planLists = await Promise.all(weekIds.map(id =>
+          typeof fetchPlan === 'function' ? fetchPlan(id).catch(()=>[]) : Promise.resolve([])
+        ));
+        const summaries = await Promise.all(weekIds.map((id, i) => {
+          const end = addDaysISO(id, 6);
+          return typeof fetchSummary === 'function' ? fetchSummary(id, end, 'complete').catch(()=>null) : Promise.resolve(null);
+        }));
+        weekIds.forEach((id, i) => {
+          const planned = (planLists[i]||[]).reduce((s,p)=>s+(Number(p.target_qty)||0),0);
+          const applied = Number(summaries[i]?.total_units || 0);
+          const tEl = capContainer.querySelector(`#rp-cap-t-${id}`);
+          if (tEl && planned > 0) tEl.textContent = fmtInt(planned) + 'u';
+          // Update ring progress
+          const btn = capContainer.querySelector(`[data-rp-week="${id}"]`);
+          if (btn && planned > 0) {
+            const p = Math.min(100, Math.round(applied*100/planned));
+            const R = 26, circ = 2 * Math.PI * R;
+            const prog = btn.querySelector('.cap-ring-prog');
+            if (prog) {
+              prog.setAttribute('stroke-dashoffset', (circ*(1-p/100)).toFixed(1));
+              if (p > 0) prog.style.opacity = '1';
+            }
+          }
+        });
+      } catch(e) { console.warn('[RP capsules] async fetch failed', e); }
+    })();
   }
 
   // Prev / next shift the window by 7 days
@@ -6661,17 +6716,34 @@ function renderReportsPage(container){
 
 function reportCard(name, desc, fmt, role, proxyId){
   const fmtColor = fmt==='PDF' ? 'rgba(153,0,51,0.1);color:#990033' : fmt==='CSV' ? 'rgba(91,140,255,0.1);color:#5B8CFF' : 'rgba(58,125,68,0.1);color:#2E7D52';
-  return `<div style="background:#F5F5F7;border-radius:10px;padding:12px 14px;">
-    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:6px;">
-      <div style="font-size:12px;font-weight:500;color:#1C1C1E;line-height:1.3;">${name}</div>
-      <button data-proxy="${proxyId}" style="flex-shrink:0;width:28px;height:28px;border-radius:7px;background:#1C1C1E;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;" title="Download ${name}">
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 1v7M3 5l3 3 3-3M1 10h10" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      </button>
-    </div>
-    <div style="font-size:10px;color:#6E6E73;line-height:1.4;margin-bottom:8px;">${desc}</div>
-    <div style="display:flex;align-items:center;gap:6px;">
-      <span style="font-size:9px;font-weight:600;padding:2px 7px;border-radius:6px;font-family:monospace;background:${fmtColor}">${fmt}</span>
-      <span style="font-size:9px;color:#AEAEB2;">${role}</span>
+  // Icon per report type
+  const icons = {
+    'Applied UIDs Export':        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8B5CF6" stroke-width="1.6" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M7 8h10M7 12h7M7 16h5"/></svg>',
+    'PO × SKU Summary':           '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0EA5E9" stroke-width="1.6" stroke-linecap="round"><path d="M9 17H7a5 5 0 0 1 0-10h10"/><path d="M13 7h4a5 5 0 0 1 0 10h-2"/><line x1="12" y1="12" x2="12" y2="12.01"/></svg>',
+    'PO Summary':                 '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="1.6" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 9h6M9 13h4"/><path d="M16 17l2 2 4-4" stroke="#059669"/></svg>',
+    'Mobile Bin Export':          '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" stroke-width="1.6" stroke-linecap="round"><rect x="2" y="7" width="20" height="15" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/><line x1="12" y1="12" x2="12" y2="17"/><line x1="9.5" y1="14.5" x2="14.5" y2="14.5"/></svg>',
+    'Shipment Summary':           '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0EA5E9" stroke-width="1.6" stroke-linecap="round"><path d="M1 3h15v13H1z"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>',
+    'Shipment Details':           '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6366F1" stroke-width="1.6" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>',
+    'PO Container / AWB':         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#990033" stroke-width="1.6" stroke-linecap="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>',
+    'Transit & Clearing Status':  '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0369A1" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+    'Ops Summary Report':         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#990033" stroke-width="1.6" stroke-linecap="round"><path d="M3 3v18h18"/><polyline points="18 9 12 15 8 11 3 16"/></svg>',
+  };
+  const icon = icons[name] || '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#AEAEB2" stroke-width="1.6" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16h16V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+
+  return `<div style="background:#fff;border-radius:10px;border:0.5px solid rgba(0,0,0,0.07);padding:14px 16px;display:flex;align-items:flex-start;gap:12px;">
+    <div style="flex-shrink:0;width:36px;height:36px;border-radius:9px;background:#F5F5F7;display:flex;align-items:center;justify-content:center;">${icon}</div>
+    <div style="flex:1;min-width:0;">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:4px;">
+        <div style="font-size:12px;font-weight:500;color:#1C1C1E;line-height:1.3;">${name}</div>
+        <button data-proxy="${proxyId}" style="flex-shrink:0;width:28px;height:28px;border-radius:7px;background:#1C1C1E;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;" title="Download ${name}">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 1v7M3 5l3 3 3-3M1 10h10" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+      <div style="font-size:10px;color:#6E6E73;line-height:1.4;margin-bottom:8px;">${desc}</div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span style="font-size:9px;font-weight:600;padding:2px 7px;border-radius:6px;font-family:monospace;background:${fmtColor}">${fmt}</span>
+        <span style="font-size:9px;color:#AEAEB2;">${role}</span>
+      </div>
     </div>
   </div>`;
 }
