@@ -309,7 +309,7 @@ window.__clerkOnLoad = function() {
       </div>
       <div style="display:flex;flex-direction:column;align-items:center;gap:10px;">
         <div style="font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:0.22em;text-transform:uppercase;">Every Unit. Every Step.</div>
-        <div style="display:flex;align-items:center;gap:10px;">
+        <div style="display:flex;align-items:center;justify-content:center;gap:10px;">
           <!-- Constant pulse orb -->
           <div style="position:relative;width:20px;height:20px;flex-shrink:0;">
             <div style="position:absolute;top:50%;left:50%;width:20px;height:20px;margin:-10px 0 0 -10px;border-radius:50%;border:1.5px solid rgba(153,0,51,0.7);animation:pingRing 2s ease-out infinite;"></div>
@@ -317,12 +317,11 @@ window.__clerkOnLoad = function() {
             <div style="position:absolute;top:50%;left:50%;width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;background:#990033;box-shadow:0 0 8px rgba(153,0,51,0.8);"></div>
           </div>
           <div style="font-family:'ADLaM Display',serif;font-size:13px;color:rgba(255,255,255,0.55);letter-spacing:0.06em;">With PULSE AI</div>
-        </div>
-        <div style="display:flex;align-items:center;gap:7px;margin-top:4px;">
-          <svg width="13" height="13" viewBox="0 0 46 46" fill="none" xmlns="http://www.w3.org/2000/svg" style="opacity:0.45;">
+          <div style="width:0.5px;height:14px;background:rgba(255,255,255,0.15);flex-shrink:0;"></div>
+          <svg width="13" height="13" viewBox="0 0 46 46" fill="none" xmlns="http://www.w3.org/2000/svg" style="opacity:0.45;flex-shrink:0;">
             <path d="M32.73 14.9L26.3 5.77a3.93 3.93 0 0 0-6.6 0l-6.43 9.13L6.1 25.7a3.93 3.93 0 0 0 0 4.38l6.44 8.98 1.18 1.65a3.93 3.93 0 0 0 6.44 0l1.18-1.65 1.66-2.32 5.19-7.25.07-.1 4.47-6.25a3.93 3.93 0 0 0 0-4.24z" fill="#CC785C"/>
           </svg>
-          <div style="font-size:10px;color:rgba(255,255,255,0.3);letter-spacing:0.12em;text-transform:uppercase;">Powered by Claude</div>
+          <div style="font-size:10px;color:rgba(255,255,255,0.3);letter-spacing:0.1em;text-transform:uppercase;">Powered by Anthropic Claude</div>
         </div>
       </div>
     </div>
@@ -463,7 +462,7 @@ window.__clerkOnLoad = function() {
   .pn-brand{font-family:'ADLaM Display',serif;font-size:17px;white-space:nowrap;text-decoration:none;display:flex;align-items:center;gap:0;}
   .pn-brand-v{color:#1C1C1E;}
   .pn-brand-p{color:#990033;}
-  .pn-nav-items{display:flex;align-items:center;gap:2px;padding:4px;background:#F5F5F7;border-radius:10px;border:0.5px solid rgba(0,0,0,0.06);margin-left:20%;}
+  .pn-nav-items{display:flex;align-items:center;gap:2px;padding:4px;background:#F5F5F7;border-radius:10px;border:0.5px solid rgba(0,0,0,0.06);margin-left:32%;}
   .pn-nav-item{font-size:12px;font-weight:500;color:#6E6E73;padding:6px 14px;border-radius:7px;text-decoration:none;transition:background .15s,color .15s;white-space:nowrap;cursor:pointer;}
   .pn-nav-item.active{background:#990033;color:#fff;box-shadow:0 2px 8px rgba(153,0,51,0.25);}
   .pn-nav-item:hover:not(.active){background:rgba(0,0,0,0.04);color:#1C1C1E;}
@@ -478,6 +477,14 @@ window.__clerkOnLoad = function() {
   /* ── Page background ── */
   body{background:#F5F5F7 !important;}
   main.vo-wrap{padding:16px 24px !important;}
+
+  /* ── Week Hub Flipper ── */
+  @keyframes flipIn{0%{transform:translateY(100%);opacity:0}100%{transform:translateY(0);opacity:1}}
+  @keyframes flipOut{0%{transform:translateY(0);opacity:1}100%{transform:translateY(-100%);opacity:0}}
+  .wh-flip-in{animation:flipIn 0.28s cubic-bezier(0.4,0,0.2,1) forwards;}
+  .wh-flip-out{animation:flipOut 0.28s cubic-bezier(0.4,0,0.2,1) forwards;}
+  #wh-flipper-text:hover{color:#990033;}
+  #wh-flipper{transition:opacity .3s;}
 
   /* ── Pulse Bar ── */
   .pulse-bar{position:fixed;bottom:0;left:0;right:0;z-index:50;background:#fff;border:0.5px solid rgba(153,0,51,0.25);border-bottom:none;border-left:3px solid #990033;border-radius:14px 14px 0 0;padding:12px 24px;display:none;align-items:center;gap:14px;box-shadow:0 -6px 28px rgba(0,0,0,0.09);margin:0 16px;width:calc(100% - 32px);}
@@ -536,7 +543,7 @@ window.__clerkOnLoad = function() {
         <svg width="14" height="14" viewBox="0 0 46 46" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;opacity:0.6;">
           <path d="M32.73 14.9L26.3 5.77a3.93 3.93 0 0 0-6.6 0l-6.43 9.13L6.1 25.7a3.93 3.93 0 0 0 0 4.38l6.44 8.98 1.18 1.65a3.93 3.93 0 0 0 6.44 0l1.18-1.65 1.66-2.32 5.19-7.25.07-.1 4.47-6.25a3.93 3.93 0 0 0 0-4.24z" fill="#CC785C"/>
         </svg>
-        <span style="font-size:10px;font-weight:500;color:#6E6E73;letter-spacing:0.01em;white-space:nowrap;">Claude</span>
+        <span style="font-size:10px;font-weight:500;color:#6E6E73;letter-spacing:0.01em;white-space:nowrap;">Anthropic Claude</span>
       </span>
     </a>
     <nav class="pn-nav-items" id="pn-nav-items">
@@ -626,6 +633,18 @@ window.__clerkOnLoad = function() {
     </div>
     <!-- Week capsules immediately after title -->
     <div id="wh-capsules-display" style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;"></div>
+  </div>
+
+  <!-- Center: Split-flap insight flipper -->
+  <div id="wh-flipper" style="flex:1;display:flex;align-items:center;justify-content:center;min-width:0;padding:0 8px;">
+    <div style="display:flex;align-items:center;gap:8px;overflow:hidden;max-width:480px;width:100%;">
+      <div style="width:0.5px;height:24px;background:rgba(0,0,0,0.07);flex-shrink:0;"></div>
+      <div id="wh-flipper-icon" style="flex-shrink:0;width:16px;height:16px;display:flex;align-items:center;justify-content:center;color:#6E6E73;"></div>
+      <div style="flex:1;min-width:0;position:relative;height:18px;overflow:hidden;">
+        <div id="wh-flipper-text" style="position:absolute;width:100%;font-size:11px;font-weight:500;color:#1C1C1E;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;transition:transform 0.28s cubic-bezier(0.4,0,0.2,1),opacity 0.28s ease;" title="Click to ask Pulse"></div>
+      </div>
+      <div style="width:0.5px;height:24px;background:rgba(0,0,0,0.07);flex-shrink:0;"></div>
+    </div>
   </div>
 
   <!-- Right: Actions -->
@@ -2652,6 +2671,9 @@ document.getElementById('btn-exec-csv')?.addEventListener('click', () => {
       const v = (active && active.getAttribute('data-opsview')) ? active.getAttribute('data-opsview') : 'overview';
       renderOpsInsights(v);
     } catch (e) {}
+
+  // ── Trigger flipper insight refresh for this week ──
+  try { refreshFlipperInsights(ws); } catch(e) { console.warn('[Flipper] refresh failed:', e); }
 };
 
 
@@ -5582,6 +5604,187 @@ window.__openPrebookModal = function(){
 <script src="/public/flow_live_additive.js?v=117" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 
+
+<!-- ── Week Hub Split-Flap Insight Flipper ── -->
+<script>
+(function(){
+  'use strict';
+
+  // ── State ──
+  var _flipperInsights = [];
+  var _flipperIdx = 0;
+  var _flipperTimer = null;
+  var _flipperLoading = false;
+  var _flipperWeek = null;
+
+  // Icons per category (inline SVG strings, 16x16)
+  var ICONS = {
+    warning: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#F5BD25" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+    check:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#639922" stroke-width="2" stroke-linecap="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
+    clock:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6E6E73" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+    truck:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#990033" stroke-width="2" stroke-linecap="round"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>',
+    box:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6E6E73" stroke-width="2" stroke-linecap="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>',
+    hold:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#E24B4A" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>',
+  };
+
+  // ── Render a single insight into the flipper with flip animation ──
+  function _showInsight(idx) {
+    var textEl = document.getElementById('wh-flipper-text');
+    var iconEl = document.getElementById('wh-flipper-icon');
+    if (!textEl || !iconEl) return;
+    var ins = _flipperInsights[idx];
+    if (!ins) return;
+
+    // Flip out current
+    textEl.classList.remove('wh-flip-in');
+    textEl.classList.add('wh-flip-out');
+
+    setTimeout(function() {
+      // Swap content
+      iconEl.innerHTML = ICONS[ins.icon] || ICONS.clock;
+      textEl.textContent = ins.text;
+      textEl.title = 'Ask Pulse: ' + ins.pulse_question;
+      textEl.onclick = function() { _fireIntoPulse(ins.pulse_question); };
+
+      // Flip in
+      textEl.classList.remove('wh-flip-out');
+      textEl.classList.add('wh-flip-in');
+    }, 280);
+  }
+
+  // ── Auto-rotate timer ──
+  function _startRotation() {
+    if (_flipperTimer) clearInterval(_flipperTimer);
+    if (_flipperInsights.length < 2) return;
+    _flipperTimer = setInterval(function() {
+      _flipperIdx = (_flipperIdx + 1) % _flipperInsights.length;
+      _showInsight(_flipperIdx);
+    }, 4000);
+  }
+
+  // ── Fire question into PULSE chat ──
+  function _fireIntoPulse(question) {
+    var input = document.getElementById('pulse-input-display');
+    if (input) { input.value = question; }
+    if (typeof togglePulse === 'function') togglePulse(true);
+    if (typeof pulseSend === 'function') pulseSend();
+  }
+
+  // ── Show loading shimmer while waiting for Claude ──
+  function _showLoading() {
+    var textEl = document.getElementById('wh-flipper-text');
+    var iconEl = document.getElementById('wh-flipper-icon');
+    if (!textEl || !iconEl) return;
+    iconEl.innerHTML = ICONS.clock;
+    textEl.textContent = 'Loading week insights…';
+    textEl.style.color = '#AEAEB2';
+    textEl.onclick = null;
+  }
+
+  // ── Fallback computed insights if Claude call fails ──
+  function _computeFallback(ws) {
+    var ins = [];
+    var plan = Array.isArray(window.state && window.state.plan) ? window.state.plan : [];
+    var recs = Array.isArray(window.state && window.state.records) ? window.state.records : [];
+    var receiving = Array.isArray(window.state && window.state.receiving) ? window.state.receiving : [];
+
+    var planned = plan.reduce(function(s,p){ return s + (Number(p.target_qty)||0); }, 0);
+    var applied = recs.reduce(function(s,r){ return s + (Number(r.units||r.total_units)||0); }, 0);
+    var pct = planned > 0 ? Math.round(applied/planned*100) : 0;
+    var poPlanned = new Set(plan.map(function(p){ return String(p.po_number||'').trim(); }).filter(Boolean)).size;
+    var poReceived = new Set(receiving.map(function(r){ return String(r.po_number||'').trim(); }).filter(Boolean)).size;
+    var remaining = Math.max(0, planned - applied);
+
+    if (planned > 0) ins.push({ icon: pct >= 80 ? 'check' : pct >= 50 ? 'clock' : 'warning', text: pct + '% complete · ' + applied.toLocaleString() + ' of ' + planned.toLocaleString() + ' units applied', pulse_question: 'What is the current completion status for week ' + ws + '?' });
+    if (poPlanned > 0) ins.push({ icon: poReceived >= poPlanned ? 'check' : 'warning', text: poReceived + ' of ' + poPlanned + ' POs received this week', pulse_question: 'Which POs have not been received yet for week ' + ws + '?' });
+    if (remaining > 0) ins.push({ icon: 'clock', text: remaining.toLocaleString() + ' units remaining · ' + Math.round(remaining/Math.max(1,7)) + '/day needed to finish', pulse_question: 'Are we on pace to complete the plan for week ' + ws + '?' });
+
+    // Transit from __FLOW_INTL_CTX__ if available
+    var ctx = window.__FLOW_INTL_CTX__;
+    if (ctx && Array.isArray(ctx.lanes)) {
+      var holds = ctx.lanes.filter(function(l){ return l.manual && l.manual.customs_hold; }).length;
+      var departed = ctx.lanes.filter(function(l){ return l.actuals && l.actuals.departedAt; }).length;
+      if (holds > 0) ins.push({ icon: 'hold', text: holds + ' lane' + (holds>1?'s':'') + ' on customs hold', pulse_question: 'Which lanes have a customs hold for week ' + ws + '?' });
+      else if (departed > 0) ins.push({ icon: 'truck', text: departed + ' of ' + ctx.lanes.length + ' lanes departed · transit in progress', pulse_question: 'What is the transit status for week ' + ws + '?' });
+    }
+
+    return ins.length ? ins : [{ icon: 'clock', text: 'Week ' + ws + ' · loading operational data…', pulse_question: 'Give me a summary of week ' + ws + ' operations.' }];
+  }
+
+  // ── Main: fetch insights from /pulse/chat ──
+  window.refreshFlipperInsights = async function(ws) {
+    if (_flipperLoading) return;
+    if (_flipperWeek === ws && _flipperInsights.length) return; // already loaded for this week
+    _flipperLoading = true;
+    _flipperWeek = ws;
+
+    if (_flipperTimer) { clearInterval(_flipperTimer); _flipperTimer = null; }
+    _showLoading();
+
+    // Ensure pulse context is loaded first (it's cached after first call)
+    try { if (typeof pulseLoadContext === 'function') await pulseLoadContext(); } catch(_) {}
+
+    try {
+      var apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
+      var token = null;
+      if (window.Clerk?.session) { try { token = await window.Clerk.session.getToken(); } catch(_) {} }
+
+      var facility = ((window.state?.plan)||[]).map(function(p){ return String(p.facility_name||p.facility||'').trim(); }).find(Boolean) || String(window.state?.facility||'').trim() || '';
+
+      var prompt = 'Generate exactly 5 short operational insight lines for the Week Hub header display for week ' + ws + '. '
+        + 'Cover VAS processing, Receiving, Transit & Clearing, Last Mile, and one overall risk or highlight. '
+        + 'Each insight must be under 12 words. Be specific — use real numbers from the data. '
+        + 'Return ONLY a JSON array of 5 objects, no markdown, no explanation. '
+        + 'Each object must have exactly these fields: '
+        + '"text" (the short insight string, under 12 words), '
+        + '"icon" (one of: warning, check, clock, truck, box, hold), '
+        + '"pulse_question" (a full natural question a user would ask about this insight, under 20 words). '
+        + 'Example: [{"text":"74% VAS complete · 1,161 units remaining","icon":"clock","pulse_question":"What is the current VAS completion status and which POs are behind?"}]';
+
+      var resp = await fetch(apiBase + '/pulse/chat', {
+        method: 'POST',
+        headers: Object.assign({'Content-Type':'application/json'}, token ? {'Authorization':'Bearer '+token} : {}),
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: prompt }],
+          pulseContext: window._pulseSessionContext || null,
+          currentWeek: { facility: facility, week_start: ws },
+        })
+      });
+
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      var data = await resp.json();
+      var raw = data.reply || '';
+      var clean = raw.replace(/^```json\s*/,'').replace(/```\s*$/,'').trim();
+      var parsed = JSON.parse(clean);
+
+      if (!Array.isArray(parsed) || !parsed.length) throw new Error('empty array');
+
+      _flipperInsights = parsed;
+      _flipperIdx = 0;
+
+      // Reset text color
+      var textEl = document.getElementById('wh-flipper-text');
+      if (textEl) textEl.style.color = '';
+
+      _showInsight(0);
+      _startRotation();
+      console.log('[Flipper] loaded', _flipperInsights.length, 'insights for week', ws);
+
+    } catch(e) {
+      console.warn('[Flipper] Claude call failed, using fallback:', e.message);
+      _flipperInsights = _computeFallback(ws);
+      _flipperIdx = 0;
+      var textEl = document.getElementById('wh-flipper-text');
+      if (textEl) textEl.style.color = '';
+      _showInsight(0);
+      _startRotation();
+    } finally {
+      _flipperLoading = false;
+    }
+  };
+
+})();
+</script>
 
 <!-- Pulse Bar -->
 <div class="pulse-panel" id="pulse-panel">
