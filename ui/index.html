@@ -289,7 +289,10 @@ window.__clerkOnLoad = function() {
       <div style="font-family:'ADLaM Display',serif;font-size:22px;line-height:1.1;">
         <span style="color:#1C1C1E;">VelOzity</span><span style="color:#990033;"> Pinpoint</span>
       </div>
-      <div style="font-size:11px;color:#AEAEB2;margin-top:8px;letter-spacing:0.08em;text-transform:uppercase;">Every Unit. Every Step.</div>
+      <div style="display:flex;align-items:center;gap:5px;margin-top:8px;">
+        <svg width="11" height="11" viewBox="0 0 46 46" fill="none" style="opacity:0.4;flex-shrink:0;"><path d="M32.73 14.9L26.3 5.77a3.93 3.93 0 0 0-6.6 0l-6.43 9.13L6.1 25.7a3.93 3.93 0 0 0 0 4.38l6.44 8.98 1.18 1.65a3.93 3.93 0 0 0 6.44 0l1.18-1.65 1.66-2.32 5.19-7.25.07-.1 4.47-6.25a3.93 3.93 0 0 0 0-4.24z" fill="#CC785C"/></svg>
+        <span style="font-size:10px;color:#AEAEB2;letter-spacing:0.07em;text-transform:uppercase;">Powered by Anthropic Claude</span>
+      </div>
     </div>
     <div id="clerk-signin-mount"></div>
     <div style="font-size:10px;color:#C7C7CC;margin-top:24px;line-height:1.7;">
@@ -308,7 +311,7 @@ window.__clerkOnLoad = function() {
         <span style="display:block;font-size:clamp(36px,4vw,56px);color:#990033;letter-spacing:-0.02em;line-height:1.05;">Pinpoint</span>
       </div>
       <div style="display:flex;flex-direction:column;align-items:center;gap:10px;">
-        <div style="font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:0.22em;text-transform:uppercase;">Every Unit. Every Step.</div>
+        <div style="font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:0.22em;text-transform:uppercase;display:none;"></div>
         <div style="display:flex;align-items:center;justify-content:center;gap:10px;">
           <!-- Constant pulse orb -->
           <div style="position:relative;width:20px;height:20px;flex-shrink:0;">
@@ -462,7 +465,7 @@ window.__clerkOnLoad = function() {
   .pn-brand{font-family:'ADLaM Display',serif;font-size:17px;white-space:nowrap;text-decoration:none;display:flex;align-items:center;gap:0;}
   .pn-brand-v{color:#1C1C1E;}
   .pn-brand-p{color:#990033;}
-  .pn-nav-items{display:flex;align-items:center;gap:2px;padding:4px;background:#F5F5F7;border-radius:10px;border:0.5px solid rgba(0,0,0,0.06);margin-left:32%;}
+  .pn-nav-items{display:flex;align-items:center;gap:2px;padding:4px;background:#F5F5F7;border-radius:10px;border:0.5px solid rgba(0,0,0,0.06);}
   .pn-nav-item{font-size:12px;font-weight:500;color:#6E6E73;padding:6px 14px;border-radius:7px;text-decoration:none;transition:background .15s,color .15s;white-space:nowrap;cursor:pointer;}
   .pn-nav-item.active{background:#990033;color:#fff;box-shadow:0 2px 8px rgba(153,0,51,0.25);}
   .pn-nav-item:hover:not(.active){background:rgba(0,0,0,0.04);color:#1C1C1E;}
@@ -637,13 +640,13 @@ window.__clerkOnLoad = function() {
 
   <!-- Center: Split-flap insight flipper -->
   <div id="wh-flipper" style="flex:1;display:flex;align-items:center;justify-content:center;min-width:0;padding:0 8px;">
-    <div style="display:flex;align-items:center;gap:8px;overflow:hidden;max-width:480px;width:100%;">
-      <div style="width:0.5px;height:24px;background:rgba(0,0,0,0.07);flex-shrink:0;"></div>
-      <div id="wh-flipper-icon" style="flex-shrink:0;width:16px;height:16px;display:flex;align-items:center;justify-content:center;color:#6E6E73;"></div>
-      <div style="flex:1;min-width:0;position:relative;height:18px;overflow:hidden;">
-        <div id="wh-flipper-text" style="position:absolute;width:100%;font-size:11px;font-weight:500;color:#1C1C1E;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;transition:transform 0.28s cubic-bezier(0.4,0,0.2,1),opacity 0.28s ease;" title="Click to ask Pulse"></div>
+    <div style="display:flex;align-items:center;justify-content:center;gap:10px;overflow:hidden;max-width:560px;width:100%;">
+      <div style="width:0.5px;height:28px;background:rgba(0,0,0,0.07);flex-shrink:0;"></div>
+      <div id="wh-flipper-icon" style="flex-shrink:0;width:18px;height:18px;display:flex;align-items:center;justify-content:center;color:#6E6E73;"></div>
+      <div style="flex:1;min-width:0;position:relative;height:22px;overflow:hidden;">
+        <div id="wh-flipper-text" style="position:absolute;width:100%;font-size:15.4px;font-weight:500;color:#1C1C1E;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;text-align:center;transition:transform 0.28s cubic-bezier(0.4,0,0.2,1),opacity 0.28s ease;" title="Click to ask Pulse"></div>
       </div>
-      <div style="width:0.5px;height:24px;background:rgba(0,0,0,0.07);flex-shrink:0;"></div>
+      <div style="width:0.5px;height:28px;background:rgba(0,0,0,0.07);flex-shrink:0;"></div>
     </div>
   </div>
 
