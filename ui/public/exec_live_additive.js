@@ -344,9 +344,118 @@
   function _renderTTLChart(labels) {
     const container = el('chart-ttl'); if (!container) return;
     const W = container.offsetWidth || 600, H = 200;
-    const pad = {t:20, b:36, l:8, r:120};
+    const pad = {t:20, b:36, l:8, r:160};
     const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b;
     const n = _weeks.length; if (!n) { container.innerHTML=''; return; }
+
+    const SEG1_COL = '#C8F902';
+    const SEG2_COL = '#8B5CF6';
+    const SEG3_COL = '#06B6D4';
+    const EMPTY_COL= '#F0F0F2';
+
+    const totals = _weeks.map(w => {
+      const s1 = w.avg_days_to_apply || 0;
+      const s2 = w.avg_days_vas_to_eta || 0;
+      const s3 = w.avg_days_eta_to_delivery || 0;
+      return s1 + s2 + s3;
+    });
+    const maxDays = Math.max(...totals, 1);
+
+    const rowH = Math.floor((cH) / n);
+    const rowPad = Math.max(3, Math.floor(rowH * 0.18));
+
+    let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`;
+
+    for (let i=1; i<=4; i++) {
+      const gx = pad.l + (i/4)*cW;
+      svg += `<line x1="${gx}" y1="${pad.t}" x2="${gx}" y2="${pad.t+cH}" stroke="rgba(0,0,0,0.05)" stroke-width="1"/>`;
+      const v = Math.round(maxDays*(i/4));
+      svg += `<text x="${gx}" y="${pad.t-4}" font-size="9" fill="#AEAEB2" text-anchor="middle">${v}d</text>`;
+    }
+
+    _weeks.forEach((w, i) => {
+      const y = pad.t + i * rowH + rowPad;
+      const barH = rowH - rowPad*2;
+      const s1 = w.avg_days_to_apply || 0;
+      const s2 = w.avg_days_vas_to_eta || 0;
+      const s3 = w.avg_days_eta_to_delivery || 0;
+      const total = s1 + s2 + s3;
+      const label = labels[i];
+
+      if (total === 0 && !s1 && !s2 && !s3) {
+        svg += `<rect x="${pad.l}" y="${y}" width="${cW}" height="${barH}" rx="4" fill="${EMPTY_COL}"/>`;
+        svg += `<text x="${pad.l + cW/2}" y="${y + barH/2 + 3}" font-size="9" fill="#AEAEB2" text-anchor="middle">Data pending</text>`;
+        // Days col (empty) + Date col
+        svg += `<text x="${W - pad.r + 8}" y="${y + barH/2 + 3}" font-size="9" fill="#AEAEB2">—</text>`;
+        svg += `<text x="${W - 6}" y="${y + barH/2 + 3}" font-size="9" fill="#AEAEB2" text-anchor="end">${label}</text>`;
+        return;
+      }
+
+      let curX = pad.l;
+
+      if (s1) {
+        const segW = (s1 / maxDays) * cW;
+        svg += `<rect x="${pad.l}" y="${y}" width="${segW}" height="${barH}" rx="4" fill="${SEG1_COL}" opacity="0.9"/>`;
+        svg += `<rect x="${pad.l + segW - 4}" y="${y}" width="4" height="${barH}" fill="${SEG1_COL}" opacity="0.9"/>`;
+        if (segW > 22) svg += `<text x="${pad.l + segW/2}" y="${y + barH/2 + 3}" font-size="9" font-weight="600" fill="#1C1C1E" text-anchor="middle">${s1.toFixed(1)}d</text>`;
+        curX = pad.l + segW;
+      }
+      if (s2) {
+        const segW = (s2 / maxDays) * cW;
+        svg += `<rect x="${curX}" y="${y}" width="${segW}" height="${barH}" fill="${SEG2_COL}" opacity="0.9"/>`;
+        if (segW > 22) svg += `<text x="${curX + segW/2}" y="${y + barH/2 + 3}" font-size="9" font-weight="600" fill="#fff" text-anchor="middle">${s2.toFixed(1)}d</text>`;
+        curX += segW;
+      }
+      if (s3) {
+        const segW = (s3 / maxDays) * cW;
+        svg += `<rect x="${curX}" y="${y}" width="${segW}" height="${barH}" rx="0 4 4 0" fill="${SEG3_COL}" opacity="0.9"/>`;
+        svg += `<rect x="${curX}" y="${y}" width="4" height="${barH}" fill="${SEG3_COL}" opacity="0.9"/>`;
+        if (segW > 22) svg += `<text x="${curX + segW/2}" y="${y + barH/2 + 3}" font-size="9" font-weight="600" fill="#fff" text-anchor="middle">${s3.toFixed(1)}d</text>`;
+        curX += segW;
+      }
+
+      if (!s2 && s1) {
+        const ghostX = curX;
+        const ghostW = Math.min(40, cW - (curX - pad.l));
+        if (ghostW > 0) {
+          svg += `<rect x="${ghostX}" y="${y}" width="${ghostW}" height="${barH}" fill="${EMPTY_COL}" rx="0 2 2 0"/>`;
+          svg += `<text x="${ghostX + ghostW/2}" y="${y + barH/2 + 3}" font-size="8" fill="#AEAEB2" text-anchor="middle">?</text>`;
+        }
+      }
+
+      // Two separate columns: total days | date label
+      const totalStr = total > 0 ? total.toFixed(1)+'d' : '—';
+      const daysColX = W - pad.r + 8;       // days value — just after bar
+      const dateColX = W - 6;               // date — pinned to far right edge
+      svg += `<text x="${daysColX}" y="${y + barH/2 + 3}" font-size="9" font-weight="600" fill="#1C1C1E">${totalStr}</text>`;
+      svg += `<text x="${dateColX}" y="${y + barH/2 + 3}" font-size="9" fill="#AEAEB2" text-anchor="end">${label}</text>`;
+    });
+
+    const legendY = H - 8;
+    const items = [
+      {col: SEG1_COL, label: 'Receiving → VAS'},
+      {col: SEG2_COL, label: 'VAS → ETA FC'},
+      {col: SEG3_COL, label: 'ETA FC → Delivery'},
+    ];
+    let lx = pad.l;
+    items.forEach(item => {
+      svg += `<rect x="${lx}" y="${legendY-7}" width="10" height="6" rx="2" fill="${item.col}"/>`;
+      svg += `<text x="${lx+14}" y="${legendY}" font-size="9" fill="#6E6E73">${item.label}</text>`;
+      lx += 115;
+    });
+
+    svg += '</svg>';
+    container.innerHTML = svg;
+
+    const ttlSummary = el('exec-ttl-summary');
+    if (ttlSummary) {
+      const avgTotal = _weeks.reduce((s,w)=>{
+        const t=(w.avg_days_to_apply||0)+(w.avg_days_vas_to_eta||0)+(w.avg_days_eta_to_delivery||0);
+        return s+t;
+      }, 0) / Math.max(_weeks.filter(w=>w.avg_days_to_apply).length, 1);
+      ttlSummary.textContent = avgTotal > 0 ? `avg ${avgTotal.toFixed(1)}d end-to-end` : 'segments populate as data is entered';
+    }
+  }
 
     const SEG1_COL = '#C8F902';    // Receiving → VAS (brand green)
     const SEG2_COL = '#8B5CF6';    // VAS → ETA FC (violet/purple)
