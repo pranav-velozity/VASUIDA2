@@ -2372,7 +2372,13 @@ function computeManualNodeStatuses(ws, tz) {
       const now = new Date();
       const day = Math.floor(daysBetween(anchor, now)) + 1;
       const pct = clamp(daysBetween(anchor, now) / 24, 0, 1);
-      el.textContent = `Day ${Math.max(1, day)} / 24 (baseline)`;
+      // Week date label e.g. "March 16th · Week 12"
+      const wsDate = new Date(ws + 'T00:00:00');
+      const monthName = wsDate.toLocaleString('en-US', { month: 'long' });
+      const dayNum = wsDate.getDate();
+      const suffix = dayNum === 1 ? 'st' : dayNum === 2 ? 'nd' : dayNum === 3 ? 'rd' : 'th';
+      const weekNum = (() => { const d = new Date(Date.UTC(wsDate.getFullYear(), wsDate.getMonth(), wsDate.getDate())); d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay()||7)); const y = d.getUTCFullYear(); return Math.ceil((((d-new Date(Date.UTC(y,0,1)))/86400000)+1)/7); })();
+      el.textContent = `${monthName} ${dayNum}${suffix} · Week ${weekNum} · Day ${Math.max(1, day)} / 24`;
     } catch {
       el.textContent = '';
     }
