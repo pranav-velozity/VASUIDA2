@@ -546,7 +546,7 @@ window.__clerkOnLoad = function() {
         <svg width="14" height="14" viewBox="0 0 46 46" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;opacity:0.6;">
           <path d="M32.73 14.9L26.3 5.77a3.93 3.93 0 0 0-6.6 0l-6.43 9.13L6.1 25.7a3.93 3.93 0 0 0 0 4.38l6.44 8.98 1.18 1.65a3.93 3.93 0 0 0 6.44 0l1.18-1.65 1.66-2.32 5.19-7.25.07-.1 4.47-6.25a3.93 3.93 0 0 0 0-4.24z" fill="#CC785C"/>
         </svg>
-        <span style="font-size:10px;font-weight:500;color:#6E6E73;letter-spacing:0.01em;white-space:nowrap;">Anthropic Claude</span>
+        <span style="font-size:10px;font-weight:500;color:#6E6E73;letter-spacing:0.01em;white-space:nowrap;">Powered by Anthropic Claude</span>
       </span>
     </a>
     <nav class="pn-nav-items" id="pn-nav-items">
@@ -1597,7 +1597,7 @@ function round3(n){ return Math.round((Number(n)||0) * 1000) / 1000; }
 
 
 async function downloadAppliedWeek() {
-  const ws = state.weekStart;
+  const ws = window._reportsWeek || state.weekStart;
   const weDate = new Date(ws);
   weDate.setDate(weDate.getDate() + 6);
   const we = iso(weDate);
@@ -2464,34 +2464,33 @@ renderInsights(state.records, state.plan, state.weekStart);
     // download buttons
     const __btnDlPosku = $('#btn-dl-posku');
     if(__btnDlPosku) __btnDlPosku.onclick=async()=>{
-      // Summary-only: pull PO+SKU rollup (tiny compared to raw records)
-      // so the POSKU discrepancy CSV stays accurate at very high volumes.
-      const p = new URLSearchParams({ from: ws, to: we, status: 'complete' });
+      const dlWs = window._reportsWeek || state.weekStart;
+      const dlWe = (() => { try { const d=new Date(dlWs); d.setDate(d.getDate()+6); return d.toISOString().slice(0,10); } catch{ return dlWs; } })();
+      const p = new URLSearchParams({ from: dlWs, to: dlWe, status: 'complete' });
       const resp = await api(`/summary/po_sku?${p.toString()}`).catch(()=>({}));
       const rows=buildDiscrepancyPOSKU(state.plan, resp?.rows || []);
       const csv=toCSV(
   ['PO','SKU','Supplier Name','Facility Name','Freight Type','Zendesk Ticket #','Planned','Applied','Discrepancy (Applied - Planned)'],
   rows
 );
-
-      const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download=`po_sku_discrepancy_${ws}.csv`; a.click();
+      const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download=`po_sku_discrepancy_${dlWs}.csv`; a.click();
       setTimeout(()=>URL.revokeObjectURL(a.href),250);
     };
     const __btnDlPo = $('#btn-dl-po');
     if(__btnDlPo) __btnDlPo.onclick=()=>{
+      const dlWs = window._reportsWeek || state.weekStart;
       const rows=buildDiscrepancyPO(poRows, state.plan);
 const csv=toCSV(
   ['PO','SKU','Supplier Name','Facility Name','Freight Type','Zendesk Ticket #','Mobile Bin Count','Mobile Bins','Planned','Applied','Discrepancy (Applied - Planned)'],
   rows
 );
-      const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download=`po_discrepancy_${ws}.csv`; a.click();
+      const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download=`po_discrepancy_${dlWs}.csv`; a.click();
       setTimeout(()=>URL.revokeObjectURL(a.href),250);
     };
 
 const __btnShipSummary = $('#btn-ship-summary');
 if(__btnShipSummary) __btnShipSummary.onclick = () => {
-  // Summary-only download (server-side aggregation)
-  const ws = state.weekStart;
+  const ws = window._reportsWeek || state.weekStart;
   api(`/summary/shipment_summary?weekStart=${encodeURIComponent(ws)}`)
     .then(resp => {
       const rows = (resp && resp.rows) ? resp.rows : [];
@@ -2521,8 +2520,7 @@ if(__btnShipSummary) __btnShipSummary.onclick = () => {
 
 const __btnShipDetail = $('#btn-ship-detail');
 if(__btnShipDetail) __btnShipDetail.onclick = () => {
-  // Summary-only download (server-side aggregation)
-  const ws = state.weekStart;
+  const ws = window._reportsWeek || state.weekStart;
   api(`/summary/shipment_detail?weekStart=${encodeURIComponent(ws)}`)
     .then(resp => {
       const rows = (resp && resp.rows) ? resp.rows : [];
@@ -3420,7 +3418,7 @@ async function downloadMobileBins(){
   try{
     // Fetch bins if not loaded (e.g. called from Reports page directly)
     let bins = Array.isArray(state.bins) ? state.bins : [];
-    const ws = state.weekStart || '';
+    const ws = window._reportsWeek || state.weekStart || '';
     if(!bins.length && ws){
       try{
         const r = await api(`/bins/weeks/${encodeURIComponent(ws)}`);
@@ -6050,12 +6048,17 @@ document.addEventListener('DOMContentLoaded', function(){
     if(h==='#reports'){
       _pnHideAll();
       _pnSetHash('#reports');
+      // Sync reports week to current Week Hub selection on every visit
+      window._reportsWeek = state.weekStart || window._reportsWeek || '';
       let rp=document.getElementById('page-reports');
       if(!rp){
         rp=document.createElement('section');
         rp.id='page-reports';
         const main=document.querySelector('main.vo-wrap')||document.querySelector('main');
         if(main) main.appendChild(rp);
+        renderReportsPage(rp);
+      } else {
+        // Re-render capsules with updated week
         renderReportsPage(rp);
       }
       rp.classList.remove('hidden');
@@ -6163,7 +6166,7 @@ function syncPinpointNav(hash){
 // ── Reports page renderer ──
 
 async function downloadConsolidatedReport() {
-  const ws = state.weekStart || '';
+  const ws = window._reportsWeek || state.weekStart || '';
   const we = (() => { try { const d=new Date(ws); d.setDate(d.getDate()+6); return d.toISOString().slice(0,10); } catch{ return ws; } })();
   if(!ws){ alert('No week selected. Please navigate to Week Hub first.'); return; }
 
@@ -6284,7 +6287,7 @@ async function downloadConsolidatedReport() {
 
 
 async function downloadPOContainer() {
-  const ws = state.weekStart || '';
+  const ws = window._reportsWeek || state.weekStart || '';
   if(!ws){ alert('No week selected.'); return; }
   try {
     const plan = Array.isArray(state.plan) ? state.plan : [];
@@ -6367,7 +6370,7 @@ async function downloadPOContainer() {
 }
 
 async function downloadTransitClearing() {
-  const ws = state.weekStart || '';
+  const ws = window._reportsWeek || state.weekStart || '';
   if(!ws){ alert('No week selected.'); return; }
   try {
     const plan = Array.isArray(state.plan) ? state.plan : [];
@@ -6472,13 +6475,35 @@ async function downloadTransitClearing() {
 }
 
 function renderReportsPage(container){
+  // Reports page has its own week selection — defaults to state.weekStart, never mutates it
+  if (!window._reportsWeek) window._reportsWeek = state.weekStart || '';
+
   container.innerHTML = `
   <div style="padding:4px 0 20px;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
       <div style="font-size:22px;font-weight:600;color:#1C1C1E;letter-spacing:-0.02em;">Reports &amp; Downloads</div>
       <button id="btn-consolidated-download" onclick="downloadConsolidatedReport()" style="display:flex;align-items:center;gap:8px;background:#1C1C1E;color:#fff;border:none;border-radius:9px;padding:10px 18px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;">
         <svg width="13" height="13" viewBox="0 0 12 12" fill="none"><path d="M6 1v7M3 5l3 3 3-3M1 10h10" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
         Download All (Excel)
+      </button>
+    </div>
+
+    <!-- Week selector — same position and style as Week Hub header tile -->
+    <div id="rp-week-header" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:8px 16px;display:flex;align-items:center;gap:12px;margin-bottom:14px;">
+      <div style="flex-shrink:0;">
+        <div style="font-size:13px;font-weight:500;color:#1C1C1E;letter-spacing:-0.01em;">Reporting week</div>
+        <div id="rp-week-label" style="font-size:10px;color:#AEAEB2;margin-top:1px;"></div>
+      </div>
+      <div style="width:0.5px;height:28px;background:rgba(0,0,0,0.07);flex-shrink:0;"></div>
+      <!-- Prev arrow -->
+      <button id="rp-prev" style="flex-shrink:0;width:26px;height:26px;border-radius:7px;border:0.5px solid rgba(0,0,0,0.1);background:#F5F5F7;cursor:pointer;display:flex;align-items:center;justify-content:center;font-family:inherit;" title="Earlier week">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6E6E73" stroke-width="2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <!-- Capsules -->
+      <div id="rp-capsules" style="display:flex;gap:4px;flex-wrap:nowrap;align-items:center;"></div>
+      <!-- Next arrow -->
+      <button id="rp-next" style="flex-shrink:0;width:26px;height:26px;border-radius:7px;border:0.5px solid rgba(0,0,0,0.1);background:#F5F5F7;cursor:pointer;display:flex;align-items:center;justify-content:center;font-family:inherit;" title="Later week">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6E6E73" stroke-width="2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg>
       </button>
     </div>
 
@@ -6564,6 +6589,74 @@ function renderReportsPage(container){
       else console.warn('[Reports] proxy target not found:', proxyId);
     });
   });
+
+  // ── Reports week capsule selector ──
+  function rpRenderCapsules() {
+    const capContainer = container.querySelector('#rp-capsules');
+    const label = container.querySelector('#rp-week-label');
+    if (!capContainer) return;
+    capContainer.innerHTML = '';
+
+    const base = window._reportsWeek || state.weekStart || '';
+    if (label) label.textContent = 'Downloading data for week of ' + base;
+
+    // Show 5 weeks centred on _reportsWeek
+    const offsets = [-14, -7, 0, 7, 14];
+    offsets.forEach(n => {
+      const id = addDaysISO(base, n);
+      const d = new Date(id + 'T00:00:00');
+      const day = String(d.getDate()).padStart(2, '0');
+      const mon = d.toLocaleString('en-US', { month: 'short' }).toUpperCase().slice(0, 3);
+      const isActive = id === base;
+
+      // Get totals from state if available
+      const stats = (id === state.weekStart)
+        ? { planned: (state.plan||[]).reduce((s,p)=>s+(Number(p.target_qty)||0),0),
+            applied: (state.records||[]).reduce((s,r)=>s+(Number(r.units||r.total_units)||0),0) }
+        : { planned: 0, applied: 0 };
+      const p = stats.planned > 0 ? Math.min(100, Math.round(stats.applied*100/stats.planned)) : 0;
+
+      const R = 26, CX = 29, CY = 29;
+      const circ = 2 * Math.PI * R;
+      const offset = circ * (1 - p / 100);
+
+      const btn = document.createElement('button');
+      btn.className = 'wkcap' + (isActive ? ' active' : '');
+      btn.setAttribute('data-rp-week', id);
+      btn.innerHTML = `
+        <svg class="cap-ring" viewBox="0 0 58 58">
+          <circle class="cap-ring-track" cx="${CX}" cy="${CY}" r="${R}"/>
+          <circle class="cap-ring-prog" cx="${CX}" cy="${CY}" r="${R}"
+            stroke-dasharray="${circ.toFixed(1)}"
+            stroke-dashoffset="${offset.toFixed(1)}"
+            style="transform:rotate(-90deg);transform-origin:${CX}px ${CY}px;${p===0?'opacity:0.3':''}"/>
+        </svg>
+        <div class="cap-inner">
+          <span class="m">${mon}</span>
+          <span class="d">${day}</span>
+          <span class="t">${stats.planned ? fmtInt(stats.planned)+'u' : '—'}</span>
+        </div>`;
+      btn.onclick = () => {
+        window._reportsWeek = id;
+        rpRenderCapsules();
+      };
+      capContainer.appendChild(btn);
+    });
+  }
+
+  // Prev / next shift the window by 7 days
+  const prevBtn = container.querySelector('#rp-prev');
+  const nextBtn = container.querySelector('#rp-next');
+  if (prevBtn) prevBtn.onclick = () => {
+    window._reportsWeek = addDaysISO(window._reportsWeek || state.weekStart, -7);
+    rpRenderCapsules();
+  };
+  if (nextBtn) nextBtn.onclick = () => {
+    window._reportsWeek = addDaysISO(window._reportsWeek || state.weekStart, 7);
+    rpRenderCapsules();
+  };
+
+  rpRenderCapsules();
 }
 
 function reportCard(name, desc, fmt, role, proxyId){
