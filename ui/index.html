@@ -6286,94 +6286,207 @@ async function downloadConsolidatedReport() {
 }
 
 
+// ── Shared: fetch and merge flow_week data (lanes + containers) for a given week ──
+async function _fetchFlowData(ws) {
+  const ctx = window.__FLOW_INTL_CTX__;
+  if (ctx && ctx.ws === ws && Array.isArray(ctx.lanes)) {
+    return { lanes: ctx.lanes, containers: Array.isArray(ctx.weekContainers) ? ctx.weekContainers : [] };
+  }
+  // Fallback: fetch from backend
+  const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
+  let token = null;
+  if(window.Clerk?.session){ try{ token = await window.Clerk.session.getToken(); }catch(_){} }
+  const resp = await fetch(`${apiBase}/flow/week/${encodeURIComponent(ws)}/all`, {
+    headers: Object.assign({}, token ? {'Authorization':'Bearer '+token} : {})
+  });
+  if(!resp.ok) throw new Error('flow/week fetch failed: HTTP ' + resp.status);
+  const d = await resp.json();
+  const flowData = {};
+  for (const facVal of Object.values(d.facilities || {})) {
+    const fd = (facVal && typeof facVal.data === 'object') ? facVal.data : {};
+    for (const [k, v] of Object.entries(fd)) {
+      if (k === 'intl_lanes' && v && typeof v === 'object' && !Array.isArray(v)) {
+        flowData.intl_lanes = Object.assign({}, flowData.intl_lanes || {}, v);
+      } else { flowData[k] = v; }
+    }
+  }
+  const intl = (flowData.intl_lanes && typeof flowData.intl_lanes === 'object') ? flowData.intl_lanes : {};
+  const lanes = Object.entries(intl).map(([lk, manual]) => {
+    const parts = lk.split('||');
+    return { key: lk, supplier: parts[0]||'', zendesk: parts[1]||'', freight: parts[2]||'', manual: manual||{} };
+  });
+  const wc = flowData.intl_weekcontainers;
+  const containers = Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []);
+  return { lanes, containers };
+}
+
+// ── Shared: fetch applied units per PO×SKU from backend ──
+async function _fetchAppliedPOSKU(ws) {
+  const we = (() => { try { const d=new Date(ws); d.setDate(d.getDate()+6); return d.toISOString().slice(0,10); } catch{ return ws; } })();
+  const p = new URLSearchParams({ from: ws, to: we, status: 'complete' });
+  const resp = await api(`/summary/po_sku?${p.toString()}`).catch(()=>({ rows: [] }));
+  // returns { rows: [{po, sku, units}] }
+  return Array.isArray(resp?.rows) ? resp.rows : [];
+}
+
+// ── Shared: fetch bins enriched with PO from backend ──
+async function _fetchBinsForWeek(ws) {
+  try {
+    const r = await api(`/bins/weeks/${encodeURIComponent(ws)}`);
+    return Array.isArray(r) ? r : (r?.bins || []);
+  } catch(e) { console.warn('[download] bins fetch failed', e); return []; }
+}
+
 async function downloadPOContainer() {
   const ws = window._reportsWeek || state.weekStart || '';
   if(!ws){ alert('No week selected.'); return; }
   try {
     const plan = Array.isArray(state.plan) ? state.plan : [];
 
-    // Source from __FLOW_INTL_CTX__ (populated from backend by flow module)
-    // Fall back to fetching /flow/week directly if flow hasn't rendered yet
-    let lanes = [];
-    let containers = [];
-    const ctx = window.__FLOW_INTL_CTX__;
-    if (ctx && ctx.ws === ws && Array.isArray(ctx.lanes)) {
-      lanes = ctx.lanes;
-      containers = Array.isArray(ctx.weekContainers) ? ctx.weekContainers : [];
-    } else {
-      // Fallback: fetch from backend directly
-      try {
-        const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
-        let token = null;
-        if(window.Clerk?.session){ try{ token = await window.Clerk.session.getToken(); }catch(_){} }
-        const facility = ((window.state?.plan)||[]).map(p=>String(p.facility_name||p.facility||'').trim()).find(Boolean)||'';
-        const resp = await fetch(`${apiBase}/flow/week/${encodeURIComponent(ws)}/all?facility=${encodeURIComponent(facility)}`, {
-          headers: Object.assign({}, token ? {'Authorization':'Bearer '+token} : {})
-        });
-        if(resp.ok){
-          const d = await resp.json();
-          const flowData = {};
-          for (const facVal of Object.values(d.facilities || {})) {
-            const fd = (facVal && typeof facVal.data === 'object') ? facVal.data : {};
-            for (const [k, v] of Object.entries(fd)) {
-              if (k === 'intl_lanes' && v && typeof v === 'object' && !Array.isArray(v)) {
-                flowData.intl_lanes = Object.assign({}, flowData.intl_lanes || {}, v);
-              } else { flowData[k] = v; }
-            }
-          }
-          const intl = flowData.intl_lanes && typeof flowData.intl_lanes === 'object' ? flowData.intl_lanes : {};
-          lanes = Object.entries(intl).map(([lk, manual]) => {
-            const parts = lk.split('||');
-            return { key: lk, supplier: parts[0]||'', zendesk: parts[1]||'', freight: parts[2]||'', manual: manual||{} };
-          });
-          const wc = flowData.intl_weekcontainers;
-          containers = Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []);
-        }
-      } catch(fe){ console.warn('[POContainer] fallback fetch failed', fe); }
+    // Fetch all three data sources in parallel
+    const [{ lanes, containers }, appliedRows, bins] = await Promise.all([
+      _fetchFlowData(ws),
+      _fetchAppliedPOSKU(ws),
+      _fetchBinsForWeek(ws),
+    ]);
+
+    if(!containers.length && !lanes.length){
+      alert('No container/lane data found for week ' + ws + '. Please ensure containers are configured in Transit & Clearing.');
+      return;
     }
 
-    const rows = [];
-    for(const c of containers){
-      const cid = String(c.container_id||c.container||'').trim() || '—';
-      const vessel = String(c.vessel||'').trim() || '—';
-      const size = String(c.size_ft||'').trim() ? String(c.size_ft)+'ft' : '—';
-      const laneKeys = Array.isArray(c.lane_keys) ? c.lane_keys : [];
-      const pos = String(c.pos||'').split(',').map(p=>p.trim()).filter(Boolean);
+    // ── Build lookup maps ──
 
-      if(!laneKeys.length && !pos.length){
-        rows.push({ 'Container / AWB': cid, 'Vessel': vessel, 'Size': size,
-          'Zendesk': '', 'Freight': '', 'Supplier': '', 'PO': '', 'SKU': '', 'Planned Units': '' });
+    // PO×SKU → applied units
+    const appliedMap = new Map(); // key: "PO||SKU" → units
+    const appliedByPO = new Map(); // key: "PO" → total units
+    for(const r of appliedRows){
+      const k = `${r.po}||${r.sku}`;
+      appliedMap.set(k, (appliedMap.get(k)||0) + Number(r.units||0));
+      appliedByPO.set(r.po, (appliedByPO.get(r.po)||0) + Number(r.units||0));
+    }
+
+    // PO → bins (Set of mobile_bin values)
+    const binsByPO = new Map();
+    for(const b of bins){
+      const po = String(b.po_number||'').trim();
+      if(!po) continue;
+      if(!binsByPO.has(po)) binsByPO.set(po, new Set());
+      binsByPO.get(po).add(String(b.mobile_bin||'').trim());
+    }
+
+    // Plan: PO → { supplier, zendesk, freight, skus[] }
+    const planByPO = new Map();
+    for(const p of plan){
+      const po = String(p.po_number||'').trim();
+      if(!po) continue;
+      if(!planByPO.has(po)) planByPO.set(po, {
+        supplier: String(p.supplier_name||'').trim(),
+        zendesk:  String(p.zendesk_ticket||'').trim(),
+        freight:  String(p.freight_type||'').trim(),
+        skus: new Set(),
+      });
+      const entry = planByPO.get(po);
+      if(p.sku_code) entry.skus.add(String(p.sku_code).trim());
+    }
+
+    // Lane key → { supplier, zendesk, freight, manual }
+    const laneByKey = new Map();
+    for(const l of lanes) laneByKey.set(l.key, l);
+
+    // Container → { cid, vessel, size, lane_keys, pos[] }
+    // Also build: zendesk → [container_ids]
+    const contList = containers.map(c => ({
+      cid:      String(c.container_id||c.container||'').trim(),
+      vessel:   String(c.vessel||'').trim(),
+      size:     String(c.size_ft||'').trim() ? String(c.size_ft)+'ft' : '',
+      laneKeys: Array.isArray(c.lane_keys) ? c.lane_keys : [],
+      pos:      String(c.pos||'').split(',').map(p=>p.trim()).filter(Boolean),
+    }));
+
+    const fmtDate = v => { if(!v) return ''; try{ return new Date(v).toISOString().slice(0,10); }catch{ return String(v); } };
+
+    // ── Sheet 1: By PO × SKU ──
+    const sheet1 = [];
+    for(const c of contList){
+      // Resolve POs for this container via lane_keys → zendesk → plan
+      const containerZendesks = new Set();
+      const containerPOs = new Set();
+      for(const lk of c.laneKeys){
+        const lane = laneByKey.get(lk);
+        if(lane?.zendesk) containerZendesks.add(lane.zendesk);
+        // Also add any POs directly listed in c.pos
+      }
+      for(const po of c.pos) containerPOs.add(po);
+      // Add POs from plan that match container's zendesks
+      for(const [po, meta] of planByPO.entries()){
+        if(containerZendesks.has(meta.zendesk)) containerPOs.add(po);
+      }
+
+      if(!containerPOs.size && !c.laneKeys.length){
+        sheet1.push({
+          'Container / AWB': c.cid, 'Vessel': c.vessel||'—', 'Size': c.size||'—',
+          'Zendesk': '', 'Supplier': '', 'Freight': '',
+          'PO': '', 'SKU': '', 'Mobile Bins': '', 'Applied Units': 0
+        });
         continue;
       }
 
-      for(const lk of laneKeys){
-        const parts = lk.split('||');
-        const supplier = parts[0]||'';
-        const zendesk = parts[1]||'';
-        const freight = parts[2]||'';
-        const lanePOs = plan.filter(p => {
-          const pz = String(p.zendesk_ticket||'').trim();
-          const pf = (p.freight_type||'').trim();
-          return pz === zendesk && pf === freight;
-        });
-        if(lanePOs.length){
-          for(const p of lanePOs){
-            rows.push({
-              'Container / AWB': cid, 'Vessel': vessel, 'Size': size,
-              'Zendesk': zendesk, 'Freight': freight, 'Supplier': p.supplier_name||supplier,
-              'PO': p.po_number||'', 'SKU': p.sku_code||'', 'Planned Units': Number(p.target_qty||0)
-            });
-          }
-        } else {
-          rows.push({ 'Container / AWB': cid, 'Vessel': vessel, 'Size': size,
-            'Zendesk': zendesk, 'Freight': freight, 'Supplier': supplier, 'PO': '', 'SKU': '', 'Planned Units': '' });
+      for(const po of containerPOs){
+        const meta = planByPO.get(po) || { supplier:'', zendesk:'', freight:'', skus: new Set() };
+        const skus = meta.skus.size ? Array.from(meta.skus) : [''];
+        const poBins = Array.from(binsByPO.get(po) || new Set()).join(', ');
+        for(const sku of skus){
+          const applied = sku ? (appliedMap.get(`${po}||${sku}`) || 0) : (appliedByPO.get(po) || 0);
+          sheet1.push({
+            'Container / AWB': c.cid,
+            'Vessel':          c.vessel||'—',
+            'Size':            c.size||'—',
+            'Zendesk':         meta.zendesk,
+            'Supplier':        meta.supplier,
+            'Freight':         meta.freight,
+            'PO':              po,
+            'SKU':             sku,
+            'Mobile Bins':     poBins,
+            'Applied Units':   applied,
+          });
         }
       }
     }
 
-    if(!rows.length){ alert('No container data found for week ' + ws + '. Please ensure containers are configured in Transit & Clearing.'); return; }
+    // ── Sheet 2: By PO (SKUs aggregated) ──
+    // Collapse sheet1 rows to PO level per container
+    const sheet2Map = new Map(); // key: "CID||PO"
+    for(const row of sheet1){
+      const k = `${row['Container / AWB']}||${row['PO']}`;
+      if(!sheet2Map.has(k)){
+        sheet2Map.set(k, {
+          'Container / AWB': row['Container / AWB'],
+          'Vessel':          row['Vessel'],
+          'Size':            row['Size'],
+          'Zendesk':         row['Zendesk'],
+          'Supplier':        row['Supplier'],
+          'Freight':         row['Freight'],
+          'PO':              row['PO'],
+          'SKUs':            new Set(),
+          'Mobile Bins':     row['Mobile Bins'],
+          'Applied Units':   0,
+        });
+      }
+      const entry = sheet2Map.get(k);
+      if(row['SKU']) entry['SKUs'].add(row['SKU']);
+      entry['Applied Units'] += Number(row['Applied Units']||0);
+    }
+    const sheet2 = Array.from(sheet2Map.values()).map(r => ({
+      ...r,
+      'SKUs': Array.from(r['SKUs']).join(', '),
+    }));
+
+    if(!sheet1.length){ alert('No data found for week ' + ws + '. Check containers are assigned to lanes in Transit & Clearing.'); return; }
+
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'PO Container AWB');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet1), 'By PO × SKU');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet2), 'By PO');
     XLSX.writeFile(wb, `PO_Container_AWB_${ws}.xlsx`);
   } catch(e){ console.error('PO Container download failed', e); alert('Download failed: '+(e.message||e)); }
 }
@@ -6384,108 +6497,170 @@ async function downloadTransitClearing() {
   try {
     const plan = Array.isArray(state.plan) ? state.plan : [];
 
-    // Source lanes and containers from __FLOW_INTL_CTX__ (backend-populated)
-    let lanes = [];
-    let containers = [];
-    const ctx = window.__FLOW_INTL_CTX__;
-    if (ctx && ctx.ws === ws && Array.isArray(ctx.lanes)) {
-      lanes = ctx.lanes;
-      containers = Array.isArray(ctx.weekContainers) ? ctx.weekContainers : [];
-    } else {
-      // Fallback: fetch from backend directly
-      try {
-        const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
-        let token = null;
-        if(window.Clerk?.session){ try{ token = await window.Clerk.session.getToken(); }catch(_){} }
-        const facility = ((window.state?.plan)||[]).map(p=>String(p.facility_name||p.facility||'').trim()).find(Boolean)||'';
-        const resp = await fetch(`${apiBase}/flow/week/${encodeURIComponent(ws)}/all?facility=${encodeURIComponent(facility)}`, {
-          headers: Object.assign({}, token ? {'Authorization':'Bearer '+token} : {})
-        });
-        if(resp.ok){
-          const d = await resp.json();
-          const flowData = {};
-          for (const facVal of Object.values(d.facilities || {})) {
-            const fd = (facVal && typeof facVal.data === 'object') ? facVal.data : {};
-            for (const [k, v] of Object.entries(fd)) {
-              if (k === 'intl_lanes' && v && typeof v === 'object' && !Array.isArray(v)) {
-                flowData.intl_lanes = Object.assign({}, flowData.intl_lanes || {}, v);
-              } else { flowData[k] = v; }
-            }
-          }
-          const intl = flowData.intl_lanes && typeof flowData.intl_lanes === 'object' ? flowData.intl_lanes : {};
-          lanes = Object.entries(intl).map(([lk, manual]) => {
-            const parts = lk.split('||');
-            return { key: lk, supplier: parts[0]||'', zendesk: parts[1]||'', freight: parts[2]||'', manual: manual||{} };
-          });
-          const wc = flowData.intl_weekcontainers;
-          containers = Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []);
-        }
-      } catch(fe){ console.warn('[TransitClearing] fallback fetch failed', fe); }
+    // Fetch all data sources in parallel
+    const [{ lanes, containers }, appliedRows, bins] = await Promise.all([
+      _fetchFlowData(ws),
+      _fetchAppliedPOSKU(ws),
+      _fetchBinsForWeek(ws),
+    ]);
+
+    if(!containers.length){
+      alert('No container data found for week ' + ws + '. Please ensure containers are configured in Transit & Clearing.');
+      return;
     }
 
-    const fmtDate = (v) => {
-      if(!v) return '';
-      try { return new Date(v).toISOString().slice(0,10); } catch{ return String(v); }
-    };
+    // ── Build lookup maps ──
 
-    // Build container lookup by lane key for easy join
-    const contByLane = new Map();
-    for(const c of containers){
-      const cid = String(c.container_id||c.container||'').trim();
-      const vessel = String(c.vessel||'').trim();
-      const size = String(c.size_ft||'').trim() ? String(c.size_ft)+'ft' : '';
-      for(const lk of (Array.isArray(c.lane_keys) ? c.lane_keys : [])){
-        if(!contByLane.has(lk)) contByLane.set(lk, []);
-        contByLane.get(lk).push({ cid, vessel, size });
-      }
+    // PO×SKU → applied units
+    const appliedByPO = new Map();
+    const skusByPO = new Map();
+    for(const r of appliedRows){
+      appliedByPO.set(r.po, (appliedByPO.get(r.po)||0) + Number(r.units||0));
+      if(!skusByPO.has(r.po)) skusByPO.set(r.po, new Set());
+      skusByPO.get(r.po).add(r.sku);
     }
 
-    const rows = [];
-    for(const lane of lanes){
-      const lk = lane.key || '';
-      const parts = lk.split('||');
-      const supplier = lane.supplier || parts[0] || '';
-      const zendesk  = lane.zendesk  || parts[1] || '';
-      const freight  = lane.freight  || parts[2] || '';
+    // PO → bins
+    const binsByPO = new Map();
+    for(const b of bins){
+      const po = String(b.po_number||'').trim();
+      if(!po) continue;
+      if(!binsByPO.has(po)) binsByPO.set(po, new Set());
+      binsByPO.get(po).add(String(b.mobile_bin||'').trim());
+    }
 
-      // Get manual dates — prefer lane.manual (from ctx) else from lane object directly
-      const manual = (lane.manual && typeof lane.manual === 'object') ? lane.manual : lane;
-
-      // POs for this lane
-      const lanePOs = [...new Set(plan
-        .filter(p => String(p.zendesk_ticket||'').trim() === zendesk && (p.freight_type||'').trim() === freight)
-        .map(p => p.po_number).filter(Boolean))];
-
-      // Containers for this lane
-      const laneConts = contByLane.get(lk) || [];
-      const contStr = laneConts.map(c => c.cid).filter(Boolean).join(', ') || '—';
-      const vesselStr = laneConts.map(c => c.vessel).filter(Boolean).join(', ') || '—';
-      const sizeStr = laneConts.map(c => c.size).filter(Boolean).join(', ') || '—';
-
-      rows.push({
-        'Zendesk': zendesk,
-        'Supplier': supplier,
-        'Freight': freight,
-        'POs': lanePOs.join(', '),
-        'Container / AWB': contStr,
-        'Vessel': vesselStr,
-        'Size': sizeStr,
-        'Shipment #': String(manual.shipmentNumber||manual.shipment||''),
-        'HBL': String(manual.hbl||''),
-        'MBL': String(manual.mbl||''),
-        'Packing List Ready': fmtDate(manual.packing_list_ready_at),
-        'Origin Customs Cleared': fmtDate(manual.origin_customs_cleared_at),
-        'Departed Origin': fmtDate(manual.departed_at),
-        'Arrived Destination': fmtDate(manual.arrived_at),
-        'Dest Customs Cleared': fmtDate(manual.dest_customs_cleared_at),
-        'ETA FC': fmtDate(manual.eta_fc),
-        'Latest Arrival Date': fmtDate(manual.latest_arrival_date),
-        'Customs Hold': manual.customs_hold ? 'Yes' : 'No',
-        'Note': String(manual.note||'')
+    // Plan: PO → { supplier, zendesk, freight }
+    const planByPO = new Map();
+    for(const p of plan){
+      const po = String(p.po_number||'').trim();
+      if(!po || planByPO.has(po)) continue;
+      planByPO.set(po, {
+        supplier: String(p.supplier_name||'').trim(),
+        zendesk:  String(p.zendesk_ticket||'').trim(),
+        freight:  String(p.freight_type||'').trim(),
       });
     }
 
-    if(!rows.length){ alert('No transit lane data found for week ' + ws + '. Please ensure lanes are configured in Transit & Clearing.'); return; }
+    // Lane key → manual dates
+    const laneByKey = new Map();
+    for(const l of lanes) laneByKey.set(l.key, l);
+
+    const fmtDate = v => { if(!v) return ''; try{ return new Date(v).toISOString().slice(0,10); }catch{ return String(v); } };
+
+    // ── Build one row per Container ──
+    const rows = [];
+    for(const c of containers){
+      const cid    = String(c.container_id||c.container||'').trim() || '—';
+      const vessel = String(c.vessel||'').trim() || '—';
+      const size   = String(c.size_ft||'').trim() ? String(c.size_ft)+'ft' : '—';
+      const laneKeys = Array.isArray(c.lane_keys) ? c.lane_keys : [];
+      const directPOs = String(c.pos||'').split(',').map(p=>p.trim()).filter(Boolean);
+
+      // Collect all zendesks, suppliers, freights for this container's lanes
+      const zendesks  = new Set();
+      const suppliers = new Set();
+      const freights  = new Set();
+      const shipments = new Set();
+      const hbls      = new Set();
+      const mbls      = new Set();
+
+      // Merge manual dates across lanes — take earliest departure, latest arrival etc.
+      let packingListReady    = '';
+      let originCustomsClr    = '';
+      let departedOrigin      = '';
+      let arrivedDest         = '';
+      let destCustomsClr      = '';
+      let etaFC               = '';
+      let latestArrivalDate   = '';
+      let customsHold         = false;
+      let notes               = [];
+
+      for(const lk of laneKeys){
+        const lane = laneByKey.get(lk);
+        if(!lane) continue;
+        if(lane.zendesk)  zendesks.add(lane.zendesk);
+        if(lane.supplier) suppliers.add(lane.supplier);
+        if(lane.freight)  freights.add(lane.freight);
+        const m = (lane.manual && typeof lane.manual === 'object') ? lane.manual : {};
+        if(m.shipmentNumber || m.shipment) shipments.add(String(m.shipmentNumber||m.shipment||'').trim());
+        if(m.hbl) hbls.add(String(m.hbl).trim());
+        if(m.mbl) mbls.add(String(m.mbl).trim());
+        if(m.customs_hold) customsHold = true;
+        if(m.note) notes.push(String(m.note).trim());
+        // Actual dates — take earliest non-empty for completed milestones
+        const pick = (curr, next) => {
+          if(!next) return curr;
+          if(!curr) return fmtDate(next);
+          return fmtDate(next) < curr ? fmtDate(next) : curr;
+        };
+        const pickLatest = (curr, next) => {
+          if(!next) return curr;
+          if(!curr) return fmtDate(next);
+          return fmtDate(next) > curr ? fmtDate(next) : curr;
+        };
+        packingListReady  = pick(packingListReady,  m.packing_list_ready_at);
+        originCustomsClr  = pick(originCustomsClr,  m.origin_customs_cleared_at);
+        departedOrigin    = pick(departedOrigin,     m.departed_at);
+        arrivedDest       = pick(arrivedDest,        m.arrived_at);
+        destCustomsClr    = pick(destCustomsClr,     m.dest_customs_cleared_at);
+        etaFC             = pickLatest(etaFC,        m.eta_fc);
+        latestArrivalDate = pickLatest(latestArrivalDate, m.latest_arrival_date);
+      }
+
+      // Collect all POs for this container
+      const containerPOs = new Set(directPOs);
+      for(const zd of zendesks){
+        for(const [po, meta] of planByPO.entries()){
+          if(meta.zendesk === zd) containerPOs.add(po);
+        }
+      }
+      // Fill suppliers/freights from plan if not already set from lane keys
+      for(const po of containerPOs){
+        const meta = planByPO.get(po);
+        if(meta){
+          if(meta.supplier) suppliers.add(meta.supplier);
+          if(meta.freight)  freights.add(meta.freight);
+          if(meta.zendesk)  zendesks.add(meta.zendesk);
+        }
+      }
+
+      // Aggregate applied units, SKUs, bins across all POs on this container
+      let totalApplied = 0;
+      const allSKUs = new Set();
+      const allBins = new Set();
+      for(const po of containerPOs){
+        totalApplied += appliedByPO.get(po) || 0;
+        for(const sku of (skusByPO.get(po) || new Set())) allSKUs.add(sku);
+        for(const bin of (binsByPO.get(po) || new Set())) allBins.add(bin);
+      }
+
+      rows.push({
+        'Container / AWB':        cid,
+        'Vessel':                 vessel,
+        'Size':                   size,
+        'Zendesk(s)':             Array.from(zendesks).join(', ')  || '—',
+        'Supplier(s)':            Array.from(suppliers).join(', ') || '—',
+        'Freight':                Array.from(freights).join(', ')  || '—',
+        'POs':                    Array.from(containerPOs).join(', ') || '—',
+        'SKUs':                   Array.from(allSKUs).join(', ')   || '—',
+        'Mobile Bins':            Array.from(allBins).join(', ')   || '—',
+        'Applied Units':          totalApplied,
+        'Shipment #':             Array.from(shipments).join(', ') || '',
+        'HBL':                    Array.from(hbls).join(', ')      || '',
+        'MBL':                    Array.from(mbls).join(', ')      || '',
+        'Packing List Ready':     packingListReady,
+        'Origin Customs Cleared': originCustomsClr,
+        'Departed Origin':        departedOrigin,
+        'Arrived Destination':    arrivedDest,
+        'Dest Customs Cleared':   destCustomsClr,
+        'ETA FC':                 etaFC,
+        'Latest Arrival Date':    latestArrivalDate,
+        'Customs Hold':           customsHold ? 'Yes' : 'No',
+        'Notes':                  notes.filter(Boolean).join(' | '),
+      });
+    }
+
+    if(!rows.length){ alert('No container data found for week ' + ws + '.'); return; }
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Transit Clearing Status');
     XLSX.writeFile(wb, `Transit_Clearing_${ws}.xlsx`);
