@@ -1013,10 +1013,22 @@ app.get('/exec/summary',
     const avg_weight_kg = bin_count > 0 ? Math.round((total_weight_kg / bin_count) * 100) / 100 : 0;
 
     // ── 5. Flow week (transit dates + containers + last mile) ──
-    const flowRow = db.prepare(
-      `SELECT data FROM flow_week WHERE facility = ? AND week_start = ?`
-    ).get(facility, ws);
-    const flowData = flowRow ? (safeJsonParse(flowRow.data, {}) || {}) : {};
+    // Must fetch ALL rows for this week and merge — data is split across multiple
+    // facility keys (intl_lanes under one key, intl_weekcontainers under another)
+    const allExecFlowRows = db.prepare(
+      `SELECT facility, data FROM flow_week WHERE week_start = ?`
+    ).all(ws);
+    const flowData = {};
+    for (const row of allExecFlowRows) {
+      const d = safeJsonParse(row.data, {}) || {};
+      for (const [k, v] of Object.entries(d)) {
+        if (k === 'intl_lanes' && v && typeof v === 'object' && !Array.isArray(v)) {
+          flowData.intl_lanes = Object.assign({}, flowData.intl_lanes || {}, v);
+        } else {
+          flowData[k] = v;
+        }
+      }
+    }
 
     // ── Flow week: intl_lanes + containers ──
     const intl_lanes = (flowData.intl_lanes && typeof flowData.intl_lanes === 'object') ? flowData.intl_lanes : {};
