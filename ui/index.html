@@ -6341,7 +6341,16 @@ async function downloadPOContainer() {
   const ws = window._reportsWeek || state.weekStart || '';
   if(!ws){ alert('No week selected.'); return; }
   try {
-    const plan = Array.isArray(state.plan) ? state.plan : [];
+    // If reporting week differs from loaded week, fetch the correct plan
+    let plan;
+    if(ws === state.weekStart && Array.isArray(state.plan) && state.plan.length){
+      plan = state.plan;
+    } else {
+      try {
+        const planResp = await api(`/plan/weeks/${encodeURIComponent(ws)}`);
+        plan = Array.isArray(planResp) ? planResp : [];
+      } catch(e){ plan = []; console.warn('[POContainer] plan fetch failed', e); }
+    }
 
     // Fetch all three data sources in parallel
     const [{ lanes, containers }, appliedRows, bins] = await Promise.all([
@@ -6376,18 +6385,33 @@ async function downloadPOContainer() {
     }
 
     // Plan: PO → { supplier, zendesk, freight, skus[] }
+    // Also build: zendesk → Set of POs (for container→PO resolution)
     const planByPO = new Map();
+    const posByZendesk = new Map(); // zendesk → Set of POs
     for(const p of plan){
-      const po = String(p.po_number||'').trim();
+      const po      = String(p.po_number||'').trim();
+      const zendesk = String(p.zendesk_ticket||'').trim();
+      const supplier= String(p.supplier_name||'').trim();
+      const freight = String(p.freight_type||'').trim();
+      const sku     = String(p.sku_code||'').trim();
       if(!po) continue;
-      if(!planByPO.has(po)) planByPO.set(po, {
-        supplier: String(p.supplier_name||'').trim(),
-        zendesk:  String(p.zendesk_ticket||'').trim(),
-        freight:  String(p.freight_type||'').trim(),
-        skus: new Set(),
-      });
-      const entry = planByPO.get(po);
-      if(p.sku_code) entry.skus.add(String(p.sku_code).trim());
+
+      // Build or update planByPO — allow later rows to fill in missing fields
+      if(!planByPO.has(po)){
+        planByPO.set(po, { supplier, zendesk, freight, skus: new Set() });
+      } else {
+        const entry = planByPO.get(po);
+        if(!entry.zendesk  && zendesk)  entry.zendesk  = zendesk;
+        if(!entry.supplier && supplier) entry.supplier = supplier;
+        if(!entry.freight  && freight)  entry.freight  = freight;
+      }
+      if(sku) planByPO.get(po).skus.add(sku);
+
+      // Build zendesk → POs index
+      if(zendesk){
+        if(!posByZendesk.has(zendesk)) posByZendesk.set(zendesk, new Set());
+        posByZendesk.get(zendesk).add(po);
+      }
     }
 
     // Lane key → { supplier, zendesk, freight, manual }
@@ -6409,18 +6433,21 @@ async function downloadPOContainer() {
     // ── Sheet 1: By PO × SKU ──
     const sheet1 = [];
     for(const c of contList){
-      // Resolve POs for this container via lane_keys → zendesk → plan
-      const containerZendesks = new Set();
+      // Resolve POs for this container via lane_keys → zendesk → posByZendesk
       const containerPOs = new Set();
+
+      // Direct POs listed on container
+      for(const po of c.pos) containerPOs.add(po);
+
+      // POs via lane keys → zendesk → plan index
       for(const lk of c.laneKeys){
         const lane = laneByKey.get(lk);
-        if(lane?.zendesk) containerZendesks.add(lane.zendesk);
-        // Also add any POs directly listed in c.pos
-      }
-      for(const po of c.pos) containerPOs.add(po);
-      // Add POs from plan that match container's zendesks
-      for(const [po, meta] of planByPO.entries()){
-        if(containerZendesks.has(meta.zendesk)) containerPOs.add(po);
+        if(!lane) continue;
+        // Use zendesk from lane key directly
+        const zd = lane.zendesk || lk.split('||')[1] || '';
+        if(zd){
+          for(const po of (posByZendesk.get(zd) || new Set())) containerPOs.add(po);
+        }
       }
 
       if(!containerPOs.size && !c.laneKeys.length){
@@ -6495,7 +6522,16 @@ async function downloadTransitClearing() {
   const ws = window._reportsWeek || state.weekStart || '';
   if(!ws){ alert('No week selected.'); return; }
   try {
-    const plan = Array.isArray(state.plan) ? state.plan : [];
+    // If reporting week differs from loaded week, fetch the correct plan
+    let plan;
+    if(ws === state.weekStart && Array.isArray(state.plan) && state.plan.length){
+      plan = state.plan;
+    } else {
+      try {
+        const planResp = await api(`/plan/weeks/${encodeURIComponent(ws)}`);
+        plan = Array.isArray(planResp) ? planResp : [];
+      } catch(e){ plan = []; console.warn('[TransitClearing] plan fetch failed', e); }
+    }
 
     // Fetch all data sources in parallel
     const [{ lanes, containers }, appliedRows, bins] = await Promise.all([
