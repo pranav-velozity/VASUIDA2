@@ -332,6 +332,50 @@ app.get('/pulse/context',
       // ── Receiving ──
       const recvRows = db.prepare('SELECT * FROM receiving WHERE week_start = ?').all(ws);
 
+      // ── Bins (mobile bins / cartons out) ──
+      // bins table stores one row per mobile_bin with total_units and weight
+      // Join against records to get PO association
+      const binRows = db.prepare(`
+        SELECT b.mobile_bin, b.total_units, b.weight_kg,
+               r.po_number
+        FROM bins b
+        LEFT JOIN (
+          SELECT TRIM(mobile_bin) as mobile_bin,
+                 po_number,
+                 COUNT(*) as scan_count
+          FROM records
+          WHERE date_local >= ? AND date_local <= ?
+            AND TRIM(COALESCE(mobile_bin,'')) <> ''
+            AND TRIM(COALESCE(po_number,'')) <> ''
+          GROUP BY TRIM(mobile_bin), po_number
+        ) r ON TRIM(b.mobile_bin) = r.mobile_bin
+        WHERE b.week_start = ?
+        ORDER BY r.scan_count DESC
+      `).all(ws, we, ws);
+
+      // Build per-PO bin counts
+      const binsByPO = new Map(); // po → { bin_count, total_units, weight_kg }
+      const seenBins = new Set();
+      let totalBins = 0;
+      let totalBinUnits = 0;
+      let totalBinWeight = 0;
+      for (const b of binRows) {
+        const bin = String(b.mobile_bin||'').trim();
+        if(!bin || seenBins.has(bin)) continue;
+        seenBins.add(bin);
+        totalBins++;
+        totalBinUnits += Number(b.total_units||0);
+        totalBinWeight += Number(b.weight_kg||0);
+        const po = String(b.po_number||'').trim();
+        if(po) {
+          if(!binsByPO.has(po)) binsByPO.set(po, { bin_count:0, total_units:0, weight_kg:0 });
+          const entry = binsByPO.get(po);
+          entry.bin_count++;
+          entry.total_units += Number(b.total_units||0);
+          entry.weight_kg   += Number(b.weight_kg||0);
+        }
+      }
+
       // ── Flow week (lanes + containers) ──
       // Fetch ALL rows for this week and merge them — data may be split across
       // multiple rows with different facility keys (prebook, intl_lanes etc. saved separately)
@@ -371,6 +415,8 @@ app.get('/pulse/context',
           received: false,
           received_date: null,
           cartons_received: 0,
+          mobile_bins: 0,
+          mobile_bin_units: 0,
         });
         const entry = poMap.get(po);
         entry.planned += Number(p.target_qty || 0) || 0;
@@ -384,6 +430,14 @@ app.get('/pulse/context',
           entry.received = true;
           entry.received_date = r.received_at_local || null;
           entry.cartons_received = Number(r.cartons_received||0)||0;
+        }
+      }
+      // Merge bins
+      for (const [po, binData] of binsByPO.entries()) {
+        if (poMap.has(po)) {
+          const entry = poMap.get(po);
+          entry.mobile_bins      = binData.bin_count;
+          entry.mobile_bin_units = binData.total_units;
         }
       }
       const pos = Array.from(poMap.values());
@@ -450,7 +504,10 @@ app.get('/pulse/context',
         completion_pct: planned_total > 0 ? Math.round(applied_total/planned_total*100) : 0,
         received_pos,
         late_pos,
-        pos,       // full PO detail
+        total_mobile_bins: totalBins,
+        total_bin_units:   totalBinUnits,
+        total_bin_weight_kg: Math.round(totalBinWeight * 10) / 10,
+        pos,       // full PO detail (now includes mobile_bins + mobile_bin_units per PO)
         lanes,     // all transit lanes with dates
         containers // all containers with PO assignments
       });
@@ -585,16 +642,17 @@ app.post('/pulse/chat',
 
       for (const w of weeks) {
         lines.push('### Week ' + w.week_start + ' (ends ' + w.week_end + ')');
-        lines.push('Planned: ' + (w.planned_total||0).toLocaleString() + ' units | Applied: ' + (w.applied_total||0).toLocaleString() + ' (' + (w.completion_pct||0) + '%) | Received POs: ' + (w.received_pos||0) + ' | Late POs: ' + (w.late_pos||0));
+        lines.push('Planned: ' + (w.planned_total||0).toLocaleString() + ' units | Applied: ' + (w.applied_total||0).toLocaleString() + ' (' + (w.completion_pct||0) + '%) | Received POs: ' + (w.received_pos||0) + ' | Late POs: ' + (w.late_pos||0) + ' | Mobile bins (cartons out): ' + (w.total_mobile_bins||0) + ' | Bin units: ' + (w.total_bin_units||0).toLocaleString() + (w.total_bin_weight_kg ? ' | Bin weight: ' + w.total_bin_weight_kg + ' kg' : ''));
         lines.push('');
 
         // PO detail
         if (Array.isArray(w.pos) && w.pos.length > 0) {
           lines.push('POs this week:');
           for (const p of w.pos) {
-            const recvStr = p.received ? ('received ' + (p.received_date ? p.received_date.slice(0,10) : 'yes') + (p.cartons_received ? ' (' + p.cartons_received + ' cartons)' : '')) : 'NOT received';
+            const recvStr = p.received ? ('received ' + (p.received_date ? p.received_date.slice(0,10) : 'yes') + (p.cartons_received ? ' (' + p.cartons_received + ' cartons in)' : '')) : 'NOT received';
+            const binStr  = p.mobile_bins ? (' | ' + p.mobile_bins + ' mobile bins (' + (p.mobile_bin_units||0) + ' units out)') : '';
             const lateFlag = p.received && p.due_date && p.received_date && p.received_date.slice(0,10) > p.due_date ? ' [LATE]' : '';
-            lines.push('  PO ' + p.po + ' | ' + p.supplier + ' | ' + (p.freight||'') + ' | Zendesk: ' + (p.zendesk||'—') + ' | Due: ' + (p.due_date||'—') + ' | Planned: ' + p.planned + ' | Applied: ' + p.applied + ' | ' + recvStr + lateFlag);
+            lines.push('  PO ' + p.po + ' | ' + p.supplier + ' | ' + (p.freight||'') + ' | Zendesk: ' + (p.zendesk||'—') + ' | Due: ' + (p.due_date||'—') + ' | Planned: ' + p.planned + ' | Applied: ' + p.applied + ' | ' + recvStr + binStr + lateFlag);
           }
           lines.push('');
         }
