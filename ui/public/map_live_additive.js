@@ -380,7 +380,7 @@
           ring.setAttribute('cx',lx); ring.setAttribute('cy',ly); ring.setAttribute('r','6');
           ring.setAttribute('fill','none'); ring.setAttribute('stroke',color);
           ring.setAttribute('stroke-width','1.5');
-          ring.style.animation=`mapSonar 2.4s ease-out infinite ${ri*0.8}s`;
+          ring.style.animation=`mapSonar 3.5s ease-out infinite ${ri*1.4}s`;
           svgEl.appendChild(ring);
         }
       }
@@ -524,13 +524,13 @@
         }
 
         // Pulse rings + dot at vessel tip
-        for(let ri=0;ri<3;ri++){
+        for(let ri=0;ri<2;ri++){
           const ring=ns('circle');
           ring.setAttribute('cx',vx); ring.setAttribute('cy',vy); ring.setAttribute('r','5');
           ring.setAttribute('fill','none'); ring.setAttribute('stroke','#990033');
           ring.setAttribute('stroke-width','1.5');
           ring.setAttribute('opacity',String(arcOpacity));
-          ring.style.animation=`mapSonar 2.2s ease-out infinite ${ri*0.75}s`;
+          ring.style.animation=`mapSonar 3.5s ease-out infinite ${ri*1.4}s`;
           svgEl.appendChild(ring);
         }
         const gEl=ns('g');
@@ -551,8 +551,8 @@
       } else {
         // Sea: arc curves EAST around landmass
         // Apply offset by shifting the eastern waypoint slightly
-        const wayptLon=155+(offsetFactor*15);
-        const wayptLat=10;
+        const wayptLon=160+(offsetFactor*18);
+        const wayptLat=8;
         const [wx2,wy2]=project(wayptLon,wayptLat);
         // Cubic-like: use two quadratic segments via eastern waypoint
         const seaD=`M${ox},${oy} Q${wx2},${wy2} ${dx},${dy}`;
@@ -612,13 +612,13 @@
         }
 
         // Pulse rings + clickable dot
-        for(let ri=0;ri<3;ri++){
+        for(let ri=0;ri<2;ri++){
           const ring=ns('circle');
           ring.setAttribute('cx',vx); ring.setAttribute('cy',vy); ring.setAttribute('r','5');
           ring.setAttribute('fill','none'); ring.setAttribute('stroke','#990033');
           ring.setAttribute('stroke-width','1.5');
           ring.setAttribute('opacity',String(arcOpacity));
-          ring.style.animation=`mapSonar 2.2s ease-out infinite ${ri*0.75}s`;
+          ring.style.animation=`mapSonar 3.5s ease-out infinite ${ri*1.4}s`;
           svgEl.appendChild(ring);
         }
         const gEl=ns('g');
@@ -683,7 +683,7 @@
     if(document.getElementById('map-sonar-style')) return;
     const s=document.createElement('style');
     s.id='map-sonar-style';
-    s.textContent=`@keyframes mapSonar{0%{r:5;stroke-opacity:.65;stroke-width:2}100%{r:22;stroke-opacity:0;stroke-width:.5}}`;
+    s.textContent=`@keyframes mapSonar{0%{r:5;stroke-opacity:.55;stroke-width:1.5}100%{r:26;stroke-opacity:0;stroke-width:.3}}`;
     document.head.appendChild(s);
   }
 
@@ -732,7 +732,21 @@
     const weekStart=window.state?.weekStart||'';
     const planRows=Array.isArray(window.state?.plan)?window.state.plan:[];
 
-    // 8 weeks of flow data
+    // ── appliedByPO: use window.state.records (already loaded, avoids duplicate API call) ──
+    // state.records = by_po array: [{po, units}] from /records/summary
+    const appliedByPO=new Map();
+    const stateRecords=Array.isArray(window.state?.records)?window.state.records:[];
+    for(const r of stateRecords){
+      const po=String(r.po||r.po_number||'').trim();
+      if(po) appliedByPO.set(po,(appliedByPO.get(po)||0)+Number(r.units||0));
+    }
+    console.log('[Map] appliedByPO from state.records — entries:',appliedByPO.size,'sample:',Array.from(appliedByPO.entries()).slice(0,3));
+
+    // ── receiving: use window.state.receiving (already loaded) ──
+    const receiving=Array.isArray(window.state?.receiving)?window.state.receiving:[];
+    console.log('[Map] receiving from state.receiving — rows:',receiving.length,'sample:',receiving.slice(0,2));
+
+    // ── Flow data: 8 weeks (needed for lane/vessel data not in state) ──
     const weeks=[];
     for(let i=0;i<8;i++){
       const d=new Date(weekStart+'T00:00:00'); d.setDate(d.getDate()-i*7);
@@ -759,21 +773,9 @@
       const conts=Array.isArray(wc)?wc:(Array.isArray(wc?.containers)?wc.containers:[]);
       allContainers.push(...conts);
     }
-
-    const [recvRes,summaryRes]=await Promise.allSettled([
-      api(`/receiving?weekStart=${encodeURIComponent(weekStart)}`),
-      api(`/summary/po_sku?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}&status=complete`),
-    ]);
-
-    const receiving=recvRes.status==='fulfilled'?(Array.isArray(recvRes.value)?recvRes.value:[]):[];
-    const summary=summaryRes.status==='fulfilled'?(summaryRes.value?.rows||[]):[];
-
-    // summary returns { po, sku, units } — po is the field name
-    const appliedByPO=new Map();
-    for(const r of summary){
-      const po=String(r.po||r.po_number||'').trim();
-      if(po) appliedByPO.set(po,(appliedByPO.get(po)||0)+Number(r.units||0));
-    }
+    console.log('[Map] lanes:',allLanes.length,'containers:',allContainers.length,'plan rows:',planRows.length);
+    console.log('[Map] plan sample zendesk fields:',planRows.slice(0,3).map(p=>p.zendesk_ticket));
+    console.log('[Map] lane sample zendesks:',allLanes.slice(0,3).map(l=>l.zendesk));
 
     return {lanes:allLanes,containers:allContainers,plan:planRows,receiving,appliedByPO};
   }
