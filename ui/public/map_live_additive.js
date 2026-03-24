@@ -343,157 +343,165 @@
       svgEl.appendChild(txt);
     }
 
-    // Draw one shared ghost route line per freight type (sea / air) — not one per vessel
-    const drawnRoutes = new Set();
-    groups.forEach((g) => {
-      const routeKey = g.isAir ? 'air' : 'sea';
-      if (drawnRoutes.has(routeKey)) return;
-      drawnRoutes.add(routeKey);
-      const [ox,oy] = project(LOCATIONS.origin_port.lon, LOCATIONS.origin_port.lat);
-      const destPort = g.isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
-      const [dx,dy] = project(destPort.lon, destPort.lat);
-      const [mx,my] = arcMid(ox,oy,dx,dy,0.22);
-      const ghostPath = ns('path');
-      ghostPath.setAttribute('d',`M${ox},${oy} Q${mx},${my} ${dx},${dy}`);
-      ghostPath.setAttribute('stroke','#C8C8C8');
-      ghostPath.setAttribute('stroke-width','1');
-      ghostPath.setAttribute('fill','none');
-      ghostPath.setAttribute('stroke-opacity','0.4');
-      svgEl.appendChild(ghostPath);
-    });
-
-    // Draw animated progress arc per vessel — offset perpendicular to route
+    // ── Arc rendering ──
+    // Design: one faint ghost route per vessel (full path), one moving dot at current position
+    // No duplicate progress arcs — cleaner and unambiguous
     const seaGroups = groups.filter(g=>!g.isAir);
     const airGroups = groups.filter(g=>g.isAir);
 
     groups.forEach((g, idx) => {
       const isMatch = matched ? matched.has(g.vessel) : true;
+      const arcOpacity = isFiltering ? (isMatch ? 1 : 0.04) : 1;
+      if (arcOpacity < 0.05) return;
       const color = STAGE_COLOR[g.stage];
       const isAir = g.isAir;
-      const [ox,oy] = project(LOCATIONS.origin_port.lon, LOCATIONS.origin_port.lat);
-      const destPort = isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
-      const [dx,dy] = project(destPort.lon, destPort.lat);
 
-      // Perpendicular offset: vessels in same freight type spread out
+      // Perpendicular offset per vessel within same freight type
       const sameType = isAir ? airGroups : seaGroups;
       const typeIdx = sameType.indexOf(g);
       const typeCount = sameType.length;
-      const offsetFactor = typeCount > 1 ? (typeIdx - (typeCount-1)/2) * 0.12 : 0;
+      const offsetFactor = typeCount > 1 ? (typeIdx - (typeCount-1)/2) * 0.10 : 0;
       const bend = 0.22 + offsetFactor;
 
-      if (g.stage === 'transit') {
-        const progress = getVesselPosition(g.departed_at, g.eta_port, g.arrived_at);
-        const [vx,vy] = arcPoint(ox,oy,dx,dy,progress,bend);
-        const [pmx,pmy] = arcMid(ox,oy,vx,vy,bend);
-        const animId = 'mf' + idx;
-        const styleEl = document.createElement('style');
-        styleEl.textContent = `@keyframes ${animId}{from{stroke-dashoffset:14}to{stroke-dashoffset:0}}`;
-        document.head.appendChild(styleEl);
+      const [ox,oy] = project(LOCATIONS.origin_port.lon, LOCATIONS.origin_port.lat);
+      const destPort = isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
+      const [dx,dy] = project(destPort.lon, destPort.lat);
+      const [mx,my] = arcMid(ox,oy,dx,dy,bend);
 
-        // Animated arc from origin to current vessel position
-        const fgPath = ns('path');
-        fgPath.setAttribute('d',`M${ox},${oy} Q${pmx},${pmy} ${vx},${vy}`);
-        fgPath.setAttribute('stroke',color);
-        fgPath.setAttribute('stroke-width','2.5');
-        fgPath.setAttribute('fill','none');
-        fgPath.setAttribute('stroke-dasharray','8 6');
-        fgPath.setAttribute('stroke-linecap','round');
-        fgPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.9':'0.05'):'0.7');
-        fgPath.style.animation = `${animId} 1.4s linear infinite`;
-        svgEl.appendChild(fgPath);
+      // ── Sea/Air transit arc ──
+      if (g.stage === 'transit' || g.stage === 'clearing' || g.stage === 'customs_hold' ||
+          g.stage === 'origin_port' || g.stage === 'at_supplier') {
 
-        // Vessel name label — placed at 40% along the arc
-        const vesselName = g.vessel || 'Unassigned';
-        if (vesselName !== 'Unassigned' && (!isFiltering || isMatch)) {
-          const [lbx,lby] = arcPoint(ox,oy,vx,vy,0.42,bend*0.5);
-          const labelBg = ns('rect');
-          const labelW = Math.min(vesselName.length * 5.5 + 10, 160);
-          labelBg.setAttribute('x', lbx - labelW/2); labelBg.setAttribute('y', lby - 9);
-          labelBg.setAttribute('width', labelW); labelBg.setAttribute('height', '14');
-          labelBg.setAttribute('rx', '3'); labelBg.setAttribute('fill', '#fff');
-          labelBg.setAttribute('opacity', '0.85');
-          svgEl.appendChild(labelBg);
-          const labelTxt = ns('text');
-          labelTxt.setAttribute('x', lbx); labelTxt.setAttribute('y', lby + 2);
-          labelTxt.setAttribute('text-anchor', 'middle');
-          labelTxt.setAttribute('font-size', '8.5');
-          labelTxt.setAttribute('font-weight', '500');
-          labelTxt.setAttribute('fill', color);
-          labelTxt.setAttribute('font-family', '-apple-system,sans-serif');
-          labelTxt.textContent = vesselName.length > 22 ? vesselName.slice(0,20)+'…' : vesselName;
-          svgEl.appendChild(labelTxt);
+        // Full ghost route — always draw so user sees the intended journey
+        const ghostPath = ns('path');
+        ghostPath.setAttribute('d',`M${ox},${oy} Q${mx},${my} ${dx},${dy}`);
+        ghostPath.setAttribute('stroke', color);
+        ghostPath.setAttribute('stroke-width','1');
+        ghostPath.setAttribute('fill','none');
+        ghostPath.setAttribute('stroke-opacity', String(arcOpacity * 0.18));
+        svgEl.appendChild(ghostPath);
+
+        if (g.stage === 'transit') {
+          const progress = getVesselPosition(g.departed_at, g.eta_port, g.arrived_at);
+          const [vx,vy] = arcPoint(ox,oy,dx,dy,progress,bend);
+
+          // Travelled portion — solid colored line from origin to vessel
+          const [tmx,tmy] = arcMid(ox,oy,vx,vy,bend);
+          const travelledPath = ns('path');
+          travelledPath.setAttribute('d',`M${ox},${oy} Q${tmx},${tmy} ${vx},${vy}`);
+          travelledPath.setAttribute('stroke',color);
+          travelledPath.setAttribute('stroke-width','2');
+          travelledPath.setAttribute('fill','none');
+          travelledPath.setAttribute('stroke-opacity', String(arcOpacity * 0.5));
+          svgEl.appendChild(travelledPath);
+
+          // Vessel name tag — small pill above the moving dot
+          const vesselName = g.vessel || '';
+          if (vesselName && (!isFiltering || isMatch)) {
+            const tagW = Math.min(vesselName.length * 5.2 + 12, 150);
+            const tagBg = ns('rect');
+            tagBg.setAttribute('x', vx - tagW/2); tagBg.setAttribute('y', vy - 22);
+            tagBg.setAttribute('width', tagW); tagBg.setAttribute('height', '13');
+            tagBg.setAttribute('rx', '3'); tagBg.setAttribute('fill', '#fff');
+            tagBg.setAttribute('stroke', color); tagBg.setAttribute('stroke-width', '0.5');
+            tagBg.setAttribute('opacity', '0.95');
+            svgEl.appendChild(tagBg);
+            const tagTxt = ns('text');
+            tagTxt.setAttribute('x', vx); tagTxt.setAttribute('y', vy - 12);
+            tagTxt.setAttribute('text-anchor','middle');
+            tagTxt.setAttribute('font-size','8'); tagTxt.setAttribute('font-weight','500');
+            tagTxt.setAttribute('fill', color);
+            tagTxt.setAttribute('font-family','-apple-system,sans-serif');
+            tagTxt.textContent = vesselName.length > 24 ? vesselName.slice(0,22)+'…' : vesselName;
+            svgEl.appendChild(tagTxt);
+          }
+
+          // Pulse rings at vessel tip
+          for (let ri=0; ri<3; ri++) {
+            const tipRing = ns('circle');
+            tipRing.setAttribute('cx',vx); tipRing.setAttribute('cy',vy); tipRing.setAttribute('r','5');
+            tipRing.setAttribute('fill','none'); tipRing.setAttribute('stroke',color);
+            tipRing.setAttribute('stroke-width','1.5');
+            tipRing.style.animation = `mapSonar 2.2s ease-out infinite ${ri*0.75}s`;
+            svgEl.appendChild(tipRing);
+          }
+          // Vessel dot at tip
+          const tipDot = ns('circle');
+          tipDot.setAttribute('cx',vx); tipDot.setAttribute('cy',vy);
+          tipDot.setAttribute('r','5'); tipDot.setAttribute('fill',color);
+          tipDot.setAttribute('stroke','#fff'); tipDot.setAttribute('stroke-width','2');
+          svgEl.appendChild(tipDot);
         }
-
-        // Pulse ring at arc tip (current vessel position)
-        for (let ri=0; ri<2; ri++) {
-          const tipRing = ns('circle');
-          tipRing.setAttribute('cx', vx); tipRing.setAttribute('cy', vy); tipRing.setAttribute('r','5');
-          tipRing.setAttribute('fill','none'); tipRing.setAttribute('stroke', color);
-          tipRing.setAttribute('stroke-width','1.5');
-          tipRing.style.animation = `mapSonar 2s ease-out infinite ${ri*0.9}s`;
-          svgEl.appendChild(tipRing);
-        }
-
-        // Vessel head dot at arc tip
-        const tipDot = ns('circle');
-        tipDot.setAttribute('cx',vx); tipDot.setAttribute('cy',vy);
-        tipDot.setAttribute('r','5'); tipDot.setAttribute('fill',color);
-        tipDot.setAttribute('stroke','#fff'); tipDot.setAttribute('stroke-width','1.5');
-        svgEl.appendChild(tipDot);
       }
 
+      // ── Last mile arc: port → client WH ──
       if (g.stage === 'last_mile') {
         const dep = isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
         const [lpx,lpy] = project(dep.lon, dep.lat);
         const [wx,wy] = project(LOCATIONS.client_wh.lon, LOCATIONS.client_wh.lat);
-        const lmBend = 0.15+offsetFactor*0.5;
-        const [lmx,lmy] = arcMid(lpx,lpy,wx,wy,lmBend);
-        const lmId = 'ml' + idx;
-        const lmStyle = document.createElement('style');
-        lmStyle.textContent = `@keyframes ${lmId}{from{stroke-dashoffset:14}to{stroke-dashoffset:0}}`;
-        document.head.appendChild(lmStyle);
-        const lmPath = ns('path');
-        lmPath.setAttribute('d',`M${lpx},${lpy} Q${lmx},${lmy} ${wx},${wy}`);
-        lmPath.setAttribute('stroke',color);
-        lmPath.setAttribute('stroke-width','2');
-        lmPath.setAttribute('fill','none');
-        lmPath.setAttribute('stroke-dasharray','6 5');
-        lmPath.setAttribute('stroke-linecap','round');
-        lmPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.8':'0.04'):'0.6');
-        lmPath.style.animation = `${lmId} 1s linear infinite`;
-        svgEl.appendChild(lmPath);
+        const lmBend = 0.2 + offsetFactor * 0.5;
+        const [lmgx,lmgy] = arcMid(lpx,lpy,wx,wy,lmBend);
 
-        // Pulse tip at last mile current position
+        // Ghost last mile route
+        const lmGhost = ns('path');
+        lmGhost.setAttribute('d',`M${lpx},${lpy} Q${lmgx},${lmgy} ${wx},${wy}`);
+        lmGhost.setAttribute('stroke',color); lmGhost.setAttribute('stroke-width','1');
+        lmGhost.setAttribute('fill','none');
+        lmGhost.setAttribute('stroke-opacity', String(arcOpacity * 0.18));
+        svgEl.appendChild(lmGhost);
+
+        // Current position dot
         const lmProg = g.dest_customs_cleared_at
           ? clamp((Date.now()-new Date(g.dest_customs_cleared_at).getTime())/(2*24*60*60*1000),0.1,0.9)
           : 0.5;
         const [ltx,lty] = arcPoint(lpx,lpy,wx,wy,lmProg,lmBend);
-        const lmTipRing = ns('circle');
-        lmTipRing.setAttribute('cx',ltx); lmTipRing.setAttribute('cy',lty); lmTipRing.setAttribute('r','5');
-        lmTipRing.setAttribute('fill','none'); lmTipRing.setAttribute('stroke',color);
-        lmTipRing.setAttribute('stroke-width','1.5');
-        lmTipRing.style.animation = `mapSonar 2s ease-out infinite`;
-        svgEl.appendChild(lmTipRing);
-        const lmTipDot = ns('circle');
-        lmTipDot.setAttribute('cx',ltx); lmTipDot.setAttribute('cy',lty);
-        lmTipDot.setAttribute('r','4'); lmTipDot.setAttribute('fill',color);
-        lmTipDot.setAttribute('stroke','#fff'); lmTipDot.setAttribute('stroke-width','1.5');
-        svgEl.appendChild(lmTipDot);
+        // Travelled portion
+        const [ltmx,ltmy] = arcMid(lpx,lpy,ltx,lty,lmBend);
+        const lmTravel = ns('path');
+        lmTravel.setAttribute('d',`M${lpx},${lpy} Q${ltmx},${ltmy} ${ltx},${lty}`);
+        lmTravel.setAttribute('stroke',color); lmTravel.setAttribute('stroke-width','2');
+        lmTravel.setAttribute('fill','none');
+        lmTravel.setAttribute('stroke-opacity', String(arcOpacity * 0.5));
+        svgEl.appendChild(lmTravel);
+
+        for (let ri=0; ri<3; ri++) {
+          const r = ns('circle');
+          r.setAttribute('cx',ltx); r.setAttribute('cy',lty); r.setAttribute('r','4');
+          r.setAttribute('fill','none'); r.setAttribute('stroke',color); r.setAttribute('stroke-width','1.5');
+          r.style.animation = `mapSonar 2s ease-out infinite ${ri*0.7}s`;
+          svgEl.appendChild(r);
+        }
+        const lmDot = ns('circle');
+        lmDot.setAttribute('cx',ltx); lmDot.setAttribute('cy',lty);
+        lmDot.setAttribute('r','4'); lmDot.setAttribute('fill',color);
+        lmDot.setAttribute('stroke','#fff'); lmDot.setAttribute('stroke-width','2');
+        svgEl.appendChild(lmDot);
       }
 
-      // VAS — short arc from supplier to VAS facility (both in Shenzhen)
+      // ── VAS arc: supplier → VAS facility (Shenzhen cluster) ──
       if (g.stage === 'vas') {
         const [sx,sy] = project(LOCATIONS.supplier.lon, LOCATIONS.supplier.lat);
         const [vfx,vfy] = project(LOCATIONS.vas_facility.lon, LOCATIONS.vas_facility.lat);
-        const [vmx,vmy] = arcMid(sx,sy,vfx,vfy,0.2);
+        const [vmx,vmy] = arcMid(sx,sy,vfx,vfy,0.25);
         const vasPath = ns('path');
         vasPath.setAttribute('d',`M${sx},${sy} Q${vmx},${vmy} ${vfx},${vfy}`);
-        vasPath.setAttribute('stroke',color);
-        vasPath.setAttribute('stroke-width','1.5');
+        vasPath.setAttribute('stroke',color); vasPath.setAttribute('stroke-width','1.5');
         vasPath.setAttribute('fill','none');
-        vasPath.setAttribute('stroke-dasharray','4 4');
-        vasPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.5':'0.04'):'0.4');
+        vasPath.setAttribute('stroke-opacity', String(arcOpacity * 0.5));
         svgEl.appendChild(vasPath);
+      }
+
+      // ── Origin port arc: VAS facility → Shenzhen Port ──
+      if (g.stage === 'origin_port') {
+        const [vfx,vfy] = project(LOCATIONS.vas_facility.lon, LOCATIONS.vas_facility.lat);
+        const [opx,opy] = project(LOCATIONS.origin_port.lon, LOCATIONS.origin_port.lat);
+        const [opmx,opmy] = arcMid(vfx,vfy,opx,opy,0.2);
+        const opPath = ns('path');
+        opPath.setAttribute('d',`M${vfx},${vfy} Q${opmx},${opmy} ${opx},${opy}`);
+        opPath.setAttribute('stroke',color); opPath.setAttribute('stroke-width','1.5');
+        opPath.setAttribute('fill','none');
+        opPath.setAttribute('stroke-opacity', String(arcOpacity * 0.45));
+        svgEl.appendChild(opPath);
       }
     });
 
