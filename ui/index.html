@@ -554,6 +554,7 @@ window.__clerkOnLoad = function() {
       <a class="pn-nav-item" href="#receiving" id="nav-receiving" onclick="event.preventDefault();window.show('#receiving')">Receiving Ops</a>
       <a class="pn-nav-item" href="#intake" id="nav-intake-pn" onclick="event.preventDefault();window.show('#intake')">VAS Ops</a>
       <a class="pn-nav-item" href="#exec" id="nav-exec" onclick="event.preventDefault();window.show('#exec')">Executive</a>
+      <a class="pn-nav-item" href="#map" id="nav-map" onclick="event.preventDefault();window.show('#map')">Live Map</a>
       <a class="pn-nav-item" href="#reports" id="nav-reports" onclick="event.preventDefault();window.show('#reports')">Reports &amp; Downloads</a>
     </nav>
     <div class="pn-user">
@@ -5604,6 +5605,7 @@ window.__openPrebookModal = function(){
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
 <script src="/public/flow_live_additive.js?v=117" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
+<script src="/public/map_live_additive.js?v=1" defer></script>
 
 
 <!-- ── Week Hub Split-Flap Insight Flipper ── -->
@@ -6003,7 +6005,7 @@ document.addEventListener('DOMContentLoaded', function(){
   // Helper: hide all pages
   function _pnHideAll(){
     // page-flow lives inside page-dashboard — hiding page-dashboard hides page-flow too
-    ['page-dashboard','page-intake','page-exec','page-receiving','page-reports'].forEach(id=>{
+    ['page-dashboard','page-intake','page-exec','page-receiving','page-reports','page-map'].forEach(id=>{
       const el=document.getElementById(id);
       if(el){el.classList.add('hidden');el.style.display='none';}
     });
@@ -6064,6 +6066,25 @@ document.addEventListener('DOMContentLoaded', function(){
       rp.classList.remove('hidden');
       rp.style.display='block';
       syncPinpointNav('#reports');
+      return;
+    }
+
+    // ── Live Map ──
+    if(h==='#map'){
+      _pnHideAll();
+      _pnSetHash('#map');
+      if(typeof window.showMapPage==='function'){
+        window.showMapPage();
+      } else {
+        var _mapInterval = setInterval(function(){
+          if(typeof window.showMapPage==='function'){
+            clearInterval(_mapInterval);
+            window.showMapPage();
+          }
+        }, 50);
+        setTimeout(function(){ clearInterval(_mapInterval); }, 3000);
+      }
+      syncPinpointNav('#map');
       return;
     }
 
@@ -6157,6 +6178,7 @@ function syncPinpointNav(hash){
   const items = document.querySelectorAll('.pn-nav-item');
   items.forEach(el=>el.classList.remove('active'));
   if(hash==='#exec'){ const e=document.getElementById('nav-exec'); if(e) e.classList.add('active'); }
+  else if(hash==='#map'){ const m=document.getElementById('nav-map'); if(m) m.classList.add('active'); }
   else if(hash==='#reports'){ const r=document.getElementById('nav-reports'); if(r) r.classList.add('active'); }
   else if(hash==='#receiving'){ const rec=document.getElementById('nav-receiving'); if(rec) rec.classList.add('active'); }
   else if(hash==='#intake'){ const vas=document.getElementById('nav-intake-pn'); if(vas) vas.classList.add('active'); }
@@ -7031,6 +7053,8 @@ function applyPNRoleGating(roleKey) {
   // Executive: visible to Admin + Client only
   const navExec = document.getElementById('nav-exec');
   if (navExec) navExec.style.display = (isAdmin || isClient) ? '' : 'none';
+  const navMap = document.getElementById('nav-map');
+  if (navMap) navMap.style.display = (isAdmin || isClient) ? '' : 'none';
 
   // ── 2. Upload Plan / Zero Plan buttons ──
   // Admin only — hidden for Facility and Client
