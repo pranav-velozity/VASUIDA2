@@ -1,12 +1,10 @@
-/* map_live_additive.js — VelOzity Pinpoint Live Map
-   Additive module — mounts into #page-map
-   Phase 1: calculated vessel position from lane dates
-   Phase 2 hook: getVesselPosition() / getFlightPosition() — swap for API calls
+/* map_live_additive.js v2 — VelOzity Pinpoint Live Map
+   Uses D3 + Natural Earth GeoJSON for proper world map
+   Phase 1: calculated vessel position | Phase 2 hook: getVesselPosition() API swap
 */
 (function () {
   'use strict';
 
-  // ── Fixed location coordinates (Phase 1 — hardcoded, Phase 2 via lookup table) ──
   const LOCATIONS = {
     supplier:       { name: 'Shenzhen',       lat: 22.54,  lon: 114.06 },
     origin_port:    { name: 'Shenzhen Port',  lat: 22.49,  lon: 113.87 },
@@ -15,7 +13,6 @@
     client_wh:      { name: 'Sydney WH',      lat: -33.87, lon: 151.20 },
   };
 
-  // ── Stage colors — matte palette ──
   const STAGE_COLOR = {
     at_supplier:  '#9E9689',
     origin_port:  '#B5956A',
@@ -36,95 +33,43 @@
     last_mile:    'Last Mile',
   };
 
-  const W = 900, H = 480;
-
-  // ── Map land polygon data (simplified Natural Earth) ──
-  const LAND = [
-    [[-140,60],[-130,54],[-124,48],[-124,34],[-117,32],[-97,26],[-87,30],[-81,25],[-80,32],[-76,34],[-75,38],[-70,42],[-66,44],[-64,48],[-66,50],[-64,52],[-66,56],[-78,54],[-82,48],[-84,46],[-88,48],[-94,48],[-100,50],[-104,50],[-110,50],[-120,50],[-128,52],[-136,58],[-140,60]],
-    [[-80,12],[-76,8],[-74,4],[-70,0],[-70,-4],[-74,-8],[-76,-12],[-70,-18],[-66,-22],[-64,-26],[-62,-30],[-58,-34],[-56,-38],[-58,-40],[-62,-42],[-66,-44],[-68,-48],[-68,-52],[-66,-54],[-60,-52],[-52,-46],[-48,-28],[-44,-24],[-40,-20],[-36,-12],[-38,-8],[-46,0],[-52,4],[-58,8],[-62,10],[-68,12],[-72,12],[-76,10],[-80,12]],
-    [[0,51],[4,52],[8,54],[10,56],[14,56],[18,58],[22,56],[26,60],[28,62],[26,64],[28,66],[30,68],[28,70],[24,68],[20,64],[16,62],[12,60],[8,58],[4,54],[2,52],[0,51],[-2,50],[-4,48],[-6,44],[-2,44],[2,44],[4,48],[0,51]],
-    [[-18,16],[-16,12],[-14,8],[-12,4],[-8,4],[-4,4],[0,4],[4,6],[8,4],[12,4],[16,4],[20,0],[24,-4],[28,-8],[32,-12],[34,-20],[36,-24],[34,-28],[30,-32],[28,-34],[22,-34],[18,-34],[16,-30],[14,-26],[12,-22],[10,-18],[8,-14],[8,-4],[8,4],[10,8],[12,14],[14,22],[8,18],[4,14],[0,12],[-4,14],[-8,16],[-12,18],[-16,18],[-18,16]],
-    [[26,42],[30,46],[34,48],[38,50],[42,54],[46,56],[50,58],[54,60],[58,60],[62,58],[66,56],[70,54],[74,52],[78,52],[82,54],[86,52],[90,50],[94,48],[98,46],[102,44],[106,42],[110,40],[114,40],[118,40],[122,40],[126,38],[130,36],[134,34],[130,32],[126,30],[122,28],[118,24],[116,22],[118,20],[116,18],[112,14],[108,10],[104,6],[100,4],[100,0],[104,-4],[106,-6],[108,-8],[110,-8],[116,-4],[116,0],[120,4],[124,8],[128,12],[132,14],[136,14],[140,12],[142,10],[142,6],[138,2],[134,-2],[130,-6],[126,-8],[122,-8],[118,-6],[114,-4],[110,-2],[106,2],[102,4],[98,4],[94,8],[90,8],[86,8],[82,8],[78,8],[74,6],[70,8],[66,8],[62,10],[58,12],[54,12],[50,14],[46,12],[42,10],[38,10],[34,10],[30,12],[26,14],[22,12],[18,12],[14,14],[14,18],[18,20],[22,22],[26,24],[26,30],[26,36],[26,42]],
-    [[114,-22],[116,-20],[118,-18],[122,-16],[126,-14],[130,-12],[136,-12],[140,-16],[142,-18],[144,-22],[146,-24],[148,-26],[150,-28],[152,-30],[152,-34],[150,-38],[148,-38],[146,-38],[144,-36],[142,-38],[140,-36],[138,-36],[136,-36],[134,-34],[132,-32],[128,-32],[124,-32],[120,-34],[116,-34],[112,-32],[110,-30],[110,-26],[112,-22],[114,-22]],
-    [[130,32],[132,34],[134,36],[136,38],[138,40],[140,42],[142,44],[140,44],[138,44],[136,42],[134,38],[132,36],[130,34],[130,32]],
-    [[-6,50],[-4,50],[-2,52],[0,52],[2,52],[2,54],[0,56],[-2,58],[-4,58],[-6,56],[-6,54],[-4,52],[-6,50]],
-    [[168,-44],[170,-44],[172,-42],[174,-40],[174,-38],[172,-36],[170,-36],[168,-38],[166,-42],[168,-44]],
-    [[14,56],[16,58],[18,60],[20,62],[22,64],[24,68],[26,70],[28,70],[30,68],[28,66],[26,64],[24,62],[22,60],[20,58],[18,58],[16,56],[14,56]],
-  ];
+  const STAGE_ORDER = ['at_supplier','origin_port','transit','clearing','customs_hold','vas','last_mile'];
 
   // ── Utilities ──
-  function project(lon, lat) {
-    return [(lon + 180) / 360 * W, (90 - lat) / 180 * H];
-  }
-
-  function insidePoly(px, py, poly) {
-    let inside = false;
-    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-      const [xi,yi] = poly[i], [xj,yj] = poly[j];
-      if (((yi>py)!==(yj>py)) && (px < (xj-xi)*(py-yi)/(yj-yi)+xi)) inside = !inside;
-    }
-    return inside;
-  }
-
-  function lerp(a, b, t) { return a + (b - a) * t; }
-
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-
-  function arcPoint(x1, y1, x2, y2, t) {
-    const mx = (x1+x2)/2, my = (y1+y2)/2 - Math.abs(x2-x1)*0.28;
-    return [lerp(lerp(x1,mx,t),lerp(mx,x2,t),t), lerp(lerp(y1,my,t),lerp(my,y2,t),t)];
-  }
+  function lerp(a, b, t) { return a + (b-a)*t; }
+  function ns(tag) { return document.createElementNS('http://www.w3.org/2000/svg', tag); }
 
   function fmtDate(v) {
     if (!v) return '—';
-    try { return new Date(v).toLocaleDateString('en-AU', {day:'numeric',month:'short',year:'numeric'}); } catch { return String(v); }
+    try { return new Date(v).toLocaleDateString('en-AU', {day:'numeric',month:'short',year:'numeric'}); }
+    catch { return String(v); }
   }
 
-  function ns(tag) { return document.createElementNS('http://www.w3.org/2000/svg', tag); }
-
-  // ── Phase 1: calculated position — Phase 2: swap these for real API calls ──
-  function getVesselPosition(vesselData) {
-    // vesselData: { departed_at, eta_port, arrived_at }
-    // Returns progress 0→1 along sea arc
-    if (!vesselData.departed_at) return 0.02;
-    if (vesselData.arrived_at) return 1;
-    const dep = new Date(vesselData.departed_at).getTime();
-    const eta = vesselData.eta_port ? new Date(vesselData.eta_port).getTime() : null;
+  // ── Phase 1 position — Phase 2: replace body with API call ──
+  function getVesselPosition(departed_at, eta_port, arrived_at) {
+    if (arrived_at) return 1;
+    if (!departed_at) return 0.02;
+    const dep = new Date(departed_at).getTime();
+    const eta = eta_port ? new Date(eta_port).getTime() : 0;
     if (!eta || eta <= dep) return 0.5;
-    const now = Date.now();
-    return clamp((now - dep) / (eta - dep), 0.05, 0.95);
+    return clamp((Date.now() - dep) / (eta - dep), 0.05, 0.95);
   }
 
-  function getFlightPosition(flightData) {
-    // Same structure, same logic for air
-    return getVesselPosition(flightData);
-  }
-
-  // ── Determine stage from lane milestone dates ──
-  function getLaneStage(lane, hasReceiving) {
-    if (lane.customs_hold) return 'customs_hold';
+  // ── Stage derivation from lane milestone dates ──
+  function getLaneStage(m, hasReceiving) {
+    if (!m) return 'at_supplier';
+    if (m.customs_hold) return 'customs_hold';
     if (hasReceiving) return 'vas';
-    if (lane.dest_customs_cleared_at) return 'last_mile';
-    if (lane.arrived_at) return 'clearing';
-    if (lane.departed_at) return 'transit';
-    if (lane.packing_list_ready_at) return 'origin_port';
+    if (m.dest_customs_cleared_at) return 'last_mile';
+    if (m.arrived_at) return 'clearing';
+    if (m.departed_at) return 'transit';
+    if (m.packing_list_ready_at) return 'origin_port';
     return 'at_supplier';
   }
 
-  // ── Build vessel groups from lanes + containers ──
+  // ── Build vessel groups ──
   function buildVesselGroups(lanes, containers, plan, receiving, appliedByPO, binsByPO) {
-    const groups = new Map(); // vesselKey → group object
-    const noVesselLanes = [];
-
-    // Build container → vessel lookup
-    const contVessel = new Map();
-    for (const c of containers) {
-      const vessel = String(c.vessel||'').trim();
-      const cid = String(c.container_id||c.container||'').trim();
-      if (vessel && cid) contVessel.set(cid, vessel);
-    }
-
-    // Plan lookup: zendesk → [PO records]
     const planByZendesk = new Map();
     for (const p of plan) {
       const zd = String(p.zendesk_ticket||'').trim();
@@ -132,215 +77,140 @@
       if (!planByZendesk.has(zd)) planByZendesk.set(zd, []);
       planByZendesk.get(zd).push(p);
     }
+    const receivedPOs = new Set((receiving||[]).map(r=>String(r.po_number||'').trim()).filter(Boolean));
 
-    // Receiving: set of received PO numbers
-    const receivedPOs = new Set((receiving||[]).map(r => String(r.po_number||'').trim()).filter(Boolean));
+    // Container → vessel lookup
+    const contVessel = new Map();
+    for (const c of containers) {
+      const v = String(c.vessel||'').trim();
+      const cid = String(c.container_id||c.container||'').trim();
+      if (v && cid) contVessel.set(cid, v);
+    }
+
+    const groups = new Map();
 
     for (const lane of lanes) {
-      const vessel = String(lane.manual?.vessel || lane.vessel || '').trim();
+      const m = lane.manual || {};
+      // Try vessel from manual data, then from containers matching this lane
+      let vessel = String(m.vessel||m.shipmentNumber||'').trim();
+      if (!vessel) {
+        // Look for a container whose lane_keys include this lane
+        for (const c of containers) {
+          const lks = Array.isArray(c.lane_keys) ? c.lane_keys : [];
+          if (lks.includes(lane.key)) {
+            vessel = String(c.vessel||'').trim();
+            if (vessel) break;
+          }
+        }
+      }
+
       const freight = String(lane.freight||'').trim().toLowerCase();
       const zendesk = String(lane.zendesk||'').trim();
       const isAir = freight === 'air';
 
-      // Find POs for this lane via zendesk
       const lanePoRows = planByZendesk.get(zendesk) || [];
-      const lanePos = [...new Set(lanePoRows.map(p => String(p.po_number||'').trim()).filter(Boolean))];
-      const laneSkus = [...new Set(lanePoRows.map(p => String(p.sku_code||'').trim()).filter(Boolean))];
-
-      // Planned / applied / bins for this lane
+      const lanePos = [...new Set(lanePoRows.map(p=>String(p.po_number||'').trim()).filter(Boolean))];
+      const laneSkus = [...new Set(lanePoRows.map(p=>String(p.sku_code||'').trim()).filter(Boolean))];
       let planned = 0, applied = 0;
       const laneBins = new Set();
       for (const po of lanePos) {
         planned += lanePoRows.filter(p=>String(p.po_number||'').trim()===po).reduce((s,p)=>s+Number(p.target_qty||0),0);
         applied += appliedByPO.get(po) || 0;
-        for (const bin of (binsByPO.get(po)||new Set())) laneBins.add(bin);
+        for (const b of (binsByPO.get(po)||new Set())) laneBins.add(b);
       }
-
-      // Receiving status for this lane's POs
-      const hasReceiving = lanePos.some(po => receivedPOs.has(po));
-
-      // Stage
-      const manual = lane.manual || {};
-      const stageData = {
-        customs_hold: manual.customs_hold || false,
-        packing_list_ready_at: manual.packing_list_ready_at || null,
-        departed_at: manual.departed_at || null,
-        arrived_at: manual.arrived_at || null,
-        dest_customs_cleared_at: manual.dest_customs_cleared_at || null,
-        eta_port: manual.eta_fc || manual.latest_arrival_date || null,
-        eta_fc: manual.eta_fc || null,
-        latest_arrival_date: manual.latest_arrival_date || null,
-        hbl: manual.hbl || null,
-        mbl: manual.mbl || null,
-        shipment: manual.shipmentNumber || manual.shipment || null,
-      };
-      const stage = getLaneStage(stageData, hasReceiving);
-
-      // Skip delivered
+      const hasReceiving = lanePos.some(po=>receivedPOs.has(po));
+      const stage = getLaneStage(m, hasReceiving);
       if (stage === 'delivered') continue;
 
-      const laneObj = {
-        zendesk, freight: lane.freight, stage, stageData, isAir,
-        pos: lanePos, skus: laneSkus, planned, applied,
-        bins: Array.from(laneBins),
-        supplier: lane.supplier || '',
-      };
+      const key = vessel || ('NO_VESSEL_' + zendesk);
 
-      if (!vessel) {
-        noVesselLanes.push({ vessel: 'NO_VESSEL_' + zendesk, lanes: [laneObj], isAir, stage, stageData });
-        continue;
-      }
-
-      const key = vessel;
       if (!groups.has(key)) {
         groups.set(key, {
-          vessel, isAir,
+          vessel: vessel || '',
+          isAir,
           lanes: [],
-          // Merge dates across lanes — earliest departure, latest ETA
-          departed_at: null, eta_port: null, arrived_at: null,
+          departed_at: null,
+          eta_port: null,
+          arrived_at: null,
           dest_customs_cleared_at: null,
           stage: 'at_supplier',
         });
       }
       const g = groups.get(key);
-      g.lanes.push(laneObj);
 
-      // Merge dates
-      const dep = stageData.departed_at;
-      const eta = stageData.eta_port;
-      const arr = stageData.arrived_at;
-      const clr = stageData.dest_customs_cleared_at;
+      g.lanes.push({
+        zendesk, freight: lane.freight, stage, manual: m, isAir,
+        pos: lanePos, skus: laneSkus, planned, applied,
+        bins: Array.from(laneBins),
+        supplier: lane.supplier||'',
+      });
+
+      // Merge dates — earliest departure, latest ETA
+      const dep = m.departed_at, eta = m.eta_fc||m.latest_arrival_date;
+      const arr = m.arrived_at, clr = m.dest_customs_cleared_at;
       if (dep && (!g.departed_at || dep < g.departed_at)) g.departed_at = dep;
       if (eta && (!g.eta_port || eta > g.eta_port)) g.eta_port = eta;
       if (arr && (!g.arrived_at || arr > g.arrived_at)) g.arrived_at = arr;
       if (clr && (!g.dest_customs_cleared_at || clr > g.dest_customs_cleared_at)) g.dest_customs_cleared_at = clr;
 
-      // Group stage = most advanced stage across lanes
-      const STAGE_ORDER = ['at_supplier','origin_port','transit','clearing','customs_hold','vas','last_mile'];
-      const stageIdx = s => STAGE_ORDER.indexOf(s);
-      if (stageIdx(stage) > stageIdx(g.stage)) g.stage = stage;
+      // Most advanced stage wins
+      if (STAGE_ORDER.indexOf(stage) > STAGE_ORDER.indexOf(g.stage)) g.stage = stage;
     }
 
-    // Combine
-    const result = Array.from(groups.values());
-    for (const nl of noVesselLanes) result.push(nl);
-    return result;
+    return Array.from(groups.values());
   }
 
-  // ── Get pin coordinates for a vessel group ──
-  function getGroupPosition(g) {
+  // ── Project lon/lat to SVG x/y using equirectangular ──
+  // Returns [x,y] in the SVG coordinate space (0..svgW, 0..svgH)
+  function project(lon, lat, svgW, svgH) {
+    const x = (lon + 180) / 360 * svgW;
+    const y = (90 - lat) / 180 * svgH;
+    return [x, y];
+  }
+
+  // ── Arc midpoint (curved upward for sea routes) ──
+  function arcMid(x1, y1, x2, y2, bend) {
+    const mx = (x1+x2)/2;
+    const my = (y1+y2)/2 - Math.abs(x2-x1) * (bend||0.28);
+    return [mx, my];
+  }
+
+  function arcPoint(x1, y1, x2, y2, t, bend) {
+    const [mx, my] = arcMid(x1, y1, x2, y2, bend);
+    const ax = lerp(x1,mx,t), ay = lerp(y1,my,t);
+    const bx = lerp(mx,x2,t), by = lerp(my,y2,t);
+    return [lerp(ax,bx,t), lerp(ay,by,t)];
+  }
+
+  // ── Get pin [x,y] for a vessel group ──
+  function getGroupXY(g, svgW, svgH) {
     const stage = g.stage;
     const isAir = g.isAir;
+    const P = (loc) => project(loc.lon, loc.lat, svgW, svgH);
 
-    if (stage === 'at_supplier') return project(LOCATIONS.supplier.lon, LOCATIONS.supplier.lat);
-    if (stage === 'origin_port') return project(LOCATIONS.origin_port.lon, LOCATIONS.origin_port.lat);
-    if (stage === 'vas') return project(LOCATIONS.client_wh.lon, LOCATIONS.client_wh.lat);
-
-    if (stage === 'transit') {
-      const progress = isAir
-        ? getFlightPosition({ departed_at: g.departed_at, eta_port: g.eta_port, arrived_at: g.arrived_at })
-        : getVesselPosition({ departed_at: g.departed_at, eta_port: g.eta_port, arrived_at: g.arrived_at });
-      const [ox, oy] = project(LOCATIONS.origin_port.lon, LOCATIONS.origin_port.lat);
-      const dest = isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
-      const [dx, dy] = project(dest.lon, dest.lat);
-      return arcPoint(ox, oy, dx, dy, progress);
-    }
-
+    if (stage === 'at_supplier') return P(LOCATIONS.supplier);
+    if (stage === 'origin_port') return P(LOCATIONS.origin_port);
+    if (stage === 'vas') return P(LOCATIONS.client_wh);
     if (stage === 'clearing' || stage === 'customs_hold') {
-      const dest = isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
-      return project(dest.lon, dest.lat);
+      return P(isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port);
     }
-
+    if (stage === 'transit') {
+      const progress = getVesselPosition(g.departed_at, g.eta_port, g.arrived_at);
+      const [ox, oy] = P(LOCATIONS.origin_port);
+      const dest = isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
+      const [dx, dy] = P(dest);
+      return arcPoint(ox, oy, dx, dy, progress, 0.28);
+    }
     if (stage === 'last_mile') {
       const dep = isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
-      const [dx, dy] = project(dep.lon, dep.lat);
-      const [wx, wy] = project(LOCATIONS.client_wh.lon, LOCATIONS.client_wh.lat);
-      const prog = g.dest_customs_cleared_at ? clamp((Date.now() - new Date(g.dest_customs_cleared_at).getTime()) / (2*24*60*60*1000), 0.1, 0.9) : 0.5;
-      return arcPoint(dx, dy, wx, wy, prog);
+      const [dpx, dpy] = P(dep);
+      const [wx, wy] = P(LOCATIONS.client_wh);
+      const prog = g.dest_customs_cleared_at
+        ? clamp((Date.now() - new Date(g.dest_customs_cleared_at).getTime()) / (2*24*60*60*1000), 0.1, 0.9)
+        : 0.5;
+      return arcPoint(dpx, dpy, wx, wy, prog, 0.1);
     }
-
-    return project(LOCATIONS.supplier.lon, LOCATIONS.supplier.lat);
-  }
-
-  // ── Inject skeleton into page ──
-  function injectSkeleton(host) {
-    host.innerHTML = `
-<div style="padding:0;height:calc(100vh - 100px);min-height:500px;position:relative;display:flex;flex-direction:column;gap:8px;">
-  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
-    <div style="display:flex;align-items:center;gap:12px;">
-      <div style="font-size:15px;font-weight:500;color:#1C1C1E;letter-spacing:-0.01em;">Live Map</div>
-      <div style="width:0.5px;height:20px;background:rgba(0,0,0,0.08);"></div>
-      <input id="map-search" type="text" placeholder="Search vessel, PO, SKU, Zendesk, mobile bin..." style="border:0.5px solid rgba(0,0,0,0.12);border-radius:8px;padding:6px 12px;font-size:12px;width:300px;outline:none;font-family:inherit;color:#1C1C1E;background:#fff;"/>
-    </div>
-    <div style="display:flex;align-items:center;gap:16px;">
-      <div id="map-counter" style="font-size:11px;color:#6E6E73;"></div>
-      <div style="display:flex;gap:12px;align-items:center;" id="map-legend"></div>
-    </div>
-  </div>
-  <div style="flex:1;position:relative;border-radius:14px;overflow:hidden;border:0.5px solid rgba(0,0,0,0.08);">
-    <canvas id="map-canvas" style="display:block;width:100%;height:100%;"></canvas>
-    <svg id="map-pins" style="position:absolute;top:0;left:0;width:100%;height:100%;overflow:visible;"></svg>
-    <div id="map-tooltip" style="position:absolute;background:#1C1C1E;color:#fff;border-radius:6px;padding:5px 10px;font-size:11px;pointer-events:none;display:none;white-space:nowrap;z-index:10;"></div>
-    <div id="map-detail" style="position:absolute;top:0;right:0;width:300px;height:100%;background:#fff;border-left:0.5px solid rgba(0,0,0,0.08);transform:translateX(100%);transition:transform .3s cubic-bezier(0.4,0,0.2,1);z-index:20;overflow-y:auto;padding:20px 18px 20px;"></div>
-  </div>
-</div>`;
-  }
-
-  // ── Draw dot matrix base map ──
-  function drawBaseMap(canvas) {
-    const ctx = canvas.getContext('2d');
-    const w = canvas.width, h = canvas.height;
-    ctx.fillStyle = '#FAFAFA';
-    ctx.fillRect(0, 0, w, h);
-    const scaleX = w / W, scaleY = h / H;
-    const step = 7;
-    for (let px = 0; px < W; px += step) {
-      for (let py = 0; py < H; py += step) {
-        let inside = false;
-        for (const poly of LAND) {
-          if (insidePoly(px, py, poly.map(([lo,la])=>project(lo,la)))) { inside=true; break; }
-        }
-        if (inside) {
-          ctx.beginPath();
-          ctx.arc(px*scaleX, py*scaleY, 1.5*Math.min(scaleX,scaleY), 0, Math.PI*2);
-          ctx.fillStyle = '#D8D8D8';
-          ctx.fill();
-        }
-      }
-    }
-  }
-
-  // ── Render fixed location labels ──
-  function renderLocationLabels(svgEl, cw, ch) {
-    const scaleX = cw / W, scaleY = ch / H;
-    const locs = Object.values(LOCATIONS);
-    for (const loc of locs) {
-      const [x, y] = project(loc.lon, loc.lat);
-      const sx = x * scaleX, sy = y * scaleY;
-      const dot = ns('circle');
-      dot.setAttribute('cx', sx); dot.setAttribute('cy', sy);
-      dot.setAttribute('r', '3'); dot.setAttribute('fill', '#C8C8C8');
-      dot.setAttribute('stroke', '#fff'); dot.setAttribute('stroke-width', '1');
-      svgEl.appendChild(dot);
-      const label = ns('text');
-      label.setAttribute('x', sx + 6); label.setAttribute('y', sy + 3);
-      label.setAttribute('font-size', '9'); label.setAttribute('fill', '#AEAEB2');
-      label.setAttribute('font-family', '-apple-system,sans-serif');
-      label.textContent = loc.name;
-      svgEl.appendChild(label);
-    }
-  }
-
-  // ── Render legend ──
-  function renderLegend() {
-    const el = document.getElementById('map-legend');
-    if (!el) return;
-    el.innerHTML = Object.entries(STAGE_LABEL).map(([k, v]) =>
-      `<div style="display:flex;align-items:center;gap:5px;">
-        <div style="width:8px;height:8px;border-radius:50%;background:${STAGE_COLOR[k]};flex-shrink:0;"></div>
-        <span style="font-size:10px;color:#6E6E73;">${v}</span>
-      </div>`
-    ).join('');
+    return P(LOCATIONS.supplier);
   }
 
   // ── Detail panel ──
@@ -349,39 +219,44 @@
     const allPos = [...new Set(g.lanes.flatMap(l=>l.pos))];
     const allSkus = [...new Set(g.lanes.flatMap(l=>l.skus))];
     const allBins = [...new Set(g.lanes.flatMap(l=>l.bins))];
-    const allZendesks = [...new Set(g.lanes.map(l=>l.zendesk).filter(Boolean))];
+    const allZd = [...new Set(g.lanes.map(l=>l.zendesk).filter(Boolean))];
     const totalPlanned = g.lanes.reduce((s,l)=>s+l.planned,0);
     const totalApplied = g.lanes.reduce((s,l)=>s+l.applied,0);
     const pct = totalPlanned > 0 ? Math.round(totalApplied/totalPlanned*100) : 0;
-    const hbls = [...new Set(g.lanes.flatMap(l=>l.stageData?.hbl ? [l.stageData.hbl] : []))];
-    const mbls = [...new Set(g.lanes.flatMap(l=>l.stageData?.mbl ? [l.stageData.mbl] : []))];
-    const etaPort = g.lanes[0]?.stageData?.eta_port;
-    const etaFC = g.lanes[0]?.stageData?.eta_fc;
-    const latestArr = g.lanes[0]?.stageData?.latest_arrival_date;
+    const hbls = [...new Set(g.lanes.map(l=>l.manual?.hbl).filter(Boolean))];
+    const mbls = [...new Set(g.lanes.map(l=>l.manual?.mbl).filter(Boolean))];
+    const eta_port = g.eta_port;
+    const eta_fc = g.lanes[0]?.manual?.eta_fc;
+    const lat_arr = g.lanes[0]?.manual?.latest_arrival_date;
+    const onHold = g.lanes.some(l=>l.manual?.customs_hold);
 
-    const row = (label, value) => value && value !== '—'
-      ? `<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:8px 12px;border-bottom:0.5px solid rgba(0,0,0,0.05);">
-          <span style="font-size:11px;color:#AEAEB2;flex-shrink:0;">${label}</span>
-          <span style="font-size:11px;font-weight:500;color:#1C1C1E;text-align:right;max-width:160px;">${value}</span>
-        </div>` : '';
+    const row = (label, value) => (!value || value==='—') ? '' :
+      `<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:8px 12px;border-bottom:0.5px solid rgba(0,0,0,0.05);">
+        <span style="font-size:11px;color:#AEAEB2;flex-shrink:0;margin-right:8px;">${label}</span>
+        <span style="font-size:11px;font-weight:500;color:#1C1C1E;text-align:right;">${value}</span>
+      </div>`;
 
-    const section = (title, rows) => `
-      <div style="font-size:10px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin:14px 0 6px;">${title}</div>
-      <div style="border:0.5px solid rgba(0,0,0,0.07);border-radius:10px;overflow:hidden;">${rows}</div>`;
+    const section = (title, content) => content.trim()
+      ? `<div style="font-size:10px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin:14px 0 6px;">${title}</div>
+         <div style="border:0.5px solid rgba(0,0,0,0.07);border-radius:10px;overflow:hidden;">${content}</div>` : '';
+
+    const vesselName = g.vessel || 'Unassigned vessel';
 
     panel.innerHTML = `
-      <button onclick="document.getElementById('map-detail').style.transform='translateX(100%)'" style="position:absolute;top:14px;right:14px;width:26px;height:26px;border-radius:7px;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);cursor:pointer;font-size:13px;color:#6E6E73;display:flex;align-items:center;justify-content:center;font-family:inherit;">✕</button>
+      <button onclick="this.closest('#map-detail').style.transform='translateX(100%)'"
+        style="position:absolute;top:14px;right:14px;width:26px;height:26px;border-radius:7px;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);cursor:pointer;font-size:13px;color:#6E6E73;display:flex;align-items:center;justify-content:center;font-family:inherit;">✕</button>
       <div style="padding-right:32px;margin-bottom:14px;">
-        <div style="font-size:13px;font-weight:500;color:#1C1C1E;margin-bottom:6px;">${g.vessel && !g.vessel.startsWith('NO_VESSEL') ? g.vessel : 'Unassigned vessel'}</div>
+        <div style="font-size:13px;font-weight:500;color:#1C1C1E;margin-bottom:6px;">${vesselName}</div>
         <div style="display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:6px;background:${color}18;">
           <div style="width:6px;height:6px;border-radius:50%;background:${color};"></div>
           <span style="font-size:10px;font-weight:500;color:${color};">${STAGE_LABEL[g.stage]}</span>
         </div>
+        ${onHold ? `<div style="display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:6px;background:#B0707018;margin-left:6px;">
+          <span style="font-size:10px;font-weight:500;color:#B07070;">Customs Hold</span></div>` : ''}
       </div>
       ${section('Shipment', [
-        row('Vessel', g.vessel && !g.vessel.startsWith('NO_VESSEL') ? g.vessel : null),
         row('Freight', g.isAir ? 'Air' : 'Sea'),
-        row('Zendesk(s)', allZendesks.map(z=>'#'+z).join(', ')),
+        row('Zendesk(s)', allZd.map(z=>'#'+z).join(', ')),
         row('HBL', hbls.join(', ')),
         row('MBL', mbls.join(', ')),
       ].join(''))}
@@ -396,105 +271,109 @@
       ].join(''))}
       ${allBins.length ? section('Mobile Bins', [
         row('Count', allBins.length.toLocaleString()),
-        row('Bins', allBins.slice(0,8).join(', ') + (allBins.length > 8 ? ` +${allBins.length-8} more` : '')),
+        row('Bins', allBins.slice(0,6).join(', ')+(allBins.length>6?` +${allBins.length-6} more`:'')),
       ].join('')) : ''}
-      ${section('Dates', [
-        row('ETA Port', fmtDate(etaPort)),
-        row('ETA FC / WH', fmtDate(etaFC || latestArr)),
+      ${section('Dates & ETA', [
         row('Departed', fmtDate(g.departed_at)),
+        row('ETA Port', fmtDate(eta_port)),
+        row('ETA FC / WH', fmtDate(eta_fc||lat_arr)),
         row('Arrived', fmtDate(g.arrived_at)),
-        row('Customs cleared', fmtDate(g.dest_customs_cleared_at)),
-        g.lanes.some(l=>l.stageData?.customs_hold) ? row('Customs Hold', 'YES — contact ops') : '',
+        row('Customs Cleared', fmtDate(g.dest_customs_cleared_at)),
       ].join(''))}`;
 
     panel.style.transform = 'translateX(0)';
   }
 
-  // ── Main render function ──
-  function renderMap(groups, filter) {
-    const svgEl = document.getElementById('map-pins');
-    const canvas = document.getElementById('map-canvas');
-    const tooltip = document.getElementById('map-tooltip');
-    const detail = document.getElementById('map-detail');
-    const wrap = svgEl.parentElement;
-    if (!svgEl || !canvas) return;
-
-    const cw = canvas.offsetWidth || W;
-    const ch = canvas.offsetHeight || H;
-    canvas.width = cw; canvas.height = ch;
-    const scaleX = cw / W, scaleY = ch / H;
-
-    drawBaseMap(canvas);
-    svgEl.innerHTML = '';
-    svgEl.setAttribute('viewBox', `0 0 ${cw} ${ch}`);
-
-    renderLocationLabels(svgEl, cw, ch);
+  // ── Render all pins and arcs onto the SVG ──
+  function renderPins(svgEl, groups, filter, svgW, svgH) {
+    // Clear everything except defs
+    while (svgEl.firstChild) svgEl.removeChild(svgEl.firstChild);
 
     const q = (filter||'').toLowerCase().trim();
-    const matched = q ? groups.filter(g => {
+    const matched = q ? new Set(groups.filter(g => {
       const allPos = g.lanes.flatMap(l=>l.pos);
       const allSkus = g.lanes.flatMap(l=>l.skus);
       const allZd = g.lanes.map(l=>l.zendesk);
       const allBins = g.lanes.flatMap(l=>l.bins);
       const allSup = g.lanes.map(l=>l.supplier);
-      return (
-        g.vessel?.toLowerCase().includes(q) ||
+      return g.vessel?.toLowerCase().includes(q) ||
         allPos.some(p=>p.toLowerCase().includes(q)) ||
         allSkus.some(s=>s.toLowerCase().includes(q)) ||
         allZd.some(z=>z.includes(q)) ||
         allBins.some(b=>b.toLowerCase().includes(q)) ||
-        allSup.some(s=>s.toLowerCase().includes(q))
-      );
-    }) : groups;
+        allSup.some(s=>s.toLowerCase().includes(q));
+    }).map(g=>g.vessel)) : null;
 
-    const matchedIds = new Set(matched.map(g=>g.vessel));
     const isFiltering = q.length > 0;
 
-    // Draw arcs first (behind pins)
-    for (const g of groups) {
-      const isMatch = matchedIds.has(g.vessel);
-      const opacity = isFiltering ? (isMatch ? 0.7 : 0.06) : 0.45;
-      const color = STAGE_COLOR[g.stage];
-      if (g.stage !== 'transit' && g.stage !== 'last_mile') continue;
-
-      let x1, y1, x2, y2;
-      if (g.stage === 'transit') {
-        [x1, y1] = project(LOCATIONS.origin_port.lon, LOCATIONS.origin_port.lat);
-        const dest = g.isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
-        [x2, y2] = project(dest.lon, dest.lat);
-      } else {
-        const dep = g.isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
-        [x1, y1] = project(dep.lon, dep.lat);
-        [x2, y2] = project(LOCATIONS.client_wh.lon, LOCATIONS.client_wh.lat);
-      }
-      const mx = (x1+x2)/2*scaleX, my = ((y1+y2)/2 - Math.abs(x2-x1)*0.28)*scaleY;
-      const pathD = `M${x1*scaleX},${y1*scaleY} Q${mx},${my} ${x2*scaleX},${y2*scaleY}`;
-      const bg = ns('path'); bg.setAttribute('d',pathD); bg.setAttribute('stroke',color);
-      bg.setAttribute('stroke-width','1.5'); bg.setAttribute('fill','none');
-      bg.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.3':'0.04'):'0.18');
-      svgEl.appendChild(bg);
-      const fg = ns('path'); fg.setAttribute('d',pathD); fg.setAttribute('stroke',color);
-      fg.setAttribute('stroke-width','1.5'); fg.setAttribute('fill','none');
-      fg.setAttribute('stroke-dasharray','5 4');
-      fg.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.8':'0.06'):'0.5');
-      svgEl.appendChild(fg);
+    // Fixed location labels — always visible
+    for (const loc of Object.values(LOCATIONS)) {
+      const [lx, ly] = project(loc.lon, loc.lat, svgW, svgH);
+      const dot = ns('circle');
+      dot.setAttribute('cx', lx); dot.setAttribute('cy', ly);
+      dot.setAttribute('r', '3'); dot.setAttribute('fill', '#CACACA');
+      dot.setAttribute('stroke', '#fff'); dot.setAttribute('stroke-width', '1.5');
+      svgEl.appendChild(dot);
+      const txt = ns('text');
+      txt.setAttribute('x', lx+6); txt.setAttribute('y', ly+3);
+      txt.setAttribute('font-size', '9'); txt.setAttribute('fill', '#BCBCBC');
+      txt.setAttribute('font-family', '-apple-system,sans-serif');
+      txt.textContent = loc.name;
+      svgEl.appendChild(txt);
     }
 
-    // Draw pins — matched on top
-    const sorted = [...groups].sort((a,b) => {
-      const am = matchedIds.has(a.vessel), bm = matchedIds.has(b.vessel);
-      return am === bm ? 0 : am ? 1 : -1;
+    // Draw arcs behind pins
+    for (const g of groups) {
+      const isMatch = matched ? matched.has(g.vessel) : true;
+      const color = STAGE_COLOR[g.stage];
+
+      if (g.stage === 'transit' || g.stage === 'last_mile') {
+        let x1, y1, x2, y2;
+        if (g.stage === 'transit') {
+          [x1,y1] = project(LOCATIONS.origin_port.lon, LOCATIONS.origin_port.lat, svgW, svgH);
+          const dest = g.isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
+          [x2,y2] = project(dest.lon, dest.lat, svgW, svgH);
+        } else {
+          const dep = g.isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
+          [x1,y1] = project(dep.lon, dep.lat, svgW, svgH);
+          [x2,y2] = project(LOCATIONS.client_wh.lon, LOCATIONS.client_wh.lat, svgW, svgH);
+        }
+        const bend = g.stage === 'last_mile' ? 0.08 : 0.28;
+        const [mx,my] = arcMid(x1,y1,x2,y2,bend);
+        const d = `M${x1},${y1} Q${mx},${my} ${x2},${y2}`;
+
+        const bgPath = ns('path');
+        bgPath.setAttribute('d',d); bgPath.setAttribute('stroke',color);
+        bgPath.setAttribute('stroke-width','1.5'); bgPath.setAttribute('fill','none');
+        bgPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.25':'0.04'):'0.18');
+        svgEl.appendChild(bgPath);
+
+        const fgPath = ns('path');
+        fgPath.setAttribute('d',d); fgPath.setAttribute('stroke',color);
+        fgPath.setAttribute('stroke-width','1.5'); fgPath.setAttribute('fill','none');
+        fgPath.setAttribute('stroke-dasharray','5 4');
+        fgPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.75':'0.05'):'0.5');
+        svgEl.appendChild(fgPath);
+      }
+    }
+
+    // Draw pins — dimmed first, matched on top
+    const sorted = [...groups].sort((a,b)=>{
+      const am = matched ? matched.has(a.vessel) : true;
+      const bm = matched ? matched.has(b.vessel) : true;
+      return (am===bm) ? 0 : (am ? 1 : -1);
     });
 
-    let activeCount = 0;
+    const detail = document.getElementById('map-detail');
+    const tooltip = document.getElementById('map-tooltip');
+    const wrap = svgEl.parentElement;
+
     for (const g of sorted) {
-      const isMatch = matchedIds.has(g.vessel);
-      const pinOpacity = isFiltering ? (isMatch ? 1 : 0.1) : 1;
-      const pinScale = isFiltering && isMatch ? 1.8 : 1;
+      const isMatch = matched ? matched.has(g.vessel) : true;
+      const pinOpacity = isFiltering ? (isMatch ? 1 : 0.08) : 1;
+      const pinScale = isFiltering && isMatch ? 1.7 : 1;
       const color = STAGE_COLOR[g.stage];
-      const [rawX, rawY] = getGroupPosition(g);
-      const px = rawX * scaleX, py = rawY * scaleY;
-      activeCount++;
+      const [px, py] = getGroupXY(g, svgW, svgH);
 
       const gEl = ns('g');
       gEl.setAttribute('opacity', pinOpacity);
@@ -502,145 +381,228 @@
       gEl.style.pointerEvents = 'all';
 
       // Sonar rings
-      for (let ri = 0; ri < 3; ri++) {
+      for (let ri=0; ri<3; ri++) {
         const ring = ns('circle');
         ring.setAttribute('cx', px); ring.setAttribute('cy', py); ring.setAttribute('r', '4');
-        ring.setAttribute('fill', 'none'); ring.setAttribute('stroke', color);
+        ring.setAttribute('fill','none'); ring.setAttribute('stroke', color);
         ring.style.animation = `mapSonar 2.4s ease-out infinite ${ri*0.8}s`;
         gEl.appendChild(ring);
       }
 
-      // Outer glow
       const outer = ns('circle');
-      outer.setAttribute('cx', px); outer.setAttribute('cy', py);
-      outer.setAttribute('r', String(7*pinScale)); outer.setAttribute('fill', color);
-      outer.setAttribute('opacity', '0.15');
+      outer.setAttribute('cx',px); outer.setAttribute('cy',py);
+      outer.setAttribute('r', String(7*pinScale)); outer.setAttribute('fill',color);
+      outer.setAttribute('opacity','0.15');
       gEl.appendChild(outer);
 
-      // Core dot
       const dot = ns('circle');
-      dot.setAttribute('cx', px); dot.setAttribute('cy', py);
-      dot.setAttribute('r', String(4.5*pinScale)); dot.setAttribute('fill', color);
+      dot.setAttribute('cx',px); dot.setAttribute('cy',py);
+      dot.setAttribute('r', String(4.5*pinScale)); dot.setAttribute('fill',color);
       gEl.appendChild(dot);
 
-      // Customs hold X mark
       if (g.stage === 'customs_hold') {
-        const sz = 3*pinScale;
+        const sz = 2.5*pinScale;
         const x = ns('path');
-        x.setAttribute('d', `M${px-sz},${py-sz} L${px+sz},${py+sz} M${px+sz},${py-sz} L${px-sz},${py+sz}`);
-        x.setAttribute('stroke', '#fff'); x.setAttribute('stroke-width', '1.5');
-        x.setAttribute('stroke-linecap', 'round');
+        x.setAttribute('d',`M${px-sz},${py-sz}L${px+sz},${py+sz}M${px+sz},${py-sz}L${px-sz},${py+sz}`);
+        x.setAttribute('stroke','#fff'); x.setAttribute('stroke-width','1.5');
+        x.setAttribute('stroke-linecap','round');
         gEl.appendChild(x);
       }
 
-      const vesselLabel = g.vessel && !g.vessel.startsWith('NO_VESSEL') ? g.vessel : 'Unassigned';
-      gEl.addEventListener('mouseenter', e => {
-        tooltip.style.display = 'block';
-        tooltip.textContent = vesselLabel + ' · ' + STAGE_LABEL[g.stage];
-      });
+      const label = g.vessel || 'Unassigned';
+      gEl.addEventListener('mouseenter', () => { tooltip.style.display='block'; tooltip.textContent=label+' · '+STAGE_LABEL[g.stage]; });
       gEl.addEventListener('mousemove', e => {
         const r = wrap.getBoundingClientRect();
-        tooltip.style.left = (e.clientX - r.left + 14) + 'px';
-        tooltip.style.top = (e.clientY - r.top - 32) + 'px';
+        tooltip.style.left=(e.clientX-r.left+14)+'px';
+        tooltip.style.top=(e.clientY-r.top-36)+'px';
       });
-      gEl.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
-      gEl.addEventListener('click', () => { openDetail(g, detail); });
-
+      gEl.addEventListener('mouseleave', ()=>{ tooltip.style.display='none'; });
+      gEl.addEventListener('click', ()=>{ openDetail(g, detail); });
       svgEl.appendChild(gEl);
     }
 
+    // Update counter
     const counter = document.getElementById('map-counter');
-    if (counter) counter.textContent = activeCount + ' active shipment' + (activeCount !== 1 ? 's' : '');
+    if (counter) {
+      const total = groups.length;
+      counter.textContent = total + ' active shipment' + (total!==1?'s':'');
+    }
   }
 
-  // ── CSS for sonar animation ──
+  // ── Draw world map using D3 + TopoJSON ──
+  async function drawWorldMap(canvas, svgEl) {
+    const w = canvas.offsetWidth || 900;
+    const h = canvas.offsetHeight || 480;
+    canvas.width = w; canvas.height = h;
+
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#FAFAFA';
+    ctx.fillRect(0, 0, w, h);
+
+    // Load world TopoJSON from CDN
+    const topo = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(r=>r.json());
+    const features = topojson.feature(topo, topo.objects.countries).features;
+
+    // Use D3 equirectangular projection matching our project() function
+    // We draw dots inside each country polygon
+    const DOT_STEP = 6;
+    const DOT_R = 1.4;
+    ctx.fillStyle = '#D4D4D4';
+
+    // Build path renderer using D3
+    const projection = d3.geoEquirectangular()
+      .scale(w / (2 * Math.PI))
+      .translate([w/2, h/2]);
+    const path = d3.geoPath(projection, ctx);
+
+    // Draw each country as dots by sampling the filled path
+    // Offscreen canvas approach: fill country, sample pixels
+    const offscreen = document.createElement('canvas');
+    offscreen.width = w; offscreen.height = h;
+    const octx = offscreen.getContext('2d');
+
+    for (const feature of features) {
+      // Clear offscreen
+      octx.clearRect(0, 0, w, h);
+      octx.beginPath();
+      const oPath = d3.geoPath(projection, octx);
+      oPath(feature);
+      octx.fillStyle = '#000';
+      octx.fill();
+
+      const imageData = octx.getImageData(0, 0, w, h).data;
+      for (let px = DOT_STEP/2; px < w; px += DOT_STEP) {
+        for (let py = DOT_STEP/2; py < h; py += DOT_STEP) {
+          const idx = (Math.floor(py)*w + Math.floor(px)) * 4;
+          if (imageData[idx+3] > 128) {
+            ctx.beginPath();
+            ctx.arc(px, py, DOT_R, 0, Math.PI*2);
+            ctx.fill();
+          }
+        }
+      }
+    }
+
+    return { w, h };
+  }
+
+  // ── Inject page skeleton ──
+  function injectSkeleton(host) {
+    host.innerHTML = `
+<div style="padding:0;height:calc(100vh - 100px);min-height:520px;display:flex;flex-direction:column;gap:8px;">
+  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div style="font-size:15px;font-weight:500;color:#1C1C1E;letter-spacing:-0.01em;">Live Map</div>
+      <div style="width:0.5px;height:20px;background:rgba(0,0,0,0.08);"></div>
+      <input id="map-search" type="text" placeholder="Search vessel, PO, SKU, Zendesk, mobile bin..." style="border:0.5px solid rgba(0,0,0,0.12);border-radius:8px;padding:6px 12px;font-size:12px;width:310px;outline:none;font-family:inherit;color:#1C1C1E;background:#fff;"/>
+    </div>
+    <div style="display:flex;align-items:center;gap:16px;">
+      <div id="map-counter" style="font-size:11px;color:#6E6E73;"></div>
+      <div id="map-legend" style="display:flex;gap:12px;flex-wrap:wrap;"></div>
+    </div>
+  </div>
+  <div id="map-wrap" style="flex:1;position:relative;border-radius:14px;overflow:hidden;border:0.5px solid rgba(0,0,0,0.08);background:#FAFAFA;">
+    <div id="map-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:#AEAEB2;z-index:5;">Loading map…</div>
+    <canvas id="map-canvas" style="display:block;width:100%;height:100%;"></canvas>
+    <svg id="map-pins" style="position:absolute;top:0;left:0;width:100%;height:100%;overflow:visible;"></svg>
+    <div id="map-tooltip" style="position:absolute;background:#1C1C1E;color:#fff;border-radius:6px;padding:5px 10px;font-size:11px;pointer-events:none;display:none;white-space:nowrap;z-index:30;"></div>
+    <div id="map-detail" style="position:absolute;top:0;right:0;width:300px;height:100%;background:#fff;border-left:0.5px solid rgba(0,0,0,0.08);transform:translateX(100%);transition:transform .3s cubic-bezier(0.4,0,0.2,1);z-index:20;overflow-y:auto;padding:20px 18px;"></div>
+  </div>
+</div>`;
+  }
+
+  function renderLegend() {
+    const el = document.getElementById('map-legend');
+    if (!el) return;
+    el.innerHTML = Object.entries(STAGE_LABEL).map(([k,v]) =>
+      `<div style="display:flex;align-items:center;gap:4px;">
+        <div style="width:8px;height:8px;border-radius:50%;background:${STAGE_COLOR[k]};flex-shrink:0;"></div>
+        <span style="font-size:10px;color:#6E6E73;">${v}</span>
+      </div>`
+    ).join('');
+  }
+
   function injectStyles() {
+    if (document.getElementById('map-sonar-style')) return;
     const s = document.createElement('style');
-    s.textContent = `@keyframes mapSonar{0%{r:4;stroke-opacity:.65;stroke-width:2}100%{r:20;stroke-opacity:0;stroke-width:.5}}`;
+    s.id = 'map-sonar-style';
+    s.textContent = `@keyframes mapSonar{0%{r:4;stroke-opacity:.6;stroke-width:2}100%{r:20;stroke-opacity:0;stroke-width:.5}}`;
     document.head.appendChild(s);
   }
 
-  // ── Fetch all data needed for the map ──
+  // ── Fetch operational data ──
   async function loadMapData() {
     const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
     let token = null;
-    if (window.Clerk?.session) { try { token = await window.Clerk.session.getToken(); } catch(_) {} }
-    const headers = Object.assign({}, token ? {'Authorization':'Bearer '+token} : {});
+    if (window.Clerk?.session) { try { token = await window.Clerk.session.getToken(); } catch(_){} }
+    const headers = Object.assign({}, token?{'Authorization':'Bearer '+token}:{});
     const api = async (path) => {
-      const r = await fetch(apiBase + path, { headers });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const r = await fetch(apiBase+path, {headers});
+      if (!r.ok) throw new Error('HTTP '+r.status);
       return r.json();
     };
 
-    // Get last 8 weeks of plan data to catch slow sea freight
     const planRows = Array.isArray(window.state?.plan) ? window.state.plan : [];
     const weekStart = window.state?.weekStart || '';
 
-    // Fetch flow data for last 8 weeks
-    const weeksToFetch = [];
-    for (let i = 0; i < 8; i++) {
-      const d = new Date(weekStart + 'T00:00:00');
-      d.setDate(d.getDate() - i*7);
-      weeksToFetch.push(d.toISOString().slice(0,10));
+    // Fetch 8 weeks of flow data to catch slow sea freight
+    const weeks = [];
+    for (let i=0; i<8; i++) {
+      const d = new Date(weekStart+'T00:00:00');
+      d.setDate(d.getDate()-i*7);
+      weeks.push(d.toISOString().slice(0,10));
     }
 
     const flowResults = await Promise.allSettled(
-      weeksToFetch.map(ws => api(`/flow/week/${encodeURIComponent(ws)}/all`))
+      weeks.map(ws=>api(`/flow/week/${encodeURIComponent(ws)}/all`))
     );
 
-    // Merge all flow data
-    const allLanes = [];
-    const allContainers = [];
-    for (const result of flowResults) {
-      if (result.status !== 'fulfilled') continue;
-      const d = result.value;
-      const flowData = {};
-      for (const facVal of Object.values(d.facilities || {})) {
-        const fd = (facVal?.data && typeof facVal.data === 'object') ? facVal.data : {};
-        for (const [k, v] of Object.entries(fd)) {
-          if (k === 'intl_lanes' && v && typeof v === 'object' && !Array.isArray(v)) {
-            flowData.intl_lanes = Object.assign({}, flowData.intl_lanes||{}, v);
-          } else { flowData[k] = v; }
+    const allLanes=[], allContainers=[];
+    for (const res of flowResults) {
+      if (res.status!=='fulfilled') continue;
+      const flowData={};
+      for (const facVal of Object.values(res.value.facilities||{})) {
+        const fd=(facVal?.data&&typeof facVal.data==='object')?facVal.data:{};
+        for (const [k,v] of Object.entries(fd)) {
+          if (k==='intl_lanes'&&v&&typeof v==='object'&&!Array.isArray(v)) {
+            flowData.intl_lanes=Object.assign({},flowData.intl_lanes||{},v);
+          } else { flowData[k]=v; }
         }
       }
-      const intl = (flowData.intl_lanes && typeof flowData.intl_lanes === 'object') ? flowData.intl_lanes : {};
-      for (const [lk, manual] of Object.entries(intl)) {
-        const parts = lk.split('||');
-        allLanes.push({ key: lk, supplier: parts[0]||'', zendesk: parts[1]||'', freight: parts[2]||'', manual: manual||{} });
+      const intl=(flowData.intl_lanes&&typeof flowData.intl_lanes==='object')?flowData.intl_lanes:{};
+      for (const [lk,manual] of Object.entries(intl)) {
+        const parts=lk.split('||');
+        allLanes.push({key:lk,supplier:parts[0]||'',zendesk:parts[1]||'',freight:parts[2]||'',manual:manual||{}});
       }
-      const wc = flowData.intl_weekcontainers;
-      const conts = Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []);
+      const wc=flowData.intl_weekcontainers;
+      const conts=Array.isArray(wc)?wc:(Array.isArray(wc?.containers)?wc.containers:[]);
       allContainers.push(...conts);
     }
 
-    // Fetch receiving + bins for current week
-    const [receivingData, binsData, summaryData] = await Promise.allSettled([
+    const [recvRes, binsRes, summaryRes] = await Promise.allSettled([
       api(`/receiving?weekStart=${encodeURIComponent(weekStart)}`),
       api(`/bins/weeks/${encodeURIComponent(weekStart)}`),
       api(`/summary/po_sku?from=${encodeURIComponent(weekStart)}&to=${encodeURIComponent(weekStart)}&status=complete`),
     ]);
 
-    const receiving = receivingData.status === 'fulfilled' ? (Array.isArray(receivingData.value) ? receivingData.value : []) : [];
-    const bins = binsData.status === 'fulfilled' ? (Array.isArray(binsData.value) ? binsData.value : []) : [];
-    const summary = summaryData.status === 'fulfilled' ? (summaryData.value?.rows || []) : [];
+    const receiving = recvRes.status==='fulfilled'?(Array.isArray(recvRes.value)?recvRes.value:[]):[];
+    const bins = binsRes.status==='fulfilled'?(Array.isArray(binsRes.value)?binsRes.value:[]):[];
+    const summary = summaryRes.status==='fulfilled'?(summaryRes.value?.rows||[]):[];
 
-    // Build applied by PO
-    const appliedByPO = new Map();
+    const appliedByPO=new Map();
     for (const r of summary) appliedByPO.set(String(r.po||'').trim(), Number(r.units||0));
-
-    // Build bins by PO
-    const binsByPO = new Map();
+    const binsByPO=new Map();
     for (const b of bins) {
-      const po = String(b.po_number||'').trim();
+      const po=String(b.po_number||'').trim();
       if (!po) continue;
-      if (!binsByPO.has(po)) binsByPO.set(po, new Set());
+      if (!binsByPO.has(po)) binsByPO.set(po,new Set());
       binsByPO.get(po).add(String(b.mobile_bin||'').trim());
     }
 
-    return { lanes: allLanes, containers: allContainers, plan: planRows, receiving, appliedByPO, binsByPO };
+    return {lanes:allLanes, containers:allContainers, plan:planRows, receiving, appliedByPO, binsByPO};
   }
 
-  // ── Main entry point ──
+  // ── Main init ──
   async function initMap(host) {
     injectSkeleton(host);
     injectStyles();
@@ -648,44 +610,80 @@
 
     const canvas = document.getElementById('map-canvas');
     const svgEl = document.getElementById('map-pins');
-    if (!canvas) return;
-
-    // Draw base map immediately while data loads
-    canvas.width = canvas.offsetWidth || W;
-    canvas.height = canvas.offsetHeight || H;
-    drawBaseMap(canvas);
+    const loading = document.getElementById('map-loading');
+    const searchInput = document.getElementById('map-search');
+    const wrap = document.getElementById('map-wrap');
 
     let groups = [];
+    let svgW = 900, svgH = 480;
 
-    try {
-      const { lanes, containers, plan, receiving, appliedByPO, binsByPO } = await loadMapData();
-      groups = buildVesselGroups(lanes, containers, plan, receiving, appliedByPO, binsByPO);
-      renderMap(groups, '');
-    } catch(e) {
-      console.error('[Map] load failed', e);
-      renderMap([], '');
+    // Load D3 + TopoJSON from CDN
+    async function loadLibs() {
+      if (!window.d3) {
+        await new Promise((res,rej)=>{
+          const s=document.createElement('script');
+          s.src='https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js';
+          s.onload=res; s.onerror=rej;
+          document.head.appendChild(s);
+        });
+      }
+      if (!window.topojson) {
+        await new Promise((res,rej)=>{
+          const s=document.createElement('script');
+          s.src='https://cdn.jsdelivr.net/npm/topojson@3/dist/topojson.min.js';
+          s.onload=res; s.onerror=rej;
+          document.head.appendChild(s);
+        });
+      }
     }
 
-    // Wire search
-    const searchInput = document.getElementById('map-search');
+    try {
+      await loadLibs();
+      const dims = await drawWorldMap(canvas, svgEl);
+      svgW = dims.w; svgH = dims.h;
+      if (loading) loading.style.display='none';
+    } catch(e) {
+      console.error('[Map] world map draw failed', e);
+      if (loading) loading.textContent = 'Map unavailable — check connection';
+    }
+
+    try {
+      const data = await loadMapData();
+      groups = buildVesselGroups(data.lanes, data.containers, data.plan, data.receiving, data.appliedByPO, data.binsByPO);
+    } catch(e) {
+      console.error('[Map] data load failed', e);
+    }
+
+    renderPins(svgEl, groups, '', svgW, svgH);
+
     if (searchInput) {
       searchInput.addEventListener('input', function() {
-        renderMap(groups, this.value);
+        renderPins(svgEl, groups, this.value, svgW, svgH);
       });
     }
 
-    // Re-render on resize
-    window.addEventListener('resize', () => { renderMap(groups, searchInput?.value||''); });
+    // Redraw on resize
+    let resizeTimer;
+    window.addEventListener('resize', ()=>{
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(async ()=>{
+        try {
+          const dims = await drawWorldMap(canvas, svgEl);
+          svgW=dims.w; svgH=dims.h;
+          renderPins(svgEl, groups, searchInput?.value||'', svgW, svgH);
+        } catch(e){}
+      }, 300);
+    });
   }
 
-  // ── Show function exposed to nav routing ──
+  // ── Exposed show/hide ──
   window.showMapPage = function() {
     let pg = document.getElementById('page-map');
     if (!pg) {
       pg = document.createElement('section');
       pg.id = 'page-map';
-      pg.style.padding = '16px';
-      const main = document.querySelector('main.vo-wrap') || document.querySelector('main');
+      pg.style.cssText = 'padding:16px;display:block;';
+      const main = document.querySelector('main.vo-wrap')||document.querySelector('main');
       if (main) main.appendChild(pg);
       initMap(pg);
     }
@@ -695,7 +693,7 @@
 
   window.hideMapPage = function() {
     const pg = document.getElementById('page-map');
-    if (pg) { pg.classList.add('hidden'); pg.style.display = 'none'; }
+    if (pg) { pg.classList.add('hidden'); pg.style.display='none'; }
   };
 
 })();
