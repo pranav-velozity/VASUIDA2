@@ -6,11 +6,12 @@
   'use strict';
 
   const LOCATIONS = {
-    supplier:       { name: 'Shenzhen',       lat: 22.54,  lon: 114.06 },
-    origin_port:    { name: 'Shenzhen Port',  lat: 22.49,  lon: 113.87 },
-    sydney_port:    { name: 'Port Botany',    lat: -33.97, lon: 151.19 },
-    sydney_airport: { name: 'Sydney Airport', lat: -33.94, lon: 151.18 },
-    client_wh:      { name: 'Sydney WH',      lat: -33.87, lon: 151.20 },
+    supplier:       { name: 'Supplier',        lat: 22.80,  lon: 114.30 },
+    vas_facility:   { name: 'VAS Facility',    lat: 22.55,  lon: 114.10 },
+    origin_port:    { name: 'Shenzhen Port',   lat: 22.27,  lon: 113.57 },
+    sydney_port:    { name: 'Port Botany',     lat: -33.97, lon: 151.19 },
+    sydney_airport: { name: 'Sydney Airport',  lat: -33.94, lon: 151.17 },
+    client_wh:      { name: 'Sydney WH',       lat: -33.75, lon: 150.85 },
   };
 
   const STAGE_COLOR = {
@@ -171,8 +172,12 @@
 
   // ── Arc midpoint (curved upward for sea routes) ──
   function arcMid(x1, y1, x2, y2, bend) {
-    const mx = (x1+x2)/2;
-    const my = (y1+y2)/2 - Math.abs(x2-x1) * (bend||0.28);
+    const dx = x2-x1, dy = y2-y1;
+    const dist = Math.sqrt(dx*dx+dy*dy);
+    // Perpendicular offset — rotated 90° from the direction of travel
+    const nx = -dy/dist, ny = dx/dist;
+    const mx = (x1+x2)/2 + nx*dist*(bend||0.28);
+    const my = (y1+y2)/2 + ny*dist*(bend||0.28);
     return [mx, my];
   }
 
@@ -189,8 +194,8 @@
     const P = (loc) => project(loc.lon, loc.lat);
 
     if (stage === 'at_supplier') return P(LOCATIONS.supplier);
+    if (stage === 'vas')         return P(LOCATIONS.vas_facility);
     if (stage === 'origin_port') return P(LOCATIONS.origin_port);
-    if (stage === 'vas') return P(LOCATIONS.client_wh);
     if (stage === 'clearing' || stage === 'customs_hold') {
       return P(isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port);
     }
@@ -199,7 +204,7 @@
       const [ox, oy] = P(LOCATIONS.origin_port);
       const dest = isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
       const [dx, dy] = P(dest);
-      return arcPoint(ox, oy, dx, dy, progress, 0.28);
+      return arcPoint(ox, oy, dx, dy, progress, 0.22);
     }
     if (stage === 'last_mile') {
       const dep = isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
@@ -208,7 +213,7 @@
       const prog = g.dest_customs_cleared_at
         ? clamp((Date.now()-new Date(g.dest_customs_cleared_at).getTime())/(2*24*60*60*1000),0.1,0.9)
         : 0.5;
-      return arcPoint(dpx, dpy, wx, wy, prog, 0.08);
+      return arcPoint(dpx, dpy, wx, wy, prog, 0.15);
     }
     return P(LOCATIONS.supplier);
   }
@@ -321,7 +326,29 @@
       svgEl.appendChild(txt);
     }
 
-    // Draw full route arc for every group — offset each slightly so they don't overlap
+    // Draw one shared ghost route line per freight type (sea / air) — not one per vessel
+    const drawnRoutes = new Set();
+    groups.forEach((g) => {
+      const routeKey = g.isAir ? 'air' : 'sea';
+      if (drawnRoutes.has(routeKey)) return;
+      drawnRoutes.add(routeKey);
+      const [ox,oy] = project(LOCATIONS.origin_port.lon, LOCATIONS.origin_port.lat);
+      const destPort = g.isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
+      const [dx,dy] = project(destPort.lon, destPort.lat);
+      const [mx,my] = arcMid(ox,oy,dx,dy,0.22);
+      const ghostPath = ns('path');
+      ghostPath.setAttribute('d',`M${ox},${oy} Q${mx},${my} ${dx},${dy}`);
+      ghostPath.setAttribute('stroke','#C8C8C8');
+      ghostPath.setAttribute('stroke-width','1');
+      ghostPath.setAttribute('fill','none');
+      ghostPath.setAttribute('stroke-opacity','0.4');
+      svgEl.appendChild(ghostPath);
+    });
+
+    // Draw animated progress arc per vessel — offset perpendicular to route
+    const seaGroups = groups.filter(g=>!g.isAir);
+    const airGroups = groups.filter(g=>g.isAir);
+
     groups.forEach((g, idx) => {
       const isMatch = matched ? matched.has(g.vessel) : true;
       const color = STAGE_COLOR[g.stage];
@@ -330,62 +357,67 @@
       const destPort = isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
       const [dx,dy] = project(destPort.lon, destPort.lat);
 
-      // Offset bend per vessel index so multiple arcs fan out visibly
-      const baseBend = 0.28;
-      const bendOffset = (idx - (groups.length-1)/2) * 0.06;
-      const bend = baseBend + bendOffset;
-
-      const [mx,my] = arcMid(ox,oy,dx,dy,bend);
-      const routeD = `M${ox},${oy} Q${mx},${my} ${dx},${dy}`;
-
-      // Faint background route line
-      const bgPath = ns('path');
-      bgPath.setAttribute('d',routeD); bgPath.setAttribute('stroke',color);
-      bgPath.setAttribute('stroke-width','1.5'); bgPath.setAttribute('fill','none');
-      bgPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.18':'0.03'):'0.1');
-      svgEl.appendChild(bgPath);
+      // Perpendicular offset: vessels in same freight type spread out
+      const sameType = isAir ? airGroups : seaGroups;
+      const typeIdx = sameType.indexOf(g);
+      const typeCount = sameType.length;
+      const offsetFactor = typeCount > 1 ? (typeIdx - (typeCount-1)/2) * 0.12 : 0;
+      const bend = 0.22 + offsetFactor;
 
       if (g.stage === 'transit') {
         const progress = getVesselPosition(g.departed_at, g.eta_port, g.arrived_at);
         const [vx,vy] = arcPoint(ox,oy,dx,dy,progress,bend);
-        const [pmx,pmy] = arcMid(ox,oy,vx,vy,bend*0.5);
-        const animId = 'map-flow-' + idx;
-
-        // Animated flowing dashes — create style tag with unique keyframe per arc
-        const dash = 9, gap = 5, total = dash+gap;
-        const style = document.createElement('style');
-        style.textContent = `@keyframes ${animId}{0%{stroke-dashoffset:${total}}100%{stroke-dashoffset:0}}`;
-        document.head.appendChild(style);
-
+        const [pmx,pmy] = arcMid(ox,oy,vx,vy,bend);
+        const animId = 'mf' + idx;
+        const styleEl = document.createElement('style');
+        styleEl.textContent = `@keyframes ${animId}{from{stroke-dashoffset:14}to{stroke-dashoffset:0}}`;
+        document.head.appendChild(styleEl);
         const fgPath = ns('path');
         fgPath.setAttribute('d',`M${ox},${oy} Q${pmx},${pmy} ${vx},${vy}`);
-        fgPath.setAttribute('stroke',color); fgPath.setAttribute('stroke-width','2.5');
+        fgPath.setAttribute('stroke',color);
+        fgPath.setAttribute('stroke-width','2.5');
         fgPath.setAttribute('fill','none');
-        fgPath.setAttribute('stroke-dasharray',`${dash} ${gap}`);
+        fgPath.setAttribute('stroke-dasharray','8 6');
         fgPath.setAttribute('stroke-linecap','round');
-        fgPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.85':'0.05'):'0.65');
-        fgPath.style.animation = `${animId} 1.2s linear infinite`;
+        fgPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.9':'0.05'):'0.7');
+        fgPath.style.animation = `${animId} 1.4s linear infinite`;
         svgEl.appendChild(fgPath);
       }
 
-      if (g.stage === 'last_mile' || g.stage === 'vas') {
+      if (g.stage === 'last_mile') {
         const dep = isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
         const [lpx,lpy] = project(dep.lon, dep.lat);
         const [wx,wy] = project(LOCATIONS.client_wh.lon, LOCATIONS.client_wh.lat);
-        const [lmx,lmy] = arcMid(lpx,lpy,wx,wy,0.08);
-        const lmId = 'map-lm-' + idx;
+        const [lmx,lmy] = arcMid(lpx,lpy,wx,wy,0.15+offsetFactor*0.5);
+        const lmId = 'ml' + idx;
         const lmStyle = document.createElement('style');
-        lmStyle.textContent = `@keyframes ${lmId}{0%{stroke-dashoffset:14}100%{stroke-dashoffset:0}}`;
+        lmStyle.textContent = `@keyframes ${lmId}{from{stroke-dashoffset:14}to{stroke-dashoffset:0}}`;
         document.head.appendChild(lmStyle);
         const lmPath = ns('path');
         lmPath.setAttribute('d',`M${lpx},${lpy} Q${lmx},${lmy} ${wx},${wy}`);
-        lmPath.setAttribute('stroke',color); lmPath.setAttribute('stroke-width','2');
+        lmPath.setAttribute('stroke',color);
+        lmPath.setAttribute('stroke-width','2');
         lmPath.setAttribute('fill','none');
-        lmPath.setAttribute('stroke-dasharray','8 6');
+        lmPath.setAttribute('stroke-dasharray','6 5');
         lmPath.setAttribute('stroke-linecap','round');
-        lmPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.75':'0.04'):'0.55');
+        lmPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.8':'0.04'):'0.6');
         lmPath.style.animation = `${lmId} 1s linear infinite`;
         svgEl.appendChild(lmPath);
+      }
+
+      // VAS — short arc from supplier to VAS facility (both in Shenzhen)
+      if (g.stage === 'vas') {
+        const [sx,sy] = project(LOCATIONS.supplier.lon, LOCATIONS.supplier.lat);
+        const [vfx,vfy] = project(LOCATIONS.vas_facility.lon, LOCATIONS.vas_facility.lat);
+        const [vmx,vmy] = arcMid(sx,sy,vfx,vfy,0.2);
+        const vasPath = ns('path');
+        vasPath.setAttribute('d',`M${sx},${sy} Q${vmx},${vmy} ${vfx},${vfy}`);
+        vasPath.setAttribute('stroke',color);
+        vasPath.setAttribute('stroke-width','1.5');
+        vasPath.setAttribute('fill','none');
+        vasPath.setAttribute('stroke-dasharray','4 4');
+        vasPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.5':'0.04'):'0.4');
+        svgEl.appendChild(vasPath);
       }
     });
 
