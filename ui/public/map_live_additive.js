@@ -160,12 +160,13 @@
     return Array.from(groups.values());
   }
 
-  // ── Project lon/lat to SVG x/y using equirectangular ──
-  // Returns [x,y] in the SVG coordinate space (0..svgW, 0..svgH)
-  function project(lon, lat, svgW, svgH) {
-    const x = (lon + 180) / 360 * svgW;
-    const y = (90 - lat) / 180 * svgH;
-    return [x, y];
+  // ── Project lon/lat using D3 projection (set after map draws) ──
+  // Fallback to equirectangular if D3 not ready yet
+  let _proj = null;
+  function project(lon, lat) {
+    if (_proj) return _proj(lon, lat);
+    // Equirectangular fallback (same as D3 default but may not match dots exactly)
+    return [(lon+180)/360*900, (90-lat)/180*480];
   }
 
   // ── Arc midpoint (curved upward for sea routes) ──
@@ -182,11 +183,10 @@
     return [lerp(ax,bx,t), lerp(ay,by,t)];
   }
 
-  // ── Get pin [x,y] for a vessel group ──
-  function getGroupXY(g, svgW, svgH) {
+  function getGroupXY(g) {
     const stage = g.stage;
     const isAir = g.isAir;
-    const P = (loc) => project(loc.lon, loc.lat, svgW, svgH);
+    const P = (loc) => project(loc.lon, loc.lat);
 
     if (stage === 'at_supplier') return P(LOCATIONS.supplier);
     if (stage === 'origin_port') return P(LOCATIONS.origin_port);
@@ -206,9 +206,9 @@
       const [dpx, dpy] = P(dep);
       const [wx, wy] = P(LOCATIONS.client_wh);
       const prog = g.dest_customs_cleared_at
-        ? clamp((Date.now() - new Date(g.dest_customs_cleared_at).getTime()) / (2*24*60*60*1000), 0.1, 0.9)
+        ? clamp((Date.now()-new Date(g.dest_customs_cleared_at).getTime())/(2*24*60*60*1000),0.1,0.9)
         : 0.5;
-      return arcPoint(dpx, dpy, wx, wy, prog, 0.1);
+      return arcPoint(dpx, dpy, wx, wy, prog, 0.08);
     }
     return P(LOCATIONS.supplier);
   }
@@ -285,8 +285,7 @@
   }
 
   // ── Render all pins and arcs onto the SVG ──
-  function renderPins(svgEl, groups, filter, svgW, svgH) {
-    // Clear everything except defs
+  function renderPins(svgEl, groups, filter) {
     while (svgEl.firstChild) svgEl.removeChild(svgEl.firstChild);
 
     const q = (filter||'').toLowerCase().trim();
@@ -306,62 +305,69 @@
 
     const isFiltering = q.length > 0;
 
-    // Fixed location labels — always visible
+    // Fixed location labels
     for (const loc of Object.values(LOCATIONS)) {
-      const [lx, ly] = project(loc.lon, loc.lat, svgW, svgH);
+      const [lx, ly] = project(loc.lon, loc.lat);
       const dot = ns('circle');
-      dot.setAttribute('cx', lx); dot.setAttribute('cy', ly);
-      dot.setAttribute('r', '3'); dot.setAttribute('fill', '#CACACA');
-      dot.setAttribute('stroke', '#fff'); dot.setAttribute('stroke-width', '1.5');
+      dot.setAttribute('cx',lx); dot.setAttribute('cy',ly);
+      dot.setAttribute('r','3'); dot.setAttribute('fill','#CACACA');
+      dot.setAttribute('stroke','#fff'); dot.setAttribute('stroke-width','1.5');
       svgEl.appendChild(dot);
       const txt = ns('text');
-      txt.setAttribute('x', lx+6); txt.setAttribute('y', ly+3);
-      txt.setAttribute('font-size', '9'); txt.setAttribute('fill', '#BCBCBC');
-      txt.setAttribute('font-family', '-apple-system,sans-serif');
+      txt.setAttribute('x',lx+6); txt.setAttribute('y',ly+3);
+      txt.setAttribute('font-size','9'); txt.setAttribute('fill','#BCBCBC');
+      txt.setAttribute('font-family','-apple-system,sans-serif');
       txt.textContent = loc.name;
       svgEl.appendChild(txt);
     }
 
-    // Draw arcs behind pins
+    // Draw full route arc for every group
     for (const g of groups) {
       const isMatch = matched ? matched.has(g.vessel) : true;
       const color = STAGE_COLOR[g.stage];
+      const isAir = g.isAir;
+      const [ox,oy] = project(LOCATIONS.origin_port.lon, LOCATIONS.origin_port.lat);
+      const destPort = isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
+      const [dx,dy] = project(destPort.lon, destPort.lat);
+      const [mx,my] = arcMid(ox,oy,dx,dy,0.28);
+      const routeD = `M${ox},${oy} Q${mx},${my} ${dx},${dy}`;
 
-      if (g.stage === 'transit' || g.stage === 'last_mile') {
-        let x1, y1, x2, y2;
-        if (g.stage === 'transit') {
-          [x1,y1] = project(LOCATIONS.origin_port.lon, LOCATIONS.origin_port.lat, svgW, svgH);
-          const dest = g.isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
-          [x2,y2] = project(dest.lon, dest.lat, svgW, svgH);
-        } else {
-          const dep = g.isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
-          [x1,y1] = project(dep.lon, dep.lat, svgW, svgH);
-          [x2,y2] = project(LOCATIONS.client_wh.lon, LOCATIONS.client_wh.lat, svgW, svgH);
-        }
-        const bend = g.stage === 'last_mile' ? 0.08 : 0.28;
-        const [mx,my] = arcMid(x1,y1,x2,y2,bend);
-        const d = `M${x1},${y1} Q${mx},${my} ${x2},${y2}`;
+      const bgPath = ns('path');
+      bgPath.setAttribute('d',routeD); bgPath.setAttribute('stroke',color);
+      bgPath.setAttribute('stroke-width','1.5'); bgPath.setAttribute('fill','none');
+      bgPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.2':'0.03'):'0.12');
+      svgEl.appendChild(bgPath);
 
-        const bgPath = ns('path');
-        bgPath.setAttribute('d',d); bgPath.setAttribute('stroke',color);
-        bgPath.setAttribute('stroke-width','1.5'); bgPath.setAttribute('fill','none');
-        bgPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.25':'0.04'):'0.18');
-        svgEl.appendChild(bgPath);
-
+      if (g.stage === 'transit') {
+        const progress = getVesselPosition(g.departed_at, g.eta_port, g.arrived_at);
+        const [vx,vy] = arcPoint(ox,oy,dx,dy,progress,0.28);
+        const [pmx,pmy] = arcMid(ox,oy,vx,vy,0.1);
         const fgPath = ns('path');
-        fgPath.setAttribute('d',d); fgPath.setAttribute('stroke',color);
-        fgPath.setAttribute('stroke-width','1.5'); fgPath.setAttribute('fill','none');
-        fgPath.setAttribute('stroke-dasharray','5 4');
-        fgPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.75':'0.05'):'0.5');
+        fgPath.setAttribute('d',`M${ox},${oy} Q${pmx},${pmy} ${vx},${vy}`);
+        fgPath.setAttribute('stroke',color); fgPath.setAttribute('stroke-width','2');
+        fgPath.setAttribute('fill','none'); fgPath.setAttribute('stroke-dasharray','5 3');
+        fgPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.8':'0.05'):'0.55');
         svgEl.appendChild(fgPath);
+      }
+
+      if (g.stage === 'last_mile' || g.stage === 'vas') {
+        const dep = isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
+        const [lpx,lpy] = project(dep.lon, dep.lat);
+        const [wx,wy] = project(LOCATIONS.client_wh.lon, LOCATIONS.client_wh.lat);
+        const [lmx,lmy] = arcMid(lpx,lpy,wx,wy,0.08);
+        const lmPath = ns('path');
+        lmPath.setAttribute('d',`M${lpx},${lpy} Q${lmx},${lmy} ${wx},${wy}`);
+        lmPath.setAttribute('stroke',color); lmPath.setAttribute('stroke-width','1.5');
+        lmPath.setAttribute('fill','none'); lmPath.setAttribute('stroke-dasharray','4 3');
+        lmPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.7':'0.04'):'0.45');
+        svgEl.appendChild(lmPath);
       }
     }
 
-    // Draw pins — dimmed first, matched on top
+    // Pins — dimmed first, matched on top
     const sorted = [...groups].sort((a,b)=>{
-      const am = matched ? matched.has(a.vessel) : true;
-      const bm = matched ? matched.has(b.vessel) : true;
-      return (am===bm) ? 0 : (am ? 1 : -1);
+      const am=matched?matched.has(a.vessel):true, bm=matched?matched.has(b.vessel):true;
+      return (am===bm)?0:(am?1:-1);
     });
 
     const detail = document.getElementById('map-detail');
@@ -369,68 +375,57 @@
     const wrap = svgEl.parentElement;
 
     for (const g of sorted) {
-      const isMatch = matched ? matched.has(g.vessel) : true;
-      const pinOpacity = isFiltering ? (isMatch ? 1 : 0.08) : 1;
-      const pinScale = isFiltering && isMatch ? 1.7 : 1;
+      const isMatch = matched?matched.has(g.vessel):true;
+      const pinOpacity = isFiltering?(isMatch?1:0.08):1;
+      const pinScale = isFiltering&&isMatch?1.7:1;
       const color = STAGE_COLOR[g.stage];
-      const [px, py] = getGroupXY(g, svgW, svgH);
+      const [px,py] = getGroupXY(g);
 
       const gEl = ns('g');
-      gEl.setAttribute('opacity', pinOpacity);
+      gEl.setAttribute('opacity',pinOpacity);
       gEl.style.cursor = 'pointer';
       gEl.style.pointerEvents = 'all';
 
-      // Sonar rings
       for (let ri=0; ri<3; ri++) {
         const ring = ns('circle');
-        ring.setAttribute('cx', px); ring.setAttribute('cy', py); ring.setAttribute('r', '4');
-        ring.setAttribute('fill','none'); ring.setAttribute('stroke', color);
+        ring.setAttribute('cx',px); ring.setAttribute('cy',py); ring.setAttribute('r','4');
+        ring.setAttribute('fill','none'); ring.setAttribute('stroke',color);
         ring.style.animation = `mapSonar 2.4s ease-out infinite ${ri*0.8}s`;
         gEl.appendChild(ring);
       }
-
       const outer = ns('circle');
       outer.setAttribute('cx',px); outer.setAttribute('cy',py);
-      outer.setAttribute('r', String(7*pinScale)); outer.setAttribute('fill',color);
-      outer.setAttribute('opacity','0.15');
-      gEl.appendChild(outer);
-
+      outer.setAttribute('r',String(7*pinScale)); outer.setAttribute('fill',color);
+      outer.setAttribute('opacity','0.15'); gEl.appendChild(outer);
       const dot = ns('circle');
       dot.setAttribute('cx',px); dot.setAttribute('cy',py);
-      dot.setAttribute('r', String(4.5*pinScale)); dot.setAttribute('fill',color);
+      dot.setAttribute('r',String(4.5*pinScale)); dot.setAttribute('fill',color);
       gEl.appendChild(dot);
 
-      if (g.stage === 'customs_hold') {
-        const sz = 2.5*pinScale;
-        const x = ns('path');
-        x.setAttribute('d',`M${px-sz},${py-sz}L${px+sz},${py+sz}M${px+sz},${py-sz}L${px-sz},${py+sz}`);
-        x.setAttribute('stroke','#fff'); x.setAttribute('stroke-width','1.5');
-        x.setAttribute('stroke-linecap','round');
-        gEl.appendChild(x);
+      if (g.stage==='customs_hold') {
+        const sz=2.5*pinScale, xPath=ns('path');
+        xPath.setAttribute('d',`M${px-sz},${py-sz}L${px+sz},${py+sz}M${px+sz},${py-sz}L${px-sz},${py+sz}`);
+        xPath.setAttribute('stroke','#fff'); xPath.setAttribute('stroke-width','1.5');
+        xPath.setAttribute('stroke-linecap','round'); gEl.appendChild(xPath);
       }
 
-      const label = g.vessel || 'Unassigned';
-      gEl.addEventListener('mouseenter', () => { tooltip.style.display='block'; tooltip.textContent=label+' · '+STAGE_LABEL[g.stage]; });
-      gEl.addEventListener('mousemove', e => {
-        const r = wrap.getBoundingClientRect();
-        tooltip.style.left=(e.clientX-r.left+14)+'px';
-        tooltip.style.top=(e.clientY-r.top-36)+'px';
-      });
-      gEl.addEventListener('mouseleave', ()=>{ tooltip.style.display='none'; });
-      gEl.addEventListener('click', ()=>{ openDetail(g, detail); });
+      const label = g.vessel||'Unassigned';
+      gEl.addEventListener('mouseenter',()=>{ tooltip.style.display='block'; tooltip.textContent=label+' · '+STAGE_LABEL[g.stage]; });
+      gEl.addEventListener('mousemove',e=>{ const r=wrap.getBoundingClientRect(); tooltip.style.left=(e.clientX-r.left+14)+'px'; tooltip.style.top=(e.clientY-r.top-36)+'px'; });
+      gEl.addEventListener('mouseleave',()=>{ tooltip.style.display='none'; });
+      gEl.addEventListener('click',()=>{ openDetail(g,detail); });
       svgEl.appendChild(gEl);
     }
 
-    // Update counter
     const counter = document.getElementById('map-counter');
-    if (counter) {
-      const total = groups.length;
-      counter.textContent = total + ' active shipment' + (total!==1?'s':'');
-    }
+    if (counter) counter.textContent=groups.length+' active shipment'+(groups.length!==1?'s':'');
+    console.log('[Map] rendered',groups.length,'groups:',groups.map(g=>(g.vessel||'NO_VES')+'='+g.stage).join(', '));
   }
 
+  // ── Draw world map using D3 + TopoJSON ──  }
+
   // ── Draw world map using D3 + TopoJSON ──
-  async function drawWorldMap(canvas, svgEl) {
+  async function drawWorldMap(canvas) {
     const w = canvas.offsetWidth || 900;
     const h = canvas.offsetHeight || 480;
     canvas.width = w; canvas.height = h;
@@ -439,41 +434,31 @@
     ctx.fillStyle = '#FAFAFA';
     ctx.fillRect(0, 0, w, h);
 
-    // Load world TopoJSON from CDN
+    // D3 Natural Earth projection — looks better than equirectangular for world maps
+    const projection = d3.geoNaturalEarth1()
+      .scale(w / (2.1 * Math.PI) * 1.3)
+      .translate([w / 2, h / 2]);
+
     const topo = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(r=>r.json());
     const features = topojson.feature(topo, topo.objects.countries).features;
 
-    // Use D3 equirectangular projection matching our project() function
-    // We draw dots inside each country polygon
-    const DOT_STEP = 6;
-    const DOT_R = 1.4;
+    const DOT_STEP = 6, DOT_R = 1.4;
     ctx.fillStyle = '#D4D4D4';
 
-    // Build path renderer using D3
-    const projection = d3.geoEquirectangular()
-      .scale(w / (2 * Math.PI))
-      .translate([w/2, h/2]);
-    const path = d3.geoPath(projection, ctx);
-
-    // Draw each country as dots by sampling the filled path
-    // Offscreen canvas approach: fill country, sample pixels
     const offscreen = document.createElement('canvas');
     offscreen.width = w; offscreen.height = h;
     const octx = offscreen.getContext('2d');
 
     for (const feature of features) {
-      // Clear offscreen
       octx.clearRect(0, 0, w, h);
       octx.beginPath();
-      const oPath = d3.geoPath(projection, octx);
-      oPath(feature);
+      d3.geoPath(projection, octx)(feature);
       octx.fillStyle = '#000';
       octx.fill();
-
       const imageData = octx.getImageData(0, 0, w, h).data;
       for (let px = DOT_STEP/2; px < w; px += DOT_STEP) {
         for (let py = DOT_STEP/2; py < h; py += DOT_STEP) {
-          const idx = (Math.floor(py)*w + Math.floor(px)) * 4;
+          const idx = (Math.floor(py)*w + Math.floor(px))*4;
           if (imageData[idx+3] > 128) {
             ctx.beginPath();
             ctx.arc(px, py, DOT_R, 0, Math.PI*2);
@@ -483,7 +468,8 @@
       }
     }
 
-    return { w, h };
+    // Return projection so pins use the same coordinate system as the map
+    return { w, h, project: (lon, lat) => projection([lon, lat]) };
   }
 
   // ── Inject page skeleton ──
@@ -615,7 +601,6 @@
     const wrap = document.getElementById('map-wrap');
 
     let groups = [];
-    let svgW = 900, svgH = 480;
 
     // Load D3 + TopoJSON from CDN
     async function loadLibs() {
@@ -639,8 +624,9 @@
 
     try {
       await loadLibs();
-      const dims = await drawWorldMap(canvas, svgEl);
-      svgW = dims.w; svgH = dims.h;
+      const dims = await drawWorldMap(canvas);
+      // Set module-level projection so all pins use same coordinate system as map dots
+      _proj = dims.project;
       if (loading) loading.style.display='none';
     } catch(e) {
       console.error('[Map] world map draw failed', e);
@@ -654,11 +640,11 @@
       console.error('[Map] data load failed', e);
     }
 
-    renderPins(svgEl, groups, '', svgW, svgH);
+    renderPins(svgEl, groups, '');
 
     if (searchInput) {
       searchInput.addEventListener('input', function() {
-        renderPins(svgEl, groups, this.value, svgW, svgH);
+        renderPins(svgEl, groups, this.value);
       });
     }
 
@@ -668,9 +654,9 @@
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(async ()=>{
         try {
-          const dims = await drawWorldMap(canvas, svgEl);
-          svgW=dims.w; svgH=dims.h;
-          renderPins(svgEl, groups, searchInput?.value||'', svgW, svgH);
+          const dims = await drawWorldMap(canvas);
+          _proj = dims.project;
+          renderPins(svgEl, groups, searchInput?.value||'');
         } catch(e){}
       }, 300);
     });
