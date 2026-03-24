@@ -321,32 +321,50 @@
       svgEl.appendChild(txt);
     }
 
-    // Draw full route arc for every group
-    for (const g of groups) {
+    // Draw full route arc for every group — offset each slightly so they don't overlap
+    groups.forEach((g, idx) => {
       const isMatch = matched ? matched.has(g.vessel) : true;
       const color = STAGE_COLOR[g.stage];
       const isAir = g.isAir;
       const [ox,oy] = project(LOCATIONS.origin_port.lon, LOCATIONS.origin_port.lat);
       const destPort = isAir ? LOCATIONS.sydney_airport : LOCATIONS.sydney_port;
       const [dx,dy] = project(destPort.lon, destPort.lat);
-      const [mx,my] = arcMid(ox,oy,dx,dy,0.28);
+
+      // Offset bend per vessel index so multiple arcs fan out visibly
+      const baseBend = 0.28;
+      const bendOffset = (idx - (groups.length-1)/2) * 0.06;
+      const bend = baseBend + bendOffset;
+
+      const [mx,my] = arcMid(ox,oy,dx,dy,bend);
       const routeD = `M${ox},${oy} Q${mx},${my} ${dx},${dy}`;
 
+      // Faint background route line
       const bgPath = ns('path');
       bgPath.setAttribute('d',routeD); bgPath.setAttribute('stroke',color);
       bgPath.setAttribute('stroke-width','1.5'); bgPath.setAttribute('fill','none');
-      bgPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.2':'0.03'):'0.12');
+      bgPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.18':'0.03'):'0.1');
       svgEl.appendChild(bgPath);
 
       if (g.stage === 'transit') {
         const progress = getVesselPosition(g.departed_at, g.eta_port, g.arrived_at);
-        const [vx,vy] = arcPoint(ox,oy,dx,dy,progress,0.28);
-        const [pmx,pmy] = arcMid(ox,oy,vx,vy,0.1);
+        const [vx,vy] = arcPoint(ox,oy,dx,dy,progress,bend);
+        const [pmx,pmy] = arcMid(ox,oy,vx,vy,bend*0.5);
+        const animId = 'map-flow-' + idx;
+
+        // Animated flowing dashes — create style tag with unique keyframe per arc
+        const dash = 9, gap = 5, total = dash+gap;
+        const style = document.createElement('style');
+        style.textContent = `@keyframes ${animId}{0%{stroke-dashoffset:${total}}100%{stroke-dashoffset:0}}`;
+        document.head.appendChild(style);
+
         const fgPath = ns('path');
         fgPath.setAttribute('d',`M${ox},${oy} Q${pmx},${pmy} ${vx},${vy}`);
-        fgPath.setAttribute('stroke',color); fgPath.setAttribute('stroke-width','2');
-        fgPath.setAttribute('fill','none'); fgPath.setAttribute('stroke-dasharray','5 3');
-        fgPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.8':'0.05'):'0.55');
+        fgPath.setAttribute('stroke',color); fgPath.setAttribute('stroke-width','2.5');
+        fgPath.setAttribute('fill','none');
+        fgPath.setAttribute('stroke-dasharray',`${dash} ${gap}`);
+        fgPath.setAttribute('stroke-linecap','round');
+        fgPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.85':'0.05'):'0.65');
+        fgPath.style.animation = `${animId} 1.2s linear infinite`;
         svgEl.appendChild(fgPath);
       }
 
@@ -355,14 +373,21 @@
         const [lpx,lpy] = project(dep.lon, dep.lat);
         const [wx,wy] = project(LOCATIONS.client_wh.lon, LOCATIONS.client_wh.lat);
         const [lmx,lmy] = arcMid(lpx,lpy,wx,wy,0.08);
+        const lmId = 'map-lm-' + idx;
+        const lmStyle = document.createElement('style');
+        lmStyle.textContent = `@keyframes ${lmId}{0%{stroke-dashoffset:14}100%{stroke-dashoffset:0}}`;
+        document.head.appendChild(lmStyle);
         const lmPath = ns('path');
         lmPath.setAttribute('d',`M${lpx},${lpy} Q${lmx},${lmy} ${wx},${wy}`);
-        lmPath.setAttribute('stroke',color); lmPath.setAttribute('stroke-width','1.5');
-        lmPath.setAttribute('fill','none'); lmPath.setAttribute('stroke-dasharray','4 3');
-        lmPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.7':'0.04'):'0.45');
+        lmPath.setAttribute('stroke',color); lmPath.setAttribute('stroke-width','2');
+        lmPath.setAttribute('fill','none');
+        lmPath.setAttribute('stroke-dasharray','8 6');
+        lmPath.setAttribute('stroke-linecap','round');
+        lmPath.setAttribute('stroke-opacity', isFiltering?(isMatch?'0.75':'0.04'):'0.55');
+        lmPath.style.animation = `${lmId} 1s linear infinite`;
         svgEl.appendChild(lmPath);
       }
-    }
+    });
 
     // Pins — dimmed first, matched on top
     const sorted = [...groups].sort((a,b)=>{
@@ -683,3 +708,4 @@
   };
 
 })();
+
