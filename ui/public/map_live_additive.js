@@ -5,15 +5,14 @@
 (function () {
   'use strict';
 
-  // ── Locations — spread apart for visual clarity ──
-  // Shenzhen cluster spread north-south, Sydney cluster spread apart
+  // ── Locations — deliberately spread for visual clarity at Asia-Pacific zoom ──
   const LOCATIONS = {
-    supplier:       { name: 'Supplier (Shenzhen)',  lat: 23.50,  lon: 116.00 },
-    vas_facility:   { name: 'VAS Facility',         lat: 22.55,  lon: 114.10 },
-    origin_port:    { name: 'Shenzhen Port',        lat: 21.50,  lon: 111.50 },
+    supplier:       { name: 'Supplier (Shenzhen)',  lat: 26.00,  lon: 118.00 },
+    vas_facility:   { name: 'VAS Facility',         lat: 23.50,  lon: 114.50 },
+    origin_port:    { name: 'Shenzhen Port',        lat: 20.50,  lon: 110.00 },
     sydney_port:    { name: 'Port Botany',          lat: -34.00, lon: 151.22 },
     sydney_airport: { name: 'Sydney Airport',       lat: -33.94, lon: 151.17 },
-    client_wh:      { name: 'Sydney WH (Client)',   lat: -31.80, lon: 148.50 },
+    client_wh:      { name: 'Sydney WH (Client)',   lat: -29.00, lon: 147.50 },
   };
 
   // ── Strong distinct colors per stage ──
@@ -509,12 +508,12 @@
     ctx.fillStyle = '#FAFAFA';
     ctx.fillRect(0, 0, w, h);
 
-    // Asia-Pacific focused projection — covers China to Australia
-    // Centered on ~130°E, 0° lat with enough zoom to see both Shenzhen and Sydney clearly
+    // Asia-Pacific projection — zoomed to show Shenzhen cluster + Australia clearly
+    // Center between China and Australia, scale to fit both comfortably
     const projection = d3.geoMercator()
-      .center([130, -10])
-      .scale(w * 0.55)
-      .translate([w * 0.42, h * 0.52]);
+      .center([128, -5])
+      .scale(w * 0.28)
+      .translate([w * 0.38, h * 0.48]);
 
     const topo = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(r=>r.json());
     const features = topojson.feature(topo, topo.objects.countries).features;
