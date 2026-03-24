@@ -5,23 +5,26 @@
 (function () {
   'use strict';
 
+  // ── Locations — spread apart for visual clarity ──
+  // Shenzhen cluster spread north-south, Sydney cluster spread apart
   const LOCATIONS = {
-    supplier:       { name: 'Supplier',        lat: 22.80,  lon: 114.30 },
-    vas_facility:   { name: 'VAS Facility',    lat: 22.55,  lon: 114.10 },
-    origin_port:    { name: 'Shenzhen Port',   lat: 22.27,  lon: 113.57 },
-    sydney_port:    { name: 'Port Botany',     lat: -33.97, lon: 151.19 },
-    sydney_airport: { name: 'Sydney Airport',  lat: -33.94, lon: 151.17 },
-    client_wh:      { name: 'Sydney WH',       lat: -33.75, lon: 150.85 },
+    supplier:       { name: 'Supplier (Shenzhen)',  lat: 23.50,  lon: 116.00 },
+    vas_facility:   { name: 'VAS Facility',         lat: 22.55,  lon: 114.10 },
+    origin_port:    { name: 'Shenzhen Port',        lat: 21.50,  lon: 111.50 },
+    sydney_port:    { name: 'Port Botany',          lat: -34.00, lon: 151.22 },
+    sydney_airport: { name: 'Sydney Airport',       lat: -33.94, lon: 151.17 },
+    client_wh:      { name: 'Sydney WH (Client)',   lat: -31.80, lon: 148.50 },
   };
 
+  // ── Strong distinct colors per stage ──
   const STAGE_COLOR = {
-    at_supplier:  '#9E9689',
-    origin_port:  '#B5956A',
-    transit:      '#6B8FA8',
-    clearing:     '#A89070',
-    customs_hold: '#B07070',
-    vas:          '#7A9E7E',
-    last_mile:    '#8B82B0',
+    at_supplier:  '#888780',   // neutral grey — not yet moving
+    vas:          '#990033',   // brand red — your VAS facility
+    origin_port:  '#3B82F6',   // blue — Shenzhen port
+    transit:      '#0EA5E9',   // sky blue — at sea / in air
+    clearing:     '#3B82F6',   // blue — destination port
+    customs_hold: '#DC2626',   // red alert — blocked
+    last_mile:    '#1C1C1E',   // black — final delivery
   };
 
   const STAGE_LABEL = {
@@ -310,18 +313,33 @@
 
     const isFiltering = q.length > 0;
 
-    // Fixed location labels
-    for (const loc of Object.values(LOCATIONS)) {
+    // Fixed location pins — each with its own distinct color
+    const LOC_STYLE = {
+      supplier:       { color: '#888780', r: 5, labelColor: '#6E6E73' },
+      vas_facility:   { color: '#990033', r: 6, labelColor: '#990033' },
+      origin_port:    { color: '#3B82F6', r: 5, labelColor: '#3B82F6' },
+      sydney_port:    { color: '#3B82F6', r: 5, labelColor: '#3B82F6' },
+      sydney_airport: { color: '#6B8FA8', r: 4, labelColor: '#6B8FA8' },
+      client_wh:      { color: '#1C1C1E', r: 6, labelColor: '#1C1C1E' },
+    };
+    for (const [key, loc] of Object.entries(LOCATIONS)) {
       const [lx, ly] = project(loc.lon, loc.lat);
+      const style = LOC_STYLE[key] || { color: '#CACACA', r: 4, labelColor: '#AEAEB2' };
+      const outer = ns('circle');
+      outer.setAttribute('cx',lx); outer.setAttribute('cy',ly);
+      outer.setAttribute('r', String(style.r+4)); outer.setAttribute('fill', style.color);
+      outer.setAttribute('opacity','0.12');
+      svgEl.appendChild(outer);
       const dot = ns('circle');
       dot.setAttribute('cx',lx); dot.setAttribute('cy',ly);
-      dot.setAttribute('r','3'); dot.setAttribute('fill','#CACACA');
+      dot.setAttribute('r', String(style.r)); dot.setAttribute('fill', style.color);
       dot.setAttribute('stroke','#fff'); dot.setAttribute('stroke-width','1.5');
       svgEl.appendChild(dot);
       const txt = ns('text');
-      txt.setAttribute('x',lx+6); txt.setAttribute('y',ly+3);
-      txt.setAttribute('font-size','9'); txt.setAttribute('fill','#BCBCBC');
+      txt.setAttribute('x', lx+style.r+5); txt.setAttribute('y', ly+4);
+      txt.setAttribute('font-size','10'); txt.setAttribute('fill', style.labelColor);
       txt.setAttribute('font-family','-apple-system,sans-serif');
+      txt.setAttribute('font-weight','500');
       txt.textContent = loc.name;
       svgEl.appendChild(txt);
     }
@@ -491,10 +509,12 @@
     ctx.fillStyle = '#FAFAFA';
     ctx.fillRect(0, 0, w, h);
 
-    // D3 Natural Earth projection — looks better than equirectangular for world maps
-    const projection = d3.geoNaturalEarth1()
-      .scale(w / (2.1 * Math.PI) * 1.3)
-      .translate([w / 2, h / 2]);
+    // Asia-Pacific focused projection — covers China to Australia
+    // Centered on ~130°E, 0° lat with enough zoom to see both Shenzhen and Sydney clearly
+    const projection = d3.geoMercator()
+      .center([130, -10])
+      .scale(w * 0.55)
+      .translate([w * 0.42, h * 0.52]);
 
     const topo = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(r=>r.json());
     const features = topojson.feature(topo, topo.objects.countries).features;
