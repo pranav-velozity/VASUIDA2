@@ -91,7 +91,7 @@
     <!-- Row 1: Avg Time to Live — full width segmented timeline -->
     <div class="exec-chart-card" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:20px;margin-bottom:16px;">
       <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:2px;">
-        <div style="font-size:13px;font-weight:600;color:#1C1C1E;">Avg Time to Live</div>
+        <div style="font-size:13px;font-weight:600;color:#1C1C1E;">Avg Time — Door to Door</div>
         <div id="exec-ttl-summary" style="font-size:11px;color:#AEAEB2;"></div>
       </div>
       <div style="font-size:10px;color:#AEAEB2;margin-bottom:16px;">Avg days from receiving to FC delivery · 3 segments per week</div>
@@ -348,9 +348,9 @@
     const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b;
     const n = _weeks.length; if (!n) { container.innerHTML=''; return; }
 
-    const SEG1_COL = '#C8F902';
-    const SEG2_COL = '#8B5CF6';
-    const SEG3_COL = '#06B6D4';
+    const SEG1_COL = '#4A9B8E';  // matte teal — Receiving → VAS
+    const SEG2_COL = '#C8860A';  // matte amber — VAS → ETA FC
+    const SEG3_COL = '#990033';  // brand red — ETA FC → Delivery
     const EMPTY_COL= '#F0F0F2';
 
     const totals = _weeks.map(w => {
@@ -397,7 +397,7 @@
         const segW = (s1 / maxDays) * cW;
         svg += `<rect x="${pad.l}" y="${y}" width="${segW}" height="${barH}" rx="4" fill="${SEG1_COL}" opacity="0.9"/>`;
         svg += `<rect x="${pad.l + segW - 4}" y="${y}" width="4" height="${barH}" fill="${SEG1_COL}" opacity="0.9"/>`;
-        if (segW > 22) svg += `<text x="${pad.l + segW/2}" y="${y + barH/2 + 3}" font-size="9" font-weight="600" fill="#1C1C1E" text-anchor="middle">${s1.toFixed(1)}d</text>`;
+        if (segW > 22) svg += `<text x="${pad.l + segW/2}" y="${y + barH/2 + 3}" font-size="9" font-weight="600" fill="#fff" text-anchor="middle">${s1.toFixed(1)}d</text>`;
         curX = pad.l + segW;
       }
       if (s2) {
