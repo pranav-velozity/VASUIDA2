@@ -1,4 +1,4 @@
-/* map_live_additive.js v5 — VelOzity Pinpoint Live Map
+/* map_live_additive.js v13 — VelOzity Pinpoint Live Map
    Fixed field names from source: pack/departed/arrived/destClr/hold/etaFC
    One arc per vessel. Clickable location pins. Sea arc goes east.
 */
@@ -308,6 +308,28 @@
       if(clr && (!vg.destClr || clr > vg.destClr)) vg.destClr = clr;
     }
 
+    // Add plan-only zendesks that have no lane data yet
+    // Check receiving to determine correct stage:
+    // - received POs exist → VAS (goods at facility, processing in progress)
+    // - no receiving → at_supplier (plan loaded, not yet received)
+    const processedZDs = new Set([
+      ...Array.from(vesselGroups.values()).flatMap(v=>v.zdentrys.map(z=>z.zendesk)),
+      ...Object.values(locationGroups).flatMap(e=>e.map(z=>z.zendesk))
+    ]);
+    for(const [zd, pRows] of planByZendesk){
+      if(processedZDs.has(zd)) continue;
+      const applied = appliedByZendesk.get(zd)||0;
+      const planned = pRows.reduce((s,p)=>s+Number(p.target_qty||0),0);
+      const supplier = String(pRows[0]?.supplier_name||'').trim();
+      const freight = String(pRows[0]?.freight_type||'').trim();
+      const isAir = freight.toLowerCase()==='air';
+      // Check if any POs for this zendesk have been received
+      const zdPos = [...new Set(pRows.map(p=>String(p.po_number||'').trim().toUpperCase()).filter(Boolean))];
+      const hasRecv = zdPos.some(po=>receivedPOs.has(po));
+      const stage = hasRecv ? 'vas' : 'at_supplier';
+      locationGroups[stage].push({zendesk:zd, applied, planned, hbl:'', mbl:'', supplier, freight, stage, manual:{}, isAir, etaPort:null});
+      console.log('[Map:build] Plan-only ZD →',stage,':',zd,supplier,'received:',hasRecv);
+    }
     console.log('[Map:build] result — vesselGroups:',vesselGroups.size,'locationGroups:',Object.entries(locationGroups).map(([k,v])=>k+':'+v.length).join(' '));
     // Check where specific zendesks landed
     const targetZDs=['77664','77671','77748','77754'];
@@ -958,10 +980,29 @@
       allContainers.push(...conts);
     }
     console.log('[Map] lanes:',allLanes.length,'containers:',allContainers.length,'plan rows:',planRows.length);
-    console.log('[Map] plan sample zendesk fields:',planRows.slice(0,3).map(p=>p.zendesk_ticket));
-    console.log('[Map] lane sample zendesks:',allLanes.slice(0,3).map(l=>l.zendesk));
 
-    return {lanes:allLanes,containers:allContainers,plan:planRows,receiving,appliedByPO};
+    // Deduplicate lanes by zendesk — same zendesk may appear in multiple weeks
+    // Keep the version with the most milestone dates (most advanced state)
+    const laneByZD = new Map();
+    for(const lane of allLanes){
+      const zd = lane.zendesk;
+      if(!zd) continue;
+      const m = lane.manual||{};
+      const existing = laneByZD.get(zd);
+      if(!existing){
+        laneByZD.set(zd, lane);
+      } else {
+        // Score by number of milestone dates present — more dates = more advanced
+        const score = (l) => [getDeparted(l.manual||{}),getArrived(l.manual||{}),getDestClr(l.manual||{}),getPackingReady(l.manual||{})].filter(Boolean).length;
+        if(score(lane) > score(existing)) laneByZD.set(zd, lane);
+      }
+    }
+    const dedupedLanes = Array.from(laneByZD.values());
+    console.log('[Map] dedupedLanes:',dedupedLanes.length,'(from',allLanes.length,'raw)');
+    console.log('[Map] plan sample zendesk fields:',planRows.slice(0,3).map(p=>p.zendesk_ticket));
+    console.log('[Map] lane sample zendesks:',dedupedLanes.slice(0,3).map(l=>l.zendesk));
+
+    return {lanes:dedupedLanes,containers:allContainers,plan:planRows,receiving,appliedByPO};
   }
 
   // ── Init ──
