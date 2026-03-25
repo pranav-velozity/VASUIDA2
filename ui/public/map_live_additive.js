@@ -203,7 +203,9 @@
       const lanePoRows = planByZendesk.get(zendesk) ||
                          planByZendesk.get(String(Number(zendesk))) || [];
       const lanePos = [...new Set(lanePoRows.map(p => String(p.po_number||'').trim().toUpperCase()).filter(Boolean))];
-      const hasReceiving = lanePos.some(po => receivedPOs.has(po));
+      // hasReceiving: check receiving table OR applied units > 0 (proxy — if units applied, goods were received)
+      const hasReceiving = lanePos.some(po => receivedPOs.has(po)) ||
+                           (appliedByZendesk.get(zendesk) || 0) > 0;
       const stage = getLaneStage(m, hasReceiving);
       if(stage === 'delivered') continue;
 
@@ -754,11 +756,8 @@
     const api=async(path)=>{ const r=await fetch(apiBase+path,{headers}); if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); };
 
     const weekStart=window.state?.weekStart||'';
-    const planRows=Array.isArray(window.state?.plan)?window.state.plan:[];
 
-    // ── appliedByPO: use window.state.records (already loaded, avoids duplicate API call) ──
-    // state.records = by_po array: [{po, units}] from /records/summary
-    // Build appliedByPO — normalise PO to UPPERCASE to match plan's po_number
+    // ── appliedByPO: use window.state.records (already loaded) ──
     const appliedByPO=new Map();
     const stateRecords=Array.isArray(window.state?.records)?window.state.records:[];
     for(const r of stateRecords){
@@ -771,13 +770,38 @@
     const receiving=Array.isArray(window.state?.receiving)?window.state.receiving:[];
     console.log('[Map] receiving from state.receiving — rows:',receiving.length,'sample:',receiving.slice(0,2));
 
-    // ── Flow data: 8 weeks (needed for lane/vessel data not in state) ──
+    // ── Fetch 8 weeks of flow data AND plan data ──
+    // Lanes span multiple weeks — current state.plan only covers current week
     const weeks=[];
     for(let i=0;i<8;i++){
       const d=new Date(weekStart+'T00:00:00'); d.setDate(d.getDate()-i*7);
       weeks.push(d.toISOString().slice(0,10));
     }
-    const flowResults=await Promise.allSettled(weeks.map(ws=>api(`/flow/week/${encodeURIComponent(ws)}/all`)));
+
+    const [flowResults, planResults] = await Promise.all([
+      Promise.allSettled(weeks.map(ws=>api(`/flow/week/${encodeURIComponent(ws)}/all`))),
+      Promise.allSettled(weeks.map(ws=>api(`/plan/weeks/${encodeURIComponent(ws)}`)))
+    ]);
+
+    // Merge plan rows from all weeks
+    const allPlanRows=[];
+    const seenPlanKeys=new Set();
+    // Start with current state.plan
+    for(const p of (Array.isArray(window.state?.plan)?window.state.plan:[])){
+      const key=String(p.po_number||'').trim()+'|'+String(p.sku_code||'').trim()+'|'+String(p.zendesk_ticket||'').trim();
+      if(!seenPlanKeys.has(key)){ seenPlanKeys.add(key); allPlanRows.push(p); }
+    }
+    // Add from older weeks
+    for(const res of planResults){
+      if(res.status!=='fulfilled') continue;
+      const rows=Array.isArray(res.value)?res.value:[];
+      for(const p of rows){
+        const key=String(p.po_number||'').trim()+'|'+String(p.sku_code||'').trim()+'|'+String(p.zendesk_ticket||'').trim();
+        if(!seenPlanKeys.has(key)){ seenPlanKeys.add(key); allPlanRows.push(p); }
+      }
+    }
+    console.log('[Map] allPlanRows:',allPlanRows.length,'from',weeks.length,'weeks');
+    const planRows=allPlanRows;
     const allLanes=[], allContainers=[];
     for(const res of flowResults){
       if(res.status!=='fulfilled') continue;
