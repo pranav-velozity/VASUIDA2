@@ -1,4 +1,4 @@
-/* map_live_additive.js v20 — VelOzity Pinpoint Live Map
+/* map_live_additive.js v21 — VelOzity Pinpoint Live Map
    Fixed field names from source: pack/departed/arrived/destClr/hold/etaFC
    One arc per vessel. Clickable location pins. Sea arc goes east.
 */
@@ -683,10 +683,10 @@
       }
       const shDot=ns('circle');
       shDot.setAttribute('cx',shx); shDot.setAttribute('cy',shy);
-      shDot.setAttribute('r',shActive?'6':'4');
+      shDot.setAttribute('r','5');
       shDot.setAttribute('fill',shColor);
       shDot.setAttribute('stroke','#fff'); shDot.setAttribute('stroke-width','1.5');
-      shDot.setAttribute('opacity',shActive?'1':'0.4');
+      shDot.setAttribute('opacity','0.5');
       svgEl.appendChild(shDot);
       const shLabelW = 'SH VAS Facility'.length * 5.8 + 8;
       const shLabelBg = ns('rect');
@@ -702,7 +702,7 @@
       shTxt.setAttribute('x',shx-11); shTxt.setAttribute('y',shy+4);
       shTxt.setAttribute('text-anchor','end');
       shTxt.setAttribute('font-size','9.5'); shTxt.setAttribute('font-weight','500');
-      shTxt.setAttribute('fill',shActive?shColor:'#BCBCBC');
+      shTxt.setAttribute('fill',shColor);
       shTxt.setAttribute('font-family','-apple-system,sans-serif');
       shTxt.textContent='SH VAS Facility';
       svgEl.appendChild(shTxt);
