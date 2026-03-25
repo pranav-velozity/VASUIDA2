@@ -1,4 +1,4 @@
-/* map_live_additive.js v17 — VelOzity Pinpoint Live Map
+/* map_live_additive.js v18 — VelOzity Pinpoint Live Map
    Fixed field names from source: pack/departed/arrived/destClr/hold/etaFC
    One arc per vessel. Clickable location pins. Sea arc goes east.
 */
@@ -6,12 +6,12 @@
   'use strict';
 
   const LOCATIONS = {
-    supplier:       { name: 'Supplier (Shenzhen)',  lat: 26.00, lon: 118.00 },
-    vas_facility:   { name: 'VAS Facility',         lat: 23.50, lon: 114.50 },
+    supplier:       { name: 'Supplier',  lat: 26.00, lon: 118.00 },
+    vas_facility:   { name: 'SZ VAS Facility',         lat: 23.50, lon: 114.50 },
     origin_port:    { name: 'Shenzhen Port',        lat: 20.50, lon: 110.00 },
     sydney_port:    { name: 'Port Botany',          lat: -34.20, lon: 153.50 },
     sydney_airport: { name: 'Sydney Airport',       lat: -31.50, lon: 153.00 },
-    client_wh:      { name: 'Sydney WH (Client)',   lat: -29.00, lon: 147.50 },
+    client_wh:      { name: 'TIC FC',   lat: -29.00, lon: 147.50 },
   };
 
   const LOC_COLOR = {
@@ -447,12 +447,12 @@
   function openLocationDetail(locKey,entries,panel){
     const color=LOC_COLOR[locKey];
     const stageToName={
-      at_supplier:'Supplier (Shenzhen)',
-      vas:'VAS Facility',
+      at_supplier:'Supplier',
+      vas:'SZ VAS Facility',
       origin_port:'Shenzhen Port',
       clearing:'At Port / Clearing',
       customs_hold:'Customs Hold',
-      last_mile:'Sydney WH (Client)',
+      last_mile:'TIC FC',
     };
     const locName=stageToName[locKey]||locKey;
     const stageDesc={
@@ -612,8 +612,14 @@
       dot.setAttribute('opacity',active?'1':'0.4');
       svgEl.appendChild(dot);
 
+      // Labels on left for Shenzhen cluster + Sydney WH, right for ports/airport
+      const labelLeft = ['supplier','vas_facility','origin_port','client_wh'].includes(locKey);
+      const dotR = active ? 6 : 4;
+      const txtX = labelLeft ? lx - dotR - 6 : lx + dotR + 5;
+      const txtAnchor = labelLeft ? 'end' : 'start';
       const txt=ns('text');
-      txt.setAttribute('x',lx+9); txt.setAttribute('y',ly+4);
+      txt.setAttribute('x',txtX); txt.setAttribute('y',ly+4);
+      txt.setAttribute('text-anchor',txtAnchor);
       txt.setAttribute('font-size','9.5'); txt.setAttribute('font-weight','500');
       txt.setAttribute('fill',active?color:'#BCBCBC');
       txt.setAttribute('font-family','-apple-system,sans-serif');
@@ -622,7 +628,8 @@
 
       if(active){
         const bdg=ns('text');
-        bdg.setAttribute('x',lx+9); bdg.setAttribute('y',ly+15);
+        bdg.setAttribute('x',txtX); bdg.setAttribute('y',ly+15);
+        bdg.setAttribute('text-anchor',txtAnchor);
         bdg.setAttribute('font-size','8'); bdg.setAttribute('font-weight','500');
         bdg.setAttribute('fill',color); bdg.setAttribute('opacity','0.8');
         bdg.setAttribute('font-family','-apple-system,sans-serif');
@@ -639,6 +646,63 @@
       hit.addEventListener('mouseleave',()=>{ tooltip.style.display='none'; });
       hit.addEventListener('click',()=>{ openLocationDetail(stageKey,entries,detail); });
       svgEl.appendChild(hit);
+    }
+
+    // ── Extra pin: SH VAS Facility (same color as vas, above supplier) ──
+    {
+      const [shx,shy] = project(26.80, 116.80); // slightly north-east of supplier
+      const shColor = LOC_COLOR['vas_facility']; // same #990033
+      const shEntries = locationGroups['vas'] || [];
+      const shActive = shEntries.length > 0;
+      const shGlow = ns('circle');
+      shGlow.setAttribute('cx',shx); shGlow.setAttribute('cy',shy);
+      shGlow.setAttribute('r','10'); shGlow.setAttribute('fill',shColor);
+      shGlow.setAttribute('opacity',shActive?'0.12':'0.05');
+      svgEl.appendChild(shGlow);
+      if(shActive){
+        for(let ri=0;ri<3;ri++){
+          const ring=ns('circle');
+          ring.setAttribute('cx',shx); ring.setAttribute('cy',shy); ring.setAttribute('r','6');
+          ring.setAttribute('fill','none'); ring.setAttribute('stroke',shColor);
+          ring.setAttribute('stroke-width','1.5');
+          ring.style.animation=`mapSonar 3.5s ease-out infinite ${ri*1.4}s`;
+          svgEl.appendChild(ring);
+        }
+      }
+      const shDot=ns('circle');
+      shDot.setAttribute('cx',shx); shDot.setAttribute('cy',shy);
+      shDot.setAttribute('r',shActive?'6':'4');
+      shDot.setAttribute('fill',shColor);
+      shDot.setAttribute('stroke','#fff'); shDot.setAttribute('stroke-width','1.5');
+      shDot.setAttribute('opacity',shActive?'1':'0.4');
+      svgEl.appendChild(shDot);
+      const shTxt=ns('text');
+      shTxt.setAttribute('x',shx-11); shTxt.setAttribute('y',shy+4);
+      shTxt.setAttribute('text-anchor','end');
+      shTxt.setAttribute('font-size','9.5'); shTxt.setAttribute('font-weight','500');
+      shTxt.setAttribute('fill',shActive?shColor:'#BCBCBC');
+      shTxt.setAttribute('font-family','-apple-system,sans-serif');
+      shTxt.textContent='SH VAS Facility';
+      svgEl.appendChild(shTxt);
+      if(shActive){
+        const shBdg=ns('text');
+        shBdg.setAttribute('x',shx-11); shBdg.setAttribute('y',shy+15);
+        shBdg.setAttribute('text-anchor','end');
+        shBdg.setAttribute('font-size','8'); shBdg.setAttribute('font-weight','500');
+        shBdg.setAttribute('fill',shColor); shBdg.setAttribute('opacity','0.8');
+        shBdg.setAttribute('font-family','-apple-system,sans-serif');
+        shBdg.textContent=shEntries.length+' ZD';
+        svgEl.appendChild(shBdg);
+      }
+      const shHit=ns('circle');
+      shHit.setAttribute('cx',shx); shHit.setAttribute('cy',shy);
+      shHit.setAttribute('r','18'); shHit.setAttribute('fill','transparent');
+      shHit.style.cursor='pointer'; shHit.style.pointerEvents='all';
+      shHit.addEventListener('mouseenter',()=>{ tooltip.style.display='block'; tooltip.textContent='SH VAS Facility'+(shActive?` — ${shEntries.length} Zendesk${shEntries.length!==1?'s':''}`:''); });
+      shHit.addEventListener('mousemove',e=>{ const r=wrap.getBoundingClientRect(); tooltip.style.left=(e.clientX-r.left+14)+'px'; tooltip.style.top=(e.clientY-r.top-36)+'px'; });
+      shHit.addEventListener('mouseleave',()=>{ tooltip.style.display='none'; });
+      shHit.addEventListener('click',()=>{ openLocationDetail('vas',shEntries,detail); });
+      svgEl.appendChild(shHit);
     }
 
     // ── Last mile arcs (from location groups) ──
