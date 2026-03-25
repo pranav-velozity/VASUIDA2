@@ -615,7 +615,7 @@
       // Labels on left for Shenzhen cluster + Sydney WH, right for ports/airport
       const labelLeft = ['supplier','vas_facility','origin_port','client_wh'].includes(locKey);
       const dotR = active ? 6 : 4;
-      const txtX = labelLeft ? lx - dotR - 6 : lx + dotR + 5;
+      const txtX = labelLeft ? lx - dotR - 18 : lx + dotR + 5;
       const txtAnchor = labelLeft ? 'end' : 'start';
       const labelW = loc.name.length * 5.8 + 8;
       const labelH = active ? 24 : 14;
@@ -694,7 +694,7 @@
       svgEl.appendChild(shDot);
       const shLabelW = 'SH VAS Facility'.length * 5.8 + 8;
       const shLabelBg = ns('rect');
-      shLabelBg.setAttribute('x', shx - 11 - shLabelW);
+      shLabelBg.setAttribute('x', shx - 23 - shLabelW);
       shLabelBg.setAttribute('y', shy - 7);
       shLabelBg.setAttribute('width', shLabelW + 6);
       shLabelBg.setAttribute('height', shActive ? 24 : 14);
@@ -703,7 +703,7 @@
       shLabelBg.setAttribute('opacity', '0.82');
       svgEl.appendChild(shLabelBg);
       const shTxt=ns('text');
-      shTxt.setAttribute('x',shx-11); shTxt.setAttribute('y',shy+4);
+      shTxt.setAttribute('x',shx-23); shTxt.setAttribute('y',shy+4);
       shTxt.setAttribute('text-anchor','end');
       shTxt.setAttribute('font-size','9.5'); shTxt.setAttribute('font-weight','500');
       shTxt.setAttribute('fill',shColor);
@@ -712,7 +712,7 @@
       svgEl.appendChild(shTxt);
       if(shActive){
         const shBdg=ns('text');
-        shBdg.setAttribute('x',shx-11); shBdg.setAttribute('y',shy+15);
+        shBdg.setAttribute('x',shx-23); shBdg.setAttribute('y',shy+15);
         shBdg.setAttribute('text-anchor','end');
         shBdg.setAttribute('font-size','8'); shBdg.setAttribute('font-weight','500');
         shBdg.setAttribute('fill',shColor); shBdg.setAttribute('opacity','0.8');
