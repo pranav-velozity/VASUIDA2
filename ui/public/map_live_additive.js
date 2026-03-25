@@ -1,4 +1,4 @@
-/* map_live_additive.js v10 — VelOzity Pinpoint Live Map
+/* map_live_additive.js v5 — VelOzity Pinpoint Live Map
    Fixed field names from source: pack/departed/arrived/destClr/hold/etaFC
    One arc per vessel. Clickable location pins. Sea arc goes east.
 */
@@ -307,6 +307,13 @@
     }
 
     console.log('[Map:build] result — vesselGroups:',vesselGroups.size,'locationGroups:',Object.entries(locationGroups).map(([k,v])=>k+':'+v.length).join(' '));
+    // Diagnose why VAS / supplier / last_mile may be empty
+    console.log('[Map:build] receivedPOs count:',receivedPOs.size,'sample:',Array.from(receivedPOs).slice(0,3));
+    console.log('[Map:build] lanes without departure (should be VAS candidates):',
+      lanes.filter(l=>!getDeparted(l.manual||{})).map(l=>({zd:l.zendesk,pack:getPackingReady(l.manual||{}),recv:receivedPOs.size>0})).slice(0,5)
+    );
+    console.log('[Map:build] last_mile entries:',locationGroups.last_mile.slice(0,3).map(z=>z.zendesk));
+    console.log('[Map:build] last_mile entries in locationGroups:',locationGroups.last_mile.length);
 
     return {
       vesselGroups: Array.from(vesselGroups.values()),
@@ -376,7 +383,15 @@
   // ── Location detail panel ──
   function openLocationDetail(locKey,entries,panel){
     const color=LOC_COLOR[locKey];
-    const locName=LOCATIONS[locKey].name;
+    const stageToName={
+      at_supplier:'Supplier (Shenzhen)',
+      vas:'VAS Facility',
+      origin_port:'Shenzhen Port',
+      clearing:'At Port / Clearing',
+      customs_hold:'Customs Hold',
+      last_mile:'Sydney WH (Client)',
+    };
+    const locName=stageToName[locKey]||locKey;
     const stageDesc={
       at_supplier:'Plan loaded — not yet received',
       vas:'Received — VAS processing in progress',
@@ -460,10 +475,31 @@
     const wrap=svgEl.parentElement;
 
     // ── Location pins ──
+    // Map LOCATIONS keys → locationGroups stage keys
+    const locToStage = {
+      supplier:       'at_supplier',
+      vas_facility:   'vas',
+      origin_port:    'origin_port',
+      sydney_port:    'clearing',
+      sydney_airport: 'clearing',
+      client_wh:      'last_mile',
+    };
+
     for(const [locKey,loc] of Object.entries(LOCATIONS)){
       const [lx,ly]=project(loc.lon,loc.lat);
       const color=LOC_COLOR[locKey];
-      const entries=locationGroups[locKey]||[];
+      const stageKey=locToStage[locKey]||locKey;
+      // For sydney_port and sydney_airport split clearing by freight type
+      let entries=[];
+      if(locKey==='sydney_port'){
+        entries=(locationGroups['clearing']||[]).filter(z=>!z.isAir);
+        entries=entries.concat((locationGroups['customs_hold']||[]).filter(z=>!z.isAir));
+      } else if(locKey==='sydney_airport'){
+        entries=(locationGroups['clearing']||[]).filter(z=>z.isAir);
+        entries=entries.concat((locationGroups['customs_hold']||[]).filter(z=>z.isAir));
+      } else {
+        entries=locationGroups[stageKey]||[];
+      }
       const active=entries.length>0;
 
       const glow=ns('circle');
@@ -516,7 +552,7 @@
       hit.addEventListener('mouseenter',()=>{ tooltip.style.display='block'; tooltip.textContent=loc.name+(active?` — ${entries.length} Zendesk${entries.length!==1?'s':''}`:''); });
       hit.addEventListener('mousemove',e=>{ const r=wrap.getBoundingClientRect(); tooltip.style.left=(e.clientX-r.left+14)+'px'; tooltip.style.top=(e.clientY-r.top-36)+'px'; });
       hit.addEventListener('mouseleave',()=>{ tooltip.style.display='none'; });
-      hit.addEventListener('click',()=>{ openLocationDetail(locKey,entries,detail); });
+      hit.addEventListener('click',()=>{ openLocationDetail(stageKey,entries,detail); });
       svgEl.appendChild(hit);
     }
 
@@ -972,4 +1008,3 @@
   };
 
 })();
-
