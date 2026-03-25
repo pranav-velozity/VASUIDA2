@@ -123,8 +123,10 @@
     if(getDestClr(m)) return 'last_mile';
     if(getArrived(m)) return 'clearing';
     if(getDeparted(m)) return 'transit';
-    if(hasReceiving) return 'vas';
+    // pack date = goods ready to ship, at origin port
     if(getPackingReady(m)) return 'origin_port';
+    // VAS = received at facility, packing list NOT yet raised
+    if(hasReceiving) return 'vas';
     return 'at_supplier';
   }
 
@@ -241,28 +243,37 @@
                          planByZendesk.get(String(Number(zendesk))) || [];
       const lanePos = [...new Set(lanePoRows.map(p => String(p.po_number||'').trim().toUpperCase()).filter(Boolean))];
       
-      // hasReceiving: check via plan POs, OR applied units > 0 (proxy), OR
-      // check if supplier+freight has any received POs in receiving table
+      // hasReceiving: goods physically at your facility (receiving table only)
+      // Do NOT use hasApplied as proxy — in-transit goods also have applied units
       const sup = String(lane.supplier||'').trim().toLowerCase();
       const frt = String(lane.freight||'').trim().toLowerCase();
       const hasReceivingViaPlan = lanePos.some(po => receivedPOs.has(po));
       const hasApplied = (appliedByZendesk.get(zendesk)||0) > 0;
-      const hasReceivingViaSup = !hasReceivingViaPlan && !hasApplied && Array.from(receivedPOs).some(po => {
+      // Fallback: match by supplier+freight when plan PO lookup fails
+      const hasReceivingViaSup = !hasReceivingViaPlan && Array.from(receivedPOs).some(po => {
         const planRow = plan.find(p => String(p.po_number||'').trim().toUpperCase() === po);
         if(!planRow) return false;
         return String(planRow.supplier_name||'').trim().toLowerCase() === sup &&
                String(planRow.freight_type||'').trim().toLowerCase() === frt;
       });
-      const hasReceiving = hasReceivingViaPlan || hasApplied || hasReceivingViaSup;
+      const hasReceiving = hasReceivingViaPlan || hasReceivingViaSup;
       const stage = getLaneStage(m, hasReceiving);
       if(stage === 'delivered') continue;
+      // Log current week zendesks specifically
+      if(['77664','77671','77736','77665','77669','77750','77748','77754'].includes(zendesk)){
+        console.log(`[Map:build] ZD ${zendesk} → stage:${stage} hasReceiving:${hasReceiving} hasApplied:${hasApplied} departed:${getDeparted(m)} arrived:${getArrived(m)} destClr:${getDestClr(m)} pack:${getPackingReady(m)}`);
+      }
 
       const applied = appliedByZendesk.get(zendesk) || 0;
+      // Planned units for this zendesk from plan rows
+      const lanePoRowsForPlanned = planByZendesk.get(zendesk) ||
+                                   planByZendesk.get(String(Number(zendesk))) || [];
+      const planned = lanePoRowsForPlanned.reduce((s,p)=>s+Number(p.target_qty||0),0);
       const hbl = getHbl(m);
       const mbl = getMbl(m);
       const etaPort = getEtaFC(m) || getLatestArrival(m);
 
-      const zdEntry = {zendesk, applied, hbl, mbl, supplier: lane.supplier||'', freight: lane.freight||'', stage, manual: m, isAir, etaPort};
+      const zdEntry = {zendesk, applied, planned, hbl, mbl, supplier: lane.supplier||'', freight: lane.freight||'', stage, manual: m, isAir, etaPort};
 
       // Static location
       if(stage !== 'transit'){
@@ -368,24 +379,34 @@
     const locName=LOCATIONS[locKey].name;
     const stageDesc={
       at_supplier:'Plan loaded — not yet received',
-      vas:'In VAS processing',
+      vas:'Received — VAS processing in progress',
       origin_port:'Packing list ready — awaiting departure',
-      clearing:'Arrived — in customs',
+      clearing:'Arrived — in customs clearing',
       customs_hold:'Customs Hold — action required',
-      last_mile:'Cleared — last mile delivery',
+      last_mile:'Customs cleared — last mile delivery',
     }[locKey]||'';
-    const rows=entries.map(z=>`
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;border-bottom:0.5px solid rgba(0,0,0,0.05);">
+    const rows=entries.map(z=>{
+      const pct=z.planned>0?Math.round(z.applied/z.planned*100):null;
+      const showPct=pct!==null&&(locKey==='vas'||locKey==='last_mile');
+      const pctColor=pct>=100?'#3B82F6':pct>50?'#B5956A':'#990033';
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;border-bottom:0.5px solid rgba(0,0,0,0.05);">
         <div>
           <div style="font-size:11px;font-weight:500;color:#1C1C1E;">#${z.zendesk}</div>
           ${z.supplier?`<div style="font-size:10px;color:#AEAEB2;">${z.supplier}</div>`:''}
         </div>
         <div style="text-align:right;">
-          <div style="font-size:11px;color:#6E6E73;">${z.applied.toLocaleString()} applied</div>
+          ${z.planned>0
+            ?`<div style="font-size:11px;color:#6E6E73;">${z.applied.toLocaleString()} / ${z.planned.toLocaleString()}</div>
+              ${showPct?`<div style="font-size:10px;color:${pctColor};">${pct}% done</div>`:''}`
+            :`<div style="font-size:11px;color:#6E6E73;">${z.applied.toLocaleString()} applied</div>`}
           ${z.hbl?`<div style="font-size:10px;color:#AEAEB2;">HBL: ${z.hbl}</div>`:''}
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
     const totalApplied=entries.reduce((s,z)=>s+z.applied,0);
+    const totalPlanned=entries.reduce((s,z)=>s+(z.planned||0),0);
+    const totalPct=totalPlanned>0?Math.round(totalApplied/totalPlanned*100):null;
+    const pctBarColor=totalPct>=100?'#3B82F6':totalPct>50?'#B5956A':'#990033';
     panel.innerHTML=`${closeBtn()}
       <div style="padding-right:32px;margin-bottom:16px;">
         <div style="font-size:13px;font-weight:500;color:#1C1C1E;margin-bottom:4px;">${locName}</div>
@@ -394,9 +415,12 @@
       ${sectionHeader(entries.length+' Zendesk'+(entries.length!==1?'s':''))}
       <div style="border:0.5px solid rgba(0,0,0,0.07);border-radius:10px;overflow:hidden;margin-bottom:4px;">
         ${rows||'<div style="padding:12px;font-size:11px;color:#AEAEB2;">Nothing here right now</div>'}
-        ${entries.length>0?`<div style="display:flex;justify-content:space-between;padding:8px 12px;background:#F5F5F7;">
-          <span style="font-size:11px;font-weight:500;color:#1C1C1E;">Total applied</span>
-          <span style="font-size:11px;font-weight:500;color:#1C1C1E;">${totalApplied.toLocaleString()} units</span>
+        ${entries.length>0?`<div style="padding:8px 12px;background:#F5F5F7;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:${totalPct!==null?'5px':'0'};">
+            <span style="font-size:11px;font-weight:500;color:#1C1C1E;">${totalPlanned>0?'Applied / Planned':'Total applied'}</span>
+            <span style="font-size:11px;font-weight:500;color:#1C1C1E;">${totalPlanned>0?totalApplied.toLocaleString()+' / '+totalPlanned.toLocaleString()+' units':totalApplied.toLocaleString()+' units'}</span>
+          </div>
+          ${totalPct!==null?`<div style="height:3px;background:rgba(0,0,0,0.08);border-radius:2px;overflow:hidden;"><div style="height:100%;width:${Math.min(totalPct,100)}%;background:${pctBarColor};border-radius:2px;"></div></div>`:''}
         </div>`:''}
       </div>`;
     panel.style.transform='translateX(0)';
