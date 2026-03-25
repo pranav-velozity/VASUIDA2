@@ -622,7 +622,7 @@
       // White background pill behind label for readability over map dots
       const labelBg = ns('rect');
       labelBg.setAttribute('x', labelLeft ? txtX - labelW : txtX - 3);
-      labelBg.setAttribute('y', ly - 7);
+      labelBg.setAttribute('y', ly - 13);
       labelBg.setAttribute('width', labelW + 6);
       labelBg.setAttribute('height', labelH);
       labelBg.setAttribute('rx', '3');
@@ -630,7 +630,7 @@
       labelBg.setAttribute('opacity', '0.82');
       svgEl.appendChild(labelBg);
       const txt=ns('text');
-      txt.setAttribute('x',txtX); txt.setAttribute('y',ly+4);
+      txt.setAttribute('x',txtX); txt.setAttribute('y',ly-2);
       txt.setAttribute('text-anchor',txtAnchor);
       txt.setAttribute('font-size','9.5'); txt.setAttribute('font-weight','500');
       txt.setAttribute('fill',active?color:'#BCBCBC');
@@ -640,7 +640,7 @@
 
       if(active){
         const bdg=ns('text');
-        bdg.setAttribute('x',txtX); bdg.setAttribute('y',ly+15);
+        bdg.setAttribute('x',txtX); bdg.setAttribute('y',ly+9);
         bdg.setAttribute('text-anchor',txtAnchor);
         bdg.setAttribute('font-size','8'); bdg.setAttribute('font-weight','500');
         bdg.setAttribute('fill',color); bdg.setAttribute('opacity','0.9');
@@ -695,7 +695,7 @@
       const shLabelW = 'SH VAS Facility'.length * 5.8 + 8;
       const shLabelBg = ns('rect');
       shLabelBg.setAttribute('x', shx - 23 - shLabelW);
-      shLabelBg.setAttribute('y', shy - 7);
+      shLabelBg.setAttribute('y', shy - 13);
       shLabelBg.setAttribute('width', shLabelW + 6);
       shLabelBg.setAttribute('height', shActive ? 24 : 14);
       shLabelBg.setAttribute('rx', '3');
@@ -703,7 +703,7 @@
       shLabelBg.setAttribute('opacity', '0.82');
       svgEl.appendChild(shLabelBg);
       const shTxt=ns('text');
-      shTxt.setAttribute('x',shx-23); shTxt.setAttribute('y',shy+4);
+      shTxt.setAttribute('x',shx-23); shTxt.setAttribute('y',shy-2);
       shTxt.setAttribute('text-anchor','end');
       shTxt.setAttribute('font-size','9.5'); shTxt.setAttribute('font-weight','500');
       shTxt.setAttribute('fill',shColor);
@@ -712,7 +712,7 @@
       svgEl.appendChild(shTxt);
       if(shActive){
         const shBdg=ns('text');
-        shBdg.setAttribute('x',shx-23); shBdg.setAttribute('y',shy+15);
+        shBdg.setAttribute('x',shx-23); shBdg.setAttribute('y',shy+9);
         shBdg.setAttribute('text-anchor','end');
         shBdg.setAttribute('font-size','8'); shBdg.setAttribute('font-weight','500');
         shBdg.setAttribute('fill',shColor); shBdg.setAttribute('opacity','0.8');
