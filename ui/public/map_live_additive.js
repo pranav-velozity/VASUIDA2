@@ -1,4 +1,4 @@
-/* map_live_additive.js v19 — VelOzity Pinpoint Live Map
+/* map_live_additive.js v20 — VelOzity Pinpoint Live Map
    Fixed field names from source: pack/departed/arrived/destClr/hold/etaFC
    One arc per vessel. Clickable location pins. Sea arc goes east.
 */
@@ -662,7 +662,7 @@
 
     // ── Extra pin: SH VAS Facility (same color as vas, above supplier) ──
     {
-      const [shx,shy] = project(28.50, 119.50); // north-east of supplier, clearly separate
+      const [shx,shy] = project(30.00, 115.00); // clearly above + left of supplier cluster
       const shColor = LOC_COLOR['vas_facility']; // same #990033
       const shEntries = locationGroups['vas'] || [];
       const shActive = shEntries.length > 0;
