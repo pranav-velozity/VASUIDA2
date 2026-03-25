@@ -484,7 +484,7 @@
       const sameType=vg.isAir?airVessels:seaVessels;
       const typeIdx=sameType.indexOf(vg);
       const typeCount=sameType.length;
-      const offsetFactor=typeCount>1?(typeIdx-(typeCount-1)/2)*0.08:0;
+      const offsetFactor=typeCount>1?(typeIdx-(typeCount-1)/2)*1.0:0;
 
       const allZd=vg.zdentrys.map(z=>z.zendesk);
       const allHBL=vg.zdentrys.map(z=>z.hbl);
@@ -500,7 +500,7 @@
 
       if(vg.isAir){
         // Air: direct curved arc with slight perpendicular offset
-        const bend=0.22+offsetFactor;
+        const bend=0.22+(offsetFactor*0.15);
         const [mx,my]=arcMid(ox,oy,dx,dy,bend);
         const arcD=`M${ox},${oy} Q${mx},${my} ${dx},${dy}`;
 
