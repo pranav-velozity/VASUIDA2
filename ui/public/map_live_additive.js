@@ -1,4 +1,4 @@
-/* map_live_additive.js v14 — VelOzity Pinpoint Live Map
+/* map_live_additive.js v5 — VelOzity Pinpoint Live Map
    Fixed field names from source: pack/departed/arrived/destClr/hold/etaFC
    One arc per vessel. Clickable location pins. Sea arc goes east.
 */
@@ -15,7 +15,7 @@
   };
 
   const LOC_COLOR = {
-    supplier:       '#888780',
+    supplier:       '#C8860A',
     vas_facility:   '#990033',
     origin_port:    '#3B82F6',
     sydney_port:    '#3B82F6',
@@ -23,9 +23,9 @@
     client_wh:      '#1C1C1E',
   };
 
-  const AIR_COLOR = '#2563EB';  // distinct blue for air freight arcs/icons
+  const AIR_COLOR = '#4A9B8E';  // matte teal for air freight — distinct from sea red
   const STAGE_COLOR = {
-    at_supplier:  '#888780',
+    at_supplier:  '#C8860A',
     vas:          '#990033',
     origin_port:  '#3B82F6',
     transit:      '#990033',
@@ -507,28 +507,33 @@
 
   // ── Ship and airplane SVG icons ──
   function shipIcon(x,y,color){
+    // Clean ship silhouette — viewed from side
     const g=ns('g');
-    g.setAttribute('transform',`translate(${x-14},${y-10})`);
-    const hull=ns('path');
-    hull.setAttribute('d','M2,10 L5,3 L20,3 L23,10 Q12,17 2,10 Z');
-    hull.setAttribute('fill',color); hull.setAttribute('opacity','0.9');
-    const mast=ns('line');
-    mast.setAttribute('x1','12'); mast.setAttribute('y1','3');
-    mast.setAttribute('x2','12'); mast.setAttribute('y2','-4');
-    mast.setAttribute('stroke',color); mast.setAttribute('stroke-width','2');
-    const sail=ns('path');
-    sail.setAttribute('d','M12,-4 L20,3 L12,3 Z');
-    sail.setAttribute('fill',color); sail.setAttribute('opacity','0.5');
-    g.appendChild(hull); g.appendChild(mast); g.appendChild(sail);
+    g.setAttribute('transform',`translate(${x},${y})`);
+    const ship=ns('path');
+    // Hull + superstructure as a clean side-view silhouette, centered on 0,0
+    ship.setAttribute('d','M-13,4 L-10,-2 L-4,-2 L-4,-7 L4,-7 L4,-2 L12,-2 L14,4 Q0,9 -13,4 Z');
+    ship.setAttribute('fill',color);
+    ship.setAttribute('opacity','0.92');
+    // Funnel/chimney
+    const funnel=ns('rect');
+    funnel.setAttribute('x','1'); funnel.setAttribute('y','-11');
+    funnel.setAttribute('width','4'); funnel.setAttribute('height','5');
+    funnel.setAttribute('rx','1');
+    funnel.setAttribute('fill',color); funnel.setAttribute('opacity','0.7');
+    g.appendChild(ship); g.appendChild(funnel);
     return g;
   }
   function planeIcon(x,y,color){
+    // Clean airplane silhouette — top-down view pointing toward destination
     const g=ns('g');
-    g.setAttribute('transform',`translate(${x},${y}) rotate(-45)`);
-    const body=ns('path');
-    body.setAttribute('d','M0,-11 L3,0 L11,3 L3,3 L3,11 L0,8 L-3,11 L-3,3 L-11,3 L-3,0 Z');
-    body.setAttribute('fill',color); body.setAttribute('opacity','0.9');
-    g.appendChild(body);
+    g.setAttribute('transform',`translate(${x},${y}) rotate(135)`);
+    const plane=ns('path');
+    // Standard top-down airplane: fuselage + swept wings + tail
+    plane.setAttribute('d','M0,-12 L2,-4 L10,2 L8,4 L2,1 L1,8 L4,10 L3,12 L0,11 L-3,12 L-4,10 L-1,8 L-2,1 L-8,4 L-10,2 L-2,-4 Z');
+    plane.setAttribute('fill',color);
+    plane.setAttribute('opacity','0.92');
+    g.appendChild(plane);
     return g;
   }
 
