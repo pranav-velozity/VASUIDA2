@@ -1,4 +1,4 @@
-/* map_live_additive.js v15 — VelOzity Pinpoint Live Map
+/* map_live_additive.js v17 — VelOzity Pinpoint Live Map
    Fixed field names from source: pack/departed/arrived/destClr/hold/etaFC
    One arc per vessel. Clickable location pins. Sea arc goes east.
 */
@@ -31,7 +31,7 @@
     transit:      '#990033',
     clearing:     '#3B82F6',
     customs_hold: '#DC2626',
-    last_mile:    '#CC4466',
+    last_mile:    '#1C1C1E',
   };
 
   const STAGE_LABEL = {
@@ -654,7 +654,7 @@
         const [lmx,lmy]=arcMid(dpx,dpy,wx,wy,0.2);
         const lmArc=ns('path');
         lmArc.setAttribute('d',`M${dpx},${dpy} Q${lmx},${lmy} ${wx},${wy}`);
-        lmArc.setAttribute('stroke','#CC4466');
+        lmArc.setAttribute('stroke','#1C1C1E');
         lmArc.setAttribute('stroke-width','2');
         lmArc.setAttribute('fill','none');
         lmArc.setAttribute('stroke-opacity','0.6');
@@ -665,7 +665,7 @@
         arrowG.setAttribute('transform',`translate(${mx2},${my2})`);
         const arrowPath=ns('path');
         arrowPath.setAttribute('d','M-4,-4 L0,0 L-4,4');
-        arrowPath.setAttribute('stroke','#CC4466'); arrowPath.setAttribute('stroke-width','1.5');
+        arrowPath.setAttribute('stroke','#1C1C1E'); arrowPath.setAttribute('stroke-width','1.5');
         arrowPath.setAttribute('fill','none'); arrowPath.setAttribute('stroke-linecap','round');
         arrowG.appendChild(arrowPath);
         svgEl.appendChild(arrowG);
@@ -880,9 +880,9 @@
 <div style="padding:0;height:calc(100vh - 100px);min-height:520px;display:flex;flex-direction:column;gap:8px;">
   <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
     <div style="display:flex;align-items:center;gap:12px;">
-      <div style="font-size:15px;font-weight:500;color:#1C1C1E;letter-spacing:-0.01em;">Live Map</div>
+      <div style="font-size:15px;font-weight:500;color:#1C1C1E;letter-spacing:-0.01em;">Live Tracking</div>
       <div style="width:0.5px;height:20px;background:rgba(0,0,0,0.08);"></div>
-      <input id="map-search" type="text" placeholder="Search vessel, Zendesk, HBL..." style="border:0.5px solid rgba(0,0,0,0.12);border-radius:8px;padding:6px 12px;font-size:12px;width:560px;outline:none;font-family:inherit;color:#1C1C1E;background:#fff;"/>
+      <input id="map-search" type="text" placeholder="Search vessel, Zendesk, HBL..." style="border:1px solid rgba(153,0,51,0.3);border-radius:8px;padding:6px 12px;font-size:12px;width:560px;outline:none;font-family:inherit;color:#1C1C1E;background:#fff;transition:border-color .15s;" onfocus="this.style.borderColor='#990033'" onblur="this.style.borderColor='rgba(153,0,51,0.3)'"/>
     </div>
     <div style="display:flex;align-items:center;gap:16px;">
       <div id="map-counter" style="font-size:11px;color:#6E6E73;"></div>
@@ -962,7 +962,7 @@
     // Also fetch summary for older weeks to catch POs applied in previous weeks
     try {
       const weDate=new Date(weekStart+'T00:00:00'); weDate.setDate(weDate.getDate()+6);
-      const oldFrom=new Date(weekStart+'T00:00:00'); oldFrom.setDate(oldFrom.getDate()-16*7);
+      const oldFrom=new Date(weekStart+'T00:00:00'); oldFrom.setDate(oldFrom.getDate()-5*7);
       const summaryOld=await api(`/records/summary?from=${oldFrom.toISOString().slice(0,10)}&to=${weDate.toISOString().slice(0,10)}&status=complete`);
       for(const r of (summaryOld?.by_po||[])){
         const po=String(r.po||r.po_number||'').trim().toUpperCase();
@@ -975,10 +975,9 @@
     const receiving=Array.isArray(window.state?.receiving)?window.state.receiving:[];
     console.log('[Map] receiving from state.receiving — rows:',receiving.length,'sample:',receiving.slice(0,2));
 
-    // ── Fetch 8 weeks of flow data AND plan data ──
-    // Lanes span multiple weeks — fetch 16 weeks to catch older shipments
+    // ── Fetch 5 weeks of data (current + 4 prior = ~35 days, covers full cycle) ──
     const weeks=[];
-    for(let i=0;i<16;i++){
+    for(let i=0;i<5;i++){
       const d=new Date(weekStart+'T00:00:00'); d.setDate(d.getDate()-i*7);
       weeks.push(d.toISOString().slice(0,10));
     }
