@@ -1,4 +1,4 @@
-/* map_live_additive.js v18 — VelOzity Pinpoint Live Map
+/* map_live_additive.js v19 — VelOzity Pinpoint Live Map
    Fixed field names from source: pack/departed/arrived/destClr/hold/etaFC
    One arc per vessel. Clickable location pins. Sea arc goes east.
 */
@@ -617,6 +617,18 @@
       const dotR = active ? 6 : 4;
       const txtX = labelLeft ? lx - dotR - 6 : lx + dotR + 5;
       const txtAnchor = labelLeft ? 'end' : 'start';
+      const labelW = loc.name.length * 5.8 + 8;
+      const labelH = active ? 24 : 14;
+      // White background pill behind label for readability over map dots
+      const labelBg = ns('rect');
+      labelBg.setAttribute('x', labelLeft ? txtX - labelW : txtX - 3);
+      labelBg.setAttribute('y', ly - 7);
+      labelBg.setAttribute('width', labelW + 6);
+      labelBg.setAttribute('height', labelH);
+      labelBg.setAttribute('rx', '3');
+      labelBg.setAttribute('fill', '#FAFAFA');
+      labelBg.setAttribute('opacity', '0.82');
+      svgEl.appendChild(labelBg);
       const txt=ns('text');
       txt.setAttribute('x',txtX); txt.setAttribute('y',ly+4);
       txt.setAttribute('text-anchor',txtAnchor);
@@ -631,7 +643,7 @@
         bdg.setAttribute('x',txtX); bdg.setAttribute('y',ly+15);
         bdg.setAttribute('text-anchor',txtAnchor);
         bdg.setAttribute('font-size','8'); bdg.setAttribute('font-weight','500');
-        bdg.setAttribute('fill',color); bdg.setAttribute('opacity','0.8');
+        bdg.setAttribute('fill',color); bdg.setAttribute('opacity','0.9');
         bdg.setAttribute('font-family','-apple-system,sans-serif');
         bdg.textContent=entries.length+' ZD';
         svgEl.appendChild(bdg);
@@ -650,7 +662,7 @@
 
     // ── Extra pin: SH VAS Facility (same color as vas, above supplier) ──
     {
-      const [shx,shy] = project(26.80, 116.80); // slightly north-east of supplier
+      const [shx,shy] = project(28.50, 119.50); // north-east of supplier, clearly separate
       const shColor = LOC_COLOR['vas_facility']; // same #990033
       const shEntries = locationGroups['vas'] || [];
       const shActive = shEntries.length > 0;
@@ -676,6 +688,16 @@
       shDot.setAttribute('stroke','#fff'); shDot.setAttribute('stroke-width','1.5');
       shDot.setAttribute('opacity',shActive?'1':'0.4');
       svgEl.appendChild(shDot);
+      const shLabelW = 'SH VAS Facility'.length * 5.8 + 8;
+      const shLabelBg = ns('rect');
+      shLabelBg.setAttribute('x', shx - 11 - shLabelW);
+      shLabelBg.setAttribute('y', shy - 7);
+      shLabelBg.setAttribute('width', shLabelW + 6);
+      shLabelBg.setAttribute('height', shActive ? 24 : 14);
+      shLabelBg.setAttribute('rx', '3');
+      shLabelBg.setAttribute('fill', '#FAFAFA');
+      shLabelBg.setAttribute('opacity', '0.82');
+      svgEl.appendChild(shLabelBg);
       const shTxt=ns('text');
       shTxt.setAttribute('x',shx-11); shTxt.setAttribute('y',shy+4);
       shTxt.setAttribute('text-anchor','end');
@@ -987,7 +1009,7 @@
     const topo=await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(r=>r.json());
     const features=topojson.feature(topo,topo.objects.countries).features;
     const DOT_STEP=6, DOT_R=1.4;
-    ctx.fillStyle='#ABABAB';
+    ctx.fillStyle='#C2C2C2';
     const off=document.createElement('canvas'); off.width=w; off.height=h;
     const octx=off.getContext('2d');
     for(const feature of features){
