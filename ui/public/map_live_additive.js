@@ -259,9 +259,9 @@
       const hasReceiving = hasReceivingViaPlan || hasReceivingViaSup;
       const stage = getLaneStage(m, hasReceiving);
       if(stage === 'delivered') continue;
-      // Log current week zendesks specifically
+      // Detailed log for specific zendesks to diagnose stage assignment
       if(['77664','77671','77736','77665','77669','77750','77748','77754'].includes(zendesk)){
-        console.log(`[Map:build] ZD ${zendesk} → stage:${stage} hasReceiving:${hasReceiving} hasApplied:${hasApplied} departed:${getDeparted(m)} arrived:${getArrived(m)} destClr:${getDestClr(m)} pack:${getPackingReady(m)}`);
+        console.log(`[Map:build] ZD ${zendesk} → stage:${stage} | manual keys:`,Object.keys(m).filter(k=>m[k]), '| departed:',getDeparted(m),'pack:',getPackingReady(m),'arrived:',getArrived(m));
       }
 
       const applied = appliedByZendesk.get(zendesk) || 0;
@@ -289,7 +289,9 @@
           if(lks.includes(lane.key)){ vessel = String(c.vessel||'').trim(); if(vessel) break; }
         }
       }
-      const key = vessel || ('NO_VESSEL_' + zendesk);
+      // Group unassigned vessels by freight type so they show as one arc
+      // instead of many overlapping dots at origin port
+      const key = vessel || (isAir ? 'NO_VESSEL_AIR' : 'NO_VESSEL_SEA');
 
       if(!vesselGroups.has(key)){
         vesselGroups.set(key, {vessel, isAir, zdentrys: [],
@@ -307,6 +309,20 @@
     }
 
     console.log('[Map:build] result — vesselGroups:',vesselGroups.size,'locationGroups:',Object.entries(locationGroups).map(([k,v])=>k+':'+v.length).join(' '));
+    // Check where specific zendesks landed
+    const targetZDs=['77664','77671','77748','77754'];
+    for(const [stage,entries] of Object.entries(locationGroups)){
+      const found=entries.filter(e=>targetZDs.includes(e.zendesk));
+      if(found.length) console.log('[Map:build] Found in '+stage+':',found.map(e=>e.zendesk));
+    }
+    const inVessel=Array.from(vesselGroups.values()).flatMap(v=>v.zdentrys.map(z=>z.zendesk));
+    const foundInVessel=targetZDs.filter(z=>inVessel.includes(z));
+    if(foundInVessel.length) console.log('[Map:build] Found in vesselGroups:',foundInVessel);
+    const allFound=[...Object.values(locationGroups).flatMap(e=>e.map(z=>z.zendesk)),...inVessel];
+    const notFound=targetZDs.filter(z=>!allFound.includes(z));
+    if(notFound.length) console.log('[Map:build] NOT FOUND ANYWHERE:',notFound);
+    console.log('[Map:build] vessel breakdown:',Array.from(vesselGroups.values()).map(v=>`${v.vessel||'NO_VES'}(${v.isAir?'air':'sea'}):${v.zdentrys.length}ZD`).join(' '));
+    console.log('[Map:build] air transit lanes:',lanes.filter(l=>String(l.freight||'').toLowerCase()==='air'&&getDeparted(l.manual||{})).map(l=>l.zendesk).join(','));
     // Diagnose why VAS / supplier / last_mile may be empty
     console.log('[Map:build] receivedPOs count:',receivedPOs.size,'sample:',Array.from(receivedPOs).slice(0,3));
     console.log('[Map:build] lanes without departure (should be VAS candidates):',
@@ -837,7 +853,7 @@
     const topo=await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(r=>r.json());
     const features=topojson.feature(topo,topo.objects.countries).features;
     const DOT_STEP=6, DOT_R=1.4;
-    ctx.fillStyle='#D4D4D4';
+    ctx.fillStyle='#ABABAB';
     const off=document.createElement('canvas'); off.width=w; off.height=h;
     const octx=off.getContext('2d');
     for(const feature of features){
