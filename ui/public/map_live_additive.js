@@ -1,4 +1,4 @@
-/* map_live_additive.js v13 — VelOzity Pinpoint Live Map
+/* map_live_additive.js v14 — VelOzity Pinpoint Live Map
    Fixed field names from source: pack/departed/arrived/destClr/hold/etaFC
    One arc per vessel. Clickable location pins. Sea arc goes east.
 */
@@ -23,6 +23,7 @@
     client_wh:      '#1C1C1E',
   };
 
+  const AIR_COLOR = '#2563EB';  // distinct blue for air freight arcs/icons
   const STAGE_COLOR = {
     at_supplier:  '#888780',
     vas:          '#990033',
@@ -51,6 +52,14 @@
     if(!v||v==='undefined'||v==='null') return '—';
     try{ return new Date(v).toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'}); }
     catch{ return String(v); }
+  }
+  function fmtWeek(ws){
+    // Convert week_start date to "Wk Mar 16" format
+    if(!ws) return '';
+    try{
+      const d=new Date(ws+'T00:00:00');
+      return 'Wk '+d.toLocaleDateString('en-AU',{day:'numeric',month:'short'});
+    }catch{ return ws; }
   }
 
   let _proj = null;
@@ -143,6 +152,7 @@
     // Plan lookup by zendesk_ticket — coerce both to string, handle numeric values
     const planByZendesk = new Map();
     const zdByPO = new Map(); // PO → zendesk (reverse map)
+    const zdWeek = new Map(); // zendesk → latest week_start
     for(const p of plan){
       const zd = String(p.zendesk_ticket ?? p.zendesk ?? '').trim();
       const po = String(p.po_number ?? '').trim().toUpperCase();
@@ -150,6 +160,9 @@
       if(!planByZendesk.has(zd)) planByZendesk.set(zd, []);
       planByZendesk.get(zd).push(p);
       if(po) zdByPO.set(po, zd);
+      // Track latest week for this zendesk
+      const ws = p._week_start || p.start_date || '';
+      if(ws && (!zdWeek.has(zd) || ws > zdWeek.get(zd))) zdWeek.set(zd, ws);
     }
     console.log('[Map:build] planByZendesk keys:',Array.from(planByZendesk.keys()).slice(0,8));
     // Find plan rows for lane zendesks specifically
@@ -273,7 +286,8 @@
       const mbl = getMbl(m);
       const etaPort = getEtaFC(m) || getLatestArrival(m);
 
-      const zdEntry = {zendesk, applied, planned, hbl, mbl, supplier: lane.supplier||'', freight: lane.freight||'', stage, manual: m, isAir, etaPort};
+      const weekLabel = zdWeek.get(zendesk) || '';
+      const zdEntry = {zendesk, applied, planned, hbl, mbl, supplier: lane.supplier||'', freight: lane.freight||'', stage, manual: m, isAir, etaPort, weekLabel};
 
       // Static location
       if(stage !== 'transit'){
@@ -327,7 +341,8 @@
       const zdPos = [...new Set(pRows.map(p=>String(p.po_number||'').trim().toUpperCase()).filter(Boolean))];
       const hasRecv = zdPos.some(po=>receivedPOs.has(po));
       const stage = hasRecv ? 'vas' : 'at_supplier';
-      locationGroups[stage].push({zendesk:zd, applied, planned, hbl:'', mbl:'', supplier, freight, stage, manual:{}, isAir, etaPort:null});
+      const weekLabel = zdWeek.get(zd) || '';
+      locationGroups[stage].push({zendesk:zd, applied, planned, hbl:'', mbl:'', supplier, freight, stage, manual:{}, isAir, etaPort:null, weekLabel});
       console.log('[Map:build] Plan-only ZD →',stage,':',zd,supplier,'received:',hasRecv);
     }
     console.log('[Map:build] result — vesselGroups:',vesselGroups.size,'locationGroups:',Object.entries(locationGroups).map(([k,v])=>k+':'+v.length).join(' '));
@@ -378,18 +393,28 @@
 
   // ── Vessel detail panel ──
   function openVesselDetail(vg,panel){
-    const color='#990033';
+    const color = vg.isAir ? AIR_COLOR : '#990033';
     const totalApplied=vg.zdentrys.reduce((s,z)=>s+z.applied,0);
     const allHBLs=[...new Set(vg.zdentrys.map(z=>z.hbl).filter(Boolean))];
     const name=vg.vessel||'Unassigned vessel';
-    const zdRows=vg.zdentrys.map(z=>`
+    // ETA FC: use actual etaPort or baseline from first lane's manual
+    const etaFCActual = vg.etaPort;
+    const etaFCBaseline = vg.zdentrys[0]?.manual ? getEtaFC(vg.zdentrys[0].manual) : null;
+    const latestArrBaseline = vg.zdentrys[0]?.manual ? getLatestArrival(vg.zdentrys[0].manual) : null;
+    const etaDisplay = etaFCActual || etaFCBaseline || latestArrBaseline;
+    const etaLabel = etaFCActual ? 'ETA Port / FC' : (etaFCBaseline||latestArrBaseline) ? 'ETA FC (baseline)' : null;
+
+    const zdRows=vg.zdentrys.map(z=>{
+      const wkLabel = z.weekLabel ? ` (${fmtWeek(z.weekLabel)})` : '';
+      return `
       <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;border-bottom:0.5px solid rgba(0,0,0,0.05);">
         <div>
-          <div style="font-size:11px;font-weight:500;color:#1C1C1E;">#${z.zendesk}</div>
+          <div style="font-size:11px;font-weight:500;color:#1C1C1E;">#${z.zendesk}<span style="font-size:10px;font-weight:400;color:#AEAEB2;">${wkLabel}</span></div>
           ${z.supplier?`<div style="font-size:10px;color:#AEAEB2;">${z.supplier}</div>`:''}
         </div>
         <div style="font-size:11px;color:#6E6E73;">${z.applied.toLocaleString()} applied</div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
     panel.innerHTML=`${closeBtn()}
       <div style="padding-right:32px;margin-bottom:16px;">
         <div style="font-size:13px;font-weight:500;color:#1C1C1E;margin-bottom:6px;">${name}</div>
@@ -403,7 +428,7 @@
         ${dRow('Freight',vg.isAir?'Air':'Sea')}
         ${dRow('HBL',allHBLs.join(', ')||'—')}
         ${dRow('Departed',fmtDate(vg.departed))}
-        ${dRow('ETA Port / FC',fmtDate(vg.etaPort))}
+        ${etaLabel?dRow(etaLabel,fmtDate(etaDisplay)):''}
         ${vg.arrived?dRow('Arrived',fmtDate(vg.arrived)):''}
         ${vg.destClr?dRow('Customs Cleared',fmtDate(vg.destClr)):''}
       </div>
@@ -442,9 +467,10 @@
       const pct=z.planned>0?Math.round(z.applied/z.planned*100):null;
       const showPct=pct!==null&&(locKey==='vas'||locKey==='last_mile');
       const pctColor=pct>=100?'#3B82F6':pct>50?'#B5956A':'#990033';
+      const wkLabel = z.weekLabel ? ` (${fmtWeek(z.weekLabel)})` : '';
       return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;border-bottom:0.5px solid rgba(0,0,0,0.05);">
         <div>
-          <div style="font-size:11px;font-weight:500;color:#1C1C1E;">#${z.zendesk}</div>
+          <div style="font-size:11px;font-weight:500;color:#1C1C1E;">#${z.zendesk}<span style="font-size:10px;font-weight:400;color:#AEAEB2;">${wkLabel}</span></div>
           ${z.supplier?`<div style="font-size:10px;color:#AEAEB2;">${z.supplier}</div>`:''}
         </div>
         <div style="text-align:right;">
@@ -481,24 +507,26 @@
 
   // ── Ship and airplane SVG icons ──
   function shipIcon(x,y,color){
-    // Simple ship hull
     const g=ns('g');
-    g.setAttribute('transform',`translate(${x-8},${y-6})`);
+    g.setAttribute('transform',`translate(${x-14},${y-10})`);
     const hull=ns('path');
-    hull.setAttribute('d','M2,6 L4,2 L12,2 L14,6 Q8,10 2,6 Z');
+    hull.setAttribute('d','M2,10 L5,3 L20,3 L23,10 Q12,17 2,10 Z');
     hull.setAttribute('fill',color); hull.setAttribute('opacity','0.9');
     const mast=ns('line');
-    mast.setAttribute('x1','8'); mast.setAttribute('y1','2');
-    mast.setAttribute('x2','8'); mast.setAttribute('y2','-2');
-    mast.setAttribute('stroke',color); mast.setAttribute('stroke-width','1.5');
-    g.appendChild(hull); g.appendChild(mast);
+    mast.setAttribute('x1','12'); mast.setAttribute('y1','3');
+    mast.setAttribute('x2','12'); mast.setAttribute('y2','-4');
+    mast.setAttribute('stroke',color); mast.setAttribute('stroke-width','2');
+    const sail=ns('path');
+    sail.setAttribute('d','M12,-4 L20,3 L12,3 Z');
+    sail.setAttribute('fill',color); sail.setAttribute('opacity','0.5');
+    g.appendChild(hull); g.appendChild(mast); g.appendChild(sail);
     return g;
   }
   function planeIcon(x,y,color){
     const g=ns('g');
     g.setAttribute('transform',`translate(${x},${y}) rotate(-45)`);
     const body=ns('path');
-    body.setAttribute('d','M0,-7 L2,0 L7,2 L2,2 L2,7 L0,5 L-2,7 L-2,2 L-7,2 L-2,0 Z');
+    body.setAttribute('d','M0,-11 L3,0 L11,3 L3,3 L3,11 L0,8 L-3,11 L-3,3 L-11,3 L-3,0 Z');
     body.setAttribute('fill',color); body.setAttribute('opacity','0.9');
     g.appendChild(body);
     return g;
@@ -596,6 +624,7 @@
 
     // ── Last mile arcs (from location groups) ──
     const lastMileEntries=locationGroups.last_mile||[];
+    console.log('[Map:render] lastMileEntries:',lastMileEntries.length,'airLM:',lastMileEntries.filter(z=>z.isAir).map(z=>z.zendesk),'seaLM:',lastMileEntries.filter(z=>!z.isAir).map(z=>z.zendesk).slice(0,3));
     if(lastMileEntries.length>0){
       const seaLM=lastMileEntries.filter(z=>!z.isAir);
       const airLM=lastMileEntries.filter(z=>z.isAir);
@@ -666,14 +695,14 @@
         const [tmx,tmy]=arcMid(ox,oy,vx,vy,bend);
         const travelArc=ns('path');
         travelArc.setAttribute('d',`M${ox},${oy} Q${tmx},${tmy} ${vx},${vy}`);
-        travelArc.setAttribute('stroke','#990033'); travelArc.setAttribute('stroke-width','2');
+        travelArc.setAttribute('stroke',AIR_COLOR); travelArc.setAttribute('stroke-width','2');
         travelArc.setAttribute('fill','none');
         travelArc.setAttribute('stroke-opacity',String(arcOpacity*0.65));
         svgEl.appendChild(travelArc);
 
         // Plane icon at 30%
         const [ix,iy]=arcPoint(ox,oy,dx,dy,0.3,bend);
-        svgEl.appendChild(planeIcon(ix,iy,'#990033'));
+        svgEl.appendChild(planeIcon(ix,iy,AIR_COLOR));
 
         // Vessel label tag above dot
         if(vg.vessel&&(!q||isMatch)){
@@ -682,14 +711,14 @@
           tagBg.setAttribute('x',vx-tagW/2); tagBg.setAttribute('y',vy-22);
           tagBg.setAttribute('width',tagW); tagBg.setAttribute('height','13');
           tagBg.setAttribute('rx','3'); tagBg.setAttribute('fill','#fff');
-          tagBg.setAttribute('stroke','#990033'); tagBg.setAttribute('stroke-width','0.5');
+          tagBg.setAttribute('stroke',AIR_COLOR); tagBg.setAttribute('stroke-width','0.5');
           tagBg.setAttribute('opacity','0.95');
           svgEl.appendChild(tagBg);
           const tagTxt=ns('text');
           tagTxt.setAttribute('x',vx); tagTxt.setAttribute('y',vy-12);
           tagTxt.setAttribute('text-anchor','middle');
           tagTxt.setAttribute('font-size','8'); tagTxt.setAttribute('font-weight','500');
-          tagTxt.setAttribute('fill','#990033');
+          tagTxt.setAttribute('fill',AIR_COLOR);
           tagTxt.setAttribute('font-family','-apple-system,sans-serif');
           tagTxt.textContent=vg.vessel.length>24?vg.vessel.slice(0,22)+'\u2026':vg.vessel;
           svgEl.appendChild(tagTxt);
@@ -699,7 +728,7 @@
         for(let ri=0;ri<2;ri++){
           const ring=ns('circle');
           ring.setAttribute('cx',vx); ring.setAttribute('cy',vy); ring.setAttribute('r','5');
-          ring.setAttribute('fill','none'); ring.setAttribute('stroke','#990033');
+          ring.setAttribute('fill','none'); ring.setAttribute('stroke',AIR_COLOR);
           ring.setAttribute('stroke-width','1.5');
           ring.setAttribute('opacity',String(arcOpacity));
           ring.style.animation=`mapSonar 3.5s ease-out infinite ${ri*1.4}s`;
@@ -710,7 +739,7 @@
         gEl.style.cursor='pointer'; gEl.style.pointerEvents='all';
         const dot=ns('circle');
         dot.setAttribute('cx',vx); dot.setAttribute('cy',vy);
-        dot.setAttribute('r','5.5'); dot.setAttribute('fill','#990033');
+        dot.setAttribute('r','5.5'); dot.setAttribute('fill',AIR_COLOR);
         dot.setAttribute('stroke','#fff'); dot.setAttribute('stroke-width','2');
         gEl.appendChild(dot);
         const label=vg.vessel||'Unassigned vessel';
@@ -770,14 +799,14 @@
           tagBg.setAttribute('x',vx-tagW/2); tagBg.setAttribute('y',vy-22);
           tagBg.setAttribute('width',tagW); tagBg.setAttribute('height','13');
           tagBg.setAttribute('rx','3'); tagBg.setAttribute('fill','#fff');
-          tagBg.setAttribute('stroke','#990033'); tagBg.setAttribute('stroke-width','0.5');
+          tagBg.setAttribute('stroke',AIR_COLOR); tagBg.setAttribute('stroke-width','0.5');
           tagBg.setAttribute('opacity','0.95');
           svgEl.appendChild(tagBg);
           const tagTxt=ns('text');
           tagTxt.setAttribute('x',vx); tagTxt.setAttribute('y',vy-12);
           tagTxt.setAttribute('text-anchor','middle');
           tagTxt.setAttribute('font-size','8'); tagTxt.setAttribute('font-weight','500');
-          tagTxt.setAttribute('fill','#990033');
+          tagTxt.setAttribute('fill',AIR_COLOR);
           tagTxt.setAttribute('font-family','-apple-system,sans-serif');
           tagTxt.textContent=vg.vessel.length>24?vg.vessel.slice(0,22)+'\u2026':vg.vessel;
           svgEl.appendChild(tagTxt);
@@ -940,23 +969,23 @@
       Promise.allSettled(weeks.map(ws=>api(`/plan/weeks/${encodeURIComponent(ws)}`)))
     ]);
 
-    // Merge plan rows from all weeks
+    // Merge plan rows from all weeks — tag each with its week_start
     const allPlanRows=[];
     const seenPlanKeys=new Set();
-    // Start with current state.plan
+    // Start with current state.plan (week 0 = current week)
     for(const p of (Array.isArray(window.state?.plan)?window.state.plan:[])){
       const key=String(p.po_number||'').trim()+'|'+String(p.sku_code||'').trim()+'|'+String(p.zendesk_ticket||'').trim();
-      if(!seenPlanKeys.has(key)){ seenPlanKeys.add(key); allPlanRows.push(p); }
+      if(!seenPlanKeys.has(key)){ seenPlanKeys.add(key); allPlanRows.push({...p, _week_start: weeks[0]}); }
     }
-    // Add from older weeks
-    for(const res of planResults){
-      if(res.status!=='fulfilled') continue;
+    // Add from older weeks — keep latest week per plan key
+    planResults.forEach((res, i) => {
+      if(res.status!=='fulfilled') return;
       const rows=Array.isArray(res.value)?res.value:[];
       for(const p of rows){
         const key=String(p.po_number||'').trim()+'|'+String(p.sku_code||'').trim()+'|'+String(p.zendesk_ticket||'').trim();
-        if(!seenPlanKeys.has(key)){ seenPlanKeys.add(key); allPlanRows.push(p); }
+        if(!seenPlanKeys.has(key)){ seenPlanKeys.add(key); allPlanRows.push({...p, _week_start: weeks[i]}); }
       }
-    }
+    });
     console.log('[Map] allPlanRows:',allPlanRows.length,'from',weeks.length,'weeks');
     const planRows=allPlanRows;
     const allLanes=[], allContainers=[];
