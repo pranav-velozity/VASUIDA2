@@ -1,4 +1,4 @@
-/* map_live_additive.js v5 — VelOzity Pinpoint Live Map
+/* map_live_additive.js v15 — VelOzity Pinpoint Live Map
    Fixed field names from source: pack/departed/arrived/destClr/hold/etaFC
    One arc per vessel. Clickable location pins. Sea arc goes east.
 */
@@ -507,21 +507,35 @@
 
   // ── Ship and airplane SVG icons ──
   function shipIcon(x,y,color){
-    // Clean ship silhouette — viewed from side
+    // Container ship side profile
     const g=ns('g');
     g.setAttribute('transform',`translate(${x},${y})`);
-    const ship=ns('path');
-    // Hull + superstructure as a clean side-view silhouette, centered on 0,0
-    ship.setAttribute('d','M-13,4 L-10,-2 L-4,-2 L-4,-7 L4,-7 L4,-2 L12,-2 L14,4 Q0,9 -13,4 Z');
-    ship.setAttribute('fill',color);
-    ship.setAttribute('opacity','0.92');
-    // Funnel/chimney
+    // Hull — wide flat bottom, pointed bow on right
+    const hull=ns('path');
+    hull.setAttribute('d','M-16,5 L-16,2 L-12,2 L12,2 L17,-1 L18,5 Z');
+    hull.setAttribute('fill',color); hull.setAttribute('opacity','1');
+    // Deck boxes (cargo containers stacked)
+    const deck=ns('path');
+    deck.setAttribute('d','M-12,2 L-12,-4 L-2,-4 L-2,2 Z');
+    deck.setAttribute('fill',color); deck.setAttribute('opacity','0.7');
+    // Bridge/superstructure
+    const bridge=ns('path');
+    bridge.setAttribute('d','M2,2 L2,-7 L8,-7 L8,2 Z');
+    bridge.setAttribute('fill',color); bridge.setAttribute('opacity','0.85');
+    // Funnel on top of bridge
     const funnel=ns('rect');
-    funnel.setAttribute('x','1'); funnel.setAttribute('y','-11');
-    funnel.setAttribute('width','4'); funnel.setAttribute('height','5');
+    funnel.setAttribute('x','4'); funnel.setAttribute('y','-10');
+    funnel.setAttribute('width','3'); funnel.setAttribute('height','4');
     funnel.setAttribute('rx','1');
-    funnel.setAttribute('fill',color); funnel.setAttribute('opacity','0.7');
-    g.appendChild(ship); g.appendChild(funnel);
+    funnel.setAttribute('fill',color); funnel.setAttribute('opacity','0.9');
+    // Waterline
+    const water=ns('line');
+    water.setAttribute('x1','-16'); water.setAttribute('y1','5');
+    water.setAttribute('x2','18'); water.setAttribute('y2','5');
+    water.setAttribute('stroke',color); water.setAttribute('stroke-width','1.5');
+    water.setAttribute('opacity','0.5');
+    g.appendChild(hull); g.appendChild(deck); g.appendChild(bridge);
+    g.appendChild(funnel); g.appendChild(water);
     return g;
   }
   function planeIcon(x,y,color){
@@ -716,14 +730,14 @@
           tagBg.setAttribute('x',vx-tagW/2); tagBg.setAttribute('y',vy-22);
           tagBg.setAttribute('width',tagW); tagBg.setAttribute('height','13');
           tagBg.setAttribute('rx','3'); tagBg.setAttribute('fill','#fff');
-          tagBg.setAttribute('stroke',AIR_COLOR); tagBg.setAttribute('stroke-width','0.5');
+          tagBg.setAttribute('stroke','rgba(0,0,0,0.15)'); tagBg.setAttribute('stroke-width','0.5');
           tagBg.setAttribute('opacity','0.95');
           svgEl.appendChild(tagBg);
           const tagTxt=ns('text');
           tagTxt.setAttribute('x',vx); tagTxt.setAttribute('y',vy-12);
           tagTxt.setAttribute('text-anchor','middle');
           tagTxt.setAttribute('font-size','8'); tagTxt.setAttribute('font-weight','500');
-          tagTxt.setAttribute('fill',AIR_COLOR);
+          tagTxt.setAttribute('fill','#1C1C1E');
           tagTxt.setAttribute('font-family','-apple-system,sans-serif');
           tagTxt.textContent=vg.vessel.length>24?vg.vessel.slice(0,22)+'\u2026':vg.vessel;
           svgEl.appendChild(tagTxt);
@@ -804,14 +818,14 @@
           tagBg.setAttribute('x',vx-tagW/2); tagBg.setAttribute('y',vy-22);
           tagBg.setAttribute('width',tagW); tagBg.setAttribute('height','13');
           tagBg.setAttribute('rx','3'); tagBg.setAttribute('fill','#fff');
-          tagBg.setAttribute('stroke',AIR_COLOR); tagBg.setAttribute('stroke-width','0.5');
+          tagBg.setAttribute('stroke','rgba(0,0,0,0.15)'); tagBg.setAttribute('stroke-width','0.5');
           tagBg.setAttribute('opacity','0.95');
           svgEl.appendChild(tagBg);
           const tagTxt=ns('text');
           tagTxt.setAttribute('x',vx); tagTxt.setAttribute('y',vy-12);
           tagTxt.setAttribute('text-anchor','middle');
           tagTxt.setAttribute('font-size','8'); tagTxt.setAttribute('font-weight','500');
-          tagTxt.setAttribute('fill',AIR_COLOR);
+          tagTxt.setAttribute('fill','#1C1C1E');
           tagTxt.setAttribute('font-family','-apple-system,sans-serif');
           tagTxt.textContent=vg.vessel.length>24?vg.vessel.slice(0,22)+'\u2026':vg.vessel;
           svgEl.appendChild(tagTxt);
