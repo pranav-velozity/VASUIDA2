@@ -170,7 +170,9 @@
       const zd = zdByPO.get(po.toUpperCase()) || zdByPO.get(po);
       if(zd) appliedByZendesk.set(zd, (appliedByZendesk.get(zd)||0) + units);
     }
-    console.log('[Map:build] appliedByZendesk non-zero:',Array.from(appliedByZendesk.entries()).filter(([,v])=>v>0).slice(0,6));
+    console.log('[Map:build] appliedByZendesk non-zero:',Array.from(appliedByZendesk.entries()).filter(([,v])=>v>0).slice(0,8));
+    console.log('[Map:build] appliedByPO keys sample:',Array.from(appliedByPO.keys()).slice(0,6));
+    console.log('[Map:build] zdByPO sample (PO→zendesk):',Array.from(zdByPO.entries()).slice(0,6));
 
     // Container → vessel lookup
     const contVessel = new Map();
@@ -757,23 +759,34 @@
 
     const weekStart=window.state?.weekStart||'';
 
-    // ── appliedByPO: use window.state.records (already loaded) ──
+    // ── appliedByPO: use window.state.records + fetch older weeks ──
+    // state.records only covers current week — fetch all 16 weeks for complete picture
     const appliedByPO=new Map();
     const stateRecords=Array.isArray(window.state?.records)?window.state.records:[];
     for(const r of stateRecords){
       const po=String(r.po||r.po_number||'').trim().toUpperCase();
       if(po) appliedByPO.set(po,(appliedByPO.get(po)||0)+Number(r.units||0));
     }
-    console.log('[Map] appliedByPO from state.records — entries:',appliedByPO.size,'sample:',Array.from(appliedByPO.entries()).slice(0,3));
+    // Also fetch summary for older weeks to catch POs applied in previous weeks
+    try {
+      const weDate=new Date(weekStart+'T00:00:00'); weDate.setDate(weDate.getDate()+6);
+      const oldFrom=new Date(weekStart+'T00:00:00'); oldFrom.setDate(oldFrom.getDate()-16*7);
+      const summaryOld=await api(`/records/summary?from=${oldFrom.toISOString().slice(0,10)}&to=${weDate.toISOString().slice(0,10)}&status=complete`);
+      for(const r of (summaryOld?.by_po||[])){
+        const po=String(r.po||r.po_number||'').trim().toUpperCase();
+        if(po && !appliedByPO.has(po)) appliedByPO.set(po,Number(r.units||0));
+      }
+    } catch(e){ console.warn('[Map] extended summary fetch failed',e); }
+    console.log('[Map] appliedByPO — entries:',appliedByPO.size,'sample:',Array.from(appliedByPO.entries()).slice(0,3));
 
-    // ── receiving: use window.state.receiving (already loaded) ──
+    // ── receiving: use window.state.receiving ──
     const receiving=Array.isArray(window.state?.receiving)?window.state.receiving:[];
     console.log('[Map] receiving from state.receiving — rows:',receiving.length,'sample:',receiving.slice(0,2));
 
     // ── Fetch 8 weeks of flow data AND plan data ──
-    // Lanes span multiple weeks — current state.plan only covers current week
+    // Lanes span multiple weeks — fetch 16 weeks to catch older shipments
     const weeks=[];
-    for(let i=0;i<8;i++){
+    for(let i=0;i<16;i++){
       const d=new Date(weekStart+'T00:00:00'); d.setDate(d.getDate()-i*7);
       weeks.push(d.toISOString().slice(0,10));
     }
