@@ -662,8 +662,11 @@
 
     // ── Extra pin: SH VAS Facility (same color as vas, above supplier) ──
     {
-      const [shx,shy] = project(27.50, 121.00); // above-right of Supplier, within visible bounds
-      console.log('[Map] SH VAS Facility screen pos:',shx,shy,'active:',locationGroups['vas']?.length);
+      // Position SH VAS Facility relative to Supplier pin — offset up and slightly right
+      const [supX,supY] = project(118.00, 26.00);
+      const shx = supX + 28;
+      const shy = supY - 28;
+      console.log('[Map] SH VAS screen pos:',shx,shy,'Supplier was:',supX,supY);
       const shColor = LOC_COLOR['vas_facility']; // same #990033
       const shEntries = locationGroups['vas'] || [];
       const shActive = shEntries.length > 0;
