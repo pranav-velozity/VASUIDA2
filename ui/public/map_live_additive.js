@@ -1,4 +1,4 @@
-/* map_live_additive.js v5 — VelOzity Pinpoint Live Map
+/* map_live_additive.js v8 — VelOzity Pinpoint Live Map
    Fixed field names from source: pack/departed/arrived/destClr/hold/etaFC
    One arc per vessel. Clickable location pins. Sea arc goes east.
 */
