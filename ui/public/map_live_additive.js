@@ -1,4 +1,4 @@
-/* map_live_additive.js v8 — VelOzity Pinpoint Live Map
+/* map_live_additive.js v5 — VelOzity Pinpoint Live Map
    Fixed field names from source: pack/departed/arrived/destClr/hold/etaFC
    One arc per vessel. Clickable location pins. Sea arc goes east.
 */
@@ -150,6 +150,13 @@
       if(po) zdByPO.set(po, zd);
     }
     console.log('[Map:build] planByZendesk keys:',Array.from(planByZendesk.keys()).slice(0,8));
+    // Find plan rows for lane zendesks specifically
+    const laneZDs=[...new Set(lanes.map(l=>String(l.zendesk||'').trim()).filter(Boolean))];
+    console.log('[Map:build] lane zendesks:',laneZDs.slice(0,8));
+    console.log('[Map:build] lane ZDs in plan?',laneZDs.slice(0,5).map(zd=>zd+':'+(planByZendesk.has(zd)?'YES':'NO')));
+    // Sample older plan rows to see if zendesk_ticket is populated
+    const olderRows=plan.filter(p=>!['77665','77664','77669','77671','77750','77736','77748','77754'].includes(String(p.zendesk_ticket||'').trim()));
+    console.log('[Map:build] older plan row sample:',olderRows.slice(0,3).map(p=>({zd:p.zendesk_ticket,po:p.po_number,sup:p.supplier_name})));
 
     // Received POs — uppercase for consistent comparison
     const receivedPOs = new Set((receiving||[]).map(r => String(r.po_number||'').trim().toUpperCase()).filter(Boolean));
@@ -169,6 +176,34 @@
       if(!units) continue;
       const zd = zdByPO.get(po.toUpperCase()) || zdByPO.get(po);
       if(zd) appliedByZendesk.set(zd, (appliedByZendesk.get(zd)||0) + units);
+    }
+    // Approach 3: for lanes whose zendesk has no applied yet — 
+    // use receiving rows to find their POs, then look up applied
+    // receiving has po_number, and those POs may be in appliedByPO
+    const receivingByPO = new Map();
+    for(const r of (receiving||[])){
+      const po = String(r.po_number||'').trim().toUpperCase();
+      if(po) receivingByPO.set(po, true);
+    }
+    // Build zendesk→POs from ALL plan rows (not just planByZendesk lookup)
+    // This catches zendesks whose plan rows have empty zendesk_ticket field
+    // by falling back to the lane key's zendesk
+    for(const lane of lanes){
+      const laneZD = String(lane.zendesk||'').trim();
+      if(!laneZD || appliedByZendesk.get(laneZD)) continue; // already has units
+      // Find plan rows that match this lane's supplier+freight
+      const sup = String(lane.supplier||'').trim().toLowerCase();
+      const frt = String(lane.freight||'').trim().toLowerCase();
+      let total = 0;
+      for(const p of plan){
+        const pSup = String(p.supplier_name||'').trim().toLowerCase();
+        const pFrt = String(p.freight_type||'').trim().toLowerCase();
+        const po = String(p.po_number||'').trim().toUpperCase();
+        if(pSup===sup && pFrt===frt && po){
+          total += appliedByPO.get(po) || 0;
+        }
+      }
+      if(total > 0) appliedByZendesk.set(laneZD, total);
     }
     console.log('[Map:build] appliedByZendesk non-zero:',Array.from(appliedByZendesk.entries()).filter(([,v])=>v>0).slice(0,8));
     console.log('[Map:build] appliedByPO keys sample:',Array.from(appliedByPO.keys()).slice(0,6));
@@ -205,9 +240,20 @@
       const lanePoRows = planByZendesk.get(zendesk) ||
                          planByZendesk.get(String(Number(zendesk))) || [];
       const lanePos = [...new Set(lanePoRows.map(p => String(p.po_number||'').trim().toUpperCase()).filter(Boolean))];
-      // hasReceiving: check receiving table OR applied units > 0 (proxy — if units applied, goods were received)
-      const hasReceiving = lanePos.some(po => receivedPOs.has(po)) ||
-                           (appliedByZendesk.get(zendesk) || 0) > 0;
+      
+      // hasReceiving: check via plan POs, OR applied units > 0 (proxy), OR
+      // check if supplier+freight has any received POs in receiving table
+      const sup = String(lane.supplier||'').trim().toLowerCase();
+      const frt = String(lane.freight||'').trim().toLowerCase();
+      const hasReceivingViaPlan = lanePos.some(po => receivedPOs.has(po));
+      const hasApplied = (appliedByZendesk.get(zendesk)||0) > 0;
+      const hasReceivingViaSup = !hasReceivingViaPlan && !hasApplied && Array.from(receivedPOs).some(po => {
+        const planRow = plan.find(p => String(p.po_number||'').trim().toUpperCase() === po);
+        if(!planRow) return false;
+        return String(planRow.supplier_name||'').trim().toLowerCase() === sup &&
+               String(planRow.freight_type||'').trim().toLowerCase() === frt;
+      });
+      const hasReceiving = hasReceivingViaPlan || hasApplied || hasReceivingViaSup;
       const stage = getLaneStage(m, hasReceiving);
       if(stage === 'delivered') continue;
 
