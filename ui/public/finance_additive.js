@@ -34,9 +34,23 @@ function fmtDate(s){
 function isoToday(){return new Date().toISOString().slice(0,10);}
 function addDays(iso,n){const d=new Date(iso.slice(0,10)+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);}
 function safeDate(s){return s?String(s).slice(0,10):'';}
+function getISOWeekNum(ws){
+  try{
+    const d=new Date(ws.slice(0,10)+'T00:00:00Z');
+    const tmp=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()));
+    const day=tmp.getUTCDay()||7;
+    tmp.setUTCDate(tmp.getUTCDate()+4-day);
+    const yearStart=new Date(Date.UTC(tmp.getUTCFullYear(),0,1));
+    return Math.ceil((((tmp-yearStart)/86400000)+1)/7);
+  }catch{return 0;}
+}
 function weekLabel(ws){
-  try{const d=new Date(ws.slice(0,10)+'T00:00:00Z');return'W/C '+d.toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'});}
-  catch{return ws;}
+  try{
+    const d=new Date(ws.slice(0,10)+'T00:00:00Z');
+    const wkNum=getISOWeekNum(ws);
+    const dateStr=d.toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'});
+    return`W${wkNum} · ${dateStr}`;
+  }catch{return ws;}
 }
 function statusBadge(status){
   const cfg={draft:{bg:'rgba(174,174,178,0.15)',color:MID,label:'Draft'},sent:{bg:'rgba(50,130,246,0.12)',color:BLUE,label:'Sent'},paid:{bg:'rgba(52,199,89,0.12)',color:GREEN,label:'Paid'},overdue:{bg:'rgba(153,0,51,0.12)',color:BRAND,label:'Overdue'}}[status]||{bg:BG,color:MID,label:status};
@@ -56,9 +70,17 @@ async function fetchFX(){
 }
 
 function getWeeks(){
-  const weeks=[],now=new Date(),dow=now.getDay();
-  const monday=new Date(now);monday.setDate(now.getDate()-((dow+6)%7));monday.setHours(0,0,0,0);
-  for(let i=0;i<12;i++){const d=new Date(monday);d.setDate(monday.getDate()-i*7);weeks.push(d.toISOString().slice(0,10));}
+  const weeks=[],now=new Date();
+  // Use UTC day to avoid timezone shifting to Sunday
+  const dow=now.getUTCDay(); // 0=Sun,1=Mon...
+  const monday=new Date(now);
+  monday.setUTCDate(now.getUTCDate()-((dow+6)%7));
+  monday.setUTCHours(0,0,0,0);
+  for(let i=0;i<12;i++){
+    const d=new Date(monday);
+    d.setUTCDate(monday.getUTCDate()-i*7);
+    weeks.push(d.toISOString().slice(0,10));
+  }
   return weeks;
 }
 
