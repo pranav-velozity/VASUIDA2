@@ -199,6 +199,76 @@ CREATE INDEX IF NOT EXISTS idx_flow_week_ws ON flow_week(week_start);
 CREATE INDEX IF NOT EXISTS idx_flow_week_fac ON flow_week(facility);
 `);
 
+// ── Finance tables ──
+db.exec(`
+CREATE TABLE IF NOT EXISTS fin_invoices (
+  id          TEXT PRIMARY KEY,
+  type        TEXT NOT NULL CHECK(type IN ('VAS','SEA','AIR')),
+  week_start  TEXT NOT NULL,
+  ref_number  TEXT NOT NULL UNIQUE,
+  status      TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','sent','paid','overdue')),
+  invoice_date TEXT,
+  due_date    TEXT,
+  subtotal    REAL DEFAULT 0,
+  gst         REAL DEFAULT 0,
+  customs     REAL DEFAULT 0,
+  misc_total  REAL DEFAULT 0,
+  total       REAL DEFAULT 0,
+  currency    TEXT DEFAULT 'USD',
+  notes       TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_fin_inv_week ON fin_invoices(week_start);
+CREATE INDEX IF NOT EXISTS idx_fin_inv_type ON fin_invoices(type);
+CREATE INDEX IF NOT EXISTS idx_fin_inv_status ON fin_invoices(status);
+
+CREATE TABLE IF NOT EXISTS fin_invoice_lines (
+  id          TEXT PRIMARY KEY,
+  invoice_id  TEXT NOT NULL REFERENCES fin_invoices(id) ON DELETE CASCADE,
+  sort_order  INTEGER DEFAULT 0,
+  description TEXT NOT NULL,
+  unit_label  TEXT,
+  rate        REAL DEFAULT 0,
+  quantity    REAL DEFAULT 0,
+  total       REAL DEFAULT 0,
+  gst_free    INTEGER DEFAULT 0,
+  is_misc     INTEGER DEFAULT 0,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_fin_lines_inv ON fin_invoice_lines(invoice_id);
+
+CREATE TABLE IF NOT EXISTS fin_expenses (
+  id          TEXT PRIMARY KEY,
+  category    TEXT NOT NULL,
+  description TEXT NOT NULL,
+  amount      REAL NOT NULL,
+  currency    TEXT DEFAULT 'USD',
+  expense_date TEXT NOT NULL,
+  month_key   TEXT NOT NULL,
+  is_recurring INTEGER DEFAULT 0,
+  recur_freq  TEXT CHECK(recur_freq IN ('monthly','quarterly','annually',NULL)),
+  recur_end   TEXT,
+  parent_id   TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_fin_exp_month ON fin_expenses(month_key);
+CREATE INDEX IF NOT EXISTS idx_fin_exp_cat ON fin_expenses(category);
+CREATE INDEX IF NOT EXISTS idx_fin_exp_recur ON fin_expenses(is_recurring);
+
+CREATE TABLE IF NOT EXISTS fin_fx_rates (
+  id          TEXT PRIMARY KEY,
+  from_curr   TEXT NOT NULL,
+  to_curr     TEXT NOT NULL,
+  rate        REAL NOT NULL,
+  source      TEXT DEFAULT 'manual',
+  fetched_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(from_curr, to_curr)
+);
+`);
+
+
 
 
 
@@ -630,6 +700,29 @@ app.post('/pulse/chat',
     lines.push('Be concise and direct. Lead with numbers. Do not hedge when the data is clear.');
     lines.push('You are read-only — guide users to the UI for any changes (e.g. "Update that in Week Hub → Transit & Clearing").');
     lines.push('');
+
+    // ── Finance context (admin only) ──
+    if (userRole === 'org:admin_auth') {
+      try {
+        const finSum = db.prepare(`
+          SELECT
+            (SELECT COUNT(*) FROM fin_invoices WHERE status IN ('draft','sent','overdue')) as outstanding_n,
+            (SELECT COALESCE(SUM(total),0) FROM fin_invoices WHERE status IN ('draft','sent','overdue')) as outstanding_total,
+            (SELECT COALESCE(SUM(total),0) FROM fin_invoices WHERE status='paid' AND week_start >= ?) as revenue_ytd,
+            (SELECT COALESCE(SUM(amount),0) FROM fin_expenses WHERE month_key >= ?) as expenses_ytd
+        `).get(`${new Date().getUTCFullYear()}-01-01`, `${new Date().getUTCFullYear()}-01`);
+        if (finSum) {
+          const net = finSum.revenue_ytd - finSum.expenses_ytd;
+          const margin = finSum.revenue_ytd > 0 ? Math.round(net/finSum.revenue_ytd*100) : 0;
+          lines.push('## Finance summary (YTD)');
+          lines.push(`- Revenue YTD: USD ${finSum.revenue_ytd.toLocaleString()}`);
+          lines.push(`- Expenses YTD: USD ${finSum.expenses_ytd.toLocaleString()}`);
+          lines.push(`- Net: USD ${net.toLocaleString()} (${margin}% margin)`);
+          lines.push(`- Outstanding invoices: ${finSum.outstanding_n} (USD ${finSum.outstanding_total.toLocaleString()})`);
+          lines.push('');
+        }
+      } catch(e) { /* Finance tables may not exist yet */ }
+    }
     lines.push('## User context');
     lines.push('- Role: ' + roleLabel);
     lines.push('- Facility: ' + (facility || 'not set'));
@@ -2702,9 +2795,424 @@ app.get('/admin/audit-logs',
 );
 
 
+
+// ═══════════════════════════════════════════════════════════════
+// ── FINANCE MODULE ──────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+
+const { v4: uuidv4 } = require('uuid');
+
+// ── Helper: generate invoice reference number ──
+function genInvoiceRef(type, weekStart, existingCount) {
+  const d = new Date(weekStart + 'T00:00:00Z');
+  const yyyy = d.getUTCFullYear();
+  const wk = String(getISOWeek(d)).padStart(2, '0');
+  const seq = String((existingCount || 0) + 1).padStart(1, '0');
+  const prefix = type === 'VAS' ? 'VEL-VAS' : type === 'SEA' ? 'VEL-SEA' : 'VEL-AIR';
+  return `${prefix}-${yyyy}-W${wk}-${seq}`;
+}
+function getISOWeek(d) {
+  const tmp = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dayNum = tmp.getUTCDay() || 7;
+  tmp.setUTCDate(tmp.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(tmp.getUTCFullYear(), 0, 1));
+  return Math.ceil((((tmp - yearStart) / 86400000) + 1) / 7);
+}
+
+// ── GET /finance/invoices — list invoices ──
+app.get('/finance/invoices', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const { week_start, type, status } = req.query;
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (week_start) { where += ' AND week_start = ?'; params.push(week_start); }
+    if (type)       { where += ' AND type = ?';       params.push(type); }
+    if (status)     { where += ' AND status = ?';     params.push(status); }
+    const invoices = db.prepare(`SELECT * FROM fin_invoices ${where} ORDER BY week_start DESC, type`).all(...params);
+    // Attach line items
+    const result = invoices.map(inv => ({
+      ...inv,
+      lines: db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id = ? ORDER BY sort_order').all(inv.id)
+    }));
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── GET /finance/invoices/:id ──
+app.get('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ?').get(req.params.id);
+    if (!inv) return res.status(404).json({ error: 'Not found' });
+    inv.lines = db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id = ? ORDER BY sort_order').all(inv.id);
+    res.json(inv);
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── POST /finance/invoices — create invoice ──
+app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const { type, week_start, lines = [], invoice_date, due_date, notes, customs, misc_total } = req.body;
+    if (!type || !week_start) return res.status(400).json({ error: 'type and week_start required' });
+    const existing = db.prepare('SELECT COUNT(*) as n FROM fin_invoices WHERE type = ? AND week_start = ?').get(type, week_start);
+    const id = uuidv4();
+    const ref = genInvoiceRef(type, week_start, existing.n);
+    // Calculate totals
+    const subtotal = lines.reduce((s, l) => s + (parseFloat(l.total)||0), 0);
+    const gst = Math.round(subtotal * 0.10 * 100) / 100;
+    const customsAmt = parseFloat(customs) || 0;
+    const miscAmt = parseFloat(misc_total) || 0;
+    const total = Math.round((subtotal + gst + customsAmt + miscAmt) * 100) / 100;
+    db.prepare(`INSERT INTO fin_invoices (id,type,week_start,ref_number,invoice_date,due_date,subtotal,gst,customs,misc_total,total,notes)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, type, week_start, ref, invoice_date||null, due_date||null, subtotal, gst, customsAmt, miscAmt, total, notes||null);
+    // Insert lines
+    lines.forEach((l, i) => {
+      db.prepare(`INSERT INTO fin_invoice_lines (id,invoice_id,sort_order,description,unit_label,rate,quantity,total,gst_free,is_misc)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`).run(uuidv4(), id, i, l.description||'', l.unit_label||'', parseFloat(l.rate)||0, parseFloat(l.quantity)||0, parseFloat(l.total)||0, l.gst_free?1:0, l.is_misc?1:0);
+    });
+    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ?').get(id);
+    inv.lines = db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id = ? ORDER BY sort_order').all(id);
+    res.json(inv);
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── PATCH /finance/invoices/:id — update invoice ──
+app.patch('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ?').get(req.params.id);
+    if (!inv) return res.status(404).json({ error: 'Not found' });
+    const { lines, status, invoice_date, due_date, notes, customs, misc_total } = req.body;
+    // Recalculate if lines provided
+    if (lines) {
+      db.prepare('DELETE FROM fin_invoice_lines WHERE invoice_id = ?').run(inv.id);
+      lines.forEach((l, i) => {
+        db.prepare(`INSERT INTO fin_invoice_lines (id,invoice_id,sort_order,description,unit_label,rate,quantity,total,gst_free,is_misc)
+          VALUES (?,?,?,?,?,?,?,?,?,?)`).run(uuidv4(), inv.id, i, l.description||'', l.unit_label||'', parseFloat(l.rate)||0, parseFloat(l.quantity)||0, parseFloat(l.total)||0, l.gst_free?1:0, l.is_misc?1:0);
+      });
+      const subtotal = lines.reduce((s, l) => s + (parseFloat(l.total)||0), 0);
+      const gst = Math.round(subtotal * 0.10 * 100) / 100;
+      const customsAmt = customs !== undefined ? parseFloat(customs)||0 : inv.customs;
+      const miscAmt = misc_total !== undefined ? parseFloat(misc_total)||0 : inv.misc_total;
+      const total = Math.round((subtotal + gst + customsAmt + miscAmt) * 100) / 100;
+      db.prepare(`UPDATE fin_invoices SET subtotal=?,gst=?,customs=?,misc_total=?,total=?,updated_at=datetime('now') WHERE id=?`).run(subtotal, gst, customsAmt, miscAmt, total, inv.id);
+    }
+    if (status)       db.prepare(`UPDATE fin_invoices SET status=?,updated_at=datetime('now') WHERE id=?`).run(status, inv.id);
+    if (invoice_date !== undefined) db.prepare(`UPDATE fin_invoices SET invoice_date=?,updated_at=datetime('now') WHERE id=?`).run(invoice_date, inv.id);
+    if (due_date !== undefined)     db.prepare(`UPDATE fin_invoices SET due_date=?,updated_at=datetime('now') WHERE id=?`).run(due_date, inv.id);
+    if (notes !== undefined)        db.prepare(`UPDATE fin_invoices SET notes=?,updated_at=datetime('now') WHERE id=?`).run(notes, inv.id);
+    if (customs !== undefined && !lines) {
+      const cur = db.prepare('SELECT * FROM fin_invoices WHERE id=?').get(inv.id);
+      const total = Math.round((cur.subtotal + cur.gst + parseFloat(customs) + cur.misc_total) * 100) / 100;
+      db.prepare(`UPDATE fin_invoices SET customs=?,total=?,updated_at=datetime('now') WHERE id=?`).run(parseFloat(customs)||0, total, inv.id);
+    }
+    const updated = db.prepare('SELECT * FROM fin_invoices WHERE id = ?').get(inv.id);
+    updated.lines = db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id = ? ORDER BY sort_order').all(inv.id);
+    res.json(updated);
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── DELETE /finance/invoices/:id ──
+app.delete('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    db.prepare('DELETE FROM fin_invoice_lines WHERE invoice_id = ?').run(req.params.id);
+    db.prepare('DELETE FROM fin_invoices WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── GET /finance/prefill/:type/:week_start — auto-populate invoice data from Pinpoint ──
+app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const { type, week_start } = req.params;
+    const weDate = new Date(week_start + 'T00:00:00Z'); weDate.setUTCDate(weDate.getUTCDate() + 6);
+    const we = weDate.toISOString().slice(0,10);
+
+    if (type === 'VAS') {
+      // Units applied this week
+      const units = db.prepare(`SELECT COUNT(*) as n FROM records WHERE date_local >= ? AND date_local <= ? AND status='complete'`).get(week_start, we)?.n || 0;
+      // Cartons out (distinct mobile bins with status complete)
+      const cartonsOut = db.prepare(`SELECT COUNT(DISTINCT NULLIF(TRIM(mobile_bin),'')) as n FROM records WHERE date_local >= ? AND date_local <= ? AND status='complete'`).get(week_start, we)?.n || 0;
+      // Cartons in from receiving table
+      const recvRows = db.prepare(`SELECT SUM(cartons_received) as total FROM receiving WHERE week_start = ?`).get(week_start);
+      const cartonsIn = recvRows?.total || 0;
+      const cartonDelta = Math.max(0, cartonsOut - cartonsIn);
+      // Standard VAS rates
+      const lines = [
+        { sort_order:0, description:'VAS Base Processing',         unit_label:'Per Unit',        rate:0.21, quantity:units,              total:Math.round(0.21*units*100)/100,              gst_free:0, is_misc:0 },
+        { sort_order:1, description:'Outbound Activities',         unit_label:'Per Unit',        rate:0.05, quantity:units,              total:Math.round(0.05*units*100)/100,              gst_free:0, is_misc:0 },
+        { sort_order:2, description:'Additional Labelling',        unit_label:'Per Unit',        rate:0.01, quantity:units*3,            total:Math.round(0.01*units*3*100)/100,            gst_free:0, is_misc:0 },
+        { sort_order:3, description:'Polybagging',                 unit_label:'Per Unit',        rate:0.05, quantity:0,                 total:0,                                           gst_free:0, is_misc:0 },
+        { sort_order:4, description:'Storage post-processing',     unit_label:'Per Unit Per Day', rate:0.01, quantity:0,                 total:0,                                           gst_free:0, is_misc:0 },
+        { sort_order:5, description:'Carton Replacement - labour only', unit_label:'Per Carton', rate:1.10, quantity:cartonDelta*2,      total:Math.round(1.10*cartonDelta*2*100)/100,      gst_free:0, is_misc:0 },
+        { sort_order:6, description:'',                            unit_label:'',                rate:0,    quantity:0,                 total:0,                                           gst_free:0, is_misc:1 },
+        { sort_order:7, description:'',                            unit_label:'',                rate:0,    quantity:0,                 total:0,                                           gst_free:0, is_misc:1 },
+      ];
+      const subtotal = lines.slice(0,6).reduce((s,l)=>s+l.total,0);
+      const gst = Math.round(subtotal*0.10*100)/100;
+      const customs = 0; // VAS has no customs
+      const total = Math.round((subtotal+gst+customs)*100)/100;
+      return res.json({ type:'VAS', week_start, units, cartonsIn, cartonsOut, cartonDelta, lines, subtotal, gst, customs, total });
+    }
+
+    if (type === 'SEA' || type === 'AIR') {
+      // Load flow/container data
+      const flowRows = db.prepare('SELECT data FROM flow_week WHERE week_start = ?').all(week_start);
+      const containers = [];
+      for (const row of flowRows) {
+        try {
+          const d = JSON.parse(row.data || '{}');
+          const wc = d.intl_weekcontainers;
+          const conts = Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []);
+          for (const c of conts) {
+            if (type === 'SEA' && c.vessel && !c.is_air) containers.push(c);
+            if (type === 'AIR' && (c.is_air || String(c.vessel||'').toLowerCase().includes('air') || String(c.container_id||'').toLowerCase().includes('airway'))) containers.push(c);
+          }
+        } catch {}
+      }
+      // Also get intl_lanes for zendesk/supplier info
+      const lanes = [];
+      for (const row of flowRows) {
+        try {
+          const d = JSON.parse(row.data || '{}');
+          const il = d.intl_lanes || {};
+          for (const [key, manual] of Object.entries(il)) {
+            const parts = key.split('||');
+            lanes.push({ key, supplier: parts[0]||'', zendesk: parts[1]||'', freight: parts[2]||'', manual: manual||{} });
+          }
+        } catch {}
+      }
+      if (type === 'SEA') {
+        const lines = containers.map((c, i) => ({
+          sort_order: i,
+          description: `Container ${c.container_id||'—'}`,
+          unit_label: c.size_ft ? `${c.size_ft}' HC` : '40\' HC',
+          container_id: c.container_id || '',
+          container_type: c.size_ft ? `${c.size_ft}' HC` : '40\' HC',
+          vessel: c.vessel || '',
+          zendesks: c.lane_keys ? c.lane_keys.map(k=>k.split('||')[1]).filter(Boolean) : [],
+          rate: 0, // User enters rate per container
+          quantity: 1,
+          total: 0,
+          gst_free: 0,
+          is_misc: 0
+        }));
+        // Add customs lines
+        const customsLines = containers.map((c, i) => ({
+          sort_order: containers.length + i,
+          description: `Customs Clearance - ${c.container_id||'—'}`,
+          unit_label: 'Flat Fee per Container',
+          container_id: c.container_id || '',
+          rate: 158,
+          quantity: 1,
+          total: 158,
+          gst_free: 1,
+          is_misc: 0
+        }));
+        // Misc lines
+        lines.push({ sort_order: lines.length + customsLines.length, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
+        lines.push({ sort_order: lines.length + customsLines.length + 1, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
+        const customs = customsLines.reduce((s,l)=>s+l.total, 0);
+        return res.json({ type:'SEA', week_start, containers, lanes, lines: [...lines, ...customsLines], customs, subtotal:0, gst:0, total:customs });
+      }
+      if (type === 'AIR') {
+        // Group by zendesk
+        const airLanes = lanes.filter(l => l.freight.toLowerCase() === 'air');
+        const lines = airLanes.map((l, i) => ({
+          sort_order: i,
+          description: `Air Freight - ${l.supplier||'—'}`,
+          unit_label: 'Per KG',
+          zendesk: l.zendesk,
+          supplier: l.supplier,
+          rate: 0, // User enters rate
+          quantity: 0, // User enters KG
+          total: 0,
+          gst_free: 0,
+          is_misc: 0
+        }));
+        lines.push({ sort_order: lines.length, description:'Customs Processing', unit_label:'Flat Fee', rate:141, quantity:airLanes.length||1, total:141*(airLanes.length||1), gst_free:1, is_misc:0 });
+        lines.push({ sort_order: lines.length+1, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
+        lines.push({ sort_order: lines.length+2, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
+        const customs = 141 * (airLanes.length||1);
+        return res.json({ type:'AIR', week_start, lanes: airLanes, lines, customs, subtotal:0, gst:0, total:customs });
+      }
+    }
+    res.status(400).json({ error: 'Unknown type' });
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── GET /finance/invoice/:id/pdf — generate PDF ──
+app.get('/finance/invoice/:id/pdf', authenticateRequest, requireRole(['admin']), async (req, res) => {
+  try {
+    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ?').get(req.params.id);
+    if (!inv) return res.status(404).json({ error: 'Not found' });
+    inv.lines = db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id = ? ORDER BY sort_order').all(inv.id);
+    // Generate PDF via Python script
+    const { execFileSync } = require('child_process');
+    const tmp = require('os').tmpdir();
+    const outPath = require('path').join(tmp, `invoice_${inv.id}.pdf`);
+    const scriptPath = require('path').join(__dirname, 'gen_invoice_pdf.py');
+    const invJson = JSON.stringify(inv).replace(/'/g, "\\'");
+    execFileSync('python3', [scriptPath, '--invoice', JSON.stringify(inv), '--out', outPath]);
+    const pdf = require('fs').readFileSync(outPath);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${inv.ref_number}.pdf"`);
+    res.send(pdf);
+  } catch(e) { console.error('[finance/pdf]', e); res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── GET /finance/expenses — list expenses ──
+app.get('/finance/expenses', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const { month_key, category } = req.query;
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (month_key) { where += ' AND month_key = ?'; params.push(month_key); }
+    if (category)  { where += ' AND category = ?';  params.push(category); }
+    const rows = db.prepare(`SELECT * FROM fin_expenses ${where} ORDER BY expense_date DESC`).all(...params);
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── POST /finance/expenses ──
+app.post('/finance/expenses', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const { category, description, amount, currency, expense_date, is_recurring, recur_freq, recur_end } = req.body;
+    if (!category || !description || !amount || !expense_date) return res.status(400).json({ error: 'Missing required fields' });
+    const month_key = expense_date.slice(0, 7);
+    const id = uuidv4();
+    db.prepare(`INSERT INTO fin_expenses (id,category,description,amount,currency,expense_date,month_key,is_recurring,recur_freq,recur_end)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, category, description, parseFloat(amount), currency||'USD', expense_date, month_key, is_recurring?1:0, recur_freq||null, recur_end||null);
+    // If recurring, generate forward entries up to 12 months
+    if (is_recurring && recur_freq === 'monthly') {
+      const startDate = new Date(expense_date + 'T00:00:00Z');
+      for (let i = 1; i <= 11; i++) {
+        const nextDate = new Date(startDate);
+        nextDate.setUTCMonth(nextDate.getUTCMonth() + i);
+        const nextStr = nextDate.toISOString().slice(0,10);
+        if (recur_end && nextStr > recur_end) break;
+        const nextMonth = nextStr.slice(0,7);
+        db.prepare(`INSERT INTO fin_expenses (id,category,description,amount,currency,expense_date,month_key,is_recurring,recur_freq,recur_end,parent_id)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(uuidv4(), category, description, parseFloat(amount), currency||'USD', nextStr, nextMonth, 1, recur_freq, recur_end||null, id);
+      }
+    }
+    res.json(db.prepare('SELECT * FROM fin_expenses WHERE id = ?').get(id));
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── PATCH /finance/expenses/:id ──
+app.patch('/finance/expenses/:id', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const { category, description, amount, currency, expense_date } = req.body;
+    const exp = db.prepare('SELECT * FROM fin_expenses WHERE id = ?').get(req.params.id);
+    if (!exp) return res.status(404).json({ error: 'Not found' });
+    const upd = {
+      category: category ?? exp.category,
+      description: description ?? exp.description,
+      amount: amount !== undefined ? parseFloat(amount) : exp.amount,
+      currency: currency ?? exp.currency,
+      expense_date: expense_date ?? exp.expense_date,
+    };
+    upd.month_key = upd.expense_date.slice(0,7);
+    db.prepare(`UPDATE fin_expenses SET category=?,description=?,amount=?,currency=?,expense_date=?,month_key=?,updated_at=datetime('now') WHERE id=?`)
+      .run(upd.category, upd.description, upd.amount, upd.currency, upd.expense_date, upd.month_key, exp.id);
+    res.json(db.prepare('SELECT * FROM fin_expenses WHERE id = ?').get(exp.id));
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── DELETE /finance/expenses/:id ──
+app.delete('/finance/expenses/:id', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    db.prepare('DELETE FROM fin_expenses WHERE id = ? OR parent_id = ?').run(req.params.id, req.params.id);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── GET /finance/pl — P&L summary by month ──
+app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const { year } = req.query;
+    const y = year || new Date().getUTCFullYear();
+    // Revenue from invoices (sent + paid)
+    const invRows = db.prepare(`SELECT type, week_start, total, status, subtotal, gst FROM fin_invoices WHERE status IN ('sent','paid') AND week_start >= ? AND week_start <= ? ORDER BY week_start`)
+      .all(`${y}-01-01`, `${y}-12-31`);
+    // Group by month
+    const months = {};
+    for (let m = 1; m <= 12; m++) {
+      const mk = `${y}-${String(m).padStart(2,'0')}`;
+      months[mk] = { month_key: mk, revenue: 0, expenses: 0, net: 0, invoices: [], expense_rows: [] };
+    }
+    for (const inv of invRows) {
+      const mk = inv.week_start.slice(0,7);
+      if (months[mk]) {
+        months[mk].revenue += inv.total;
+        months[mk].invoices.push({ ref: inv.ref_number||inv.id, type: inv.type, amount: inv.total, status: inv.status });
+      }
+    }
+    // Expenses
+    const expRows = db.prepare(`SELECT * FROM fin_expenses WHERE month_key >= ? AND month_key <= ? ORDER BY expense_date`)
+      .all(`${y}-01`, `${y}-12`);
+    for (const exp of expRows) {
+      if (months[exp.month_key]) {
+        months[exp.month_key].expenses += exp.amount;
+        months[exp.month_key].expense_rows.push(exp);
+      }
+    }
+    // Calculate net
+    for (const mk of Object.keys(months)) {
+      months[mk].revenue = Math.round(months[mk].revenue * 100) / 100;
+      months[mk].expenses = Math.round(months[mk].expenses * 100) / 100;
+      months[mk].net = Math.round((months[mk].revenue - months[mk].expenses) * 100) / 100;
+      months[mk].margin_pct = months[mk].revenue > 0 ? Math.round(months[mk].net / months[mk].revenue * 100) : 0;
+    }
+    // YTD totals
+    const ytd = Object.values(months).reduce((acc, m) => ({
+      revenue: acc.revenue + m.revenue,
+      expenses: acc.expenses + m.expenses,
+      net: acc.net + m.net
+    }), { revenue: 0, expenses: 0, net: 0 });
+    ytd.margin_pct = ytd.revenue > 0 ? Math.round(ytd.net / ytd.revenue * 100) : 0;
+    // Outstanding invoices
+    const outstanding = db.prepare(`SELECT COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE status IN ('draft','sent','overdue')`).get();
+    res.json({ year: y, months: Object.values(months), ytd, outstanding });
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── GET/POST /finance/fx — FX rates ──
+app.get('/finance/fx', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const rates = db.prepare('SELECT * FROM fin_fx_rates ORDER BY from_curr, to_curr').all();
+    res.json(rates);
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+app.post('/finance/fx', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const { from_curr, to_curr, rate, source } = req.body;
+    if (!from_curr || !to_curr || !rate) return res.status(400).json({ error: 'Missing fields' });
+    db.prepare(`INSERT INTO fin_fx_rates (id,from_curr,to_curr,rate,source,fetched_at) VALUES (?,?,?,?,?,datetime('now'))
+      ON CONFLICT(from_curr,to_curr) DO UPDATE SET rate=excluded.rate, source=excluded.source, fetched_at=datetime('now')`)
+      .run(uuidv4(), from_curr.toUpperCase(), to_curr.toUpperCase(), parseFloat(rate), source||'manual');
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── GET /finance/summary — for PULSE context ──
+app.get('/finance/summary', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const outstanding = db.prepare(`SELECT COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE status IN ('draft','sent','overdue')`).get();
+    const paid_ytd = db.prepare(`SELECT COALESCE(SUM(total),0) as total FROM fin_invoices WHERE status='paid' AND week_start >= ?`).get(`${new Date().getUTCFullYear()}-01-01`);
+    const expenses_ytd = db.prepare(`SELECT COALESCE(SUM(amount),0) as total FROM fin_expenses WHERE month_key >= ?`).get(`${new Date().getUTCFullYear()}-01`);
+    const last_invoice = db.prepare(`SELECT * FROM fin_invoices ORDER BY created_at DESC LIMIT 1`).get();
+    const by_type = db.prepare(`SELECT type, COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE status='paid' GROUP BY type`).all();
+    res.json({ outstanding, paid_ytd, expenses_ytd, last_invoice, by_type });
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── END FINANCE MODULE ──────────────────────────────────────────
+
 // ---- Start ----
 app.listen(PORT, () => {
   console.log(`UID Ops backend listening on http://localhost:${PORT}`);
   console.log(`DB file: ${DB_FILE}`);
   console.log(`CORS origin(s): ${allowList.join(', ')}`);
 });
+
