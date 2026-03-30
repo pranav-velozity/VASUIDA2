@@ -2806,10 +2806,36 @@ const { v4: uuidv4 } = require('uuid');
 function genInvoiceRef(type, weekStart, existingCount) {
   const d = new Date(weekStart + 'T00:00:00Z');
   const yyyy = d.getUTCFullYear();
+
+  if (type === 'VAS') {
+    // INVVAS027_2026 — global counter per year
+    const pattern = `INVVAS%_${yyyy}`;
+    const existing = db.prepare(
+      `SELECT ref_number FROM fin_invoices WHERE type = 'VAS' AND ref_number LIKE ? ORDER BY ref_number DESC LIMIT 1`
+    ).get(pattern);
+    let seq = 1;
+    if (existing) {
+      const match = existing.ref_number.match(/INVVAS(\d+)_\d{4}$/);
+      if (match) seq = parseInt(match[1]) + 1;
+    }
+    return `INVVAS${String(seq).padStart(3,'0')}_${yyyy}`;
+  }
+
+  // SEA: VOZ_INSD2D_W132026-1  AIR: VOZ_INAD2D_W132026-1
+  // Counter resets per week — increment within same week only
   const wk = String(getISOWeek(d)).padStart(2, '0');
-  const seq = String((existingCount || 0) + 1).padStart(1, '0');
-  const prefix = type === 'VAS' ? 'VEL-VAS' : type === 'SEA' ? 'VEL-SEA' : 'VEL-AIR';
-  return `${prefix}-${yyyy}-W${wk}-${seq}`;
+  const prefix = type === 'SEA' ? 'VOZ_INSD2D' : 'VOZ_INAD2D';
+  const weekCode = `W${wk}${yyyy}`;
+  const pattern = `${prefix}_${weekCode}-%`;
+  const existing = db.prepare(
+    `SELECT ref_number FROM fin_invoices WHERE type = ? AND ref_number LIKE ? ORDER BY ref_number DESC LIMIT 1`
+  ).get(type, pattern);
+  let seq = 1;
+  if (existing) {
+    const match = existing.ref_number.match(/-(\d+)$/);
+    if (match) seq = parseInt(match[1]) + 1;
+  }
+  return `${prefix}_${weekCode}-${seq}`;
 }
 function getISOWeek(d) {
   const tmp = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
