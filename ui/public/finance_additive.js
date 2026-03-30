@@ -367,8 +367,20 @@ window._finDownloadPDF=async function(id,ref){
   try{
     const token=await getToken();
     const url=_apiBase+`/finance/invoice/${id}/pdf`+(token?'?_token='+encodeURIComponent(token):'');
-    const a=document.createElement('a');a.href=url;a.download=(ref||'invoice')+'.pdf';document.body.appendChild(a);a.click();a.remove();
-  }catch(e){alert('PDF failed: '+e.message);}
+    // Use fetch+blob so browser never navigates away
+    const r=await fetch(url);
+    if(!r.ok){
+      const err=await r.text();
+      throw new Error('PDF failed: '+err);
+    }
+    const blob=await r.blob();
+    const blobUrl=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=blobUrl;
+    a.download=(ref||'invoice').replace(/[^a-zA-Z0-9\-_]/g,'_')+'.pdf';
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(blobUrl),5000);
+  }catch(e){alert('PDF download failed: '+e.message);}
 };
 window._finDelInv=async function(id){
   if(!confirm('Delete this invoice?'))return;
