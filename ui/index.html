@@ -551,11 +551,12 @@ window.__clerkOnLoad = function() {
     </a>
     <nav class="pn-nav-items" id="pn-nav-items">
       <a class="pn-nav-item active" href="#week-hub" id="nav-weekhub" onclick="event.preventDefault();window.show('#week-hub')">Week Hub</a>
-      <a class="pn-nav-item" href="#exec" id="nav-exec" onclick="event.preventDefault();window.show('#exec')">Executive</a>
-      <a class="pn-nav-item" href="#map" id="nav-map" onclick="event.preventDefault();window.show('#map')">Live Tracking</a>
       <a class="pn-nav-item" href="#receiving" id="nav-receiving" onclick="event.preventDefault();window.show('#receiving')">Receiving Ops</a>
       <a class="pn-nav-item" href="#intake" id="nav-intake-pn" onclick="event.preventDefault();window.show('#intake')">VAS Ops</a>
+      <a class="pn-nav-item" href="#exec" id="nav-exec" onclick="event.preventDefault();window.show('#exec')">Executive</a>
+      <a class="pn-nav-item" href="#map" id="nav-map" onclick="event.preventDefault();window.show('#map')">Live Map</a>
       <a class="pn-nav-item" href="#reports" id="nav-reports" onclick="event.preventDefault();window.show('#reports')">Reports &amp; Downloads</a>
+      <a class="pn-nav-item" href="#finance" id="nav-finance" onclick="event.preventDefault();window.show('#finance')" style="display:none;">Finance</a>
     </nav>
     <div class="pn-user">
       <div class="pn-date" id="vo-today"></div>
@@ -5605,7 +5606,8 @@ window.__openPrebookModal = function(){
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
 <script src="/public/flow_live_additive.js?v=117" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
-<script src="/public/map_live_additive.js?v=22" defer></script>
+<script src="/public/map_live_additive.js?v=1" defer></script>
+  <script src="/public/finance_additive.js?v=1" defer></script>
 
 
 <!-- ── Week Hub Split-Flap Insight Flipper ── -->
@@ -6005,7 +6007,7 @@ document.addEventListener('DOMContentLoaded', function(){
   // Helper: hide all pages
   function _pnHideAll(){
     // page-flow lives inside page-dashboard — hiding page-dashboard hides page-flow too
-    ['page-dashboard','page-intake','page-exec','page-receiving','page-reports','page-map'].forEach(id=>{
+    ['page-dashboard','page-intake','page-exec','page-receiving','page-reports','page-map','page-finance'].forEach(id=>{
       const el=document.getElementById(id);
       if(el){el.classList.add('hidden');el.style.display='none';}
     });
@@ -6147,6 +6149,17 @@ document.addEventListener('DOMContentLoaded', function(){
       return;
     }
 
+    // ── Finance ──
+    if(h==='#finance'){
+      _pnHideAll();
+      _pnSetHash('#finance');
+      if(typeof window.showFinancePage==='function'){
+        window.showFinancePage();
+      }
+      syncPinpointNav('#finance');
+      return;
+    }
+
     // ── Everything else — delegate to original ──
     _pnSetHash(h);
     if(typeof origShow==='function') origShow(h);
@@ -6178,6 +6191,7 @@ function syncPinpointNav(hash){
   const items = document.querySelectorAll('.pn-nav-item');
   items.forEach(el=>el.classList.remove('active'));
   if(hash==='#exec'){ const e=document.getElementById('nav-exec'); if(e) e.classList.add('active'); }
+  if(hash==='#finance'){ const e=document.getElementById('nav-finance'); if(e) e.classList.add('active'); }
   else if(hash==='#map'){ const m=document.getElementById('nav-map'); if(m) m.classList.add('active'); }
   else if(hash==='#reports'){ const r=document.getElementById('nav-reports'); if(r) r.classList.add('active'); }
   else if(hash==='#receiving'){ const rec=document.getElementById('nav-receiving'); if(rec) rec.classList.add('active'); }
@@ -7055,6 +7069,9 @@ function applyPNRoleGating(roleKey) {
   if (navExec) navExec.style.display = (isAdmin || isClient) ? '' : 'none';
   const navMap = document.getElementById('nav-map');
   if (navMap) navMap.style.display = (isAdmin || isClient) ? '' : 'none';
+  // Finance: admin only
+  const navFinance = document.getElementById('nav-finance');
+  if (navFinance) navFinance.style.display = isAdmin ? '' : 'none';
 
   // ── 2. Upload Plan / Zero Plan buttons ──
   // Admin only — hidden for Facility and Client
