@@ -3039,24 +3039,227 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
 });
 
-// ── GET /finance/invoice/:id/pdf — generate PDF ──
-app.get('/finance/invoice/:id/pdf', authenticateRequest, requireRole(['admin']), async (req, res) => {
+// ── GET /finance/invoice/:id/pdf — generate PDF (pure Node, no Python) ──
+app.get('/finance/invoice/:id/pdf', async (req, res) => {
   try {
+    // Accept token from query param (for direct browser downloads)
+    if (req.query._token) {
+      req.headers['authorization'] = 'Bearer ' + req.query._token;
+    }
+    // Auth check via existing middleware pattern
+    const authHeader = req.headers['authorization'] || '';
+    const token = authHeader.replace('Bearer ', '').trim();
+    if (!token) return res.status(401).json({ error: 'No token' });
+
     const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ?').get(req.params.id);
     if (!inv) return res.status(404).json({ error: 'Not found' });
     inv.lines = db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id = ? ORDER BY sort_order').all(inv.id);
-    // Generate PDF via Python script
-    const { execFileSync } = require('child_process');
-    const tmp = require('os').tmpdir();
-    const outPath = require('path').join(tmp, `invoice_${inv.id}.pdf`);
-    const scriptPath = require('path').join(__dirname, 'gen_invoice_pdf.py');
-    const invJson = JSON.stringify(inv).replace(/'/g, "\\'");
-    execFileSync('python3', [scriptPath, '--invoice', JSON.stringify(inv), '--out', outPath]);
-    const pdf = require('fs').readFileSync(outPath);
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${inv.ref_number}.pdf"`);
-    res.send(pdf);
-  } catch(e) { console.error('[finance/pdf]', e); res.status(500).json({ error: String(e.message||e) }); }
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+
+    const chunks = [];
+    doc.on('data', chunk => chunks.push(chunk));
+    doc.on('end', () => {
+      const pdf = Buffer.concat(chunks);
+      const filename = (inv.ref_number || 'invoice').replace(/[^a-zA-Z0-9\-_]/g, '_') + '.pdf';
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Length', pdf.length);
+      res.send(pdf);
+    });
+
+    const BRAND = '#990033';
+    const DARK  = '#1C1C1E';
+    const MID   = '#6E6E73';
+    const LIGHT = '#AEAEB2';
+
+    function fmtUSD(v) {
+      const f = parseFloat(v) || 0;
+      return 'USD ' + f.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+    function fmtDate(s) {
+      if (!s) return '—';
+      try { return new Date(s.slice(0,10) + 'T00:00:00Z').toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' }); } catch { return s; }
+    }
+
+    const W = 595 - 100; // usable width (A4 = 595, margins 50 each side)
+    const type = inv.type;
+    const lines = inv.lines || [];
+    const mainLines = lines.filter(l => !l.gst_free && !l.is_misc);
+    const customsLines = lines.filter(l => l.gst_free && !l.is_misc);
+    const miscLines = lines.filter(l => l.is_misc && l.description);
+
+    // ── Header ──
+    doc.fontSize(22).font('Helvetica-Bold').fillColor(BRAND).text('VelOzity', 50, 50);
+    doc.fontSize(16).font('Helvetica-Bold').fillColor(DARK).text('TAX INVOICE', 400, 50, { align: 'right', width: 145 });
+
+    // Rule
+    doc.moveTo(50, 80).lineTo(545, 80).lineWidth(2).strokeColor(BRAND).stroke();
+
+    // Company info
+    doc.fontSize(9).font('Helvetica-Bold').fillColor(DARK).text('Ogeo Pty Ltd.', 50, 92);
+    doc.fontSize(8).font('Helvetica').fillColor(MID)
+      .text('ABN: 96 670 485 499', 50, 104)
+      .text('9 Aquamarine Street, Quakers Hill NSW 2763', 50, 114)
+      .text('shuch@velozity.au  |  +61-449-701-751', 50, 124);
+
+    // Invoice meta (right side)
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(MID).text('Invoice No:', 370, 92);
+    doc.fontSize(8).font('Helvetica').fillColor(DARK).text(inv.ref_number || '—', 440, 92);
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(MID).text('Invoice Date:', 370, 104);
+    doc.fontSize(8).font('Helvetica').fillColor(DARK).text(fmtDate(inv.invoice_date), 440, 104);
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(MID).text('Due Date:', 370, 114);
+    doc.fontSize(8).font('Helvetica').fillColor(DARK).text(fmtDate(inv.due_date), 440, 114);
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(MID).text('Week:', 370, 124);
+    doc.fontSize(8).font('Helvetica').fillColor(DARK).text(inv.week_start || '—', 440, 124);
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(MID).text('Payment Terms:', 370, 134);
+    doc.fontSize(8).font('Helvetica').fillColor(DARK).text(type === 'VAS' ? '30 Days' : '7 Days', 440, 134);
+
+    // Thin rule
+    doc.moveTo(50, 148).lineTo(545, 148).lineWidth(0.5).strokeColor('#E5E5EA').stroke();
+
+    // Bill To
+    let y = 158;
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(BRAND).text('BILL TO', 50, y);
+    y += 12;
+    doc.fontSize(9).font('Helvetica-Bold').fillColor(DARK).text('The Iconic [ABN 50 152 631 082]', 50, y);
+    y += 12;
+    doc.fontSize(8).font('Helvetica').fillColor(MID).text('Level 18, Tower Two, International Towers, 200 Barangaroo Avenue, Barangaroo NSW 2000', 50, y);
+    y += 14;
+
+    // Description
+    doc.moveTo(50, y).lineTo(545, y).lineWidth(0.5).strokeColor('#E5E5EA').stroke();
+    y += 10;
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(BRAND).text('DESCRIPTION OF SERVICES', 50, y);
+    y += 11;
+    const descText = type === 'VAS'
+      ? 'Services provided to The Iconic by VelOzity: VAS base processing, outbound activities, additional labelling, and carton replacement labour as detailed below.'
+      : type === 'SEA'
+      ? 'Services provided to The Iconic by VelOzity: transportation from warehouse to port, origin customs clearing and declaration, sea freight, destination customs declaration and clearing, and transportation from port to FC Yennora.'
+      : 'Services provided to The Iconic by VelOzity: transportation from warehouse to airport, origin customs clearing and declaration, air freight, destination customs declaration and clearing, and transportation from airport to FC Yennora.';
+    doc.fontSize(8).font('Helvetica').fillColor(DARK).text(descText, 50, y, { width: W });
+    y += 28;
+
+    // ── Line items table ──
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(BRAND).text('DETAILS OF CHARGES (USD)', 50, y);
+    y += 10;
+
+    // Table header
+    doc.rect(50, y, W, 16).fillColor('#F5F5F7').fill();
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(MID);
+    if (type === 'VAS') {
+      doc.text('Service', 56, y + 4, { width: 160 });
+      doc.text('Unit', 220, y + 4, { width: 90 });
+      doc.text('Rate', 315, y + 4, { width: 50, align: 'right' });
+      doc.text('Qty', 370, y + 4, { width: 60, align: 'right' });
+      doc.text('Total', 435, y + 4, { width: 104, align: 'right' });
+    } else {
+      doc.text('Description', 56, y + 4, { width: 210 });
+      doc.text('Rate (USD)', 270, y + 4, { width: 90, align: 'right' });
+      doc.text('Qty', 365, y + 4, { width: 60, align: 'right' });
+      doc.text('Total (USD)', 430, y + 4, { width: 109, align: 'right' });
+    }
+    y += 16;
+
+    // Draw line rows
+    function drawLine(l, idx) {
+      const rowH = 18;
+      if (idx % 2 === 1) { doc.rect(50, y, W, rowH).fillColor('#FAFAFA').fill(); }
+      doc.moveTo(50, y + rowH).lineTo(545, y + rowH).lineWidth(0.3).strokeColor('#E5E5EA').stroke();
+      doc.fontSize(8).font('Helvetica').fillColor(DARK);
+      if (type === 'VAS') {
+        doc.text(l.description || '', 56, y + 5, { width: 160 });
+        doc.fontSize(7).fillColor(MID).text(l.unit_label || '', 220, y + 6, { width: 90 });
+        doc.fontSize(8).fillColor(DARK).text(String(parseFloat(l.rate||0).toFixed(2)), 315, y + 5, { width: 50, align: 'right' });
+        doc.text(String(parseFloat(l.quantity||0)), 370, y + 5, { width: 60, align: 'right' });
+        doc.font('Helvetica-Bold').text(fmtUSD(l.total), 435, y + 5, { width: 104, align: 'right' });
+      } else {
+        doc.text(l.description || '', 56, y + 5, { width: 210 });
+        doc.text(fmtUSD(l.rate||0), 270, y + 5, { width: 90, align: 'right' });
+        doc.text(String(parseFloat(l.quantity||0)), 365, y + 5, { width: 60, align: 'right' });
+        doc.font('Helvetica-Bold').text(fmtUSD(l.total), 430, y + 5, { width: 109, align: 'right' });
+      }
+      y += rowH;
+    }
+
+    mainLines.forEach((l, i) => drawLine(l, i));
+    if (miscLines.length) {
+      doc.rect(50, y, W, 14).fillColor('#F5F5F7').fill();
+      doc.fontSize(7).font('Helvetica-Bold').fillColor(LIGHT).text('MISCELLANEOUS', 56, y + 4);
+      y += 14;
+      miscLines.forEach((l, i) => drawLine(l, mainLines.length + i));
+    }
+    if (customsLines.length) {
+      doc.rect(50, y, W, 14).fillColor('#F5F5F7').fill();
+      doc.fontSize(7).font('Helvetica-Bold').fillColor(LIGHT).text('CUSTOMS / GST-FREE', 56, y + 4);
+      y += 14;
+      customsLines.forEach((l, i) => drawLine(l, mainLines.length + miscLines.length + i));
+    }
+
+    y += 8;
+
+    // ── Totals ──
+    doc.moveTo(50, y).lineTo(545, y).lineWidth(0.5).strokeColor('#E5E5EA').stroke();
+    y += 8;
+    const subtotal = parseFloat(inv.subtotal) || 0;
+    const gst      = parseFloat(inv.gst) || 0;
+    const customs  = parseFloat(inv.customs) || 0;
+    const total    = parseFloat(inv.total) || 0;
+
+    function totRow(label, value, bold = false) {
+      doc.fontSize(8).font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(bold ? DARK : MID)
+        .text(label, 350, y, { width: 130 })
+        .text(value, 480, y, { width: 65, align: 'right' });
+      y += 13;
+    }
+    if (subtotal) totRow('Subtotal (excl. GST)', fmtUSD(subtotal));
+    if (gst)      totRow('GST at 10%', fmtUSD(gst));
+    if (customs)  totRow('Customs Clearance (GST-free)', fmtUSD(customs));
+
+    // Total payable highlighted box
+    y += 2;
+    doc.rect(350, y, 195, 20).fillColor(BRAND).fill();
+    doc.fontSize(9).font('Helvetica-Bold').fillColor('#FFFFFF')
+      .text('Total Payable', 356, y + 5, { width: 90 })
+      .text(fmtUSD(total), 356, y + 5, { width: 183, align: 'right' });
+    y += 28;
+
+    // Notes
+    if (inv.notes) {
+      doc.moveTo(50, y).lineTo(545, y).lineWidth(0.5).strokeColor('#E5E5EA').stroke();
+      y += 8;
+      doc.fontSize(8).font('Helvetica-Bold').fillColor(BRAND).text('NOTES', 50, y);
+      y += 11;
+      doc.fontSize(8).font('Helvetica').fillColor(DARK).text(inv.notes, 50, y, { width: W });
+      y += 20;
+    }
+
+    // ── Remittance ──
+    y = Math.max(y, 680); // push to bottom area
+    doc.moveTo(50, y).lineTo(545, y).lineWidth(1.5).strokeColor(BRAND).stroke();
+    y += 10;
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(BRAND).text('REMITTANCE INFORMATION', 50, y);
+    y += 12;
+    const remit = [
+      ['Account Beneficiary Name', 'OGEO PTY LTD'],
+      ['Bank Name', 'COMMONWEALTH BANK'],
+      ['Bank Address', '2 Sentry Dr, Stanhope Gardens NSW 2768, Australia'],
+      ['Bank Account Number', '10199366'],
+      ['SWIFT Code', 'CTBAAU2S'],
+      ['BSB / IBAN', '062-704'],
+    ];
+    remit.forEach(([label, value]) => {
+      doc.fontSize(8).font('Helvetica-Bold').fillColor(MID).text(label + ':', 50, y, { width: 140 });
+      doc.fontSize(8).font('Helvetica').fillColor(DARK).text(value, 195, y, { width: 350 });
+      y += 12;
+    });
+
+    doc.end();
+  } catch(e) {
+    console.error('[finance/pdf]', e);
+    if (!res.headersSent) res.status(500).json({ error: String(e.message||e) });
+  }
 });
 
 // ── GET /finance/expenses — list expenses ──
