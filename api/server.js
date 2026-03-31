@@ -2877,11 +2877,11 @@ app.get('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), (r
 // ── POST /finance/invoices — create invoice ──
 app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), (req, res) => {
   try {
-    const { type, week_start, lines = [], invoice_date, due_date, notes, customs, misc_total } = req.body;
+    const { type, week_start, lines = [], invoice_date, due_date, notes, customs, misc_total, ref_override } = req.body;
     if (!type || !week_start) return res.status(400).json({ error: 'type and week_start required' });
     const existing = db.prepare('SELECT COUNT(*) as n FROM fin_invoices WHERE type = ? AND week_start = ?').get(type, week_start);
     const id = uuidv4();
-    const ref = genInvoiceRef(type, week_start, existing.n);
+    const ref = (ref_override && ref_override.trim()) ? ref_override.trim() : genInvoiceRef(type, week_start, existing.n);
     // Calculate totals
     const subtotal = lines.reduce((s, l) => s + (parseFloat(l.total)||0), 0);
     const gst = Math.round(subtotal * 0.10 * 100) / 100;
@@ -2906,7 +2906,11 @@ app.patch('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), 
   try {
     const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ?').get(req.params.id);
     if (!inv) return res.status(404).json({ error: 'Not found' });
-    const { lines, status, invoice_date, due_date, notes, customs, misc_total } = req.body;
+    const { lines, status, invoice_date, due_date, notes, customs, misc_total, ref_override } = req.body;
+    // Update ref_number if override provided
+    if (ref_override && ref_override.trim()) {
+      db.prepare(`UPDATE fin_invoices SET ref_number=?,updated_at=datetime('now') WHERE id=?`).run(ref_override.trim(), inv.id);
+    }
     // Recalculate if lines provided
     if (lines) {
       db.prepare('DELETE FROM fin_invoice_lines WHERE invoice_id = ?').run(inv.id);
