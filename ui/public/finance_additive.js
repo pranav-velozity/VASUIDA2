@@ -319,7 +319,7 @@ function renderInvoiceEditor(inv){
       <button onclick="window._finClosePanel()" style="width:28px;height:28px;border-radius:8px;border:none;background:${BG};color:${MID};font-size:14px;cursor:pointer;">✕</button>
     </div>
     <div style="display:grid;grid-template-columns:1fr auto;gap:10px;margin-bottom:14px;">
-      <div><span class="fin-label">Reference</span><div style="font-size:12px;font-weight:600;color:${DARK};padding:8px 10px;background:${BG};border-radius:8px;">${esc(inv.ref_number||'Auto-generated')}</div></div>
+      <div><span class="fin-label">Reference</span><input id="fin-inv-ref" class="fin-input" style="font-weight:600;" value="${esc(inv.ref_number||'')}" placeholder="Auto-generated on save"/></div>
       <div><span class="fin-label">Status</span><select id="fin-inv-status" class="fin-input" style="width:110px;">${['draft','sent','paid','overdue'].map(s=>`<option value="${s}" ${s===inv.status?'selected':''}>${s[0].toUpperCase()+s.slice(1)}</option>`).join('')}</select></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;">
@@ -377,7 +377,8 @@ window._finSaveInv=async function(id,type,weekStart){
   const L=window._finCurrentLines||[],ws=safeDate(weekStart)||_finState.week;
   const mL=L.filter(l=>!l.gst_free&&!l.is_misc),cL=L.filter(l=>l.gst_free&&!l.is_misc),xL=L.filter(l=>l.is_misc&&l.description);
   const customs=cL.reduce((s,l)=>s+(parseFloat(l.total)||0),0),misc_total=xL.reduce((s,l)=>s+(parseFloat(l.total)||0),0);
-  const payload={type,week_start:ws,invoice_date:el('fin-inv-date')?.value||isoToday(),due_date:el('fin-inv-due')?.value||'',status:el('fin-inv-status')?.value||'draft',notes:el('fin-inv-notes')?.value||'',customs,misc_total,lines:[...mL,...xL,...cL]};
+  const refOverride=el('fin-inv-ref')?.value?.trim()||'';
+  const payload={type,week_start:ws,invoice_date:el('fin-inv-date')?.value||isoToday(),due_date:el('fin-inv-due')?.value||'',status:el('fin-inv-status')?.value||'draft',notes:el('fin-inv-notes')?.value||'',customs,misc_total,lines:[...mL,...xL,...cL],ref_override:refOverride};
   try{
     if(id)await api(`/finance/invoices/${id}`,{method:'PATCH',body:JSON.stringify(payload)});
     else await api('/finance/invoices',{method:'POST',body:JSON.stringify(payload)});
@@ -438,25 +439,29 @@ async function renderPLTab(){
           <div style="font-size:10px;color:${LIGHT};">Click row to expand</div>
         </div>
         <table class="fin-tbl">
-          <thead><tr><th>Month</th><th>Revenue</th><th>Expenses</th><th>Net</th><th>Margin</th><th></th></tr></thead>
+          <thead><tr><th>Month</th><th>Revenue</th><th>Expenses</th><th>Net</th><th>Margin</th><th>Cash Flow</th><th></th></tr></thead>
           <tbody id="fin-pl-tbody"></tbody>
         </table>
       </div>`;
     const tbody=el('fin-pl-tbody');
+    let runningCF=0;
     if(tbody)tbody.innerHTML=months.map(m=>{
       const hasData=m.revenue>0||m.expenses>0;
       const mn=new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'long',year:'numeric'});
       const mc=m.margin_pct>20?GREEN:m.margin_pct>0?AMBER:BRAND;
+      if(hasData)runningCF+=m.net;
+      const cfColor=runningCF>0?GREEN:runningCF<0?BRAND:LIGHT;
       return`<tr style="cursor:pointer;" onclick="window._finToggleMonth('${m.month_key}')">
         <td style="font-weight:500;">${mn}</td>
         <td style="color:${m.revenue>0?GREEN:LIGHT};font-weight:${m.revenue>0?600:400};">${m.revenue>0?fmtUSD(m.revenue):'—'}</td>
         <td style="color:${m.expenses>0?AMBER:LIGHT};font-weight:${m.expenses>0?600:400};">${m.expenses>0?fmtUSD(m.expenses):'—'}</td>
         <td style="font-weight:600;color:${m.net>0?GREEN:m.net<0?BRAND:LIGHT};">${hasData?fmtUSD(m.net):'—'}</td>
         <td>${hasData?`<span style="font-weight:600;color:${mc};">${m.margin_pct}%</span>`:'—'}</td>
+        <td style="font-weight:600;color:${cfColor};">${hasData?fmtUSD(runningCF):'—'}</td>
         <td style="text-align:right;"><button class="fin-btn fin-btn-ghost" style="font-size:10px;padding:3px 10px;" onclick="event.stopPropagation();window._finAddExpense('${m.month_key}')">+ Expense</button></td>
       </tr>
       <tr id="fin-pl-expand-${m.month_key}" style="display:none;background:${BG};">
-        <td colspan="6" style="padding:0;"><div id="fin-pl-ec-${m.month_key}" style="padding:14px 16px;"></div></td>
+        <td colspan="7" style="padding:0;"><div id="fin-pl-ec-${m.month_key}" style="padding:14px 16px;"></div></td>
       </tr>`;
     }).join('');
     loadChartJS(()=>renderPLCharts(months));
@@ -493,9 +498,13 @@ function renderPLCharts(months){
   const rE=el('fin-chart-rev'),eE=el('fin-chart-exp');if(!rE||!eE||!window.Chart)return;
   if(window._fcR)window._fcR.destroy();if(window._fcE)window._fcE.destroy();
   const labels=months.map(m=>new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short'}));
+  // Build cumulative cash flow
+  let cf=0;
+  const cfData=months.map(m=>{if(m.revenue>0||m.expenses>0){cf+=m.net;}return cf||null;});
   window._fcR=new Chart(rE,{type:'bar',data:{labels,datasets:[
     {label:'Revenue',data:months.map(m=>m.revenue),backgroundColor:'rgba(52,199,89,0.65)',borderRadius:4},
-    {label:'Expenses',data:months.map(m=>m.expenses),backgroundColor:'rgba(200,134,10,0.55)',borderRadius:4}]},
+    {label:'Expenses',data:months.map(m=>m.expenses),backgroundColor:'rgba(200,134,10,0.55)',borderRadius:4},
+    {label:'Cash Flow',data:cfData,type:'line',borderColor:'#3B82F6',backgroundColor:'rgba(59,130,246,0.08)',borderWidth:2,pointBackgroundColor:'#fff',pointBorderColor:'#3B82F6',pointBorderWidth:2,pointRadius:3,fill:true,tension:0.35,yAxisID:'y',spanGaps:false}]},
     options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'top',align:'end',labels:{font:{size:10},boxWidth:8}}},
       scales:{x:{ticks:{font:{size:10}},grid:{display:false}},y:{ticks:{font:{size:10},callback:v=>'$'+v.toLocaleString()},grid:{color:'rgba(0,0,0,0.04)'},beginAtZero:true}}}});
   const em=months.filter(m=>m.expenses>0);
