@@ -7049,6 +7049,7 @@ const PN_ROLE_LABELS = {
   'org:admin_auth':    'Admin',
   'org:supplier_auth': 'Facility',
   'org:client_auth':   'Client',
+  'org:member':        'Member',
   'org:api_auth':      'API'
 };
 
@@ -7059,16 +7060,22 @@ function getPNRole(user) {
 
 // Apply role-based UI gating — called once on sign-in, safe to re-call
 function applyPNRoleGating(roleKey) {
-  const isAdmin    = roleKey === 'org:admin_auth';
-  const isFacility = roleKey === 'org:supplier_auth';
-  const isClient   = roleKey === 'org:client_auth';
+  const isAdmin = roleKey === 'org:admin_auth';
+  // All roles: Admin, Member, Client, Supplier, API see everything except Finance.
+  // Finance is admin-only. No other restrictions.
+  const isKnown = ['org:admin_auth','org:member','org:client_auth','org:supplier_auth','org:api_auth'].includes(roleKey);
 
-  // ── 1. Nav items ──
-  // Executive: visible to Admin + Client only
-  const navExec = document.getElementById('nav-exec');
-  if (navExec) navExec.style.display = (isAdmin || isClient) ? '' : 'none';
-  const navMap = document.getElementById('nav-map');
-  if (navMap) navMap.style.display = (isAdmin || isClient) ? '' : 'none';
+  // ── 1. Nav items — all visible to everyone except Finance ──
+  const navExec    = document.getElementById('nav-exec');
+  const navMap     = document.getElementById('nav-map');
+  const navRecv    = document.getElementById('nav-receiving');
+  const navIntake  = document.getElementById('nav-intake-pn');
+  const navReports = document.getElementById('nav-reports');
+  if (navExec)    navExec.style.display    = isKnown ? '' : 'none';
+  if (navMap)     navMap.style.display     = isKnown ? '' : 'none';
+  if (navRecv)    navRecv.style.display    = isKnown ? '' : 'none';
+  if (navIntake)  navIntake.style.display  = isKnown ? '' : 'none';
+  if (navReports) navReports.style.display = isKnown ? '' : 'none';
   // Finance: admin only
   const navFinance = document.getElementById('nav-finance');
   if (navFinance) navFinance.style.display = isAdmin ? '' : 'none';
@@ -7081,17 +7088,8 @@ function applyPNRoleGating(roleKey) {
   });
 
   // ── 3. Week Hub — Receiving & VAS CTAs ──
-  // Clients cannot navigate to Receiving or VAS Processing
-  // We set a body data attribute that the flow module can read,
-  // and also hide the buttons if they exist in the DOM already.
+  // No role restrictions on Receiving/VAS — all roles can navigate there.
   document.body.setAttribute('data-pn-role', roleKey);
-  if (isClient) {
-    // Hide Receive Inventory and VAS Processing CTA buttons
-    // These may not be in DOM yet (flow module injects them) — we use
-    // a MutationObserver to catch them when they appear
-    hideCTAsForClient();
-    observeCTAsForClient();
-  }
 
   // ── 4. Reports page — role stored for use when page renders ──
   window._pnRoleKey = roleKey;
@@ -7124,16 +7122,9 @@ function observeCTAsForClient() {
 // Block navigation to unauthorised pages
 function guardRoute(hash) {
   const roleKey = window._pnRoleKey || '';
-  const isFacility = roleKey === 'org:supplier_auth';
-  const isClient   = roleKey === 'org:client_auth';
-
-  if (isClient && (hash === '#receiving' || hash === '#intake')) {
-    console.log('[PNRole] Client blocked from', hash, '— redirecting to #week-hub');
-    window.location.hash = '#week-hub';
-    return false;
-  }
-  if (isFacility && hash === '#exec') {
-    console.log('[PNRole] Facility blocked from #exec — redirecting to #week-hub');
+  // Only Finance is restricted — admin only
+  const isAdminRole = roleKey === 'org:admin_auth';
+  if (!isAdminRole && hash === '#finance') {
     window.location.hash = '#week-hub';
     return false;
   }
