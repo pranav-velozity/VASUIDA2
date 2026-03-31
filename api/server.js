@@ -2877,7 +2877,7 @@ app.get('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), (r
 // ── POST /finance/invoices — create invoice ──
 app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), (req, res) => {
   try {
-    const { type, week_start, lines = [], invoice_date, due_date, notes, customs, misc_total, ref_override } = req.body;
+    const { type, week_start, lines = [], invoice_date, due_date, notes, customs, misc_total, ref_override, status } = req.body;
     if (!type || !week_start) return res.status(400).json({ error: 'type and week_start required' });
     const existing = db.prepare('SELECT COUNT(*) as n FROM fin_invoices WHERE type = ? AND week_start = ?').get(type, week_start);
     const id = uuidv4();
@@ -2888,8 +2888,9 @@ app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), (req,
     const customsAmt = parseFloat(customs) || 0;
     const miscAmt = parseFloat(misc_total) || 0;
     const total = Math.round((subtotal + gst + customsAmt + miscAmt) * 100) / 100;
-    db.prepare(`INSERT INTO fin_invoices (id,type,week_start,ref_number,invoice_date,due_date,subtotal,gst,customs,misc_total,total,notes)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, type, week_start, ref, invoice_date||null, due_date||null, subtotal, gst, customsAmt, miscAmt, total, notes||null);
+    const invStatus = status || 'draft';
+    db.prepare(`INSERT INTO fin_invoices (id,type,week_start,ref_number,status,invoice_date,due_date,subtotal,gst,customs,misc_total,total,notes)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, type, week_start, ref, invStatus, invoice_date||null, due_date||null, subtotal, gst, customsAmt, miscAmt, total, notes||null);
     // Insert lines
     lines.forEach((l, i) => {
       db.prepare(`INSERT INTO fin_invoice_lines (id,invoice_id,sort_order,description,unit_label,rate,quantity,total,gst_free,is_misc)
@@ -2925,10 +2926,11 @@ app.patch('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), 
       const total = Math.round((subtotal + gst + customsAmt + miscAmt) * 100) / 100;
       db.prepare(`UPDATE fin_invoices SET subtotal=?,gst=?,customs=?,misc_total=?,total=?,updated_at=datetime('now') WHERE id=?`).run(subtotal, gst, customsAmt, miscAmt, total, inv.id);
     }
-    if (status)       db.prepare(`UPDATE fin_invoices SET status=?,updated_at=datetime('now') WHERE id=?`).run(status, inv.id);
-    if (invoice_date !== undefined) db.prepare(`UPDATE fin_invoices SET invoice_date=?,updated_at=datetime('now') WHERE id=?`).run(invoice_date, inv.id);
-    if (due_date !== undefined)     db.prepare(`UPDATE fin_invoices SET due_date=?,updated_at=datetime('now') WHERE id=?`).run(due_date, inv.id);
-    if (notes !== undefined)        db.prepare(`UPDATE fin_invoices SET notes=?,updated_at=datetime('now') WHERE id=?`).run(notes, inv.id);
+    // Always update these fields if provided — use explicit !== undefined check so 'draft' isn't falsy-skipped
+    if (status !== undefined)        db.prepare(`UPDATE fin_invoices SET status=?,updated_at=datetime('now') WHERE id=?`).run(status, inv.id);
+    if (invoice_date !== undefined)  db.prepare(`UPDATE fin_invoices SET invoice_date=?,updated_at=datetime('now') WHERE id=?`).run(invoice_date, inv.id);
+    if (due_date !== undefined)      db.prepare(`UPDATE fin_invoices SET due_date=?,updated_at=datetime('now') WHERE id=?`).run(due_date, inv.id);
+    if (notes !== undefined)         db.prepare(`UPDATE fin_invoices SET notes=?,updated_at=datetime('now') WHERE id=?`).run(notes, inv.id);
     if (customs !== undefined && !lines) {
       const cur = db.prepare('SELECT * FROM fin_invoices WHERE id=?').get(inv.id);
       const total = Math.round((cur.subtotal + cur.gst + parseFloat(customs) + cur.misc_total) * 100) / 100;
@@ -2993,8 +2995,15 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
           const wc = d.intl_weekcontainers;
           const conts = Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []);
           for (const c of conts) {
-            if (type === 'SEA' && c.vessel && !c.is_air) containers.push(c);
-            if (type === 'AIR' && (c.is_air || String(c.vessel||'').toLowerCase().includes('air') || String(c.container_id||'').toLowerCase().includes('airway'))) containers.push(c);
+            const vesselLower = String(c.vessel||'').toLowerCase();
+            const containerLower = String(c.container_id||'').toLowerCase();
+            const isAirContainer = c.is_air ||
+              vesselLower.includes('air') ||
+              containerLower.includes('airway') ||
+              containerLower.startsWith('ca') ||  // CA prefix = common air waybill format
+              (c.lane_keys||[]).some(k => k.split('||')[2]?.toLowerCase() === 'air');
+            if (type === 'SEA' && c.vessel && !isAirContainer) containers.push(c);
+            if (type === 'AIR' && isAirContainer) containers.push(c);
           }
         } catch {}
       }
@@ -3121,7 +3130,13 @@ app.get('/finance/invoice/:id/pdf', async (req, res) => {
     const miscLines = lines.filter(l => l.is_misc && l.description);
 
     // ── Header ──
-    doc.fontSize(22).font('Helvetica-Bold').fillColor(BRAND).text('VelOzity', 50, 50);
+    // ── Brand name: velOzity>> with mixed styling ──
+    // "vel" lowercase regular, "Oz" bold brand color, "ity" lowercase regular, ">>" brand arrows
+    const brandY = 50;
+    doc.fontSize(22).font('Helvetica').fillColor('#3A3A3C').text('vel', 50, brandY, { continued: true });
+    doc.fontSize(22).font('Helvetica-Bold').fillColor(BRAND).text('Oz', { continued: true });
+    doc.fontSize(22).font('Helvetica').fillColor('#3A3A3C').text('ity', { continued: true });
+    doc.fontSize(16).font('Helvetica-Bold').fillColor(BRAND).text('»', { continued: false });
     doc.fontSize(16).font('Helvetica-Bold').fillColor(DARK).text('TAX INVOICE', 400, 50, { align: 'right', width: 145 });
 
     // Rule
