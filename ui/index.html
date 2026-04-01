@@ -2777,11 +2777,15 @@ $('#file-plan').addEventListener('change', async (e) => {
         target_qty: toNum(r.po_qty ?? r.target_qty ?? r.planned ?? 0),
 
         // ── Supplier / logistics ──
-        supplier_name:  String(r.supplier_name ?? r.supplier ?? '').trim() || undefined,
-        vendor_code:    String(r.vendor_code ?? '').trim() || undefined,
-        facility_name:  String(r.facility_name ?? r.facility ?? '').trim() || undefined, // facility (new) / facility_name (old)
-        freight_type:   normalizeFreight(r.transport_mode ?? r.freight_type ?? r.freight ?? ''),
-        zendesk_ticket: String(extractIferror(r.zendesk_ticket ?? '')).trim() || undefined,
+        supplier_name:          String(r.supplier_name ?? r.supplier ?? '').trim() || undefined,
+        supplier_contact:       String(r.supplier_contact ?? '').trim() || undefined,
+        supplier_contact_email: String(r.supplier_contact_email ?? '').trim() || undefined,
+        supplier_contact_phone: String(r.supplier_contact_phone ?? '').trim() || undefined,
+        vendor_code:            String(r.vendor_code ?? '').trim() || undefined,
+        vendor_item_no:         String(r.vendor_item_no ?? '').trim() || undefined,
+        facility_name:          String(r.facility_name ?? r.facility ?? '').trim() || undefined,
+        freight_type:           normalizeFreight(r.transport_mode ?? r.freight_type ?? r.freight ?? ''),
+        zendesk_ticket:         String(extractIferror(r.zendesk_ticket ?? '')).trim() || undefined,
 
         // ── Item detail fields ──
         item_description: String(r.item_description ?? '').trim() || undefined,
