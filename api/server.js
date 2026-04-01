@@ -3385,55 +3385,164 @@ app.delete('/finance/expenses/:id', authenticateRequest, requireRole(['admin']),
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
 });
 
-// ── GET /finance/pl — P&L summary by month ──
+// ── GET /finance/pl — P&L summary by month with unit economics ──
 app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) => {
   try {
     const { year } = req.query;
     const y = year || new Date().getUTCFullYear();
-    // Revenue from invoices (sent + paid)
-    const invRows = db.prepare(`SELECT type, week_start, total, status, subtotal, gst FROM fin_invoices WHERE status IN ('sent','paid') AND week_start >= ? AND week_start <= ? ORDER BY week_start`)
-      .all(`${y}-01-01`, `${y}-12-31`);
-    // Group by month
+
+    // ── 1. Invoices by month and type ──
+    const invRows = db.prepare(`
+      SELECT type, week_start, total, ref_number, status
+      FROM fin_invoices
+      WHERE status IN ('sent','paid') AND week_start >= ? AND week_start <= ?
+      ORDER BY week_start
+    `).all(`${y}-01-01`, `${y}-12-31`);
+
+    // ── 2. Expenses by month and category ──
+    const expRows = db.prepare(`
+      SELECT * FROM fin_expenses WHERE month_key >= ? AND month_key <= ? ORDER BY expense_date
+    `).all(`${y}-01`, `${y}-12`);
+
+    // ── 3. VAS applied units by month from records ──
+    const vasUnitRows = db.prepare(`
+      SELECT substr(date_local, 1, 7) as month_key, COUNT(*) as units
+      FROM records
+      WHERE status='complete' AND date_local >= ? AND date_local <= ?
+      GROUP BY substr(date_local, 1, 7)
+    `).all(`${y}-01-01`, `${y}-12-31`);
+    const vasUnitsByMonth = {};
+    for (const r of vasUnitRows) vasUnitsByMonth[r.month_key] = r.units;
+
+    // ── 4. Sea + Air planned units from plans JSON blobs ──
+    const planWeeks = db.prepare(`
+      SELECT week_start, data FROM plans WHERE week_start >= ? AND week_start <= ?
+    `).all(`${y}-01-01`, `${y}-12-31`);
+    const seaUnitsByMonth = {}, airUnitsByMonth = {};
+    for (const pw of planWeeks) {
+      try {
+        const mk = pw.week_start.slice(0, 7);
+        const rows = JSON.parse(pw.data || '[]');
+        for (const p of rows) {
+          const ft = String(p.freight_type || '').toLowerCase();
+          const qty = Number(p.target_qty) || 0;
+          if (ft === 'sea') seaUnitsByMonth[mk] = (seaUnitsByMonth[mk] || 0) + qty;
+          if (ft === 'air') airUnitsByMonth[mk] = (airUnitsByMonth[mk] || 0) + qty;
+        }
+      } catch {}
+    }
+
+    // ── 5. Build month objects ──
     const months = {};
     for (let m = 1; m <= 12; m++) {
       const mk = `${y}-${String(m).padStart(2,'0')}`;
-      months[mk] = { month_key: mk, revenue: 0, expenses: 0, net: 0, invoices: [], expense_rows: [] };
+      months[mk] = {
+        month_key: mk,
+        revenue: 0, rev_vas: 0, rev_sea: 0, rev_air: 0,
+        expenses: 0, exp_labour: 0, exp_freight: 0, exp_overhead: 0,
+        units_vas: vasUnitsByMonth[mk] || 0,
+        units_sea: seaUnitsByMonth[mk] || 0,
+        units_air: airUnitsByMonth[mk] || 0,
+        net: 0, margin_pct: 0,
+        invoices: [], expense_rows: [],
+      };
     }
+
+    // ── 6. Allocate invoice revenue by type ──
     for (const inv of invRows) {
-      const mk = inv.week_start.slice(0,7);
-      if (months[mk]) {
-        months[mk].revenue += inv.total;
-        months[mk].invoices.push({ ref: inv.ref_number||inv.id, type: inv.type, amount: inv.total, status: inv.status });
-      }
+      const mk = inv.week_start.slice(0, 7);
+      if (!months[mk]) continue;
+      months[mk].revenue += inv.total;
+      months[mk].invoices.push({ ref: inv.ref_number||inv.id, type: inv.type, amount: inv.total, status: inv.status });
+      if (inv.type === 'VAS') months[mk].rev_vas += inv.total;
+      else if (inv.type === 'SEA') months[mk].rev_sea += inv.total;
+      else if (inv.type === 'AIR') months[mk].rev_air += inv.total;
     }
-    // Expenses
-    const expRows = db.prepare(`SELECT * FROM fin_expenses WHERE month_key >= ? AND month_key <= ? ORDER BY expense_date`)
-      .all(`${y}-01`, `${y}-12`);
+
+    // ── 7. Allocate expenses to channel pools by category ──
+    const LABOUR_CATS   = new Set(['Labour']);
+    const FREIGHT_CATS  = new Set(['Freight Cost', 'Duties & Customs']);
     for (const exp of expRows) {
-      if (months[exp.month_key]) {
-        months[exp.month_key].expenses += exp.amount;
-        months[exp.month_key].expense_rows.push(exp);
-      }
+      const mk = exp.month_key;
+      if (!months[mk]) continue;
+      const amt = parseFloat(exp.amount) || 0;
+      months[mk].expenses += amt;
+      months[mk].expense_rows.push(exp);
+      if (LABOUR_CATS.has(exp.category))        months[mk].exp_labour   += amt;
+      else if (FREIGHT_CATS.has(exp.category))  months[mk].exp_freight  += amt;
+      else                                       months[mk].exp_overhead += amt;
     }
-    // Calculate net
+
+    // ── 8. Compute net, margins, unit economics ──
     for (const mk of Object.keys(months)) {
-      months[mk].revenue = Math.round(months[mk].revenue * 100) / 100;
-      months[mk].expenses = Math.round(months[mk].expenses * 100) / 100;
-      months[mk].net = Math.round((months[mk].revenue - months[mk].expenses) * 100) / 100;
-      months[mk].margin_pct = months[mk].revenue > 0 ? Math.round(months[mk].net / months[mk].revenue * 100) : 0;
+      const m = months[mk];
+      // Round all money fields
+      ['revenue','rev_vas','rev_sea','rev_air','expenses','exp_labour','exp_freight','exp_overhead'].forEach(k => {
+        m[k] = Math.round(m[k] * 100) / 100;
+      });
+      m.net = Math.round((m.revenue - m.expenses) * 100) / 100;
+      m.margin_pct = m.revenue > 0 ? Math.round(m.net / m.revenue * 100) : 0;
+
+      // VAS unit economics — labour cost pool
+      m.vas_rev_pu     = m.units_vas > 0 ? Math.round(m.rev_vas / m.units_vas * 100) / 100 : null;
+      m.vas_cost_pu    = m.units_vas > 0 ? Math.round(m.exp_labour / m.units_vas * 100) / 100 : null;
+      m.vas_margin_pu  = (m.vas_rev_pu !== null && m.vas_cost_pu !== null)
+        ? Math.round((m.vas_rev_pu - m.vas_cost_pu) * 100) / 100 : null;
+
+      // Freight cost split by sea/air revenue ratio
+      const freightTotal = m.rev_sea + m.rev_air;
+      const seaFrac = freightTotal > 0 ? m.rev_sea / freightTotal : 0.5;
+      const airFrac = freightTotal > 0 ? m.rev_air / freightTotal : 0.5;
+      m.exp_freight_sea = Math.round(m.exp_freight * seaFrac * 100) / 100;
+      m.exp_freight_air = Math.round(m.exp_freight * airFrac * 100) / 100;
+
+      // SEA unit economics
+      m.sea_rev_pu    = m.units_sea > 0 ? Math.round(m.rev_sea / m.units_sea * 100) / 100 : null;
+      m.sea_cost_pu   = m.units_sea > 0 ? Math.round(m.exp_freight_sea / m.units_sea * 100) / 100 : null;
+      m.sea_margin_pu = (m.sea_rev_pu !== null && m.sea_cost_pu !== null)
+        ? Math.round((m.sea_rev_pu - m.sea_cost_pu) * 100) / 100 : null;
+
+      // AIR unit economics
+      m.air_rev_pu    = m.units_air > 0 ? Math.round(m.rev_air / m.units_air * 100) / 100 : null;
+      m.air_cost_pu   = m.units_air > 0 ? Math.round(m.exp_freight_air / m.units_air * 100) / 100 : null;
+      m.air_margin_pu = (m.air_rev_pu !== null && m.air_cost_pu !== null)
+        ? Math.round((m.air_rev_pu - m.air_cost_pu) * 100) / 100 : null;
+
+      // Blended (all revenue / all VAS units processed)
+      m.blended_rev_pu    = m.units_vas > 0 ? Math.round(m.revenue / m.units_vas * 100) / 100 : null;
+      m.blended_cost_pu   = m.units_vas > 0 ? Math.round(m.expenses / m.units_vas * 100) / 100 : null;
+      m.blended_margin_pu = (m.blended_rev_pu !== null && m.blended_cost_pu !== null)
+        ? Math.round((m.blended_rev_pu - m.blended_cost_pu) * 100) / 100 : null;
     }
-    // YTD totals
+
+    // ── 9. YTD totals ──
     const ytd = Object.values(months).reduce((acc, m) => ({
-      revenue: acc.revenue + m.revenue,
-      expenses: acc.expenses + m.expenses,
-      net: acc.net + m.net
-    }), { revenue: 0, expenses: 0, net: 0 });
-    ytd.margin_pct = ytd.revenue > 0 ? Math.round(ytd.net / ytd.revenue * 100) : 0;
-    // Outstanding invoices
+      revenue: acc.revenue + m.revenue, rev_vas: acc.rev_vas + m.rev_vas,
+      rev_sea: acc.rev_sea + m.rev_sea, rev_air: acc.rev_air + m.rev_air,
+      expenses: acc.expenses + m.expenses, exp_labour: acc.exp_labour + m.exp_labour,
+      exp_freight: acc.exp_freight + m.exp_freight, exp_overhead: acc.exp_overhead + m.exp_overhead,
+      net: acc.net + m.net,
+      units_vas: acc.units_vas + m.units_vas,
+      units_sea: acc.units_sea + m.units_sea,
+      units_air: acc.units_air + m.units_air,
+    }), { revenue:0,rev_vas:0,rev_sea:0,rev_air:0,expenses:0,exp_labour:0,exp_freight:0,exp_overhead:0,net:0,units_vas:0,units_sea:0,units_air:0 });
+
+    ytd.margin_pct      = ytd.revenue > 0 ? Math.round(ytd.net / ytd.revenue * 100) : 0;
+    ytd.vas_rev_pu      = ytd.units_vas > 0 ? Math.round(ytd.rev_vas / ytd.units_vas * 100) / 100 : null;
+    ytd.vas_cost_pu     = ytd.units_vas > 0 ? Math.round(ytd.exp_labour / ytd.units_vas * 100) / 100 : null;
+    const ytdFreight    = ytd.rev_sea + ytd.rev_air || 1;
+    ytd.sea_rev_pu      = ytd.units_sea > 0 ? Math.round(ytd.rev_sea / ytd.units_sea * 100) / 100 : null;
+    ytd.sea_cost_pu     = ytd.units_sea > 0 ? Math.round(ytd.exp_freight * (ytd.rev_sea / ytdFreight) / ytd.units_sea * 100) / 100 : null;
+    ytd.air_rev_pu      = ytd.units_air > 0 ? Math.round(ytd.rev_air / ytd.units_air * 100) / 100 : null;
+    ytd.air_cost_pu     = ytd.units_air > 0 ? Math.round(ytd.exp_freight * (ytd.rev_air / ytdFreight) / ytd.units_air * 100) / 100 : null;
+    ytd.blended_rev_pu  = ytd.units_vas > 0 ? Math.round(ytd.revenue / ytd.units_vas * 100) / 100 : null;
+    ytd.blended_cost_pu = ytd.units_vas > 0 ? Math.round(ytd.expenses / ytd.units_vas * 100) / 100 : null;
+
     const outstanding = db.prepare(`SELECT COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE status IN ('draft','sent','overdue')`).get();
     res.json({ year: y, months: Object.values(months), ytd, outstanding });
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
 });
+
 
 // ── GET/POST /finance/fx — FX rates ──
 app.get('/finance/fx', authenticateRequest, requireRole(['admin']), (req, res) => {
