@@ -6891,6 +6891,72 @@ function renderReportsPage(container){
         ${reportCard('Ops Summary Report','Full week summary — throughput, completion rate, at-risk POs, receiving status.','PDF','Admin only','__pdf-direct__')}
       </div>
     </div>
+
+    <!-- Advanced PO Generator -->
+    <div id="apo-section" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;overflow:hidden;margin-bottom:14px;">
+      <div style="padding:12px 18px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:space-between;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <div style="width:28px;height:28px;border-radius:8px;background:linear-gradient(180deg,#990033,#7a0029);display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;font-weight:800;flex-shrink:0;">AP</div>
+          <div style="font-size:12px;font-weight:500;color:#1C1C1E;">Advanced PO Generator</div>
+          <span style="font-size:9px;background:rgba(153,0,51,0.08);color:#990033;padding:2px 8px;border-radius:10px;font-weight:500;">CSV</span>
+        </div>
+        <span style="font-size:10px;color:#AEAEB2;">Plan + UIDs → grouped PO rows for TIC import</span>
+      </div>
+      <div style="padding:16px 18px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+          <!-- LEFT: Defaults + actions -->
+          <div>
+            <div style="font-size:11px;font-weight:600;color:#6E6E73;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px;">Defaults &amp; Overrides</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">shipping_type</div><input id="apo_shipping_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Warehouse"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">logistic_type</div><input id="apo_logistic_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Delivered to Warehouse"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">import_type</div><input id="apo_import_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="China Import"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">po_currency</div><input id="apo_po_currency" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="AUD"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">payment_term</div><input id="apo_payment_term" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="30"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">note</div><input id="apo_note" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="China_3PL"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">po_type</div><input id="apo_po_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Supply"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">contract_type</div><input id="apo_contract_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Outright"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">payment_type</div><input id="apo_payment_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Relabel"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">qty_tolerance</div><input id="apo_qty_tolerance" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="5"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">item_tax_rate (%)</div><input id="apo_tax_rate" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="10"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">product</div><input id="apo_product" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="0"/></div>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:14px;">
+              <button id="apo-generate-btn" onclick="apoGenerate()" style="flex:1;background:#990033;color:#fff;border:none;border-radius:8px;padding:9px 0;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Generate Output</button>
+              <button id="apo-download-btn" onclick="apoDownload()" disabled style="flex:1;background:#F5F5F7;color:#AEAEB2;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:9px 0;font-size:12px;font-weight:600;cursor:not-allowed;font-family:inherit;">Download CSV</button>
+            </div>
+            <div style="font-size:10px;color:#AEAEB2;margin-top:6px;">Output grain: PO + SKU + Mobile Bin &nbsp;•&nbsp; UIDs deduped and joined by ";"</div>
+            <div id="apo-status" style="margin-top:8px;font-size:11px;min-height:16px;"></div>
+          </div>
+          <!-- RIGHT: Exception summary -->
+          <div>
+            <div style="font-size:11px;font-weight:600;color:#6E6E73;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px;">Exception Summary</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
+              <div style="background:#F5F5F7;border-radius:8px;padding:10px 12px;"><div style="font-size:10px;color:#AEAEB2;margin-bottom:4px;">Mapped UIDs</div><div id="apo-m-uids" style="font-size:18px;font-weight:700;color:#1C1C1E;">—</div></div>
+              <div style="background:#F5F5F7;border-radius:8px;padding:10px 12px;"><div style="font-size:10px;color:#AEAEB2;margin-bottom:4px;">Output Rows</div><div id="apo-m-rows" style="font-size:18px;font-weight:700;color:#1C1C1E;">—</div></div>
+              <div style="background:#F5F5F7;border-radius:8px;padding:10px 12px;"><div style="font-size:10px;color:#AEAEB2;margin-bottom:4px;">Unmatched Rows</div><div id="apo-m-unmatched" style="font-size:18px;font-weight:700;color:#1C1C1E;">—</div></div>
+              <div style="background:#F5F5F7;border-radius:8px;padding:10px 12px;"><div style="font-size:10px;color:#AEAEB2;margin-bottom:4px;">Dupes Removed</div><div id="apo-m-dupes" style="font-size:18px;font-weight:700;color:#1C1C1E;">—</div></div>
+            </div>
+            <div style="background:#F5F5F7;border-radius:8px;overflow:hidden;">
+              <table style="width:100%;border-collapse:collapse;font-size:10px;">
+                <thead><tr style="border-bottom:0.5px solid rgba(0,0,0,0.07);"><th style="padding:7px 10px;text-align:left;font-weight:600;color:#6E6E73;">Metric</th><th style="padding:7px 10px;text-align:right;font-weight:600;color:#6E6E73;">Value</th></tr></thead>
+                <tbody id="apo-metrics-body"><tr><td style="padding:6px 10px;color:#AEAEB2;" colspan="2">No run yet</td></tr></tbody>
+              </table>
+            </div>
+            <div style="margin-top:10px;">
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:#6E6E73;">
+                <input type="checkbox" id="apo-preview-toggle" onchange="apoTogglePreview()" style="accent-color:#990033;"/>
+                Show preview (first 10 rows)
+              </label>
+              <div id="apo-preview-wrap" style="display:none;margin-top:8px;overflow-x:auto;max-height:200px;overflow-y:auto;border-radius:8px;border:0.5px solid rgba(0,0,0,0.08);">
+                <table id="apo-preview-table" style="border-collapse:collapse;font-size:10px;white-space:nowrap;min-width:100%;"></table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>`;
 
   // Wire buttons — proxy clicks to existing hidden buttons or direct functions
@@ -7024,6 +7090,395 @@ function renderReportsPage(container){
 
   rpRenderCapsules();
 }
+
+// ═══════════════════════════════════════════════════════
+// ── ADVANCED PO GENERATOR ──────────────────────────────
+// ═══════════════════════════════════════════════════════
+
+(function(){
+  'use strict';
+
+  const APO_OUTPUT_COLUMNS = [
+    'supplier','shipping_type','agreement','po_number','grand_total','tax_amount',
+    'shipping_cost','note','reverse','logistic_type','logistic_method','logistic_date',
+    'logistic_eta','inbound_tracking','supplier_contact_name','supplier_contact_phone',
+    'supplier_contact_email','payment_type','payment_term','contract_type','po_type',
+    'vendor_order_number','sku','measurement','initiator','production','qty_tolerance',
+    'id_excess','country_quantity','quantity','import_type','po_currency',
+    'estimated_landed_cost','item_tax_amount','product','volumes_to_collect',
+    'pickup_info','source_supplier_cost','source_supplier_currency','uid',
+    'invoice_nr','master_carton_number'
+  ];
+
+  let _apoCsv = null;
+  let _apoWeek = null;
+
+  function apoEl(id){ return document.getElementById(id); }
+
+  function apoNorm(v){ return String(v ?? '').trim(); }
+
+  function apoSkuCore(val){
+    const s = apoNorm(val);
+    if (!s) return '';
+    const parts = s.split('-');
+    return parts[parts.length - 1].trim();
+  }
+
+  function apoParseUid(cell){
+    // UID cell format: "STYLE-SKUNUM;UIDTOKEN"
+    const s = apoNorm(cell);
+    if (!s) return { skuFull: '', uidToken: '' };
+    const parts = s.split(';');
+    if (parts.length >= 2) return { skuFull: parts[0].trim(), uidToken: parts[1].trim() };
+    return { skuFull: '', uidToken: s };
+  }
+
+  function apoToCsv(rows, columns){
+    const esc = (x) => {
+      const s = (x === null || x === undefined) ? '' : String(x);
+      if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+      return s;
+    };
+    const header = columns.map(esc).join(',');
+    const body = rows.map(r => columns.map(c => esc(r[c])).join(',')).join('\n');
+    return header + '\n' + body + '\n';
+  }
+
+  function apoSetStatus(msg, color){
+    const el = apoEl('apo-status');
+    if (el){ el.textContent = msg; el.style.color = color || '#6E6E73'; }
+  }
+
+  function apoSetMetrics(metrics){
+    // Summary tiles
+    const mu = apoEl('apo-m-uids');     if(mu) mu.textContent = metrics['Total mapped UIDs in output'] ?? '—';
+    const mr = apoEl('apo-m-rows');     if(mr) mr.textContent = metrics['Grouped output rows'] ?? '—';
+    const mm = apoEl('apo-m-unmatched');if(mm) mm.textContent = metrics['Unmatched UID rows (no Plan match)'] ?? '—';
+    const md = apoEl('apo-m-dupes');    if(md) md.textContent = metrics['Duplicate UID occurrences removed'] ?? '—';
+
+    // Metrics table
+    const tbody = apoEl('apo-metrics-body');
+    if (tbody){
+      tbody.innerHTML = '';
+      for (const [k, v] of Object.entries(metrics)){
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '0.5px solid rgba(0,0,0,0.05)';
+        const td1 = document.createElement('td');
+        td1.textContent = k;
+        td1.style.cssText = 'padding:5px 10px;color:#6E6E73;';
+        const td2 = document.createElement('td');
+        td2.textContent = String(v);
+        td2.style.cssText = 'padding:5px 10px;text-align:right;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;';
+        const unmatched = Number(metrics['Unmatched UID rows (no Plan match)'] ?? 0);
+        if (k === 'Unmatched UID rows (no Plan match)' && unmatched > 0) td2.style.color = '#990033';
+        tr.appendChild(td1); tr.appendChild(td2);
+        tbody.appendChild(tr);
+      }
+    }
+
+    // Unmatched warning on status
+    const unmatched = Number(metrics['Unmatched UID rows (no Plan match)'] ?? 0);
+    if (unmatched > 0){
+      apoSetStatus('⚠ ' + unmatched + ' UID rows had no plan match — supplier/cost fields may be blank', '#C8860A');
+    }
+  }
+
+  function apoSetPreview(rows){
+    const tbl = apoEl('apo-preview-table');
+    if (!tbl) return;
+    tbl.innerHTML = '';
+    // Header
+    const thead = document.createElement('thead');
+    const trh = document.createElement('tr');
+    trh.style.cssText = 'background:#F5F5F7;position:sticky;top:0;';
+    for (const c of APO_OUTPUT_COLUMNS){
+      const th = document.createElement('th');
+      th.textContent = c;
+      th.style.cssText = 'padding:5px 8px;font-size:9px;font-weight:600;color:#6E6E73;text-align:left;border-bottom:0.5px solid rgba(0,0,0,0.08);white-space:nowrap;';
+      trh.appendChild(th);
+    }
+    thead.appendChild(trh);
+    tbl.appendChild(thead);
+    // Body
+    const tbody = document.createElement('tbody');
+    for (const r of rows.slice(0, 10)){
+      const tr = document.createElement('tr');
+      tr.style.borderBottom = '0.5px solid rgba(0,0,0,0.05)';
+      for (const c of APO_OUTPUT_COLUMNS){
+        const td = document.createElement('td');
+        const val = String(r[c] ?? '');
+        td.textContent = c === 'uid' ? val.slice(0, 40) + (val.length > 40 ? '…' : '') : val;
+        td.style.cssText = 'padding:5px 8px;color:#1C1C1E;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis;';
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    tbl.appendChild(tbody);
+  }
+
+  window.apoTogglePreview = function(){
+    const wrap = apoEl('apo-preview-wrap');
+    const tog  = apoEl('apo-preview-toggle');
+    if (wrap) wrap.style.display = (tog && tog.checked) ? '' : 'none';
+  };
+
+  window.apoDownload = function(){
+    if (!_apoCsv) return;
+    const ws = _apoWeek || window._reportsWeek || state.weekStart || 'week';
+    const filename = 'TIC_VOZ_' + ws + '_AdvancedPO.csv';
+    const blob = new Blob([_apoCsv], { type: 'text/csv;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  window.apoGenerate = async function(){
+    const genBtn = apoEl('apo-generate-btn');
+    const dlBtn  = apoEl('apo-download-btn');
+    if (genBtn) genBtn.disabled = true;
+    if (dlBtn)  { dlBtn.disabled = true; dlBtn.style.color = '#AEAEB2'; dlBtn.style.cursor = 'not-allowed'; }
+    _apoCsv = null;
+    apoSetStatus('Loading data…', '#6E6E73');
+
+    try {
+      const ws = window._reportsWeek || state.weekStart || '';
+      if (!ws) throw new Error('No week selected — pick a week in the Reports page header first.');
+      _apoWeek = ws;
+
+      // Week end date (Sunday)
+      const weDate = new Date(ws + 'T00:00:00Z');
+      weDate.setUTCDate(weDate.getUTCDate() + 6);
+      const we = weDate.toISOString().slice(0, 10);
+
+      apoSetStatus('Fetching plan for ' + ws + '…', '#6E6E73');
+
+      // Fetch plan rows for this week
+      const planRows = (typeof fetchPlan === 'function') ? await fetchPlan(ws) : [];
+      if (!planRows.length) throw new Error('No plan data found for week ' + ws + '. Upload the plan first.');
+
+      apoSetStatus('Fetching UID records…', '#6E6E73');
+
+      // Fetch UID records for this week
+      let records = [];
+      if (typeof fetchRecordsRange === 'function'){
+        records = await fetchRecordsRange(ws + 'T00:00:00.000Z', we + 'T23:59:59.999Z', 'complete', 200000);
+      }
+      if (!records.length) throw new Error('No applied UID records found for week ' + ws + '.');
+
+      apoSetStatus('Generating…', '#6E6E73');
+
+      // ── Defaults ──
+      const dflt = {
+        shipping_type:  apoNorm(apoEl('apo_shipping_type')?.value  || 'Warehouse'),
+        logistic_type:  apoNorm(apoEl('apo_logistic_type')?.value  || 'Delivered to Warehouse'),
+        import_type:    apoNorm(apoEl('apo_import_type')?.value    || 'China Import'),
+        po_currency:    apoNorm(apoEl('apo_po_currency')?.value    || 'AUD'),
+        payment_term:   Number(apoEl('apo_payment_term')?.value    || 30),
+        note:           apoNorm(apoEl('apo_note')?.value           || 'China_3PL'),
+        po_type:        apoNorm(apoEl('apo_po_type')?.value        || 'Supply'),
+        contract_type:  apoNorm(apoEl('apo_contract_type')?.value  || 'Outright'),
+        payment_type:   apoNorm(apoEl('apo_payment_type')?.value   || 'Relabel'),
+        qty_tolerance:  Number(apoEl('apo_qty_tolerance')?.value   || 5),
+        tax_rate:       Number(apoEl('apo_tax_rate')?.value        || 10) / 100,
+        product:        Number(apoEl('apo_product')?.value         || 0),
+      };
+
+      // ── Build plan map: key = PO||sku_code_numeric ──
+      // Pinpoint plan stores: po_number, sku_code (numeric), style, vendor_item_no,
+      //   supplier_name, supplier_contact, supplier_contact_email, supplier_contact_phone,
+      //   brand_name, cost, vendor_sku
+      const planMap = new Map();
+      let planSkipped = 0;
+
+      for (const p of planRows){
+        const po      = apoNorm(p.po_number || p.po || '');
+        const core    = apoNorm(p.sku_code || '');   // numeric — e.g. "11989208"
+        const style   = apoNorm(p.style || '');       // e.g. "AE897AA02XO"
+        if (!po || !core){ planSkipped++; continue; }
+
+        const key = po + '||' + core;
+        if (!planMap.has(key)){
+          planMap.set(key, {
+            supplier:               apoNorm(p.supplier_name  || ''),
+            supplier_contact_name:  apoNorm(p.supplier_contact || p.supplier_name || ''),
+            supplier_contact_email: apoNorm(p.supplier_contact_email || ''),
+            supplier_contact_phone: apoNorm(p.supplier_contact_phone || ''),
+            vendor_order_number:    apoNorm(p.vendor_item_no  || ''),
+            initiator:              apoNorm(p.brand_name      || ''),
+            cost:                   p.cost,
+            sku_full:               style ? (style + '-' + core) : core,
+          });
+        }
+      }
+
+      // ── Normalize UID records ──
+      // Pinpoint records: po_number, sku_code (numeric), mobile_bin, uid ("STYLE-SKUNUM;TOKEN")
+      let rawCount = records.length;
+      let droppedMissingUID = 0;
+      let droppedMissingBin = 0;
+      const normalized = [];
+
+      for (const r of records){
+        const po  = apoNorm(r.po_number || r.po || '');
+        const bin = apoNorm(r.mobile_bin || r.mobileBin || r.bin || '');
+        const parsed = apoParseUid(r.uid || '');
+        const uidToken = apoNorm(parsed.uidToken);
+        // sku_core: prefer sku_code field, fallback to parsing uid
+        const core = apoNorm(r.sku_code || '') || apoSkuCore(parsed.skuFull);
+
+        if (!uidToken){ droppedMissingUID++; continue; }
+        if (!bin)     { droppedMissingBin++; continue; }
+
+        normalized.push({
+          po_key:              po,
+          sku_core:            core,
+          sku_full:            parsed.skuFull,
+          uid_token:           uidToken,
+          master_carton_number: bin,
+        });
+      }
+
+      const inputUidUnique = new Set(normalized.map(x => x.uid_token)).size;
+      const inputBinUnique = new Set(normalized.map(x => x.master_carton_number)).size;
+
+      // ── Group by PO + SKU + Mobile Bin, dedup UIDs ──
+      const groups = new Map();
+      let unmatched = 0;
+      let dupRemoved = 0;
+
+      for (const s of normalized){
+        const planKey  = s.po_key + '||' + s.sku_core;
+        const pl       = planMap.get(planKey);
+        if (!pl) unmatched++;
+
+        const groupKey = s.po_key + '||' + s.sku_core + '||' + s.master_carton_number;
+        if (!groups.has(groupKey)){
+          groups.set(groupKey, {
+            po_number:             s.po_key,
+            sku_core:              s.sku_core,
+            master_carton_number:  s.master_carton_number,
+            uidSet:  new Set(),
+            uidList: [],
+            supplier:               pl?.supplier              ?? '',
+            supplier_contact_name:  pl?.supplier_contact_name ?? '',
+            supplier_contact_email: pl?.supplier_contact_email ?? '',
+            supplier_contact_phone: pl?.supplier_contact_phone ?? '',
+            vendor_order_number:    pl?.vendor_order_number    ?? '',
+            initiator:              pl?.initiator              ?? '',
+            cost:                   pl?.cost                   ?? '',
+            sku_full_plan:          pl?.sku_full               ?? '',
+            sku_full_ship:          s.sku_full                 ?? '',
+          });
+        }
+
+        const g = groups.get(groupKey);
+        if (g.uidSet.has(s.uid_token)) dupRemoved++;
+        else { g.uidSet.add(s.uid_token); g.uidList.push(s.uid_token); }
+      }
+
+      // Global UID uniqueness check
+      const outputUidSet = new Set();
+      for (const g of groups.values()) for (const u of g.uidList) outputUidSet.add(u);
+
+      // ── Build output rows ──
+      const rowsOut = [];
+      let mappedUidTotal = 0;
+
+      for (const g of groups.values()){
+        const costNum = Number.isFinite(Number(g.cost)) ? Number(g.cost) : NaN;
+        const qty     = g.uidList.length;
+        mappedUidTotal += qty;
+        const skuOut  = g.sku_full_plan || g.sku_full_ship || g.sku_core;
+
+        const row = {};
+        for (const c of APO_OUTPUT_COLUMNS) row[c] = '';
+
+        row['supplier']               = g.supplier;
+        row['shipping_type']          = dflt.shipping_type;
+        row['po_number']              = g.po_number;
+        row['note']                   = dflt.note;
+        row['logistic_type']          = dflt.logistic_type;
+        row['supplier_contact_name']  = g.supplier_contact_name;
+        row['supplier_contact_phone'] = g.supplier_contact_phone;
+        row['supplier_contact_email'] = g.supplier_contact_email;
+        row['payment_type']           = dflt.payment_type;
+        row['payment_term']           = dflt.payment_term;
+        row['contract_type']          = dflt.contract_type;
+        row['po_type']                = dflt.po_type;
+        row['vendor_order_number']    = g.vendor_order_number;
+        row['sku']                    = skuOut;
+        row['initiator']              = g.initiator;
+        row['qty_tolerance']          = dflt.qty_tolerance;
+        row['country_quantity']       = qty;
+        row['quantity']               = qty;
+        row['import_type']            = dflt.import_type;
+        row['po_currency']            = dflt.po_currency;
+        row['item_tax_amount']        = Number.isFinite(costNum) ? (costNum * dflt.tax_rate) : '';
+        row['product']                = dflt.product;
+        row['source_supplier_cost']   = Number.isFinite(costNum) ? costNum : '';
+        row['source_supplier_currency'] = dflt.po_currency;
+        row['uid']                    = g.uidList.join(';');
+        row['master_carton_number']   = g.master_carton_number;
+
+        rowsOut.push(row);
+      }
+
+      // Sort: PO → SKU → Bin
+      rowsOut.sort((a, b) =>
+        (a.po_number + '||' + a.sku + '||' + a.master_carton_number)
+          .localeCompare(b.po_number + '||' + b.sku + '||' + b.master_carton_number)
+      );
+
+      const outputBinUnique = new Set(rowsOut.map(r => r.master_carton_number)).size;
+
+      const metrics = {
+        'Plan rows loaded':                     planRows.length,
+        'Plan rows skipped (missing PO/SKU)':   planSkipped,
+        'UID records (raw)':                    rawCount,
+        'UID records (used)':                   normalized.length,
+        'Unique UIDs in input':                 inputUidUnique,
+        'Unique Mobile Bins in input':          inputBinUnique,
+        'Dropped missing UID':                  droppedMissingUID,
+        'Dropped missing Mobile Bin':           droppedMissingBin,
+        'Unmatched UID rows (no Plan match)':   unmatched,
+        'Duplicate UID occurrences removed':    dupRemoved,
+        'Grouped output rows':                  rowsOut.length,
+        'Total mapped UIDs in output':          mappedUidTotal,
+        'Unique UIDs in output':                outputUidSet.size,
+        'Unique Mobile Bins in output':         outputBinUnique,
+      };
+
+      apoSetMetrics(metrics);
+      apoSetPreview(rowsOut);
+
+      _apoCsv = apoToCsv(rowsOut, APO_OUTPUT_COLUMNS);
+
+      // Enable download
+      if (dlBtn){
+        dlBtn.disabled = false;
+        dlBtn.style.color = '#1C1C1E';
+        dlBtn.style.background = '#F5F5F7';
+        dlBtn.style.cursor = 'pointer';
+      }
+
+      if (!unmatched){
+        apoSetStatus('✓ Generated ' + rowsOut.length + ' rows · ' + mappedUidTotal + ' UIDs · week ' + ws, '#16a34a');
+      }
+
+    } catch(err){
+      console.error('[APO]', err);
+      apoSetStatus('Error: ' + err.message, '#990033');
+      const tbody = apoEl('apo-metrics-body');
+      if (tbody) tbody.innerHTML = '<tr><td style="padding:6px 10px;color:#990033;" colspan="2">' + err.message + '</td></tr>';
+    } finally {
+      if (genBtn) genBtn.disabled = false;
+    }
+  };
+
+})();
+
 
 function reportCard(name, desc, fmt, role, proxyId){
   const fmtColor = fmt==='PDF' ? 'rgba(153,0,51,0.1);color:#990033' : fmt==='CSV' ? 'rgba(91,140,255,0.1);color:#5B8CFF' : 'rgba(58,125,68,0.1);color:#2E7D52';
