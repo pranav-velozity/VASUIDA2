@@ -2418,7 +2418,9 @@ function normalizePlanArray(body, fallbackStart) {
 
     // Optional fields — only include if present
     const optionals = [
-      'style', 'vendor_sku', 'supplier_name', 'vendor_code', 'facility_name',
+      'style', 'vendor_sku', 'supplier_name', 'supplier_contact', 
+      'supplier_contact_email', 'supplier_contact_phone',
+      'vendor_code', 'vendor_item_no', 'facility_name',
       'freight_type', 'zendesk_ticket', 'item_description', 'item_color',
       'item_size', 'department_code', 'brand_name', 'season', 'ean',
       'cost', 'priority', 'notes',
