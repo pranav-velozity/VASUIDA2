@@ -2695,8 +2695,14 @@ $('#file-plan').addEventListener('change', async (e) => {
   try {
     // Always use SheetJS — TIC sends .xlsx direct from Google Sheets
     const buf = await f.arrayBuffer();
-    const wb = XLSX.read(buf, { type: 'array', cellFormula: false, cellDates: true });
-    rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '', raw: false });
+    // cellFormula:false tells SheetJS not to parse formulas as formulas
+    // but we need raw:true so dates come as serial numbers and formulas
+    // return their cached/display value rather than the formula string
+    const wb = XLSX.read(buf, { type: 'array', cellFormula: true, cellDates: false });
+    rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {
+      defval: '',
+      raw: true,    // keep numbers as numbers, dates as serials
+    });
   } catch (err) {
     console.error('Parsing failed', err);
     alert('Could not parse file');
@@ -2754,14 +2760,15 @@ $('#file-plan').addEventListener('change', async (e) => {
 
   const items = raw
     .map(r => {
-      const { style, sku_code } = splitItemSku(r.item_sku ?? '');
+      // SKU Number (new file) or item_sku (old file) — format: STYLE-SKUNUMBER
+      const { style, sku_code } = splitItemSku(r.sku_number ?? r.item_sku ?? '');
       return {
         // ── Core identity fields ──
-        po_number:  String(r.po_number ?? r.po_number ?? '').trim(),
-        sku_code,                                          // from item_sku (after hyphen)
-        style,                                             // from item_sku (before hyphen)
-        vendor_sku: String(r.sku ?? '').trim(),            // TIC "SKU" column → vendor_sku
-        start_date: weekStart,                             // always selected week Monday
+        po_number:  String(r.po_number ?? r.po ?? '').trim(),
+        sku_code,                                                       // after last hyphen
+        style,                                                          // before last hyphen
+        vendor_sku: String(r.vendor_item_number ?? r.sku ?? '').trim(), // Vendor Item Number (new) / SKU (old)
+        start_date: weekStart,
 
         // ── Dates ──
         due_date: toISODate(r.latest_delivery_date ?? r.due_date ?? r.due ?? ''),
@@ -2772,9 +2779,9 @@ $('#file-plan').addEventListener('change', async (e) => {
         // ── Supplier / logistics ──
         supplier_name:  String(r.supplier_name ?? r.supplier ?? '').trim() || undefined,
         vendor_code:    String(r.vendor_code ?? '').trim() || undefined,
-        facility_name:  String(r.facility_name ?? r.facility ?? '').trim() || undefined,
+        facility_name:  String(r.facility_name ?? r.facility ?? '').trim() || undefined, // facility (new) / facility_name (old)
         freight_type:   normalizeFreight(r.transport_mode ?? r.freight_type ?? r.freight ?? ''),
-        zendesk_ticket: String(extractIferror(r.zendesk_ticket ?? r['zendesk_ticket'] ?? '')).trim() || undefined,
+        zendesk_ticket: String(extractIferror(r.zendesk_ticket ?? '')).trim() || undefined,
 
         // ── Item detail fields ──
         item_description: String(r.item_description ?? '').trim() || undefined,
