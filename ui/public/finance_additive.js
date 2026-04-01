@@ -428,10 +428,10 @@ async function renderPLTab(){
 
       <!-- YTD KPIs -->
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">
-        <div class="fin-card"><div class="fin-label">Revenue YTD</div><div style="font-size:22px;font-weight:700;color:${GREEN};">${fmtUSD(ytd.revenue)}</div><div style="font-size:10px;color:${MID};">VAS ${fmtUSD(ytd.rev_vas)} · Sea ${fmtUSD(ytd.rev_sea)} · Air ${fmtUSD(ytd.rev_air)}</div></div>
+        <div class="fin-card"><div class="fin-label">Revenue YTD <span style="font-size:9px;color:${LIGHT};">(accrual incl. draft)</span></div><div style="font-size:22px;font-weight:700;color:${GREEN};">${fmtUSD(ytd.revenue)}</div><div style="font-size:10px;color:${MID};">VAS ${fmtUSD(ytd.rev_vas)} · Sea ${fmtUSD(ytd.rev_sea)} · Air ${fmtUSD(ytd.rev_air)}</div></div>
         <div class="fin-card"><div class="fin-label">Expenses YTD</div><div style="font-size:22px;font-weight:700;color:${AMBER};">${fmtUSD(ytd.expenses)}</div><div style="font-size:10px;color:${MID};">Labour ${fmtUSD(ytd.exp_labour)} · Freight ${fmtUSD(ytd.exp_freight)}</div></div>
         <div class="fin-card"><div class="fin-label">Net YTD</div><div style="font-size:22px;font-weight:700;color:${ytd.net>0?GREEN:BRAND};">${fmtUSD(ytd.net)}</div><div style="font-size:10px;color:${MID};">${ytd.margin_pct}% margin</div></div>
-        <div class="fin-card"><div class="fin-label">Units Processed YTD</div><div style="font-size:22px;font-weight:700;color:${DARK};">${(ytd.units_vas||0).toLocaleString()}</div><div style="font-size:10px;color:${MID};">Sea ${(ytd.units_sea||0).toLocaleString()} · Air ${(ytd.units_air||0).toLocaleString()}</div></div>
+        <div class="fin-card"><div class="fin-label">Units Processed YTD</div><div style="font-size:22px;font-weight:700;color:${DARK};">${(ytd.units_vas||0).toLocaleString()}</div><div style="font-size:10px;color:${MID};">Sea <b>${(ytd.units_sea||0).toLocaleString()}</b> · Air <b>${(ytd.units_air||0).toLocaleString()}</b> <span style="font-size:9px;color:${LIGHT};">(actuals)</span></div></div>
       </div>
 
       <!-- Unit Economics strip -->
