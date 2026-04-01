@@ -420,86 +420,153 @@ async function renderPLTab(){
     _finState.pl=pl;
     const ytd=pl.ytd||{},months=pl.months||[];
 
+    // ── Main layout: left content + right insights panel ──
     cont.innerHTML=`
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-        <div style="font-size:16px;font-weight:700;color:${DARK};">Profit &amp; Loss ${year}</div>
-        <button class="fin-btn fin-btn-primary" onclick="window._finAddExpense()">+ Add Expense</button>
-      </div>
+      <div style="display:flex;gap:16px;align-items:flex-start;">
 
-      <!-- YTD KPIs -->
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">
-        <div class="fin-card"><div class="fin-label">Revenue YTD <span style="font-size:9px;color:${LIGHT};">(accrual incl. draft)</span></div><div style="font-size:22px;font-weight:700;color:${GREEN};">${fmtUSD(ytd.revenue)}</div><div style="font-size:10px;color:${MID};">VAS ${fmtUSD(ytd.rev_vas)} · Sea ${fmtUSD(ytd.rev_sea)} · Air ${fmtUSD(ytd.rev_air)}</div></div>
-        <div class="fin-card"><div class="fin-label">Expenses YTD</div><div style="font-size:22px;font-weight:700;color:${AMBER};">${fmtUSD(ytd.expenses)}</div><div style="font-size:10px;color:${MID};">Labour ${fmtUSD(ytd.exp_labour)} · Freight ${fmtUSD(ytd.exp_freight)}</div></div>
-        <div class="fin-card"><div class="fin-label">Net YTD</div><div style="font-size:22px;font-weight:700;color:${ytd.net>0?GREEN:BRAND};">${fmtUSD(ytd.net)}</div><div style="font-size:10px;color:${MID};">${ytd.margin_pct}% margin</div></div>
-        <div class="fin-card"><div class="fin-label">Units Processed YTD</div><div style="font-size:22px;font-weight:700;color:${DARK};">${(ytd.units_vas||0).toLocaleString()}</div><div style="font-size:10px;color:${MID};">Sea <b>${(ytd.units_sea||0).toLocaleString()}</b> · Air <b>${(ytd.units_air||0).toLocaleString()}</b> <span style="font-size:9px;color:${LIGHT};">(actuals)</span></div></div>
-      </div>
+        <!-- LEFT MAIN CONTENT -->
+        <div style="flex:1;min-width:0;">
 
-      <!-- Unit Economics strip -->
-      <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:16px 20px;margin-bottom:20px;">
-        <div style="font-size:12px;font-weight:600;color:${DARK};margin-bottom:14px;">Unit Economics YTD — Revenue · Cost · Margin per unit</div>
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">
-          ${apoUnitCard('⚙️ VAS',ytd.vas_rev_pu,ytd.vas_cost_pu,'Applied units','Labour cost pool')}
-          ${apoUnitCard('🚢 Sea',ytd.sea_rev_pu,ytd.sea_cost_pu,'Planned sea units','Freight cost pool')}
-          ${apoUnitCard('✈️ Air',ytd.air_rev_pu,ytd.air_cost_pu,'Planned air units','Freight cost pool')}
-          ${apoUnitCard('◈ Blended',ytd.blended_rev_pu,ytd.blended_cost_pu,'All VAS units','All expenses')}
-        </div>
-      </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <div style="font-size:16px;font-weight:700;color:${DARK};">Profit &amp; Loss ${year}</div>
+              <!-- Period toggle -->
+              <div style="display:flex;gap:3px;background:rgba(0,0,0,0.04);border-radius:8px;padding:3px;">
+                <button id="fin-period-ytd" onclick="window._finSetPeriod('ytd')" style="font-size:10px;padding:3px 10px;border-radius:6px;border:none;background:${BRAND};color:#fff;cursor:pointer;font-family:inherit;font-weight:600;">YTD</button>
+                <button id="fin-period-4w"  onclick="window._finSetPeriod('4w')"  style="font-size:10px;padding:3px 10px;border-radius:6px;border:none;background:transparent;color:${MID};cursor:pointer;font-family:inherit;">4W</button>
+                <button id="fin-period-8w"  onclick="window._finSetPeriod('8w')"  style="font-size:10px;padding:3px 10px;border-radius:6px;border:none;background:transparent;color:${MID};cursor:pointer;font-family:inherit;">8W</button>
+              </div>
+            </div>
+            <button class="fin-btn fin-btn-primary" onclick="window._finAddExpense()">+ Add Expense</button>
+          </div>
 
-      <!-- Charts row -->
-      <div style="display:grid;grid-template-columns:3fr 1fr;gap:16px;margin-bottom:20px;">
-        <div class="fin-card">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-            <div class="fin-section-title" style="margin-bottom:0;">Revenue by Channel vs Expenses</div>
-            <div style="display:flex;gap:4px;">
-              <button id="plc-rev" onclick="window._finPlChart('rev')" style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BRAND};color:#fff;cursor:pointer;font-family:inherit;">Revenue</button>
-              <button id="plc-pu" onclick="window._finPlChart('pu')" style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};color:${MID};cursor:pointer;font-family:inherit;">Per Unit</button>
+          <!-- YTD KPIs -->
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;">
+            <div class="fin-card"><div class="fin-label">Revenue YTD <span style="font-size:9px;color:${LIGHT};">(incl. draft)</span></div><div id="fin-kpi-rev" style="font-size:20px;font-weight:700;color:${GREEN};">${fmtUSD(ytd.revenue)}</div><div id="fin-kpi-rev-sub" style="font-size:10px;color:${MID};">VAS ${fmtUSD(ytd.rev_vas)} · Sea ${fmtUSD(ytd.rev_sea)} · Air ${fmtUSD(ytd.rev_air)}</div></div>
+            <div class="fin-card"><div class="fin-label">Expenses YTD</div><div id="fin-kpi-exp" style="font-size:20px;font-weight:700;color:${AMBER};">${fmtUSD(ytd.expenses)}</div><div id="fin-kpi-exp-sub" style="font-size:10px;color:${MID};">Labour ${fmtUSD(ytd.exp_labour)} · Freight ${fmtUSD(ytd.exp_freight)}</div></div>
+            <div class="fin-card"><div class="fin-label">Net YTD</div><div id="fin-kpi-net" style="font-size:20px;font-weight:700;color:${ytd.net>0?GREEN:BRAND};">${fmtUSD(ytd.net)}</div><div id="fin-kpi-net-sub" style="font-size:10px;color:${MID};">${ytd.margin_pct}% margin</div></div>
+            <div class="fin-card"><div class="fin-label">Units Processed</div><div id="fin-kpi-units" style="font-size:20px;font-weight:700;color:${DARK};">${(ytd.units_vas||0).toLocaleString()}</div><div id="fin-kpi-units-sub" style="font-size:10px;color:${MID};">Sea ${(ytd.units_sea||0).toLocaleString()} · Air ${(ytd.units_air||0).toLocaleString()}</div></div>
+          </div>
+
+          <!-- Unit Economics strip — 4 cards with totals + per unit -->
+          <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;margin-bottom:16px;">
+            <div style="font-size:11px;font-weight:600;color:${DARK};margin-bottom:12px;">Unit Economics YTD — Revenue · Cost · Margin per unit</div>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;" id="fin-ue-strip">
+              ${apoUnitCard('⚙️ VAS', ytd.vas_rev_pu, ytd.vas_cost_pu, ytd.rev_vas, ytd.exp_labour, ytd.units_vas)}
+              ${apoUnitCard('🚢 Sea', ytd.sea_rev_pu, ytd.sea_cost_pu, ytd.rev_sea, ytd.exp_freight_sea||0, ytd.units_sea)}
+              ${apoUnitCard('✈️ Air', ytd.air_rev_pu, ytd.air_cost_pu, ytd.rev_air, ytd.exp_freight_air||0, ytd.units_air)}
+              ${apoUnitCard('◈ Blended', ytd.blended_rev_pu, ytd.blended_cost_pu, ytd.revenue, ytd.expenses, ytd.units_vas)}
             </div>
           </div>
-          <div style="height:200px;"><canvas id="fin-chart-rev"></canvas></div>
-        </div>
-        <div class="fin-card">
-          <div class="fin-section-title">Expense Mix</div>
-          <div style="height:200px;"><canvas id="fin-chart-exp"></canvas></div>
-        </div>
-      </div>
 
-      <!-- Monthly breakdown table -->
-      <div class="fin-card">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-          <div class="fin-section-title" style="margin-bottom:0;">Monthly Breakdown</div>
-          <div style="font-size:10px;color:${LIGHT};">Click row to expand · Rev/u = Revenue per unit · Cost/u = Cost per unit</div>
-        </div>
-        <div style="overflow-x:auto;">
-        <table class="fin-tbl" style="min-width:900px;">
-          <thead><tr>
-            <th>Month</th>
-            <th>VAS Rev</th><th style="color:#4A9B8E;">Rev/u</th>
-            <th>Sea Rev</th><th style="color:#4A9B8E;">Rev/u</th>
-            <th>Air Rev</th><th style="color:#4A9B8E;">Rev/u</th>
-            <th>Expenses</th><th>Net</th><th>Margin</th><th>Cash Flow</th><th></th>
-          </tr></thead>
-          <tbody id="fin-pl-tbody"></tbody>
-        </table>
-        </div>
-      </div>
-
-      <!-- Claude Insights panel -->
-      <div class="fin-card" style="margin-top:16px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-          <div style="display:flex;align-items:center;gap:8px;">
-            <div style="width:24px;height:24px;border-radius:6px;background:${BRAND};display:flex;align-items:center;justify-content:center;">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+          <!-- Charts row -->
+          <div style="display:grid;grid-template-columns:3fr 1fr;gap:12px;margin-bottom:16px;">
+            <div class="fin-card">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+                <div class="fin-section-title" style="margin-bottom:0;">Revenue by Channel vs Expenses</div>
+                <div style="display:flex;gap:4px;">
+                  <button id="plc-rev" onclick="window._finPlChart('rev')" style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BRAND};color:#fff;cursor:pointer;font-family:inherit;">Revenue</button>
+                  <button id="plc-pu"  onclick="window._finPlChart('pu')"  style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};color:${MID};cursor:pointer;font-family:inherit;">Per Unit</button>
+                </div>
+              </div>
+              <div style="height:180px;"><canvas id="fin-chart-rev"></canvas></div>
             </div>
-            <div class="fin-section-title" style="margin-bottom:0;">Financial Insights</div>
-            <span style="font-size:9px;background:rgba(153,0,51,0.08);color:${BRAND};padding:2px 8px;border-radius:10px;">AI</span>
+            <div class="fin-card">
+              <div class="fin-section-title">Expense Mix</div>
+              <div style="height:180px;"><canvas id="fin-chart-exp"></canvas></div>
+            </div>
           </div>
-          <button onclick="window._finLoadInsights()" style="font-size:11px;padding:5px 12px;border-radius:7px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};color:${DARK};cursor:pointer;font-family:inherit;">Generate Insights</button>
+
+          <!-- Monthly breakdown table -->
+          <div class="fin-card">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+              <div class="fin-section-title" style="margin-bottom:0;">Monthly Breakdown</div>
+              <div style="font-size:10px;color:${LIGHT};">Click row to expand · /u = per unit</div>
+            </div>
+            <div style="overflow-x:auto;">
+            <table class="fin-tbl" style="min-width:860px;">
+              <thead><tr>
+                <th>Month</th>
+                <th>VAS Rev</th><th style="color:#D97706;">/u</th>
+                <th>Sea Rev</th><th style="color:#D97706;">/u</th>
+                <th>Air Rev</th><th style="color:#D97706;">/u</th>
+                <th>Expenses</th><th>Net</th><th>Margin</th><th>Cash Flow</th><th></th>
+              </tr></thead>
+              <tbody id="fin-pl-tbody"></tbody>
+            </table>
+            </div>
+          </div>
+
         </div>
-        <div id="fin-insights-content" style="color:${LIGHT};font-size:12px;">Click "Generate Insights" to analyse your P&L data and surface actionable recommendations.</div>
+
+        <!-- RIGHT: AI Insights panel (sticky) -->
+        <div style="width:280px;flex-shrink:0;">
+          <div class="fin-card" style="position:sticky;top:16px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+              <div style="display:flex;align-items:center;gap:6px;">
+                <div style="width:22px;height:22px;border-radius:6px;background:${BRAND};display:flex;align-items:center;justify-content:center;">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                </div>
+                <div style="font-size:12px;font-weight:600;color:${DARK};">Financial Insights</div>
+                <span style="font-size:9px;background:rgba(153,0,51,0.08);color:${BRAND};padding:1px 6px;border-radius:8px;font-weight:500;">AI</span>
+              </div>
+            </div>
+            <button onclick="window._finLoadInsights()" style="width:100%;font-size:11px;padding:7px 0;border-radius:7px;border:none;background:${BRAND};color:#fff;cursor:pointer;font-family:inherit;font-weight:600;margin-bottom:12px;">Generate Insights</button>
+            <div id="fin-insights-content" style="color:${LIGHT};font-size:11px;line-height:1.5;">Click above to analyse your P&L data and surface actionable recommendations.</div>
+          </div>
+        </div>
+
       </div>
     `;
 
-    // Build monthly rows with running cash flow
+    // ── Period filter logic ──
+    window._finPeriod = 'ytd';
+    window._finSetPeriod = function(p){
+      window._finPeriod = p;
+      ['ytd','4w','8w'].forEach(id=>{
+        const btn=el('fin-period-'+id);if(!btn)return;
+        btn.style.background = id===p ? BRAND : 'transparent';
+        btn.style.color = id===p ? '#fff' : MID;
+      });
+      const now = new Date();
+      const cutoff = p==='4w' ? new Date(now-28*864e5).toISOString().slice(0,7)
+                   : p==='8w' ? new Date(now-56*864e5).toISOString().slice(0,7)
+                   : '0000-00';
+      const filtered = p==='ytd' ? months : months.filter(m=>m.month_key>=cutoff);
+      renderPLCharts(filtered, window._finPlChartMode||'rev');
+      // Recompute KPI tiles for filtered period
+      const agg = filtered.reduce((a,m)=>({
+        revenue:a.revenue+m.revenue, rev_vas:a.rev_vas+m.rev_vas,
+        rev_sea:a.rev_sea+m.rev_sea, rev_air:a.rev_air+m.rev_air,
+        expenses:a.expenses+m.expenses, exp_labour:a.exp_labour+m.exp_labour,
+        exp_freight:a.exp_freight+m.exp_freight,
+        net:a.net+m.net, units_vas:a.units_vas+m.units_vas,
+        units_sea:a.units_sea+m.units_sea, units_air:a.units_air+m.units_air,
+      }),{revenue:0,rev_vas:0,rev_sea:0,rev_air:0,expenses:0,exp_labour:0,exp_freight:0,net:0,units_vas:0,units_sea:0,units_air:0});
+      const mp = agg.revenue>0?Math.round(agg.net/agg.revenue*100):0;
+      const setT=(id,v)=>{const e2=el(id);if(e2)e2.innerHTML=v;};
+      setT('fin-kpi-rev', fmtUSD(agg.revenue));
+      setT('fin-kpi-rev-sub',`VAS ${fmtUSD(agg.rev_vas)} · Sea ${fmtUSD(agg.rev_sea)} · Air ${fmtUSD(agg.rev_air)}`);
+      setT('fin-kpi-exp', fmtUSD(agg.expenses));
+      setT('fin-kpi-exp-sub',`Labour ${fmtUSD(agg.exp_labour)} · Freight ${fmtUSD(agg.exp_freight)}`);
+      setT('fin-kpi-net', fmtUSD(agg.net));
+      setT('fin-kpi-net-sub', mp+'% margin');
+      setT('fin-kpi-units', (agg.units_vas||0).toLocaleString());
+      setT('fin-kpi-units-sub', `Sea ${(agg.units_sea||0).toLocaleString()} · Air ${(agg.units_air||0).toLocaleString()}`);
+      // Update unit economics strip
+      const freightTotal=agg.rev_sea+agg.rev_air||1;
+      const seaFrac=agg.rev_sea/freightTotal, airFrac=agg.rev_air/freightTotal;
+      const exp_fsea=Math.round(agg.exp_freight*seaFrac*100)/100;
+      const exp_fair=Math.round(agg.exp_freight*airFrac*100)/100;
+      const ueStrip=el('fin-ue-strip');
+      if(ueStrip) ueStrip.innerHTML=
+        apoUnitCard('⚙️ VAS', agg.units_vas>0?Math.round(agg.rev_vas/agg.units_vas*100)/100:null, agg.units_vas>0?Math.round(agg.exp_labour/agg.units_vas*100)/100:null, agg.rev_vas, agg.exp_labour, agg.units_vas)+
+        apoUnitCard('🚢 Sea', agg.units_sea>0?Math.round(agg.rev_sea/agg.units_sea*100)/100:null, agg.units_sea>0?Math.round(exp_fsea/agg.units_sea*100)/100:null, agg.rev_sea, exp_fsea, agg.units_sea)+
+        apoUnitCard('✈️ Air', agg.units_air>0?Math.round(agg.rev_air/agg.units_air*100)/100:null, agg.units_air>0?Math.round(exp_fair/agg.units_air*100)/100:null, agg.rev_air, exp_fair, agg.units_air)+
+        apoUnitCard('◈ Blended', agg.units_vas>0?Math.round(agg.revenue/agg.units_vas*100)/100:null, agg.units_vas>0?Math.round(agg.expenses/agg.units_vas*100)/100:null, agg.revenue, agg.expenses, agg.units_vas);
+    };
+
+    // ── Monthly rows ──
     const tbody=el('fin-pl-tbody');
     let runningCF=0;
     if(tbody)tbody.innerHTML=months.map(m=>{
@@ -507,7 +574,7 @@ async function renderPLTab(){
       const mn=new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'long',year:'numeric'});
       if(hasData)runningCF+=m.net;
       const cfColor=runningCF>0?GREEN:BRAND;
-      const fpu=(v)=>v!==null&&v!==undefined?`<span style="color:#4A9B8E;font-size:10px;font-weight:600;">$${Number(v).toFixed(2)}</span>`:'<span style="color:${LIGHT};font-size:10px;">—</span>';
+      const fpu=(v)=>v!==null&&v!==undefined?`<span style="color:#D97706;font-size:10px;font-weight:600;">$${Number(v).toFixed(2)}</span>`:'<span style="color:#AEAEB2;font-size:10px;">—</span>';
       return`<tr style="cursor:pointer;" onclick="window._finToggleMonth('${m.month_key}')">
         <td style="font-weight:500;">${mn}</td>
         <td style="color:${m.rev_vas>0?GREEN:LIGHT};">${m.rev_vas>0?fmtUSD(m.rev_vas):'—'}</td>
@@ -529,19 +596,23 @@ async function renderPLTab(){
       </tr>`;
     }).join('');
 
-    // Chart mode state
+    // ── Chart mode ──
     window._finPlChartMode='rev';
     window._finPlChart=function(mode){
       window._finPlChartMode=mode;
       const rBtn=el('plc-rev'),pBtn=el('plc-pu');
       if(rBtn){rBtn.style.background=mode==='rev'?BRAND:BG;rBtn.style.color=mode==='rev'?'#fff':MID;}
       if(pBtn){pBtn.style.background=mode==='pu'?BRAND:BG;pBtn.style.color=mode==='pu'?'#fff':MID;}
-      renderPLCharts(months,mode);
+      const period=window._finPeriod||'ytd';
+      const now=new Date();
+      const cutoff=period==='4w'?new Date(now-28*864e5).toISOString().slice(0,7):period==='8w'?new Date(now-56*864e5).toISOString().slice(0,7):'0000-00';
+      const filtered=period==='ytd'?months:months.filter(m=>m.month_key>=cutoff);
+      renderPLCharts(filtered,mode);
     };
 
     loadChartJS(()=>renderPLCharts(months,'rev'));
 
-    // Expand month rows
+    // ── Expand month row ──
     window._finToggleMonth=async function(mk){
       const row=el('fin-pl-expand-'+mk);if(!row)return;
       if(row.style.display==='none'){
@@ -556,7 +627,7 @@ async function renderPLTab(){
             <div>
               <div class="fin-label">Revenue</div>
               ${invs.length?invs.map(i=>`<div style="display:flex;justify-content:space-between;font-size:11px;padding:5px 0;border-bottom:0.5px solid rgba(0,0,0,0.05);">
-                <span style="color:${MID};">${typeIcon(i.type||'')} ${esc(i.ref||i.type)}</span>
+                <span style="color:${MID};">${typeIcon(i.type||'')} ${esc(i.ref||i.type)} <span style="font-size:9px;color:${LIGHT};">${i.status}</span></span>
                 <span style="font-weight:600;color:${GREEN};">${fmtUSD(i.amount)}</span>
               </div>`).join(''):`<div style="font-size:11px;color:${LIGHT};">No invoices</div>`}
             </div>
@@ -574,15 +645,18 @@ async function renderPLTab(){
             <div>
               <div class="fin-label">Unit Economics</div>
               ${[
-                ['⚙️ VAS',m?.vas_rev_pu,m?.vas_cost_pu,m?.units_vas],
-                ['🚢 Sea',m?.sea_rev_pu,m?.sea_cost_pu,m?.units_sea],
-                ['✈️ Air',m?.air_rev_pu,m?.air_cost_pu,m?.units_air],
-              ].map(([label,rev,cost,units])=>`<div style="display:flex;justify-content:space-between;font-size:11px;padding:5px 0;border-bottom:0.5px solid rgba(0,0,0,0.05);">
-                <span style="color:${MID};">${label} <span style="font-size:9px;">(${(units||0).toLocaleString()}u)</span></span>
-                <span style="color:${DARK};">
-                  ${rev!==null?`<span style="color:${GREEN};">$${Number(rev).toFixed(2)}/u</span>`:'-'}
-                  ${cost!==null?` · <span style="color:${AMBER};">$${Number(cost).toFixed(2)}/u</span>`:' · -'}
-                </span>
+                ['⚙️ VAS', m?.vas_rev_pu, m?.vas_cost_pu, m?.units_vas, m?.rev_vas, m?.exp_labour],
+                ['🚢 Sea', m?.sea_rev_pu, m?.sea_cost_pu, m?.units_sea, m?.rev_sea, m?.exp_freight_sea],
+                ['✈️ Air', m?.air_rev_pu, m?.air_cost_pu, m?.units_air, m?.rev_air, m?.exp_freight_air],
+              ].map(([label,rev,cost,units,totRev,totCost])=>`<div style="padding:6px 0;border-bottom:0.5px solid rgba(0,0,0,0.05);">
+                <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:2px;">
+                  <span style="color:${MID};font-weight:500;">${label} <span style="font-size:9px;font-weight:400;">(${(units||0).toLocaleString()}u)</span></span>
+                  <span style="color:${GREEN};font-size:10px;">${totRev?fmtUSD(totRev):'-'}</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-size:10px;">
+                  <span style="color:${LIGHT};">$${rev!==null&&rev!==undefined?Number(rev).toFixed(3):'-'}/u rev · $${cost!==null&&cost!==undefined?Number(cost).toFixed(3):'-'}/u cost</span>
+                  <span style="color:${AMBER};font-size:10px;">${totCost?fmtUSD(totCost):'-'}</span>
+                </div>
               </div>`).join('')}
             </div>
           </div>`;
@@ -590,86 +664,76 @@ async function renderPLTab(){
       }else row.style.display='none';
     };
 
-    // Claude insights loader
+    // ── Claude insights ──
     window._finLoadInsights=async function(){
-      const cont2=el('fin-insights-content');
-      if(!cont2)return;
-      cont2.innerHTML=`<div style="color:${LIGHT};font-size:12px;">Analysing P&L data…</div>`;
+      const cont2=el('fin-insights-content');if(!cont2)return;
+      cont2.innerHTML=`<div style="color:${LIGHT};font-size:11px;">Analysing…</div>`;
       try{
-        const summary={
-          year, ytd,
-          months_with_data: months.filter(m=>m.revenue>0||m.expenses>0).map(m=>({
-            month: m.month_key,
-            revenue: m.revenue, rev_vas: m.rev_vas, rev_sea: m.rev_sea, rev_air: m.rev_air,
-            expenses: m.expenses, exp_labour: m.exp_labour, exp_freight: m.exp_freight, exp_overhead: m.exp_overhead,
-            net: m.net, margin_pct: m.margin_pct,
-            units_vas: m.units_vas, units_sea: m.units_sea, units_air: m.units_air,
-            vas_rev_pu: m.vas_rev_pu, vas_cost_pu: m.vas_cost_pu, vas_margin_pu: m.vas_margin_pu,
-            sea_rev_pu: m.sea_rev_pu, sea_cost_pu: m.sea_cost_pu,
-            air_rev_pu: m.air_rev_pu, air_cost_pu: m.air_cost_pu,
-          })),
-        };
-        const resp=await fetch('https://api.anthropic.com/v1/messages',{
-          method:'POST',
+        const summary={year,ytd,months_with_data:months.filter(m=>m.revenue>0||m.expenses>0).map(m=>({
+          month:m.month_key, revenue:m.revenue, rev_vas:m.rev_vas, rev_sea:m.rev_sea, rev_air:m.rev_air,
+          expenses:m.expenses, exp_labour:m.exp_labour, exp_freight:m.exp_freight, net:m.net, margin_pct:m.margin_pct,
+          units_vas:m.units_vas, units_sea:m.units_sea, units_air:m.units_air,
+          vas_rev_pu:m.vas_rev_pu, vas_cost_pu:m.vas_cost_pu, vas_margin_pu:m.vas_margin_pu,
+          sea_rev_pu:m.sea_rev_pu, sea_cost_pu:m.sea_cost_pu, air_rev_pu:m.air_rev_pu, air_cost_pu:m.air_cost_pu,
+        }))};
+        const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
           headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({
-            model:'claude-sonnet-4-20250514',
-            max_tokens:1000,
-            messages:[{role:'user',content:`You are a financial analyst for VelOzity, a 3PL and VAS (Value Added Services) company. Analyse this P&L data and give 4-5 specific, actionable insights to improve profitability. Focus on unit economics trends, channel margins, cost efficiency, and cash flow. Be direct and specific with numbers. Format as JSON array of objects with fields: title (short), insight (1-2 sentences with specific numbers), action (concrete next step), impact (High/Medium/Low), channel (VAS/Sea/Air/Overall).
-
-P&L Data: ${JSON.stringify(summary)}
-
-Return ONLY valid JSON array, no markdown.`}]
-          })
-        });
+          body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,
+            messages:[{role:'user',content:`You are a financial analyst for VelOzity, a 3PL/VAS company with three revenue channels: VAS (value added services - labelling/processing), Sea Freight, and Air Freight. Analyse this P&L and give 4-5 specific, actionable insights to improve profitability. Be direct with numbers. Format as JSON array, fields: title, insight (1-2 sentences with numbers), action, impact (High/Medium/Low), channel (VAS/Sea/Air/Overall). Data: ${JSON.stringify(summary)}. Return ONLY valid JSON array.`}]})});
         const d=await resp.json();
         const text=(d.content||[]).map(c=>c.text||'').join('');
         let insights;
-        try{ insights=JSON.parse(text.replace(/```json|```/g,'').trim()); }
-        catch{ insights=[{title:'Analysis complete',insight:text,action:'Review the data above',impact:'Medium',channel:'Overall'}]; }
-        
-        cont2.innerHTML=`<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;">
-          ${insights.slice(0,6).map(ins=>{
-            const impColor=ins.impact==='High'?BRAND:ins.impact==='Medium'?AMBER:GREEN;
-            const chColor={'VAS':'#4A9B8E','Sea':'#1C1C1E','Air':'#3B82F6','Overall':BRAND}[ins.channel]||MID;
-            return`<div style="background:${BG};border-radius:10px;padding:14px 16px;border-left:3px solid ${impColor};">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-                <div style="font-size:11px;font-weight:600;color:${DARK};">${esc(ins.title||'')}</div>
-                <div style="display:flex;gap:4px;">
-                  <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,0,0,0.06);color:${chColor};font-weight:600;">${esc(ins.channel||'')}</span>
-                  <span style="font-size:9px;padding:2px 6px;border-radius:10px;background:rgba(0,0,0,0.06);color:${impColor};font-weight:600;">${esc(ins.impact||'')}</span>
-                </div>
-              </div>
-              <div style="font-size:11px;color:${MID};margin-bottom:8px;line-height:1.5;">${esc(ins.insight||'')}</div>
-              <div style="font-size:10px;color:${DARK};background:rgba(153,0,51,0.05);padding:6px 8px;border-radius:6px;">→ ${esc(ins.action||'')}</div>
-            </div>`;
-          }).join('')}
-        </div>`;
-      }catch(e){
-        cont2.innerHTML=`<div style="color:${BRAND};font-size:12px;">Failed to load insights: ${e.message}</div>`;
-      }
+        try{insights=JSON.parse(text.replace(/```json|```/g,'').trim());}
+        catch{insights=[{title:'Analysis',insight:text.slice(0,200),action:'Review data',impact:'Medium',channel:'Overall'}];}
+        cont2.innerHTML=insights.slice(0,5).map(ins=>{
+          const impColor=ins.impact==='High'?BRAND:ins.impact==='Medium'?AMBER:GREEN;
+          const chColor={'VAS':'#4A9B8E','Sea':'#1C1C1E','Air':'#3B82F6','Overall':BRAND}[ins.channel]||MID;
+          return`<div style="background:${BG};border-radius:8px;padding:10px 12px;margin-bottom:8px;border-left:3px solid ${impColor};">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
+              <div style="font-size:11px;font-weight:600;color:${DARK};">${esc(ins.title||'')}</div>
+              <span style="font-size:9px;padding:1px 5px;border-radius:8px;background:rgba(0,0,0,0.05);color:${chColor};font-weight:600;">${esc(ins.channel||'')}</span>
+            </div>
+            <div style="font-size:10px;color:${MID};margin-bottom:6px;line-height:1.5;">${esc(ins.insight||'')}</div>
+            <div style="font-size:10px;color:${DARK};background:rgba(153,0,51,0.05);padding:5px 7px;border-radius:5px;">→ ${esc(ins.action||'')}</div>
+            <div style="font-size:9px;color:${impColor};margin-top:4px;font-weight:600;">${ins.impact} impact</div>
+          </div>`;
+        }).join('');
+      }catch(e){cont2.innerHTML=`<div style="color:${BRAND};font-size:11px;">Failed: ${e.message}</div>`;}
     };
 
   }catch(e){cont.innerHTML=`<div style="color:${BRAND};padding:20px;">P&L failed: ${esc(e.message)}</div>`;}
 }
 
-function apoUnitCard(label,revPu,costPu,unitsSub,costSub){
-  const marginPu=revPu!==null&&costPu!==null?Math.round((revPu-costPu)*100)/100:null;
-  const mColor=marginPu===null?LIGHT:marginPu>0?GREEN:BRAND;
-  return`<div style="background:${BG};border-radius:10px;padding:12px 14px;">
-    <div style="font-size:11px;font-weight:600;color:${DARK};margin-bottom:10px;">${label}</div>
-    <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:4px;">
-      <span style="color:${LIGHT};">Rev/unit</span>
-      <span style="font-weight:600;color:${GREEN};">${revPu!==null?'$'+Number(revPu).toFixed(2):'—'}</span>
+function apoUnitCard(label, revPu, costPu, totalRev, totalCost, totalUnits){
+  const marginPu = revPu!==null&&costPu!==null ? Math.round((revPu-costPu)*100)/100 : null;
+  const mColor = marginPu===null ? LIGHT : marginPu>0 ? GREEN : BRAND;
+  const unitsStr = totalUnits ? Number(totalUnits).toLocaleString()+'u' : '—';
+  const channelColor = label.includes('VAS')?'#4A9B8E':label.includes('Sea')?'#1C1C1E':label.includes('Air')?'#3B82F6':'#990033';
+  return`<div style="background:${BG};border-radius:10px;padding:12px 14px;border-top:3px solid ${channelColor};">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <div style="font-size:11px;font-weight:600;color:${DARK};">${label}</div>
+      <div style="font-size:9px;color:${LIGHT};">${unitsStr}</div>
     </div>
-    <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:4px;">
-      <span style="color:${LIGHT};">Cost/unit</span>
-      <span style="font-weight:600;color:${AMBER};">${costPu!==null?'$'+Number(costPu).toFixed(2):'—'}</span>
+    <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:3px;">
+      <span style="color:${LIGHT};">Total Rev</span>
+      <span style="font-weight:600;color:${GREEN};">${totalRev!==null&&totalRev!==undefined?fmtUSD(totalRev):'—'}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:3px;">
+      <span style="color:${LIGHT};">Total Cost</span>
+      <span style="font-weight:600;color:${AMBER};">${totalCost!==null&&totalCost!==undefined?fmtUSD(totalCost):'—'}</span>
     </div>
     <div style="height:0.5px;background:rgba(0,0,0,0.07);margin:6px 0;"></div>
+    <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:3px;">
+      <span style="color:${LIGHT};">Rev/unit</span>
+      <span style="font-weight:600;color:${GREEN};">${revPu!==null?'$'+Number(revPu).toFixed(3):'—'}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:3px;">
+      <span style="color:${LIGHT};">Cost/unit</span>
+      <span style="font-weight:600;color:${AMBER};">${costPu!==null?'$'+Number(costPu).toFixed(3):'—'}</span>
+    </div>
     <div style="display:flex;justify-content:space-between;font-size:10px;">
       <span style="color:${LIGHT};">Margin/unit</span>
-      <span style="font-weight:700;color:${mColor};">${marginPu!==null?'$'+Number(marginPu).toFixed(2):'—'}</span>
+      <span style="font-weight:700;color:${mColor};">${marginPu!==null?'$'+Number(marginPu).toFixed(3):'—'}</span>
     </div>
   </div>`;
 }
@@ -689,11 +753,11 @@ function renderPLCharts(months, mode='rev'){
     let cf=0;
     const cfData=months.map(m=>{if(m.revenue>0||m.expenses>0)cf+=m.net;return cf||null;});
     window._fcR=new Chart(rE,{type:'bar',data:{labels,datasets:[
-      {label:'VAS Revenue',  data:months.map(m=>m.rev_vas||0), backgroundColor:'rgba(74,155,142,0.75)',borderRadius:4,stack:'rev'},
-      {label:'Sea Revenue',  data:months.map(m=>m.rev_sea||0), backgroundColor:'rgba(28,28,30,0.65)',borderRadius:4,stack:'rev'},
-      {label:'Air Revenue',  data:months.map(m=>m.rev_air||0), backgroundColor:'rgba(59,130,246,0.70)',borderRadius:4,stack:'rev'},
-      {label:'Expenses',     data:months.map(m=>m.expenses||0),backgroundColor:'rgba(200,134,10,0.50)',borderRadius:4,stack:'exp'},
-      {label:'Cash Flow',    data:cfData,type:'line',borderColor:'#990033',backgroundColor:'rgba(153,0,51,0.06)',borderWidth:2,pointRadius:3,fill:true,tension:0.35,yAxisID:'y',spanGaps:false},
+      {label:'VAS Revenue',  data:months.map(m=>m.rev_vas||0), backgroundColor:'#22C55E',borderRadius:4,stack:'rev'},
+      {label:'Sea Revenue',  data:months.map(m=>m.rev_sea||0), backgroundColor:'#3B82F6',borderRadius:4,stack:'rev'},
+      {label:'Air Revenue',  data:months.map(m=>m.rev_air||0), backgroundColor:'#A855F7',borderRadius:4,stack:'rev'},
+      {label:'Expenses',     data:months.map(m=>m.expenses||0),backgroundColor:'rgba(239,68,68,0.55)',borderRadius:4,stack:'exp'},
+      {label:'Cash Flow',    data:cfData,type:'line',borderColor:'#F59E0B',backgroundColor:'rgba(245,158,11,0.08)',borderWidth:2,pointRadius:3,fill:true,tension:0.35,yAxisID:'y',spanGaps:false},
     ]},options:{responsive:true,maintainAspectRatio:false,
       plugins:{legend:{position:'top',align:'end',labels:{font:{size:9},boxWidth:8}}},
       scales:{x:{ticks:{font:{size:9}},grid:{display:false}},
@@ -701,10 +765,10 @@ function renderPLCharts(months, mode='rev'){
   } else {
     // Per-unit economics chart
     window._fcR=new Chart(rE,{type:'bar',data:{labels,datasets:[
-      {label:'VAS Rev/u',  data:months.map(m=>m.vas_rev_pu),  backgroundColor:'rgba(74,155,142,0.75)', borderRadius:4},
-      {label:'VAS Cost/u', data:months.map(m=>m.vas_cost_pu), backgroundColor:'rgba(74,155,142,0.30)', borderRadius:4},
-      {label:'Sea Rev/u',  data:months.map(m=>m.sea_rev_pu),  backgroundColor:'rgba(28,28,30,0.65)',   borderRadius:4},
-      {label:'Air Rev/u',  data:months.map(m=>m.air_rev_pu),  backgroundColor:'rgba(59,130,246,0.70)', borderRadius:4},
+      {label:'VAS Rev/u',  data:months.map(m=>m.vas_rev_pu),  backgroundColor:'#22C55E', borderRadius:4},
+      {label:'VAS Cost/u', data:months.map(m=>m.vas_cost_pu), backgroundColor:'rgba(34,197,94,0.35)', borderRadius:4},
+      {label:'Sea Rev/u',  data:months.map(m=>m.sea_rev_pu),  backgroundColor:'#3B82F6', borderRadius:4},
+      {label:'Air Rev/u',  data:months.map(m=>m.air_rev_pu),  backgroundColor:'#A855F7', borderRadius:4},
     ]},options:{responsive:true,maintainAspectRatio:false,
       plugins:{legend:{position:'top',align:'end',labels:{font:{size:9},boxWidth:8}}},
       scales:{x:{ticks:{font:{size:9}},grid:{display:false}},
@@ -713,7 +777,7 @@ function renderPLCharts(months, mode='rev'){
 
   // Expense Mix donut — by CATEGORY (fixed — was incorrectly showing by month)
   const EXPENSE_CATS_DISPLAY=['Labour','Freight Cost','Duties & Customs','Software','Office','Storage','Marketing','Other'];
-  const CAT_COLORS=['#4A9B8E','#1C1C1E','#3B82F6','#8B5CF6','#C8860A','#F97316','#059669','#6B7280'];
+  const CAT_COLORS=['#22C55E','#3B82F6','#A855F7','#F59E0B','#EF4444','#F97316','#14B8A6','#6B7280'];
   const catTotals={};
   for(const m of months){
     for(const exp of(m.expense_rows||[])){
