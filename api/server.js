@@ -2430,7 +2430,7 @@ function normalizePlanArray(body, fallbackStart) {
     }
 
     return item;
-  }).filter(r => r.po_number && r.sku_code && r.due_date);
+  }).filter(r => r.po_number && r.sku_code);  // due_date is storage-only, not required
 
   return norm;
 }
