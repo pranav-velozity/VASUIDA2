@@ -2693,17 +2693,10 @@ $('#file-plan').addEventListener('change', async (e) => {
   let rows = [];
 
   try {
-    if (/\.xlsx?$/i.test(f.name)) {
-      // Excel: read all rows using SheetJS
-      const buf = await f.arrayBuffer();
-      const wb = XLSX.read(buf, { type: 'array' });
-      rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
-    } else {
-      // CSV: parse with SheetJS to avoid truncation/edge cases
-      const buf = await f.arrayBuffer();
-      const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
-      rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
-    }
+    // Always use SheetJS — TIC sends .xlsx direct from Google Sheets
+    const buf = await f.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array', cellFormula: false, cellDates: true });
+    rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '', raw: false });
   } catch (err) {
     console.error('Parsing failed', err);
     alert('Could not parse file');
@@ -2712,43 +2705,93 @@ $('#file-plan').addEventListener('change', async (e) => {
 
   if (!rows.length) return alert('No rows found.');
 
-  // ---- Point B helpers ----
-  const normalize = (r) => {
+  // ── Normalise header keys: trim + lowercase + spaces→underscore ──
+  const normalizeKeys = (r) => {
     const n = {};
-for (const k in r) {
+    for (const k in r) {
       const key = k.trim().toLowerCase().replace(/\s+/g, '_');
       n[key] = r[k];
     }
     return n;
   };
 
+  // ── Extract actual value from Google Sheets IFERROR formula strings ──
+  // TIC exports contain =IFERROR(__xludf.DUMMYFUNCTION(...),ACTUAL_VALUE)
+  // The real value is always the last argument before the closing paren
+  const extractIferror = (val) => {
+    if (val == null) return '';
+    const s = String(val).trim();
+    if (!s.startsWith('=IFERROR')) return s;
+    // Match last argument: either "quoted string" or a plain number
+    const m = s.match(/,\s*("([^"]*)"|(\d+))\s*\)\s*$/);
+    if (!m) return '';
+    return m[2] !== undefined ? m[2] : m[3]; // quoted string or number
+  };
 
-  // Convert Excel serials / Dates / strings -> YYYY-MM-DD
+  // ── Normalise freight type → Sea / Air / TBD (matches existing lane key format) ──
+  const normalizeFreight = (val) => {
+    const v = extractIferror(val).trim().toLowerCase();
+    if (v === 'sea') return 'Sea';
+    if (v === 'air') return 'Air';
+    return 'TBD';
+  };
 
+  // ── Split item_sku into style + sku_code ──
+  // Format: DA131SH16OW-11852130 → style=DA131SH16OW, sku_code=11852130
+  // Split on last hyphen so style codes with hyphens are preserved
+  const splitItemSku = (val) => {
+    const s = String(val || '').trim();
+    const idx = s.lastIndexOf('-');
+    if (idx === -1) return { style: '', sku_code: s };
+    return {
+      style:    s.slice(0, idx).trim(),
+      sku_code: s.slice(idx + 1).trim(),
+    };
+  };
 
-  const raw = rows.map(normalize);
-  console.log('[plan-upload] parsed rows:', raw.length);
+  const raw = rows.map(normalizeKeys);
+  console.log('[plan-upload] parsed rows:', raw.length, '| sample:', raw[0]);
 
   const items = raw
-  .map(r => ({
-    po_number: String(r.po_number ?? r.po ?? '').trim(),
-    sku_code:  String(r.sku_code  ?? r.sku  ?? '').trim(),
-    start_date: weekStart,
-    due_date: toISODate(r.due_date ?? r.due ?? ''),
-    target_qty: toNum(r.target_qty ?? r.planned),
+    .map(r => {
+      const { style, sku_code } = splitItemSku(r.item_sku ?? '');
+      return {
+        // ── Core identity fields ──
+        po_number:  String(r.po_number ?? r.po_number ?? '').trim(),
+        sku_code,                                          // from item_sku (after hyphen)
+        style,                                             // from item_sku (before hyphen)
+        vendor_sku: String(r.sku ?? '').trim(),            // TIC "SKU" column → vendor_sku
+        start_date: weekStart,                             // always selected week Monday
 
-    // NEW fields (pulled from spreadsheet columns)
-    supplier_name:  String(r.supplier_name ?? r.supplier ?? '').trim() || undefined,
-    facility_name:  String(r.facility_name ?? r.facility ?? '').trim() || undefined,
-    freight_type:   String(r.freight_type ?? r.freight ?? '').trim() || undefined,
+        // ── Dates ──
+        due_date: toISODate(r.latest_delivery_date ?? r.due_date ?? r.due ?? ''),
 
-    // accept either "zendesk_ticket" or "zendesk_ticket_number" column name
-    zendesk_ticket: String(r.zendesk_ticket ?? r.zendesk_ticket_number ?? r.zendesk ?? '').trim() || undefined,
-  }))
-  .filter(r => r.po_number && r.sku_code);
+        // ── Quantity ──
+        target_qty: toNum(r.po_qty ?? r.target_qty ?? r.planned ?? 0),
+
+        // ── Supplier / logistics ──
+        supplier_name:  String(r.supplier_name ?? r.supplier ?? '').trim() || undefined,
+        vendor_code:    String(r.vendor_code ?? '').trim() || undefined,
+        facility_name:  String(r.facility_name ?? r.facility ?? '').trim() || undefined,
+        freight_type:   normalizeFreight(r.transport_mode ?? r.freight_type ?? r.freight ?? ''),
+        zendesk_ticket: String(extractIferror(r.zendesk_ticket ?? r['zendesk_ticket'] ?? '')).trim() || undefined,
+
+        // ── Item detail fields ──
+        item_description: String(r.item_description ?? '').trim() || undefined,
+        item_color:       String(r.item_color ?? '').trim() || undefined,
+        item_size:        String(r.item_size ?? '').trim() || undefined,
+        department_code:  String(r.department_code ?? '').trim() || undefined,
+        brand_name:       String(r.brand_name ?? '').trim() || undefined,
+        season:           String(r.season ?? '').trim() || undefined,
+        ean:              String(r.ean_number ?? r.ean ?? '').trim() || undefined,
+        cost:             toNum(r.cost ?? 0) || undefined,
+      };
+    })
+    .filter(r => r.po_number && r.sku_code);  // must have PO + sku_code to be valid
 
   console.log('[plan-upload] valid rows (PO+SKU):', items.length);
-  console.log('[plan-upload] rows with due_date:', items.filter(r => r.due_date).length);
+  console.log('[plan-upload] freight types:', [...new Set(items.map(r=>r.freight_type))]);
+  console.log('[plan-upload] sample item:', items[0]);
 
 try {
   await api(`/plan/weeks/${weekStart}`, { method: 'PUT', body: items });
