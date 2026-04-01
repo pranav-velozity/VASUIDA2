@@ -3709,7 +3709,7 @@ function renderOpsInsights(view){
     const remaining = Math.max(0, totalPlanned - totalApplied);
     const pct = totalPlanned>0 ? Math.round(100*totalApplied/totalPlanned) : 0;
 
-    const wsStr = weekStartISO || '';
+    const wsStr = (typeof state !== 'undefined' && state.weekStart) ? state.weekStart : '';
     const todayStr = (typeof todayISO==='function') ? todayISO() : new Date().toISOString().slice(0,10);
     const weekIsFutureFlag = wsStr > todayStr;
     const bandOf = (p, applied=null)=>{
