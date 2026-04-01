@@ -3391,11 +3391,11 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
     const { year } = req.query;
     const y = year || new Date().getUTCFullYear();
 
-    // ── 1. Invoices by month and type ──
+    // ── 1. Invoices by month and type — include draft so P&L shows accrual view ──
     const invRows = db.prepare(`
       SELECT type, week_start, total, ref_number, status
       FROM fin_invoices
-      WHERE status IN ('sent','paid') AND week_start >= ? AND week_start <= ?
+      WHERE status IN ('draft','sent','paid') AND week_start >= ? AND week_start <= ?
       ORDER BY week_start
     `).all(`${y}-01-01`, `${y}-12-31`);
 
@@ -3414,22 +3414,41 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
     const vasUnitsByMonth = {};
     for (const r of vasUnitRows) vasUnitsByMonth[r.month_key] = r.units;
 
-    // ── 4. Sea + Air planned units from plans JSON blobs ──
+    // ── 4. Sea + Air ACTUAL units — join records (applied) to plans (freight_type) by PO ──
+    // This gives actuals: units actually applied against sea/air POs, by month of application
     const planWeeks = db.prepare(`
       SELECT week_start, data FROM plans WHERE week_start >= ? AND week_start <= ?
     `).all(`${y}-01-01`, `${y}-12-31`);
-    const seaUnitsByMonth = {}, airUnitsByMonth = {};
+
+    // Build PO → freight_type map from all plan weeks in the year
+    const poFreightMap = new Map(); // po_number → 'sea' | 'air'
     for (const pw of planWeeks) {
       try {
-        const mk = pw.week_start.slice(0, 7);
         const rows = JSON.parse(pw.data || '[]');
         for (const p of rows) {
+          const po = String(p.po_number || '').trim();
           const ft = String(p.freight_type || '').toLowerCase();
-          const qty = Number(p.target_qty) || 0;
-          if (ft === 'sea') seaUnitsByMonth[mk] = (seaUnitsByMonth[mk] || 0) + qty;
-          if (ft === 'air') airUnitsByMonth[mk] = (airUnitsByMonth[mk] || 0) + qty;
+          if (po && (ft === 'sea' || ft === 'air')) {
+            poFreightMap.set(po, ft);
+          }
         }
       } catch {}
+    }
+
+    // Count applied records by freight type, grouped by month (date_local)
+    // Each record row = 1 applied unit (records are UID-level)
+    const appliedRecords = db.prepare(`
+      SELECT po_number, substr(date_local, 1, 7) as month_key
+      FROM records
+      WHERE status='complete' AND date_local >= ? AND date_local <= ?
+    `).all(`${y}-01-01`, `${y}-12-31`);
+
+    const seaUnitsByMonth = {}, airUnitsByMonth = {};
+    for (const r of appliedRecords) {
+      const ft = poFreightMap.get(String(r.po_number || '').trim());
+      if (!ft || !r.month_key) continue;
+      if (ft === 'sea') seaUnitsByMonth[r.month_key] = (seaUnitsByMonth[r.month_key] || 0) + 1;
+      if (ft === 'air') airUnitsByMonth[r.month_key] = (airUnitsByMonth[r.month_key] || 0) + 1;
     }
 
     // ── 5. Build month objects ──
