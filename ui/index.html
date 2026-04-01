@@ -4005,7 +4005,9 @@ function renderOpsInsights(view){
       }).join('');
 
       // status badge — date-aware: future weeks aren't "Delayed", they're "Upcoming"
-      const weekIsInFuture = ws > today;
+      const _apoToday = (typeof todayISO==='function') ? todayISO() : new Date().toISOString().slice(0,10);
+      const _apoWs    = (typeof state !== 'undefined' && state.weekStart) ? state.weekStart : '';
+      const weekIsInFuture = _apoWs > _apoToday;
       const badge =
         planned<=0 ? `<span class="px-2 py-0.5 rounded-full border bg-white text-[11px] text-gray-600">No plan</span>` :
         (pct>=90 ? `<span class="px-2 py-0.5 rounded-full border bg-white text-[11px]" style="border-color:var(--ops-green);color:var(--ops-green);">On track</span>` :
