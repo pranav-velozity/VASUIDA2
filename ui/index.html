@@ -3079,9 +3079,12 @@ state.weekCartonsIn = cartonsInUse;
     const pctNow = plannedTotal>0?Math.round(appliedTotal2*100/plannedTotal):(state.plan.length?0:100);
     const h=$('#ops-week-health');
     if(h){
+      const wsNow = state.weekStart || '';
+      const todayNow = (typeof todayISO==='function') ? todayISO() : new Date().toISOString().slice(0,10);
+      const weekIsFuture = wsNow > todayNow;
       let label = 'On-Plan';
       if(pctNow < 75) label='At-Risk';
-      if(pctNow < 50) label='Delayed';
+      if(pctNow < 50) label = (weekIsFuture && appliedTotal2===0) ? 'Upcoming' : 'Delayed';
       h.textContent = label;
     }
   }catch(e){ console.error('[OPS refreshDashboardTotals] week totals error', e); }
@@ -3706,16 +3709,21 @@ function renderOpsInsights(view){
     const remaining = Math.max(0, totalPlanned - totalApplied);
     const pct = totalPlanned>0 ? Math.round(100*totalApplied/totalPlanned) : 0;
 
-    const bandOf = (p)=>{
+    const wsStr = weekStartISO || '';
+    const todayStr = (typeof todayISO==='function') ? todayISO() : new Date().toISOString().slice(0,10);
+    const weekIsFutureFlag = wsStr > todayStr;
+    const bandOf = (p, applied=null)=>{
       if(!(totalPlanned>0)) return 'No plan';
       if(p>=90) return 'On track';
       if(p>=75) return 'At risk';
+      if(weekIsFutureFlag && (applied===null || applied===0)) return 'Upcoming';
       return 'Delayed';
     };
     const bandColor = (b)=>{
       if(b==='On track') return 'var(--ops-green)';
       if(b==='At risk') return 'var(--ops-yellow)';
       if(b==='Delayed') return '#ef4444';
+      if(b==='Upcoming') return '#6b7280';
       return '#6b7280';
     };
     const overallBand = bandOf(pct);
@@ -3734,7 +3742,7 @@ function renderOpsInsights(view){
       for(const [k,v] of m){
         v.remaining = Math.max(0, v.planned - v.applied);
         v.pct = v.planned>0 ? Math.round(100*v.applied/v.planned) : 0;
-        v.band = v.planned>0 ? (v.pct>=90?'On track':(v.pct>=75?'At risk':'Delayed')) : 'No plan';
+        v.band = v.planned>0 ? (v.pct>=90?'On track':(v.pct>=75?'At risk':(weekIsFutureFlag&&v.applied===0?'Upcoming':'Delayed'))) : 'No plan';
       }
       return m;
     };
@@ -3992,11 +4000,13 @@ function renderOpsInsights(view){
         return `<span class="px-2 py-0.5 rounded-full border bg-white text-[11px]">${label} ${fpct}%</span>`;
       }).join('');
 
-      // status badge
+      // status badge — date-aware: future weeks aren't "Delayed", they're "Upcoming"
+      const weekIsInFuture = ws > today;
       const badge =
         planned<=0 ? `<span class="px-2 py-0.5 rounded-full border bg-white text-[11px] text-gray-600">No plan</span>` :
         (pct>=90 ? `<span class="px-2 py-0.5 rounded-full border bg-white text-[11px]" style="border-color:var(--ops-green);color:var(--ops-green);">On track</span>` :
          pct>=75 ? `<span class="px-2 py-0.5 rounded-full border bg-white text-[11px]" style="border-color:var(--ops-yellow);color:#b45309;">At risk</span>` :
+         (weekIsInFuture && applied===0) ? `<span class="px-2 py-0.5 rounded-full border bg-white text-[11px] text-gray-500">Upcoming</span>` :
                   `<span class="px-2 py-0.5 rounded-full border bg-white text-[11px]" style="border-color:#ef4444;color:#b91c1c;">Delayed</span>`);
 
       const bar2 = (label, val, denom, color)=>{
