@@ -511,7 +511,7 @@ async function renderPLTab(){
                 <span style="font-size:9px;background:rgba(153,0,51,0.08);color:${BRAND};padding:1px 6px;border-radius:8px;font-weight:500;">AI</span>
               </div>
             </div>
-            <button onclick="window._finLoadInsights()" style="width:100%;font-size:11px;padding:7px 0;border-radius:7px;border:none;background:${BRAND};color:#fff;cursor:pointer;font-family:inherit;font-weight:600;margin-bottom:12px;">Generate Insights</button>
+            <button id="fin-insights-btn" onclick="window._finLoadInsights()" style="width:100%;font-size:11px;padding:7px 0;border-radius:7px;border:none;background:${BRAND};color:#fff;cursor:pointer;font-family:inherit;font-weight:600;margin-bottom:12px;">Generate Insights</button>
             <div id="fin-insights-content" style="color:${LIGHT};font-size:11px;line-height:1.5;">Click above to analyse your P&L data and surface actionable recommendations.</div>
           </div>
         </div>
@@ -615,7 +615,9 @@ async function renderPLTab(){
     // ── Expand month row ──
     window._finToggleMonth=async function(mk){
       const row=el('fin-pl-expand-'+mk);if(!row)return;
+      const icon=el('fin-exp-icon-'+mk);
       if(row.style.display==='none'){
+        if(icon){icon.textContent='▼';icon.style.color=BRAND;}
         row.style.display='';
         const c=el('fin-pl-ec-'+mk);if(!c)return;
         c.innerHTML=`<div style="color:${LIGHT};font-size:11px;">Loading…</div>`;
@@ -661,45 +663,63 @@ async function renderPLTab(){
             </div>
           </div>`;
         }catch(e){c.innerHTML=`<div style="color:${BRAND};font-size:11px;">${e.message}</div>`;}
-      }else row.style.display='none';
+      }else{row.style.display='none';if(icon){icon.textContent='▶';icon.style.color=LIGHT;}}
     };
 
-    // ── Claude insights ──
+    // ── Claude insights — routes through /pulse/chat backend (avoids CORS) ──
     window._finLoadInsights=async function(){
       const cont2=el('fin-insights-content');if(!cont2)return;
-      cont2.innerHTML=`<div style="color:${LIGHT};font-size:11px;">Analysing…</div>`;
+      const genBtn=el('fin-insights-btn');
+      if(genBtn){genBtn.disabled=true;genBtn.textContent='Analysing…';}
+      cont2.innerHTML=`<div style="color:${LIGHT};font-size:11px;text-align:center;padding:20px 0;">Analysing your P&L data…</div>`;
       try{
+        const apiBase=(document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
+        let token=null;
+        if(window.Clerk?.session){try{token=await window.Clerk.session.getToken();}catch(_){}}
         const summary={year,ytd,months_with_data:months.filter(m=>m.revenue>0||m.expenses>0).map(m=>({
           month:m.month_key, revenue:m.revenue, rev_vas:m.rev_vas, rev_sea:m.rev_sea, rev_air:m.rev_air,
-          expenses:m.expenses, exp_labour:m.exp_labour, exp_freight:m.exp_freight, net:m.net, margin_pct:m.margin_pct,
+          expenses:m.expenses, exp_labour:m.exp_labour, exp_freight:m.exp_freight, exp_overhead:m.exp_overhead,
+          net:m.net, margin_pct:m.margin_pct,
           units_vas:m.units_vas, units_sea:m.units_sea, units_air:m.units_air,
           vas_rev_pu:m.vas_rev_pu, vas_cost_pu:m.vas_cost_pu, vas_margin_pu:m.vas_margin_pu,
           sea_rev_pu:m.sea_rev_pu, sea_cost_pu:m.sea_cost_pu, air_rev_pu:m.air_rev_pu, air_cost_pu:m.air_cost_pu,
         }))};
-        const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,
-            messages:[{role:'user',content:`You are a financial analyst for VelOzity, a 3PL/VAS company with three revenue channels: VAS (value added services - labelling/processing), Sea Freight, and Air Freight. Analyse this P&L and give 4-5 specific, actionable insights to improve profitability. Be direct with numbers. Format as JSON array, fields: title, insight (1-2 sentences with numbers), action, impact (High/Medium/Low), channel (VAS/Sea/Air/Overall). Data: ${JSON.stringify(summary)}. Return ONLY valid JSON array.`}]})});
+        const prompt=`You are a financial analyst for VelOzity, a 3PL/VAS company. Revenue channels: VAS (value added services - labelling/processing units), Sea Freight, Air Freight. Labour expenses = direct VAS processing cost. Freight expenses split between Sea and Air. Analyse this P&L and give exactly 5 specific actionable insights to improve profitability. Be direct with numbers. Return ONLY a JSON array, no markdown, each object has: title (short 3-5 words), insight (1-2 sentences with specific numbers from data), action (one concrete next step), impact (High/Medium/Low), channel (VAS/Sea/Air/Overall). P&L data: ${JSON.stringify(summary)}`;
+        const resp=await fetch(apiBase+'/pulse/chat',{method:'POST',
+          headers:Object.assign({'Content-Type':'application/json'},token?{'Authorization':'Bearer '+token}:{}),
+          body:JSON.stringify({messages:[{role:'user',content:prompt}]})});
+        if(!resp.ok)throw new Error('Server error '+resp.status);
         const d=await resp.json();
-        const text=(d.content||[]).map(c=>c.text||'').join('');
+        const raw=d.reply||'';
+        const clean=raw.replace(/^```json\s*/,'').replace(/```\s*$/,'').trim();
         let insights;
-        try{insights=JSON.parse(text.replace(/```json|```/g,'').trim());}
-        catch{insights=[{title:'Analysis',insight:text.slice(0,200),action:'Review data',impact:'Medium',channel:'Overall'}];}
+        try{insights=JSON.parse(clean);}
+        catch{insights=[{title:'Analysis complete',insight:raw.slice(0,200),action:'Review the data above',impact:'Medium',channel:'Overall'}];}
+        if(!Array.isArray(insights)||!insights.length)throw new Error('No insights returned');
+        const impColors={'High':BRAND,'Medium':'#92400E','Low':'#166534'};
+        const chColors={'VAS':'#166534','Sea':'#1e3a5f','Air':'#4c1d95','Overall':BRAND};
         cont2.innerHTML=insights.slice(0,5).map(ins=>{
-          const impColor=ins.impact==='High'?BRAND:ins.impact==='Medium'?AMBER:GREEN;
-          const chColor={'VAS':'#4A9B8E','Sea':'#1C1C1E','Air':'#3B82F6','Overall':BRAND}[ins.channel]||MID;
-          return`<div style="background:${BG};border-radius:8px;padding:10px 12px;margin-bottom:8px;border-left:3px solid ${impColor};">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
+          const impColor=impColors[ins.impact]||BRAND;
+          const chColor=chColors[ins.channel]||MID;
+          const bgMap={'High':'rgba(153,0,51,0.04)','Medium':'rgba(146,64,14,0.04)','Low':'rgba(22,101,52,0.04)'};
+          return`<div style="background:${bgMap[ins.impact]||BG};border-radius:8px;padding:10px 12px;margin-bottom:8px;border-left:3px solid ${impColor};">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
               <div style="font-size:11px;font-weight:600;color:${DARK};">${esc(ins.title||'')}</div>
-              <span style="font-size:9px;padding:1px 5px;border-radius:8px;background:rgba(0,0,0,0.05);color:${chColor};font-weight:600;">${esc(ins.channel||'')}</span>
+              <span style="font-size:9px;padding:1px 5px;border-radius:6px;background:rgba(0,0,0,0.06);color:${chColor};font-weight:600;">${esc(ins.channel||'')}</span>
             </div>
             <div style="font-size:10px;color:${MID};margin-bottom:6px;line-height:1.5;">${esc(ins.insight||'')}</div>
-            <div style="font-size:10px;color:${DARK};background:rgba(153,0,51,0.05);padding:5px 7px;border-radius:5px;">→ ${esc(ins.action||'')}</div>
-            <div style="font-size:9px;color:${impColor};margin-top:4px;font-weight:600;">${ins.impact} impact</div>
+            <div style="font-size:10px;color:${DARK};background:rgba(153,0,51,0.06);padding:5px 7px;border-radius:5px;border-left:2px solid ${impColor};">→ ${esc(ins.action||'')}</div>
+            <div style="font-size:9px;color:${impColor};margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${ins.impact} impact</div>
           </div>`;
         }).join('');
-      }catch(e){cont2.innerHTML=`<div style="color:${BRAND};font-size:11px;">Failed: ${e.message}</div>`;}
+        if(genBtn){genBtn.disabled=false;genBtn.textContent='Refresh Insights';}
+      }catch(e){
+        cont2.innerHTML=`<div style="color:${BRAND};font-size:11px;padding:8px;">Unable to load insights: ${esc(e.message)}</div>`;
+        if(genBtn){genBtn.disabled=false;genBtn.textContent='Retry';}
+      }
     };
+    // Auto-load insights when page renders
+    setTimeout(()=>window._finLoadInsights&&window._finLoadInsights(), 800);
 
   }catch(e){cont.innerHTML=`<div style="color:${BRAND};padding:20px;">P&L failed: ${esc(e.message)}</div>`;}
 }
@@ -708,7 +728,7 @@ function apoUnitCard(label, revPu, costPu, totalRev, totalCost, totalUnits){
   const marginPu = revPu!==null&&costPu!==null ? Math.round((revPu-costPu)*100)/100 : null;
   const mColor = marginPu===null ? LIGHT : marginPu>0 ? GREEN : BRAND;
   const unitsStr = totalUnits ? Number(totalUnits).toLocaleString()+'u' : '—';
-  const channelColor = label.includes('VAS')?'#4A9B8E':label.includes('Sea')?'#1C1C1E':label.includes('Air')?'#3B82F6':'#990033';
+  const channelColor = label.includes('VAS')?'rgba(22,101,52,0.9)':label.includes('Sea')?'rgba(30,58,95,0.9)':label.includes('Air')?'rgba(76,29,149,0.85)':'#990033';
   return`<div style="background:${BG};border-radius:10px;padding:12px 14px;border-top:3px solid ${channelColor};">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
       <div style="font-size:11px;font-weight:600;color:${DARK};">${label}</div>
@@ -753,11 +773,11 @@ function renderPLCharts(months, mode='rev'){
     let cf=0;
     const cfData=months.map(m=>{if(m.revenue>0||m.expenses>0)cf+=m.net;return cf||null;});
     window._fcR=new Chart(rE,{type:'bar',data:{labels,datasets:[
-      {label:'VAS Revenue',  data:months.map(m=>m.rev_vas||0), backgroundColor:'#22C55E',borderRadius:4,stack:'rev'},
-      {label:'Sea Revenue',  data:months.map(m=>m.rev_sea||0), backgroundColor:'#3B82F6',borderRadius:4,stack:'rev'},
-      {label:'Air Revenue',  data:months.map(m=>m.rev_air||0), backgroundColor:'#A855F7',borderRadius:4,stack:'rev'},
-      {label:'Expenses',     data:months.map(m=>m.expenses||0),backgroundColor:'rgba(239,68,68,0.55)',borderRadius:4,stack:'exp'},
-      {label:'Cash Flow',    data:cfData,type:'line',borderColor:'#F59E0B',backgroundColor:'rgba(245,158,11,0.08)',borderWidth:2,pointRadius:3,fill:true,tension:0.35,yAxisID:'y',spanGaps:false},
+      {label:'VAS Revenue',  data:months.map(m=>m.rev_vas||0), backgroundColor:'rgba(22,101,52,0.80)',borderRadius:4,stack:'rev'},
+      {label:'Sea Revenue',  data:months.map(m=>m.rev_sea||0), backgroundColor:'rgba(30,58,95,0.80)',borderRadius:4,stack:'rev'},
+      {label:'Air Revenue',  data:months.map(m=>m.rev_air||0), backgroundColor:'rgba(76,29,149,0.75)',borderRadius:4,stack:'rev'},
+      {label:'Expenses',     data:months.map(m=>m.expenses||0),backgroundColor:'rgba(153,0,51,0.35)',borderRadius:4,stack:'exp'},
+      {label:'Cash Flow',    data:cfData,type:'line',borderColor:'#4A9B8E',backgroundColor:'rgba(74,155,142,0.05)',borderWidth:2,pointRadius:3,fill:true,tension:0.35,yAxisID:'y',spanGaps:false},
     ]},options:{responsive:true,maintainAspectRatio:false,
       plugins:{legend:{position:'top',align:'end',labels:{font:{size:9},boxWidth:8}}},
       scales:{x:{ticks:{font:{size:9}},grid:{display:false}},
@@ -765,10 +785,10 @@ function renderPLCharts(months, mode='rev'){
   } else {
     // Per-unit economics chart
     window._fcR=new Chart(rE,{type:'bar',data:{labels,datasets:[
-      {label:'VAS Rev/u',  data:months.map(m=>m.vas_rev_pu),  backgroundColor:'#22C55E', borderRadius:4},
-      {label:'VAS Cost/u', data:months.map(m=>m.vas_cost_pu), backgroundColor:'rgba(34,197,94,0.35)', borderRadius:4},
-      {label:'Sea Rev/u',  data:months.map(m=>m.sea_rev_pu),  backgroundColor:'#3B82F6', borderRadius:4},
-      {label:'Air Rev/u',  data:months.map(m=>m.air_rev_pu),  backgroundColor:'#A855F7', borderRadius:4},
+      {label:'VAS Rev/u',  data:months.map(m=>m.vas_rev_pu),  backgroundColor:'rgba(22,101,52,0.80)', borderRadius:4},
+      {label:'VAS Cost/u', data:months.map(m=>m.vas_cost_pu), backgroundColor:'rgba(22,101,52,0.30)', borderRadius:4},
+      {label:'Sea Rev/u',  data:months.map(m=>m.sea_rev_pu),  backgroundColor:'rgba(30,58,95,0.80)', borderRadius:4},
+      {label:'Air Rev/u',  data:months.map(m=>m.air_rev_pu),  backgroundColor:'rgba(76,29,149,0.75)', borderRadius:4},
     ]},options:{responsive:true,maintainAspectRatio:false,
       plugins:{legend:{position:'top',align:'end',labels:{font:{size:9},boxWidth:8}}},
       scales:{x:{ticks:{font:{size:9}},grid:{display:false}},
@@ -777,7 +797,7 @@ function renderPLCharts(months, mode='rev'){
 
   // Expense Mix donut — by CATEGORY (fixed — was incorrectly showing by month)
   const EXPENSE_CATS_DISPLAY=['Labour','Freight Cost','Duties & Customs','Software','Office','Storage','Marketing','Other'];
-  const CAT_COLORS=['#22C55E','#3B82F6','#A855F7','#F59E0B','#EF4444','#F97316','#14B8A6','#6B7280'];
+  const CAT_COLORS=['rgba(22,101,52,0.85)','rgba(30,58,95,0.85)','rgba(76,29,149,0.85)','#C8860A','#990033','#4A9B8E','#6E6E73','#AEAEB2'];
   const catTotals={};
   for(const m of months){
     for(const exp of(m.expense_rows||[])){
