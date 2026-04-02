@@ -449,7 +449,7 @@ async function renderPLTab(){
           </div>
 
           <!-- Unit Economics strip — 4 cards with totals + per unit -->
-          <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;margin-bottom:16px;">
+          <div style="border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;margin-bottom:16px;background:transparent;">
             <div style="font-size:11px;font-weight:600;color:${DARK};margin-bottom:12px;">Unit Economics YTD — Revenue · Cost · Margin per unit <span style="font-size:9px;color:${LIGHT};font-weight:400;">VAS cost = Direct Labour · Sea/Air cost = Freight+Duties · Overhead = all other expenses</span></div>
             <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;" id="fin-ue-strip">
               ${apoUnitCard('⚙️ VAS', ytd.vas_rev_pu, ytd.vas_cost_pu, ytd.rev_vas, ytd.exp_labour, ytd.units_vas)}
@@ -722,33 +722,35 @@ async function renderPLTab(){
 
 function apoUnitCard(label, revPu, costPu, totalRev, totalCost, totalUnits){
   const marginPu = revPu!==null&&costPu!==null ? Math.round((revPu-costPu)*100)/100 : null;
-  const mColor = marginPu===null ? LIGHT : marginPu>0 ? GREEN : BRAND;
+  const mColor = marginPu===null ? LIGHT : marginPu>0 ? '#166534' : BRAND;
   const unitsStr = totalUnits ? Number(totalUnits).toLocaleString()+'u' : '—';
-  const channelColor = label.includes('VAS')?'#990033':label.includes('Sea')?'#a76e6e':label.includes('Air')?'#FED000':'#606a9f';
-  return`<div style="background:${BG};border-radius:10px;padding:12px 14px;border-top:3px solid ${channelColor};">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+  const channelColor = label.includes('VAS')?'#990033':label.includes('Sea')?'#a76e6e':label.includes('Air')?'#b8960c':'#606a9f';
+  const COST_COLOR = '#4a4a6a'; // dark slate — neutral, not alarming
+  return`<div style="background:#fff;border-radius:10px;padding:12px 14px;border:0.5px solid rgba(0,0,0,0.07);border-top:3px solid ${channelColor};">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
       <div style="font-size:11px;font-weight:600;color:${DARK};">${label}</div>
-      <div style="font-size:9px;color:${LIGHT};">${unitsStr}</div>
+      <div style="font-size:9px;background:rgba(0,0,0,0.04);padding:2px 7px;border-radius:8px;color:${MID};">${unitsStr}</div>
     </div>
     <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:3px;">
-      <span style="color:${LIGHT};">Total Rev</span>
-      <span style="font-weight:600;color:${GREEN};">${totalRev!==null&&totalRev!==undefined?fmtUSD(totalRev):'—'}</span>
+      <span style="color:${LIGHT};">Revenue</span>
+      <span style="font-weight:600;color:#166534;">${totalRev!==null&&totalRev!==undefined?fmtUSD(totalRev):'—'}</span>
     </div>
     <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:3px;">
-      <span style="color:${LIGHT};">Total Cost</span>
-      <span style="font-weight:600;color:${AMBER};">${totalCost!==null&&totalCost!==undefined?fmtUSD(totalCost):'—'}</span>
+      <span style="color:${LIGHT};">Cost</span>
+      <span style="font-weight:600;color:${COST_COLOR};">${totalCost!==null&&totalCost!==undefined?fmtUSD(totalCost):'—'}</span>
     </div>
-    <div style="height:0.5px;background:rgba(0,0,0,0.07);margin:6px 0;"></div>
+    <div style="height:0.5px;background:rgba(0,0,0,0.06);margin:7px 0;"></div>
     <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:3px;">
       <span style="color:${LIGHT};">Rev/unit</span>
-      <span style="font-weight:600;color:${GREEN};">${revPu!==null?'$'+Number(revPu).toFixed(3):'—'}</span>
+      <span style="font-weight:600;color:#166534;">${revPu!==null?'$'+Number(revPu).toFixed(3):'—'}</span>
     </div>
     <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:3px;">
       <span style="color:${LIGHT};">Cost/unit</span>
-      <span style="font-weight:600;color:${AMBER};">${costPu!==null?'$'+Number(costPu).toFixed(3):'—'}</span>
+      <span style="font-weight:600;color:${COST_COLOR};">${costPu!==null?'$'+Number(costPu).toFixed(3):'—'}</span>
     </div>
+    <div style="height:0.5px;background:rgba(0,0,0,0.06);margin:7px 0;"></div>
     <div style="display:flex;justify-content:space-between;font-size:10px;">
-      <span style="color:${LIGHT};">Margin/unit</span>
+      <span style="color:${LIGHT};font-weight:500;">Margin/unit</span>
       <span style="font-weight:700;color:${mColor};">${marginPu!==null?'$'+Number(marginPu).toFixed(3):'—'}</span>
     </div>
   </div>`;
@@ -765,17 +767,18 @@ function renderPLCharts(months, mode='rev'){
   const labels=months.map(m=>new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short'}));
 
   if(mode==='rev'){
-    // Revenue by channel stacked + expenses line + cash flow line
+    // Line chart per channel — cleaner for sparse/trend data
     let cf=0;
     const cfData=months.map(m=>{if(m.revenue>0||m.expenses>0)cf+=m.net;return cf||null;});
-    window._fcR=new Chart(rE,{type:'bar',data:{labels,datasets:[
-      {label:'VAS Revenue',  data:months.map(m=>m.rev_vas||0), backgroundColor:'#990033',borderRadius:4,stack:'rev'},
-      {label:'Sea Revenue',  data:months.map(m=>m.rev_sea||0), backgroundColor:'#a76e6e',borderRadius:4,stack:'rev'},
-      {label:'Air Revenue',  data:months.map(m=>m.rev_air||0), backgroundColor:'#FED000',borderRadius:4,stack:'rev'},
-      {label:'Expenses',     data:months.map(m=>m.expenses||0),backgroundColor:'rgba(96,106,159,0.45)',borderRadius:4,stack:'exp'},
-      {label:'Cash Flow',    data:cfData,type:'line',borderColor:'#606a9f',backgroundColor:'rgba(96,106,159,0.06)',borderWidth:2,pointRadius:3,fill:true,tension:0.35,yAxisID:'y',spanGaps:false},
+    const nullZero=arr=>arr.map(v=>v>0?v:null); // show gaps where no data
+    window._fcR=new Chart(rE,{type:'line',data:{labels,datasets:[
+      {label:'VAS',    data:nullZero(months.map(m=>m.rev_vas)), borderColor:'#990033',backgroundColor:'rgba(153,0,51,0.06)',borderWidth:2,pointRadius:4,pointBackgroundColor:'#fff',pointBorderColor:'#990033',pointBorderWidth:2,fill:true,tension:0.35,spanGaps:false},
+      {label:'Sea',    data:nullZero(months.map(m=>m.rev_sea)), borderColor:'#a76e6e',backgroundColor:'rgba(167,110,110,0.04)',borderWidth:2,pointRadius:4,pointBackgroundColor:'#fff',pointBorderColor:'#a76e6e',pointBorderWidth:2,fill:false,tension:0.35,spanGaps:false},
+      {label:'Air',    data:nullZero(months.map(m=>m.rev_air)), borderColor:'#b8960c',backgroundColor:'rgba(184,150,12,0.04)',borderWidth:2,pointRadius:4,pointBackgroundColor:'#fff',pointBorderColor:'#b8960c',pointBorderWidth:2,fill:false,tension:0.35,spanGaps:false},
+      {label:'Expenses',data:months.map(m=>m.expenses||null),  borderColor:'#606a9f',backgroundColor:'rgba(96,106,159,0.05)',borderWidth:1.5,borderDash:[4,3],pointRadius:3,pointBackgroundColor:'#fff',pointBorderColor:'#606a9f',pointBorderWidth:1.5,fill:false,tension:0.2,spanGaps:false},
+      {label:'Net Cash',data:cfData,                           borderColor:'rgba(0,0,0,0.20)',backgroundColor:'rgba(0,0,0,0.02)',borderWidth:1,borderDash:[2,4],pointRadius:2,fill:false,tension:0.35,spanGaps:false},
     ]},options:{responsive:true,maintainAspectRatio:false,
-      plugins:{legend:{position:'top',align:'end',labels:{font:{size:9},boxWidth:8}}},
+      plugins:{legend:{position:'top',align:'end',labels:{font:{size:9},boxWidth:10,usePointStyle:true,pointStyleWidth:10}}},
       scales:{x:{ticks:{font:{size:9}},grid:{display:false}},
               y:{ticks:{font:{size:9},callback:v=>'$'+v.toLocaleString()},grid:{color:'rgba(0,0,0,0.04)'},beginAtZero:true}}}});
   } else {
