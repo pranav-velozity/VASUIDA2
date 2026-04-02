@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Finance Module v8 ── */
+/* ── VelOzity Pinpoint — Finance Module v2 ── */
 ;(function(){
 'use strict';
 
@@ -635,13 +635,14 @@ async function renderPLTab(){
               </div>
             </div>
             <div style="overflow-x:auto;">
-            <table class="fin-tbl" style="min-width:860px;">
+            <table class="fin-tbl" style="min-width:700px;">
               <thead><tr>
-                <th>Month</th>
-                <th>VAS Revenue</th><th>/unit</th>
-                <th>Sea Revenue</th><th>/unit</th>
-                <th>Air Revenue</th><th>/unit</th>
-                <th>Expenses</th><th>Net</th><th>Margin</th><th>Cash Flow</th><th></th>
+                <th style="width:130px;">Month</th>
+                <th>Revenue</th>
+                <th>Expenses</th>
+                <th style="text-align:right;">Net</th>
+                <th style="text-align:right;">Cash Flow</th>
+                <th style="text-align:right;"></th>
               </tr></thead>
               <tbody id="fin-pl-tbody"></tbody>
             </table>
@@ -718,37 +719,76 @@ async function renderPLTab(){
     };
 
     // ── Monthly rows ──
+    // ── Modern accordion months ──
     const tbody=el('fin-pl-tbody');
     let runningCF=0;
+    const maxRev=Math.max(...months.map(m=>m.revenue||0),1);
+    const maxExp=Math.max(...months.map(m=>m.expenses||0),1);
     if(tbody)tbody.innerHTML=months.map(m=>{
       const hasData=m.revenue>0||m.expenses>0;
-      const mn=new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'long',year:'numeric'});
+      const mn=new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'numeric'});
       if(hasData)runningCF+=m.net;
-      const cfColor=runningCF>0?GREEN:BRAND;
-      const fpu=(v)=>v!==null&&v!==undefined?`<span style="color:#D97706;font-size:10px;font-weight:600;">$${Number(v).toFixed(2)}</span>`:'<span style="color:#AEAEB2;font-size:10px;">—</span>';
-      return`<tr>
-        <td style="font-weight:500;white-space:nowrap;">
-          <span style="display:inline-flex;align-items:center;gap:6px;">
-            <button onclick="window._finToggleMonth('${m.month_key}')" style="width:22px;height:22px;border-radius:5px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};cursor:pointer;font-size:10px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-family:inherit;" id="fin-exp-icon-${m.month_key}">▶</button>
-            ${mn}
-          </span>
+      const cfColor=runningCF>=0?'#166534':'#990033';
+      const mColor=m.margin_pct>20?'#166534':m.margin_pct>0?'#606a9f':'#990033';
+      const netColor=m.net>0?'#166534':m.net<0?'#990033':'#8e8e93';
+      const revBar=Math.round(Math.min(100,m.revenue/maxRev*100));
+      const expBar=Math.round(Math.min(100,m.expenses/maxExp*100));
+      if(!hasData)return`<tr><td colspan="2" style="padding:10px 14px;color:#AEAEB2;font-size:11px;">${mn}</td>
+        <td colspan="4" style="padding:10px 14px;"><span style="font-size:10px;color:#AEAEB2;">No activity</span></td>
+        <td style="text-align:right;padding:10px 14px;">
+          <button class="fin-btn fin-btn-ghost" style="font-size:10px;padding:3px 10px;" onclick="window._finAddExpense('${m.month_key}')">+ Expense</button>
+        </td></tr>`;
+      return`
+      <tr style="border-bottom:1px solid rgba(0,0,0,0.04);">
+        <!-- Month + expand -->
+        <td style="padding:14px 14px;white-space:nowrap;min-width:120px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <button onclick="window._finToggleMonth('${m.month_key}')" id="fin-exp-icon-${m.month_key}"
+              style="width:20px;height:20px;border-radius:6px;border:1px solid rgba(0,0,0,0.10);background:#f5f5f7;cursor:pointer;font-size:9px;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-family:inherit;transition:all .15s;">▶</button>
+            <div>
+              <div style="font-size:12px;font-weight:600;color:#1C1C1E;">${mn}</div>
+              <div style="font-size:9px;color:#8e8e93;margin-top:1px;">${(m.units_vas||0).toLocaleString()} units</div>
+            </div>
+          </div>
         </td>
-        <td style="color:${m.rev_vas>0?GREEN:LIGHT};">${m.rev_vas>0?fmtUSD(m.rev_vas):'—'}</td>
-        <td>${fpu(m.vas_rev_pu)}</td>
-        <td style="color:${m.rev_sea>0?GREEN:LIGHT};">${m.rev_sea>0?fmtUSD(m.rev_sea):'—'}</td>
-        <td>${fpu(m.sea_rev_pu)}</td>
-        <td style="color:${m.rev_air>0?GREEN:LIGHT};">${m.rev_air>0?fmtUSD(m.rev_air):'—'}</td>
-        <td>${fpu(m.air_rev_pu)}</td>
-        <td style="color:${m.expenses>0?AMBER:LIGHT};">${m.expenses>0?fmtUSD(m.expenses):'—'}</td>
-        <td style="font-weight:600;color:${m.net>0?GREEN:m.net<0?BRAND:LIGHT};">${hasData?fmtUSD(m.net):'—'}</td>
-        <td>${hasData?`<span style="font-weight:600;color:${m.margin_pct>20?GREEN:m.margin_pct>0?AMBER:BRAND};">${m.margin_pct}%</span>`:'—'}</td>
-        <td style="font-weight:600;color:${cfColor};">${hasData?fmtUSD(runningCF):'—'}</td>
-        <td style="text-align:right;white-space:nowrap;">
-          <button class="fin-btn fin-btn-ghost" style="font-size:10px;padding:3px 10px;" onclick="event.stopPropagation();window._finAddExpense('${m.month_key}')">+ Expense</button>
+        <!-- Revenue bar -->
+        <td style="padding:14px 10px;min-width:160px;">
+          <div style="font-size:11px;font-weight:600;color:#166534;margin-bottom:4px;">${fmtUSD(m.revenue)}</div>
+          <div style="height:5px;background:rgba(0,0,0,0.06);border-radius:3px;overflow:hidden;">
+            <div style="height:100%;width:${revBar}%;background:linear-gradient(90deg,#990033,#a76e6e);border-radius:3px;"></div>
+          </div>
+          <div style="font-size:9px;color:#8e8e93;margin-top:3px;">
+            ${m.rev_vas>0?`<span style="color:#990033;">VAS ${fmtUSD(m.rev_vas)}</span>`:''}
+            ${m.rev_sea>0?` · <span style="color:#a76e6e;">Sea ${fmtUSD(m.rev_sea)}</span>`:''}
+            ${m.rev_air>0?` · <span style="color:#b8960c;">Air ${fmtUSD(m.rev_air)}</span>`:''}
+          </div>
+        </td>
+        <!-- Expenses bar -->
+        <td style="padding:14px 10px;min-width:140px;">
+          <div style="font-size:11px;font-weight:600;color:#606a9f;margin-bottom:4px;">${fmtUSD(m.expenses)}</div>
+          <div style="height:5px;background:rgba(0,0,0,0.06);border-radius:3px;overflow:hidden;">
+            <div style="height:100%;width:${expBar}%;background:linear-gradient(90deg,#606a9f,#a76e6e);border-radius:3px;"></div>
+          </div>
+        </td>
+        <!-- Net -->
+        <td style="padding:14px 10px;text-align:right;min-width:100px;">
+          <div style="font-size:12px;font-weight:700;color:${netColor};">${fmtUSD(m.net)}</div>
+          <div style="font-size:9px;font-weight:600;color:${mColor};margin-top:2px;">${m.margin_pct}% margin</div>
+        </td>
+        <!-- Cash flow -->
+        <td style="padding:14px 10px;text-align:right;min-width:100px;">
+          <div style="font-size:12px;font-weight:700;color:${cfColor};">${fmtUSD(runningCF)}</div>
+          <div style="font-size:9px;color:#8e8e93;margin-top:2px;">cumulative</div>
+        </td>
+        <!-- Actions -->
+        <td style="padding:14px 14px;text-align:right;">
+          <button class="fin-btn fin-btn-ghost" style="font-size:10px;padding:4px 10px;" onclick="window._finAddExpense('${m.month_key}')">+ Expense</button>
         </td>
       </tr>
-      <tr id="fin-pl-expand-${m.month_key}" style="display:none;background:${BG};">
-        <td colspan="12" style="padding:0;"><div id="fin-pl-ec-${m.month_key}" style="padding:14px 16px;"></div></td>
+      <tr id="fin-pl-expand-${m.month_key}" style="display:none;">
+        <td colspan="6" style="padding:0;background:rgba(0,0,0,0.015);">
+          <div id="fin-pl-ec-${m.month_key}" style="padding:16px 20px;border-top:1px solid rgba(0,0,0,0.05);"></div>
+        </td>
       </tr>`;
     }).join('');
 
@@ -929,187 +969,111 @@ function loadChartJS(cb){if(window.Chart){cb();return;}const s=document.createEl
 function renderPLCharts(months, mode='rev'){
   const wrap=el('fin-heatmap');
   if(!wrap)return;
-
-  // Destroy old Chart.js instances if any
   if(window._fcR){try{window._fcR.destroy();}catch(_){}window._fcR=null;}
   if(window._fcE){try{window._fcE.destroy();}catch(_){}window._fcE=null;}
 
-  const activeMonths=months.filter(m=>m.revenue>0||m.expenses>0||m.units_vas>0);
-  if(!activeMonths.length){wrap.innerHTML='<div style="color:#AEAEB2;font-size:11px;padding:20px 0;text-align:center;">No data for this period</div>';return;}
+  const active=months.filter(m=>m.revenue>0||m.expenses>0||m.units_vas>0);
+  if(!active.length){wrap.innerHTML='<div style="color:#AEAEB2;font-size:12px;padding:30px;text-align:center;">No data for this period</div>';return;}
 
-  // ── Color scale helpers ──
-  function revScale(v,max){
-    if(!v||!max)return'rgba(0,0,0,0.04)';
-    const t=Math.min(v/max,1);
-    // light pink → deep brand red
-    const r=Math.round(255-(255-153)*t);
-    const g=Math.round(255-(255-0)*t);
-    const b=Math.round(255-(255-51)*t);
-    return`rgb(${r},${g},${b})`;
-  }
-  function expScale(v,max){
-    if(!v||!max)return'rgba(0,0,0,0.04)';
-    const t=Math.min(v/max,1);
-    // light lavender → deep slate
-    const r=Math.round(240-(240-96)*t);
-    const g=Math.round(240-(240-106)*t);
-    const b=Math.round(255-(255-159)*t);
-    return`rgb(${r},${g},${b})`;
-  }
-  function unitScale(v,max){
-    if(!v||!max)return'rgba(0,0,0,0.04)';
-    const t=Math.min(v/max,1);
-    // light sage → deep forest
-    const r=Math.round(240-(240-22)*t);
-    const g=Math.round(255-(255-101)*t);
-    const b=Math.round(240-(240-52)*t);
-    return`rgb(${r},${g},${b})`;
-  }
-  function textColor(bg,t){return t>0.55?'#fff':'#1C1C1E';}
-  function cell(val,bg,t,sub){
-    const tc=textColor(bg,t);
-    return`<td style="padding:8px 10px;background:${bg};border-radius:6px;text-align:right;min-width:90px;position:relative;">
-      <div style="font-size:11px;font-weight:600;color:${tc};">${val}</div>
-      ${sub?`<div style="font-size:9px;color:${tc};opacity:0.75;margin-top:1px;">${sub}</div>`:''}
-    </td>`;
-  }
-  function emptyCell(){return`<td style="padding:8px 10px;text-align:right;min-width:90px;"><span style="color:#AEAEB2;font-size:10px;">—</span></td>`;}
+  const labels=active.map(m=>new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'2-digit'}));
+  const nullZ=arr=>arr.map(v=>(v&&v>0)?v:null);
 
   if(mode==='rev'){
-    const maxVas=Math.max(...activeMonths.map(m=>m.rev_vas||0),1);
-    const maxSea=Math.max(...activeMonths.map(m=>m.rev_sea||0),1);
-    const maxAir=Math.max(...activeMonths.map(m=>m.rev_air||0),1);
-    const maxExp=Math.max(...activeMonths.map(m=>m.expenses||0),1);
-    const maxNet=Math.max(...activeMonths.map(m=>Math.abs(m.net)||0),1);
-
+    // ── Three-panel chart: stacked area + net margin sparkline + units bar ──
     wrap.innerHTML=`
-      <table style="border-collapse:separate;border-spacing:3px;width:100%;font-size:10px;">
-        <thead>
-          <tr>
-            <th style="text-align:left;padding:4px 8px;font-size:10px;font-weight:600;color:#6E6E73;white-space:nowrap;">Month</th>
-            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#990033;">VAS Revenue</th>
-            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#a76e6e;">Sea Revenue</th>
-            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#b8960c;">Air Revenue</th>
-            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#606a9f;">Expenses</th>
-            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#1C1C1E;">Net</th>
-            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#1C1C1E;">Margin</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${activeMonths.map(m=>{
-            const mn=new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'2-digit'});
-            const vasT=(m.rev_vas||0)/maxVas, seaT=(m.rev_sea||0)/maxSea, airT=(m.rev_air||0)/maxAir;
-            const expT=(m.expenses||0)/maxExp, netT=Math.abs(m.net||0)/maxNet;
-            const netBg=m.net>0?`rgb(${Math.round(240-(240-22)*netT)},${Math.round(255-(255-101)*netT)},${Math.round(240-(240-52)*netT)})`:m.net<0?`rgb(${Math.round(255-(255-153)*netT)},${Math.round(240-(240-0)*netT)},${Math.round(240-(240-51)*netT)})`:'rgba(0,0,0,0.04)';
-            return`<tr>
-              <td style="padding:4px 8px;font-size:11px;font-weight:500;color:#1C1C1E;white-space:nowrap;">${mn}</td>
-              ${m.rev_vas>0  ? cell(fmtUSD(m.rev_vas),  revScale(m.rev_vas,maxVas),  vasT) : emptyCell()}
-              ${m.rev_sea>0  ? cell(fmtUSD(m.rev_sea),  revScale(m.rev_sea,maxSea),  seaT) : emptyCell()}
-              ${m.rev_air>0  ? cell(fmtUSD(m.rev_air),  revScale(m.rev_air,maxAir),  airT) : emptyCell()}
-              ${m.expenses>0 ? cell(fmtUSD(m.expenses), expScale(m.expenses,maxExp), expT) : emptyCell()}
-              ${cell(fmtUSD(m.net), netBg, netT, m.margin_pct+'%')}
-              <td style="padding:4px 8px;text-align:right;">
-                <span style="font-size:11px;font-weight:600;color:${m.margin_pct>20?'#166534':m.margin_pct>0?'#606a9f':'#990033'};">${m.margin_pct}%</span>
-              </td>
-            </tr>`;
-          }).join('')}
-        </tbody>
-      </table>
-      <div style="display:flex;align-items:center;gap:14px;margin-top:10px;flex-wrap:wrap;">
-        <span style="font-size:9px;color:#AEAEB2;">Colour intensity = relative size within column</span>
-        ${['VAS','Sea','Air'].map((ch,i)=>{
-          const cs=['#990033','#a76e6e','#b8960c'];
-          return`<span style="display:inline-flex;align-items:center;gap:4px;font-size:9px;color:#6E6E73;">
-            <span style="width:10px;height:10px;border-radius:2px;background:${cs[i]};display:inline-block;opacity:0.7;"></span>${ch}
-          </span>`;
-        }).join('')}
-        <span style="display:inline-flex;align-items:center;gap:4px;font-size:9px;color:#6E6E73;"><span style="width:10px;height:10px;border-radius:2px;background:#606a9f;display:inline-block;opacity:0.7;"></span>Expenses</span>
-        <span style="display:inline-flex;align-items:center;gap:4px;font-size:9px;color:#6E6E73;"><span style="width:10px;height:10px;border-radius:2px;background:#166534;display:inline-block;opacity:0.7;"></span>+Net</span>
-        <span style="display:inline-flex;align-items:center;gap:4px;font-size:9px;color:#6E6E73;"><span style="width:10px;height:10px;border-radius:2px;background:#990033;display:inline-block;opacity:0.7;"></span>-Net</span>
+      <div style="display:grid;grid-template-columns:1fr;gap:0;">
+        <!-- Revenue channels area chart -->
+        <div style="position:relative;padding-bottom:12px;border-bottom:1px solid rgba(0,0,0,0.05);">
+          <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:8px;">Channel Revenue</div>
+          <div style="height:140px;position:relative;"><canvas id="fin-ch-rev"></canvas></div>
+        </div>
+        <!-- Net margin + expenses panel -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;padding-top:14px;padding-bottom:12px;border-bottom:1px solid rgba(0,0,0,0.05);">
+          <div>
+            <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:8px;">Net &amp; Margin %</div>
+            <div style="height:90px;"><canvas id="fin-ch-net"></canvas></div>
+          </div>
+          <div>
+            <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:8px;">Expense Breakdown</div>
+            <div style="height:90px;"><canvas id="fin-ch-exp"></canvas></div>
+          </div>
+        </div>
+        <!-- Legend -->
+        <div style="display:flex;align-items:center;gap:14px;padding-top:10px;flex-wrap:wrap;">
+          ${[['VAS','#990033'],['Sea','#a76e6e'],['Air','#b8960c'],['Expenses','#606a9f'],['Net','#166534']].map(([l,c])=>
+            `<span style="display:inline-flex;align-items:center;gap:5px;font-size:9px;color:#6E6E73;">
+              <span style="width:16px;height:3px;background:${c};border-radius:2px;display:inline-block;"></span>${l}
+            </span>`).join('')}
+        </div>
       </div>`;
-  } else {
-    // Per-unit heatmap
-    const maxVRev=Math.max(...activeMonths.map(m=>m.vas_rev_pu||0),0.01);
-    const maxVCost=Math.max(...activeMonths.map(m=>m.vas_cost_pu||0),0.01);
-    const maxSRev=Math.max(...activeMonths.map(m=>m.sea_rev_pu||0),0.01);
-    const maxARev=Math.max(...activeMonths.map(m=>m.air_rev_pu||0),0.01);
-    const toFixed3=(v)=>v!==null&&v!==undefined?'$'+Number(v).toFixed(3):'—';
 
+    // Revenue area chart
+    const ctxR=document.getElementById('fin-ch-rev');
+    if(ctxR&&window.Chart){
+      window._fcR=new window.Chart(ctxR,{type:'line',data:{labels,datasets:[
+        {label:'VAS',  data:nullZ(active.map(m=>m.rev_vas)),  borderColor:'#990033',backgroundColor:'rgba(153,0,51,0.12)',borderWidth:2,fill:true,tension:0.4,pointRadius:3,pointBackgroundColor:'#fff',pointBorderColor:'#990033',pointBorderWidth:1.5,spanGaps:false},
+        {label:'Sea',  data:nullZ(active.map(m=>m.rev_sea)),  borderColor:'#a76e6e',backgroundColor:'rgba(167,110,110,0.08)',borderWidth:2,fill:true,tension:0.4,pointRadius:3,pointBackgroundColor:'#fff',pointBorderColor:'#a76e6e',pointBorderWidth:1.5,spanGaps:false},
+        {label:'Air',  data:nullZ(active.map(m=>m.rev_air)),  borderColor:'#b8960c',backgroundColor:'rgba(184,150,12,0.08)',borderWidth:2,fill:true,tension:0.4,pointRadius:3,pointBackgroundColor:'#fff',pointBorderColor:'#b8960c',pointBorderWidth:1.5,spanGaps:false},
+      ]},options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false,callbacks:{label:ctx=>`${ctx.dataset.label}: $${(ctx.parsed.y||0).toLocaleString()}`}}},
+        scales:{x:{ticks:{font:{size:9},color:'#8e8e93'},grid:{display:false},border:{display:false}},
+                y:{ticks:{font:{size:9},color:'#8e8e93',callback:v=>'$'+v.toLocaleString()},grid:{color:'rgba(0,0,0,0.04)'},border:{display:false}}}}});
+    }
+
+    // Net margin combo (bar=net $, line=margin %)
+    const ctxN=document.getElementById('fin-ch-net');
+    if(ctxN&&window.Chart){
+      window._fcN=new window.Chart(ctxN,{type:'bar',data:{labels,datasets:[
+        {label:'Net',data:active.map(m=>m.net||0),backgroundColor:active.map(m=>m.net>0?'rgba(22,101,52,0.7)':'rgba(153,0,51,0.55)'),borderRadius:3,order:2},
+        {label:'Margin%',data:active.map(m=>m.margin_pct||0),type:'line',borderColor:'#606a9f',borderWidth:2,pointRadius:2,fill:false,tension:0.4,yAxisID:'y2',order:1},
+      ]},options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false}},
+        scales:{x:{ticks:{font:{size:8},color:'#8e8e93'},grid:{display:false},border:{display:false}},
+                y:{ticks:{font:{size:8},color:'#8e8e93',callback:v=>'$'+v.toLocaleString()},grid:{color:'rgba(0,0,0,0.04)'},border:{display:false}},
+                y2:{position:'right',ticks:{font:{size:8},color:'#606a9f',callback:v=>v+'%'},grid:{display:false},border:{display:false}}}}});
+    }
+
+    // Expense stacked bar
+    const ctxE=document.getElementById('fin-ch-exp');
+    if(ctxE&&window.Chart){
+      window._fcE=new window.Chart(ctxE,{type:'bar',data:{labels,datasets:[
+        {label:'Labour',   data:active.map(m=>m.exp_labour||0),   backgroundColor:'rgba(153,0,51,0.75)',borderRadius:2,stack:'s'},
+        {label:'Freight',  data:active.map(m=>m.exp_freight||0),  backgroundColor:'rgba(96,106,159,0.75)',borderRadius:2,stack:'s'},
+        {label:'Overhead', data:active.map(m=>m.exp_overhead||0), backgroundColor:'rgba(167,110,110,0.60)',borderRadius:2,stack:'s'},
+      ]},options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false}},
+        scales:{x:{ticks:{font:{size:8},color:'#8e8e93'},grid:{display:false},border:{display:false}},
+                y:{ticks:{font:{size:8},color:'#8e8e93',callback:v=>'$'+v.toLocaleString()},grid:{color:'rgba(0,0,0,0.04)'},border:{display:false}}}}});
+    }
+
+  } else {
+    // ── Per Unit view: grouped bar per channel ──
     wrap.innerHTML=`
-      <table style="border-collapse:separate;border-spacing:3px;width:100%;font-size:10px;">
-        <thead>
-          <tr>
-            <th style="text-align:left;padding:4px 8px;font-size:10px;font-weight:600;color:#6E6E73;">Month</th>
-            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#990033;">VAS Rev/u</th>
-            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#606a9f;">VAS Cost/u</th>
-            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#a76e6e;">Sea Rev/u</th>
-            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#b8960c;">Air Rev/u</th>
-            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#1C1C1E;">VAS Margin/u</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${activeMonths.map(m=>{
-            const mn=new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'2-digit'});
-            const mpu=m.vas_rev_pu!==null&&m.vas_cost_pu!==null?Math.round((m.vas_rev_pu-m.vas_cost_pu)*1000)/1000:null;
-            const mpuBg=mpu!==null?(mpu>0?unitScale(mpu,maxVRev):revScale(Math.abs(mpu),maxVCost)):'rgba(0,0,0,0.04)';
-            return`<tr>
-              <td style="padding:4px 8px;font-size:11px;font-weight:500;color:#1C1C1E;white-space:nowrap;">${mn}</td>
-              ${m.vas_rev_pu!==null ? cell(toFixed3(m.vas_rev_pu), revScale(m.vas_rev_pu,maxVRev),   m.vas_rev_pu/maxVRev)   : emptyCell()}
-              ${m.vas_cost_pu!==null? cell(toFixed3(m.vas_cost_pu),expScale(m.vas_cost_pu,maxVCost), m.vas_cost_pu/maxVCost) : emptyCell()}
-              ${m.sea_rev_pu!==null ? cell(toFixed3(m.sea_rev_pu), revScale(m.sea_rev_pu,maxSRev),   m.sea_rev_pu/maxSRev)   : emptyCell()}
-              ${m.air_rev_pu!==null ? cell(toFixed3(m.air_rev_pu), revScale(m.air_rev_pu,maxARev),   m.air_rev_pu/maxARev)   : emptyCell()}
-              ${mpu!==null ? cell(toFixed3(mpu), mpuBg, Math.abs(mpu)/maxVRev) : emptyCell()}
-            </tr>`;
-          }).join('')}
-        </tbody>
-      </table>
-      <div style="font-size:9px;color:#AEAEB2;margin-top:10px;">Colour intensity = relative size within column · Red = high/negative · Green = high/positive · Slate = cost</div>`;
+      <div>
+        <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:10px;">Revenue per Unit by Channel</div>
+        <div style="height:160px;"><canvas id="fin-ch-pu"></canvas></div>
+        <div style="display:flex;align-items:center;gap:14px;margin-top:10px;flex-wrap:wrap;">
+          ${[['VAS Rev/u','#990033'],['VAS Cost/u','rgba(153,0,51,0.3)'],['Sea Rev/u','#a76e6e'],['Air Rev/u','#b8960c']].map(([l,c])=>
+            `<span style="display:inline-flex;align-items:center;gap:5px;font-size:9px;color:#6E6E73;">
+              <span style="width:16px;height:3px;background:${c};border-radius:2px;display:inline-block;"></span>${l}
+            </span>`).join('')}
+        </div>
+      </div>`;
+    const ctxP=document.getElementById('fin-ch-pu');
+    if(ctxP&&window.Chart){
+      window._fcR=new window.Chart(ctxP,{type:'bar',data:{labels,datasets:[
+        {label:'VAS Rev/u', data:active.map(m=>m.vas_rev_pu),  backgroundColor:'#990033',borderRadius:4,barPercentage:0.6},
+        {label:'VAS Cost/u',data:active.map(m=>m.vas_cost_pu), backgroundColor:'rgba(153,0,51,0.3)',borderRadius:4,barPercentage:0.6},
+        {label:'Sea Rev/u', data:active.map(m=>m.sea_rev_pu),  backgroundColor:'#a76e6e',borderRadius:4,barPercentage:0.6},
+        {label:'Air Rev/u', data:active.map(m=>m.air_rev_pu),  backgroundColor:'#b8960c',borderRadius:4,barPercentage:0.6},
+      ]},options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false,callbacks:{label:ctx=>`${ctx.dataset.label}: $${Number(ctx.parsed.y||0).toFixed(3)}/u`}}},
+        scales:{x:{ticks:{font:{size:9},color:'#8e8e93'},grid:{display:false},border:{display:false}},
+                y:{ticks:{font:{size:9},color:'#8e8e93',callback:v=>'$'+Number(v).toFixed(3)},grid:{color:'rgba(0,0,0,0.04)'},border:{display:false}}}}});
+    }
   }
 }
 
-
-
-async function renderExpensesTab(){
-  const cont=el('fin-tab-expenses');if(!cont)return;
-  cont.innerHTML=`<div style="color:${LIGHT};font-size:12px;">Loading expenses…</div>`;
-  try{
-    const expenses=await api('/finance/expenses');_finState.expenses=expenses;
-    // Group by category for summary tiles
-    const catTotals={};
-    for(const e of expenses)catTotals[e.category]=(catTotals[e.category]||0)+parseFloat(e.amount||0);
-    const grandTotal=expenses.reduce((s,e)=>s+parseFloat(e.amount||0),0);
-    cont.innerHTML=`
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-        <div style="font-size:16px;font-weight:700;color:${DARK};">Expenses</div>
-        <button class="fin-btn fin-btn-primary" onclick="window._finAddExpense()">+ Add Expense</button>
-      </div>
-      <!-- Category summary tiles -->
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:20px;">
-        <div class="fin-card"><div class="fin-label">Total YTD</div><div style="font-size:20px;font-weight:700;color:${DARK};">${fmtUSD(grandTotal)}</div><div style="font-size:10px;color:${LIGHT};">All categories</div></div>
-        ${EXPENSE_CATS.filter(cat=>catTotals[cat]>0).slice(0,3).map(cat=>`
-          <div class="fin-card" style="cursor:pointer;" onclick="window._finFilterExp('${cat}')">
-            <div class="fin-label">${cat}</div>
-            <div style="font-size:18px;font-weight:700;color:${DARK};">${fmtUSD(catTotals[cat])}</div>
-            <div style="font-size:10px;color:${LIGHT};">${Math.round(catTotals[cat]/grandTotal*100)}% of total</div>
-          </div>`).join('')}
-      </div>
-      <!-- Filter row -->
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;">
-        <button onclick="window._finFilterExp(null)" style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BRAND};color:#fff;cursor:pointer;font-family:inherit;">All</button>
-        ${EXPENSE_CATS.filter(cat=>catTotals[cat]>0).map(cat=>`<button onclick="window._finFilterExp('${cat}')" style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};color:${MID};cursor:pointer;font-family:inherit;">${cat}</button>`).join('')}
-      </div>
-      <!-- Expense list -->
-      <div class="fin-card">
-        <div id="fin-exp-list"></div>
-      </div>
-    `;
-    renderExpList(expenses);
-    window._finFilterExp=async function(cat){
-      const filtered=cat?await api(`/finance/expenses?category=${encodeURIComponent(cat)}`):expenses;
-      renderExpList(filtered);
-    };
-  }catch(e){cont.innerHTML=`<div style="color:${BRAND};padding:20px;">Failed to load expenses: ${esc(e.message)}</div>`;}
-}
 
 
 function renderExpList(exps){
