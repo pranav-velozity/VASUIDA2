@@ -1,1168 +1,7741 @@
-/* ── VelOzity Pinpoint — Finance Module v2 ── */
-;(function(){
-'use strict';
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <!-- ⬇️ Set to your Render API base (no trailing slash) -->
+  <meta name="api-base" content="https://vasuida1.onrender.com"/>
+<meta name="business-tz" content="Asia/Shanghai"/>
+  <title>VelOzity Pinpoint — Every Unit. Every Step.</title>
+<link href="https://fonts.googleapis.com/css2?family=ADLaM+Display&display=swap" rel="stylesheet"/>
 
-const BRAND='#990033',DARK='#1C1C1E',MID='#6E6E73',LIGHT='#AEAEB2';
-const BG='#F5F5F7',GREEN='#34C759',AMBER='#C8860A',BLUE='#3B82F6';
-const EXPENSE_CATS=['Freight Cost','Direct Labour','Labour','Software','Office','Duties & Customs','Storage','Marketing','Other'];
+<!-- Tailwind -->
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- SheetJS -->
+<script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
 
-let _apiBase='',_finState={tab:'invoices',week:'',invoices:[],expenses:[],pl:null,fxRates:{USD:1},fxLabel:'',currency:'USD'};
+/* OPS explicit palette classes (guaranteed) */
+.ops-bar-planned{ background: var(--ops-green) !important; }
+.ops-bar-applied{ background: var(--ops-yellow) !important; }
+.ops-bg-planned-soft{ background: rgba(var(--ops-green-rgb),0.20) !important; }
+.ops-bg-applied-soft{ background: rgba(var(--ops-yellow-rgb),0.20) !important; }
+.ops-dot-planned{ background: var(--ops-green) !important; }
+.ops-dot-applied{ background: var(--ops-yellow) !important; }
 
-async function getToken(){
-  if(window.Clerk?.session){try{return await window.Clerk.session.getToken();}catch{}}
-  return null;
-}
-async function api(path,opts={}){
-  const token=await getToken();
-  const headers={'Content-Type':'application/json',...(opts.headers||{})};
-  if(token)headers['Authorization']='Bearer '+token;
-  const r=await fetch(_apiBase+path,{...opts,headers});
-  if(!r.ok){const t=await r.text();throw new Error('HTTP '+r.status+' '+t);}
-  return r.json();
-}
 
-function fmtUSD(v){
-  const c=_finState.currency||'USD';
-  const rate=_finState.fxRates[c]||1;
-  const f=(parseFloat(v)||0)*(c==='USD'?1:rate);
-  return new Intl.NumberFormat('en-US',{style:'currency',currency:c,minimumFractionDigits:2}).format(f);
+/* OPS palette: force Tailwind green/emerald bars used in Supplier/Facility/PO progress to match ops palette */
+#ops-insights-content .ops-bar-planned,
+#ops-insights-content .ops-bar-planned,
+#ops-po-progress .ops-bar-planned,
+#ops-po-progress .ops-bar-planned{
+  background: var(--ops-green) !important;
 }
-function fmtDate(s){
-  if(!s)return'—';
-  try{return new Date(s.slice(0,10)+'T00:00:00Z').toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'});}catch{return s;}
+#ops-insights-content .ops-bg-planned-soft,
+#ops-insights-content .ops-bg-planned-soft,
+#ops-po-progress .ops-bg-planned-soft,
+#ops-po-progress .ops-bg-planned-soft{
+  background: rgba(var(--ops-green-rgb),0.20) !important;
 }
-function isoToday(){return new Date().toISOString().slice(0,10);}
-function addDays(iso,n){const d=new Date(iso.slice(0,10)+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);}
-function safeDate(s){return s?String(s).slice(0,10):'';}
-function getISOWeekNum(ws){
-  try{
-    const d=new Date(ws.slice(0,10)+'T00:00:00Z');
-    const tmp=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()));
-    const day=tmp.getUTCDay()||7;
-    tmp.setUTCDate(tmp.getUTCDate()+4-day);
-    const yearStart=new Date(Date.UTC(tmp.getUTCFullYear(),0,1));
-    return Math.ceil((((tmp-yearStart)/86400000)+1)/7);
-  }catch{return 0;}
-}
-function weekLabel(ws){
-  try{
-    const d=new Date(ws.slice(0,10)+'T00:00:00Z');
-    const wkNum=getISOWeekNum(ws);
-    const dateStr=d.toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'});
-    return`W${wkNum} · ${dateStr}`;
-  }catch{return ws;}
-}
-function statusBadge(status){
-  const cfg={draft:{bg:'rgba(174,174,178,0.15)',color:MID,label:'Draft'},sent:{bg:'rgba(50,130,246,0.12)',color:BLUE,label:'Sent'},paid:{bg:'rgba(52,199,89,0.12)',color:GREEN,label:'Paid'},overdue:{bg:'rgba(153,0,51,0.12)',color:BRAND,label:'Overdue'}}[status]||{bg:BG,color:MID,label:status};
-  return `<span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:10px;font-weight:600;background:${cfg.bg};color:${cfg.color};">${cfg.label}</span>`;
-}
-function typeIcon(t){return t==='VAS'?'⚙️':t==='SEA'?'🚢':'✈️';}
-function el(id){return document.getElementById(id);}
-function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-
-async function fetchFX(){
-  try{
-    const r=await fetch('https://open.er-api.com/v6/latest/USD');
-    if(r.ok){const d=await r.json();if(d.rates){_finState.fxRates={...d.rates,USD:1};_finState.fxLabel='Live rates';return;}}
-  }catch{}
-  try{const rows=await api('/finance/fx');for(const r of rows){if(r.from_curr==='USD')_finState.fxRates[r.to_curr]=r.rate;}}catch{}
-  _finState.fxRates.USD=1;_finState.fxLabel='Manual rates';
+#ops-insights-content .ops-bg-planned-soft,
+#ops-po-progress .ops-bg-planned-soft{
+  background: rgba(var(--ops-green-rgb),0.28) !important;
 }
 
-function getWeeks(){
-  const weeks=[],now=new Date();
-  // Use UTC day to avoid timezone shifting to Sunday
-  const dow=now.getUTCDay(); // 0=Sun,1=Mon...
-  const monday=new Date(now);
-  monday.setUTCDate(now.getUTCDate()-((dow+6)%7));
-  monday.setUTCHours(0,0,0,0);
-  for(let i=0;i<12;i++){
-    const d=new Date(monday);
-    d.setUTCDate(monday.getUTCDate()-i*7);
-    weeks.push(d.toISOString().slice(0,10));
-  }
-  return weeks;
+
+/* OPS chart palette overrides */
+#opsRoot .ops-bar-planned{ background: var(--ops-green) !important; }
+#opsRoot .ops-bg-planned-soft{ background: rgba(var(--ops-green-rgb),0.20) !important; }
+#opsRoot .ops-bg-planned-soft{ background: rgba(var(--ops-green-rgb),0.28) !important; }
+
+
+:root{
+  --ops-green:#D1E231; /* planned / in */
+  --ops-yellow:#F0D731; /* applied / ready */
+  --ops-green-rgb:209,226,49;
+  --ops-yellow-rgb:240,215,49;
 }
 
-function injectStyles(){
-  if(document.getElementById('fin-styles'))return;
-  const s=document.createElement('style');s.id='fin-styles';
-  s.textContent=`
-  /* ── Finance page — modern design system ── */
-  #page-finance{
-    background: linear-gradient(135deg,#fafafa 0%,#f4f4f6 100%);
-    min-height:100vh;
-  }
 
-  /* Sidebar */
-  .fin-sidebar{
-    width:196px;flex-shrink:0;
-    background:linear-gradient(180deg,#1a0010 0%,#2d0018 100%);
-    min-height:calc(100vh - 56px);
-    padding:24px 0 20px;
-  }
-  .fin-sidebar-title{
-    padding:0 20px 20px;
-    border-bottom:1px solid rgba(255,255,255,0.08);
-    margin-bottom:8px;
-  }
-  .fin-nav-item{
-    display:flex;align-items:center;gap:10px;
-    padding:10px 20px;font-size:12px;font-weight:500;
-    color:rgba(255,255,255,0.55);cursor:pointer;
-    transition:all .18s;border:none;
-    width:100%;box-sizing:border-box;background:none;
-    text-align:left;font-family:inherit;border-radius:0;
-    letter-spacing:0.01em;
-  }
-  .fin-nav-item .nav-icon{
-    width:28px;height:28px;border-radius:7px;
-    display:flex;align-items:center;justify-content:center;
-    background:rgba(255,255,255,0.08);flex-shrink:0;
-    transition:all .18s;
-  }
-  .fin-nav-item:hover{color:rgba(255,255,255,0.85);}
-  .fin-nav-item:hover .nav-icon{background:rgba(255,255,255,0.14);}
-  .fin-nav-item.active{color:#fff;}
-  .fin-nav-item.active .nav-icon{background:#990033;box-shadow:0 4px 12px rgba(153,0,51,0.4);}
-
-  /* Content area */
-  .fin-content{flex:1;padding:28px 32px;overflow-y:auto;min-width:0;}
-
-  /* Cards */
-  .fin-card{
-    background:#fff;
-    border:1px solid rgba(0,0,0,0.06);
-    border-radius:16px;
-    padding:20px 22px;
-    box-shadow:0 1px 4px rgba(0,0,0,0.04),0 4px 16px rgba(0,0,0,0.03);
-    transition:box-shadow .2s;
-  }
-  .fin-card:hover{box-shadow:0 2px 8px rgba(0,0,0,0.07),0 8px 24px rgba(0,0,0,0.05);}
-
-  /* KPI cards — first row gets accent top borders */
-  .fin-kpi-card{
-    background:#fff;border-radius:16px;padding:20px 22px;
-    border:1px solid rgba(0,0,0,0.06);
-    box-shadow:0 1px 4px rgba(0,0,0,0.04);
-    position:relative;overflow:hidden;
-  }
-  .fin-kpi-card::before{
-    content:'';position:absolute;top:0;left:0;right:0;height:3px;
-    background:var(--kpi-accent,#e5e7eb);
-  }
-
-  /* Inputs */
-  .fin-input{
-    border:1px solid rgba(0,0,0,0.10);border-radius:9px;
-    padding:8px 11px;font-size:12px;font-family:inherit;
-    color:#1C1C1E;outline:none;width:100%;box-sizing:border-box;
-    transition:border-color .15s,box-shadow .15s;background:#fff;
-  }
-  .fin-input:focus{border-color:#990033;box-shadow:0 0 0 3px rgba(153,0,51,0.08);}
-
-  /* Buttons */
-  .fin-btn{
-    border:none;border-radius:9px;padding:8px 16px;
-    font-size:12px;font-weight:600;font-family:inherit;
-    cursor:pointer;transition:all .15s;letter-spacing:0.01em;
-  }
-  .fin-btn-primary{background:#990033;color:#fff;box-shadow:0 2px 8px rgba(153,0,51,0.25);}
-  .fin-btn-primary:hover{background:#7a0029;box-shadow:0 4px 14px rgba(153,0,51,0.35);transform:translateY(-1px);}
-  .fin-btn-ghost{background:#f5f5f7;color:#1C1C1E;border:1px solid rgba(0,0,0,0.08);}
-  .fin-btn-ghost:hover{background:rgba(0,0,0,0.06);}
-
-  /* Table */
-  .fin-tbl{width:100%;border-collapse:collapse;font-size:12px;}
-  .fin-tbl th{
-    font-size:10px;font-weight:600;color:#8e8e93;
-    text-transform:uppercase;letter-spacing:0.05em;
-    padding:9px 14px;text-align:left;
-    background:#fafafa;
-  }
-  .fin-tbl th:first-child{border-radius:8px 0 0 8px;}
-  .fin-tbl th:last-child{border-radius:0 8px 8px 0;}
-  .fin-tbl td{padding:11px 14px;border-bottom:1px solid rgba(0,0,0,0.04);color:#1C1C1E;vertical-align:middle;}
-  .fin-tbl tr:last-child td{border-bottom:none;}
-  .fin-tbl tr:hover td{background:rgba(0,0,0,0.015);}
-
-  /* Labels & titles */
-  .fin-label{font-size:10px;font-weight:600;color:#8e8e93;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;display:block;}
-  .fin-section-title{font-size:13px;font-weight:700;color:#1C1C1E;margin-bottom:14px;letter-spacing:-0.01em;}
-
-  .fin-kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px;}
-
-  /* Slide-in panel */
-  .fin-panel{
-    position:fixed;top:0;right:0;width:520px;height:100vh;
-    background:#fff;
-    border-left:1px solid rgba(0,0,0,0.08);
-    box-shadow:-20px 0 60px rgba(0,0,0,0.12);
-    transform:translateX(100%);
-    transition:transform .3s cubic-bezier(0.4,0,0.2,1);
-    z-index:300;overflow-y:auto;padding:28px 26px 60px;
-  }
-  .fin-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.25);backdrop-filter:blur(2px);z-index:299;display:none;}
-
-  /* Sidebar week/currency section */
-  .fin-sidebar-controls{padding:12px 14px;}
-  .fin-sidebar-label{font-size:9px;font-weight:600;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:5px;display:block;padding:0 4px;}
-  .fin-sidebar-select{
-    width:100%;border:1px solid rgba(255,255,255,0.12);border-radius:8px;
-    padding:7px 10px;font-size:11px;font-family:inherit;
-    color:rgba(255,255,255,0.8);outline:none;
-    background:rgba(255,255,255,0.07);
-    transition:border-color .15s;
-  }
-  .fin-sidebar-select:focus{border-color:rgba(255,255,255,0.3);}
-  .fin-sidebar-select option{background:#2d0018;color:#fff;}
-  `;
-  document.head.appendChild(s);
+/* OPS: keep view buttons neutral (black text), independent of chart palette */
+.insights-view-btn,
+.insightsViewBtn,
+.insights-tabs button,
+.insights-tab-btn,
+.viewBtn,
+.view-btn{
+  color:#111 !important;
+  background:#fff !important;
+  border-color:#e5e7eb !important;
+}
+.insights-view-btn.active,
+.insightsViewBtn.active,
+.insights-tabs button.active,
+.insights-tab-btn.active,
+.viewBtn.active,
+.view-btn.active{
+  color:#111 !important;
+  background:#fff !important;
+  border-color:#11182733 !important;
+  box-shadow: 0 0 0 2px rgba(17,24,39,0.08) !important;
+}
+.insights-view-btn:hover,
+.insightsViewBtn:hover,
+.insights-tabs button:hover,
+.insights-tab-btn:hover,
+.viewBtn:hover,
+.view-btn:hover{
+  color:#111 !important;
+  background:#f9fafb !important;
 }
 
-function injectSkeleton(host){
-  injectStyles();
-  const weeks=getWeeks();
-  // SVG icons for nav
-  const icons={
-    invoices:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10,9 9,9 8,9"/></svg>`,
-    pl:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`,
-    expenses:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>`,
-  };
-  host.innerHTML=`
-  <div style="display:flex;align-items:stretch;min-height:calc(100vh - 56px);">
 
-    <!-- Dark sidebar -->
-    <div class="fin-sidebar">
-      <div class="fin-sidebar-title">
-        <div style="font-size:13px;font-weight:700;color:#fff;letter-spacing:-0.01em;">Finance</div>
-        <div style="font-size:10px;color:rgba(255,255,255,0.35);margin-top:2px;">Admin only</div>
+:root{
+  --ops-green:#D1E231; /* planned / in */
+  --ops-yellow:#F0D731; /* applied / ready */
+  --ops-ink:#111827;
+}
+/* Keep view buttons neutral (black text), do NOT tint with ops colors */
+.insights-view-btn, .insightsViewBtn, .insights-tabs button, .insights-tab-btn, .viewBtn, .view-btn{
+  color: var(--ops-ink) !important;
+}
+.insights-view-btn.active, .insightsViewBtn.active, .insights-tabs button.active, .insights-tab-btn.active, .viewBtn.active, .view-btn.active{
+  color: var(--ops-ink) !important;
+}
+
+    body{background:#F5F5F7;color:#1C1C1E}
+    .vo-nav{position:sticky;top:0;z-index:40;background:#fff;border-bottom:1px solid #eee}
+    .vo-wrap{
+  max-width:none;
+  width:min(96vw,1920px);
+  margin:0 auto;
+  padding:16px 24px;
+  box-sizing:border-box;
+}
+#page-dashboard .cmdbar, #capsules{ min-width:0; flex-wrap:wrap; }
+
+    .dot{width:.6rem;height:.6rem;border-radius:9999px;display:inline-block}
+    .heartbeat{animation:heartbeat 1.2s ease-in-out infinite;transform-origin:center}
+    @keyframes heartbeat{0%{transform:scale(1)}15%{transform:scale(1.18)}30%{transform:scale(1)}45%{transform:scale(1.12)}60%{transform:scale(1)}100%{transform:scale(1)}}
+    .cell{width:100%;padding:.4rem .5rem;border:0;outline:none}
+    .cell:focus{box-shadow:0 0 0 3px rgba(59,130,246,.25)}
+    .th{font-size:.75rem;font-weight:600;color:#F0D731}
+    /* Week capsule — SVG ring outline progress */
+    .wkcap{border-radius:10px;border:none;padding:0;width:58px;height:58px;background:transparent;cursor:pointer;transition:transform .15s,filter .15s;position:relative;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+    .wkcap:hover{transform:translateY(-2px);filter:drop-shadow(0 3px 8px rgba(0,0,0,0.12));}
+    .wkcap svg.cap-ring{position:absolute;inset:0;width:100%;height:100%;overflow:visible;}
+    .wkcap .cap-inner{position:relative;z-index:1;text-align:center;pointer-events:none;}
+    .wkcap .m{font-size:8px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;line-height:1;display:block;}
+    .wkcap.active .m{color:#990033;}
+    .wkcap .d{font-size:16px;font-weight:700;color:#1C1C1E;line-height:1.05;letter-spacing:-0.03em;display:block;}
+    .wkcap .t{font-size:8px;color:#AEAEB2;font-variant-numeric:tabular-nums;display:block;margin-top:1px;}
+    .wkcap.active .t{color:#6E6E73;}
+    .wkcap.active::after{content:'';position:absolute;bottom:-5px;left:50%;transform:translateX(-50%);width:20px;height:2.5px;background:#990033;border-radius:9999px;}
+    /* Ring track */
+    .cap-ring-track{fill:none;stroke:rgba(0,0,0,0.07);stroke-width:2.5;}
+    /* Ring progress — default gray */
+    .cap-ring-prog{fill:none;stroke:#C8F902;stroke-width:2.5;stroke-linecap:round;transition:stroke-dashoffset .6s ease;transform-origin:center;transform:rotate(-90deg);}
+    .wkcap.active .cap-ring-prog{stroke:#990033;}
+    @keyframes capIn{from{opacity:0;transform:scale(0.88)}to{opacity:1;transform:scale(1)}}
+    .wkcap{animation:capIn .2s ease both;}
+
+/* Respect .hidden; only style when visible */
+#page-dashboard:not(.hidden){ display:block; }
+/* Children visibility controlled individually — do NOT force display:block on all children */
+
+/* ── Week Hub: suppress flow module's own header row ── */
+#page-flow div:has(> #flow-sub),
+#page-flow div:has(> #flow-prev-week) { display:none !important; }
+#flow-sub { display:none !important; }
+/* Rename "End-to-end nodes" to "Control Tower" via CSS content trick */
+#flow-top-tile .text-sm.font-semibold { font-size:0 !important; }
+#flow-top-tile .text-sm.font-semibold::before { content:"Control Tower"; font-size:13px; font-weight:500; color:#1C1C1E; }
+/* Remove flow module footnote */
+#page-flow > div > .mt-3.text-xs { display:none !important; }
+
+/* ── Week Hub: tighten flow/right tile heights, make detail tile prominent ── */
+/* Linear timeline — compressed tile heights */
+#flow-journey { width:100%; display:flex; justify-content:center; align-items:center; overflow:visible; padding:4px 0; }
+#flow-journey svg { height: 200px !important; width:100% !important; display:block; overflow:visible; }
+#flow-top-tile { overflow:visible !important; min-height:0 !important; height:auto !important; padding:12px 14px !important; }
+#flow-top-tile.flow-tile--nodes { background:#ffffff !important; border-color:rgba(0,0,0,0.08) !important; }
+/* Compress grid row containing the pipeline tiles */
+#page-flow .lg\:col-span-2 { min-height:0 !important; height:auto !important; align-self:start !important; }
+#page-flow .grid.lg\:grid-cols-3 { align-items:start !important; }
+/* Detail tile */
+#flow-detail { min-height:300px; }
+#flow-top-tile { padding: 8px 10px !important; }
+#flow-top-tile .flex.items-center.justify-between.mb-2 { margin-bottom: 6px !important; }
+/* Right tile: compact */
+#page-flow .lg\:col-span-1 { min-height: 0 !important; }
+#page-flow .lg\:col-span-1 > div { padding: 10px 12px !important; }
+/* Detail tile: generous height, remove top border radius join */
+#flow-detail { min-height: 480px; }
+/* Tighten the grid gap between flow+right and detail */
+#page-flow .grid.grid-cols-1.gap-3 { gap: 8px !important; }
+
+/* segmented toggle visuals (neutral) */
+.seg { color:#303030; }
+.seg.active {
+  background:#fff;
+  color:#303030;
+  box-shadow:0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.1);
+}
+.seg:not(.active):hover { background: rgba(0,0,0,.06); }
+
+
+/* --- Command Bar (visual only) --- */
+.cmdbar{
+  display:flex; flex-wrap:wrap; gap:.25rem;
+  padding:.25rem; border-radius:12px;
+  background:#fff; border:1px solid #e5e7eb;
+  box-shadow:0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.08);
+}
+.cmd{
+  display:inline-flex; align-items:center; gap:.5rem;
+  font-size:.875rem; line-height:1;
+  padding:.5rem .75rem; border-radius:10px;
+  border:1px solid transparent; background:transparent; color:#111827;
+  transition:background .15s ease, border-color .15s ease, transform .05s ease;
+}
+.cmd:hover{ background:#f9fafb; border-color:#e5e7eb; }
+.cmd:active{ transform:translateY(1px); }
+.cmd:focus-visible{ outline:none; box-shadow:0 0 0 3px rgba(153,0,51,.15); }
+
+/* variants */
+.cmd--primary{ background:#990033; color:#fff; }
+.cmd--primary:hover{ filter:brightness(.98); }
+.cmd--danger{ color:#991b1b; background:#fff5f5; border-color:#fecaca; }
+.cmd--ghost{ background:transparent; }
+
+/* Override colors for Upload/Zero buttons ONLY */
+#btn-upload-plan,
+#btn-zero-plan {
+  background: #E2E2E2 !important;
+  color: #303030 !important;
+  border-color: #e5e7eb !important;
+}
+
+#btn-upload-plan:hover,
+#btn-zero-plan:hover {
+  background: #d9d9d9 !important; /* subtle hover */
+}
+
+
+
+/* icon sizing */
+.cmd svg{ width:16px; height:16px; opacity:.75; }
+
+  
+/* Ops insights pills */
+.ops-pill{
+  display:inline-flex; align-items:center; justify-content:flex-start; gap:8px;
+  padding:0 10px;
+  min-width:96px; height:30px;
+  border:1px solid rgba(17,24,39,.12);
+  border-radius:9999px;
+  background:transparent;
+  font-size:11px;
+  font-weight:600;
+  color:#111827;
+  transition: all .12s ease;
+}
+.ops-pill svg{ width:14px; height:14px; }
+.ops-pill:hover{ background:#f9fafb; border-color: rgba(17,24,39,.18); }
+.ops-pill--active{
+  background:#fff;
+  border-color: rgba(153,0,51,.45);
+  box-shadow: 0 0 0 3px rgba(153,0,51,.08);
+  color:#111827;
+}
+</style>
+
+<!-- 🔐 Clerk Authentication With New Publishable key  -->
+<script>
+// Safe Clerk onload — waits for initializeClerkAuth to be defined before calling it
+// Prevents ReferenceError when Clerk loads before body scripts finish parsing
+window.__clerkOnLoad = function() {
+  if (typeof initializeClerkAuth === 'function') {
+    initializeClerkAuth();
+  } else {
+    var t = setInterval(function() {
+      if (typeof initializeClerkAuth === 'function') {
+        clearInterval(t);
+        initializeClerkAuth();
+      }
+    }, 50);
+  }
+};
+</script>
+<script 
+  async
+  crossorigin="anonymous"
+  data-clerk-publishable-key="pk_live_Y2xlcmsudmVsb3ppdHkuY29tLmF1JA"
+  onload="window.__clerkOnLoad()"
+  src="https://clerk.velozity.com.au/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"
+  type="text/javascript"
+></script>
+
+</head>
+<body style="margin:0;padding:0;height:100%;overflow-x:hidden;">
+
+<!-- 🔐 Login Screen (shows when NOT signed in) -->
+<div id="auth-login-screen" style="display:flex;width:100vw;height:100vh;min-height:100vh;overflow:hidden;position:fixed;top:0;left:0;z-index:9999;">
+
+  <!-- Left panel: login form -->
+  <div style="width:34%;min-width:320px;background:#fff;display:flex;flex-direction:column;justify-content:center;padding:56px 48px;position:relative;z-index:2;border-right:0.5px solid rgba(0,0,0,0.06);">
+    <div style="margin-bottom:40px;">
+      <div style="font-family:'ADLaM Display',serif;font-size:22px;line-height:1.1;">
+        <span style="color:#1C1C1E;">VelOzity</span><span style="color:#990033;"> Pinpoint</span>
       </div>
-
-      <div style="padding:8px 10px;margin-bottom:4px;">
-        <button class="fin-nav-item active" id="fin-nav-invoices" onclick="window._finTab('invoices')">
-          <span class="nav-icon">${icons.invoices}</span>Invoices
-        </button>
-        <button class="fin-nav-item" id="fin-nav-pl" onclick="window._finTab('pl')">
-          <span class="nav-icon">${icons.pl}</span>P&amp;L
-        </button>
-        <button class="fin-nav-item" id="fin-nav-expenses" onclick="window._finTab('expenses')">
-          <span class="nav-icon">${icons.expenses}</span>Expenses
-        </button>
-      </div>
-
-      <div style="margin:8px 16px;height:1px;background:rgba(255,255,255,0.07);"></div>
-
-      <div class="fin-sidebar-controls" style="margin-top:4px;">
-        <span class="fin-sidebar-label">Week</span>
-        <select id="fin-week-sel" class="fin-sidebar-select" onchange="window._finSelectWeek(this.value)">
-          ${weeks.map(w=>`<option value="${w}">${weekLabel(w)}</option>`).join('')}
-        </select>
-      </div>
-      <div class="fin-sidebar-controls" style="margin-top:8px;">
-        <span class="fin-sidebar-label">Currency</span>
-        <select id="fin-currency" class="fin-sidebar-select" onchange="window._finCurrencyChange(this.value)">
-          <option value="USD">USD</option><option value="AUD">AUD</option><option value="EUR">EUR</option><option value="GBP">GBP</option>
-        </select>
-        <div id="fin-fx-label" style="font-size:9px;color:rgba(255,255,255,0.30);margin-top:5px;padding:0 4px;"></div>
+      <div style="display:flex;align-items:center;gap:5px;margin-top:8px;">
+        <svg width="11" height="11" viewBox="0 0 46 46" fill="none" style="opacity:0.4;flex-shrink:0;"><path d="M32.73 14.9L26.3 5.77a3.93 3.93 0 0 0-6.6 0l-6.43 9.13L6.1 25.7a3.93 3.93 0 0 0 0 4.38l6.44 8.98 1.18 1.65a3.93 3.93 0 0 0 6.44 0l1.18-1.65 1.66-2.32 5.19-7.25.07-.1 4.47-6.25a3.93 3.93 0 0 0 0-4.24z" fill="#CC785C"/></svg>
+        <span style="font-size:10px;color:#AEAEB2;letter-spacing:0.07em;text-transform:uppercase;">Powered by Anthropic Claude</span>
       </div>
     </div>
-
-    <!-- Main content -->
-    <div class="fin-content">
-      <div class="fin-kpi-grid" id="fin-kpis"></div>
-      <div id="fin-tab-invoices"></div>
-      <div id="fin-tab-pl" style="display:none;"></div>
-      <div id="fin-tab-expenses" style="display:none;"></div>
+    <div id="clerk-signin-mount"></div>
+    <div style="font-size:10px;color:#C7C7CC;margin-top:24px;line-height:1.7;">
+      By signing in you agree to VelOzity's terms.<br>Having trouble? Contact your administrator.
     </div>
   </div>
-  <div class="fin-panel" id="fin-panel"></div>
-  <div class="fin-overlay" id="fin-overlay" onclick="window._finClosePanel()"></div>
+
+  <!-- Right panel: operational pings -->
+  <div style="flex:1;background:#1C1C1E;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;">
+    <canvas id="login-grid-canvas" style="position:absolute;inset:0;width:100%;height:100%;z-index:0;"></canvas>
+    <div style="position:absolute;width:500px;height:500px;border-radius:50%;background:radial-gradient(circle,rgba(153,0,51,0.1) 0%,rgba(153,0,51,0.03) 50%,transparent 75%);animation:loginGlow 6s ease-in-out infinite;z-index:1;"></div>
+    <div id="login-pings" style="position:absolute;inset:0;z-index:2;pointer-events:none;"></div>
+    <div style="position:relative;z-index:3;display:flex;flex-direction:column;align-items:center;gap:28px;animation:loginRise 1.2s cubic-bezier(0.16,1,0.3,1) both;">
+      <div style="font-family:'ADLaM Display',serif;text-align:center;">
+        <span style="display:block;font-size:clamp(36px,4vw,56px);color:#fff;letter-spacing:-0.02em;line-height:1.05;">VelOzity</span>
+        <span style="display:block;font-size:clamp(36px,4vw,56px);color:#990033;letter-spacing:-0.02em;line-height:1.05;">Pinpoint</span>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:10px;">
+        <div style="font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:0.22em;text-transform:uppercase;display:none;"></div>
+        <div style="display:flex;align-items:center;justify-content:center;gap:10px;">
+          <!-- Constant pulse orb -->
+          <div style="position:relative;width:20px;height:20px;flex-shrink:0;">
+            <div style="position:absolute;top:50%;left:50%;width:20px;height:20px;margin:-10px 0 0 -10px;border-radius:50%;border:1.5px solid rgba(153,0,51,0.7);animation:pingRing 2s ease-out infinite;"></div>
+            <div style="position:absolute;top:50%;left:50%;width:20px;height:20px;margin:-10px 0 0 -10px;border-radius:50%;border:1px solid rgba(153,0,51,0.45);animation:pingRing 2s 0.5s ease-out infinite;"></div>
+            <div style="position:absolute;top:50%;left:50%;width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;background:#990033;box-shadow:0 0 8px rgba(153,0,51,0.8);"></div>
+          </div>
+          <div style="font-family:'ADLaM Display',serif;font-size:13px;color:rgba(255,255,255,0.55);letter-spacing:0.06em;">With PULSE AI</div>
+          <div style="width:0.5px;height:14px;background:rgba(255,255,255,0.15);flex-shrink:0;"></div>
+          <svg width="13" height="13" viewBox="0 0 46 46" fill="none" xmlns="http://www.w3.org/2000/svg" style="opacity:0.45;flex-shrink:0;">
+            <path d="M32.73 14.9L26.3 5.77a3.93 3.93 0 0 0-6.6 0l-6.43 9.13L6.1 25.7a3.93 3.93 0 0 0 0 4.38l6.44 8.98 1.18 1.65a3.93 3.93 0 0 0 6.44 0l1.18-1.65 1.66-2.32 5.19-7.25.07-.1 4.47-6.25a3.93 3.93 0 0 0 0-4.24z" fill="#CC785C"/>
+          </svg>
+          <div style="font-size:10px;color:rgba(255,255,255,0.3);letter-spacing:0.1em;text-transform:uppercase;">Powered by Anthropic Claude</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    @keyframes loginGlow{0%,100%{transform:scale(1);opacity:.7}50%{transform:scale(1.15);opacity:1}}
+    @keyframes loginRise{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes pingRing{0%{transform:scale(0.4);opacity:0.9}100%{transform:scale(4.8);opacity:0}}
+    @keyframes pingRing2{0%{transform:scale(0.4);opacity:0.6}100%{transform:scale(3.8);opacity:0}}
+    @keyframes pingFadeIn{0%{opacity:0;transform:scale(0.6)}20%{opacity:1;transform:scale(1)}80%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(0.8)}}
+    @keyframes pingLabel{0%{opacity:0;transform:translateY(4px)}15%{opacity:1;transform:translateY(0)}80%{opacity:1}100%{opacity:0}}
+  </style>
+  <script>
+  (function loginPanel(){
+    function init(){
+      var canvas=document.getElementById('login-grid-canvas');
+      if(!canvas) return;
+      var right=canvas.parentElement;
+      function drawGrid(){
+        canvas.width=right.offsetWidth; canvas.height=right.offsetHeight;
+        var ctx=canvas.getContext('2d');
+        ctx.strokeStyle='rgba(255,255,255,0.03)'; ctx.lineWidth=0.5;
+        var s=48;
+        for(var x=0;x<canvas.width;x+=s){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,canvas.height);ctx.stroke();}
+        for(var y=0;y<canvas.height;y+=s){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke();}
+      }
+      window.addEventListener('resize',drawGrid); drawGrid();
+
+      // Operational ping nodes
+      var PING_COL = '#990033';
+      var stages=[
+        {label:'VAS Processing'},
+        {label:'Transit'},
+        {label:'Clearing'},
+        {label:'Last Mile'},
+        {label:'Intake'},
+        {label:'Container Tracking'},
+        {label:'Carton Tracking'},
+        {label:'Units Tracking'},
+        {label:'Freight Management'},
+        {label:'First-to Last Mile'},
+        {label:'Inventory Consolidation'},
+        {label:'Inventory Deconsolidation'},
+        {label:'Bonded Warehouse'},
+        {label:'AI Pulse'},
+      ];
+
+      var container=document.getElementById('login-pings');
+      if(!container) return;
+
+      // Zones: avoid the center (logo area) — use quadrant-ish positions
+      var zones=[
+        {xMin:5, xMax:25, yMin:8,  yMax:40},
+        {xMin:5, xMax:25, yMin:55, yMax:88},
+        {xMin:70,xMax:90, yMin:8,  yMax:40},
+        {xMin:70,xMax:90, yMin:55, yMax:88},
+        {xMin:25,xMax:45, yMin:5,  yMax:20},
+        {xMin:55,xMax:75, yMin:5,  yMax:20},
+        {xMin:25,xMax:45, yMin:78, yMax:92},
+        {xMin:55,xMax:75, yMin:78, yMax:92},
+      ];
+
+      var usedZone = -1;
+      var stageIdx = 0;
+
+      function spawnPing(){
+        // Pick a zone different from last used
+        var zoneIdx;
+        do { zoneIdx = Math.floor(Math.random()*zones.length); } while(zoneIdx===usedZone && zones.length>1);
+        usedZone = zoneIdx;
+        var z = zones[zoneIdx];
+
+        var x = z.xMin + Math.random()*(z.xMax-z.xMin);
+        var y = z.yMin + Math.random()*(z.yMax-z.yMin);
+        var stage = stages[stageIdx % stages.length];
+        stageIdx++;
+
+        var dur = 4800; // ms visible — longer ping
+
+        var wrap = document.createElement('div');
+        wrap.style.cssText = 'position:absolute;left:'+x+'%;top:'+y+'%;transform:translate(-50%,-50%);animation:pingFadeIn '+dur+'ms ease forwards;';
+
+        // Outer ring 1
+        var r1 = document.createElement('div');
+        r1.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:2px solid '+PING_COL+';animation:pingRing '+(dur*0.8)+'ms ease-out forwards;';
+
+        // Outer ring 2
+        var r2 = document.createElement('div');
+        r2.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:1.5px solid '+PING_COL+';animation:pingRing2 '+(dur*0.7)+'ms '+150+'ms ease-out forwards;';
+
+        // Ring 3
+        var r3 = document.createElement('div');
+        r3.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:1px solid '+PING_COL+';animation:pingRing '+(dur*0.9)+'ms '+280+'ms ease-out forwards;';
+        // Ring 4
+        var r4 = document.createElement('div');
+        r4.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:0.5px solid '+PING_COL+';animation:pingRing2 '+dur+'ms '+420+'ms ease-out forwards;';
+        // Center dot
+        var dot = document.createElement('div');
+        dot.style.cssText = 'position:absolute;top:50%;left:50%;width:15px;height:15px;margin:-7.5px 0 0 -7.5px;border-radius:50%;background:'+PING_COL+';box-shadow:0 0 18px rgba(153,0,51,0.95);';
+
+        // Label
+        var lbl = document.createElement('div');
+        lbl.style.cssText = 'position:absolute;top:calc(50% + 22px);left:50%;transform:translateX(-50%);white-space:nowrap;animation:pingLabel '+dur+'ms ease forwards;';
+        lbl.innerHTML = '<div style="font-family:\'ADLaM Display\',serif;font-size:18px;color:#fff;letter-spacing:0.1em;text-transform:uppercase;text-shadow:0 2px 14px rgba(0,0,0,0.98);">'+stage.label+'</div>';
+
+        wrap.appendChild(r1);
+        wrap.appendChild(r2);
+        wrap.appendChild(r3);
+        wrap.appendChild(r4);
+        wrap.appendChild(dot);
+        wrap.appendChild(lbl);
+        container.appendChild(wrap);
+
+        setTimeout(function(){ wrap.remove(); }, dur + 200);
+      }
+
+      // Stagger initial pings
+      for(var i=0;i<3;i++){
+        (function(delay){ setTimeout(spawnPing, delay); })(i * 900);
+      }
+      // Then keep spawning
+      setInterval(spawnPing, 1800);
+    }
+    if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
+  })();
+  </script>
+</div>
+
+<!-- 🔐 App Content (shows when signed in) -->
+<div id="app-content" style="display:none;">
+
+<!-- New Nav Shell -->
+<style>
+  /* ── Pinpoint 3.0 Nav ── */
+  .pn-nav{position:sticky;top:0;z-index:40;background:#fff;border-bottom:0.5px solid rgba(0,0,0,0.08);}
+  .pn-wrap{max-width:none;width:min(96vw,1920px);margin:0 auto;padding:0 24px;display:flex;align-items:center;justify-content:space-between;height:52px;}
+  .pn-brand{font-family:'ADLaM Display',serif;font-size:17px;white-space:nowrap;text-decoration:none;display:flex;align-items:center;gap:0;}
+  .pn-brand-v{color:#1C1C1E;}
+  .pn-brand-p{color:#990033;}
+  .pn-nav-items{display:flex;align-items:center;gap:2px;padding:4px;background:#F5F5F7;border-radius:10px;border:0.5px solid rgba(0,0,0,0.06);}
+  .pn-nav-item{font-size:12px;font-weight:500;color:#6E6E73;padding:6px 14px;border-radius:7px;text-decoration:none;transition:background .15s,color .15s;white-space:nowrap;cursor:pointer;}
+  .pn-nav-item.active{background:#990033;color:#fff;box-shadow:0 2px 8px rgba(153,0,51,0.25);}
+  .pn-nav-item:hover:not(.active){background:rgba(0,0,0,0.04);color:#1C1C1E;}
+  .pn-user{display:flex;align-items:center;gap:10px;}
+  .pn-user-info{text-align:right;}
+  .pn-user-name{font-size:12px;font-weight:500;color:#1C1C1E;}
+  .pn-user-meta{font-size:10px;color:#AEAEB2;display:flex;gap:6px;align-items:center;justify-content:flex-end;}
+  .pn-signout{font-size:11px;color:#6E6E73;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:7px;padding:5px 10px;cursor:pointer;transition:background .15s;font-family:inherit;}
+  .pn-signout:hover{background:#EBEBED;}
+  .pn-date{font-size:11px;color:#AEAEB2;}
+
+  /* ── Page background ── */
+  body{background:#F5F5F7 !important;}
+  main.vo-wrap{padding:16px 24px !important;}
+
+  /* ── Week Hub Flipper ── */
+  @keyframes flipIn{0%{transform:translateY(100%);opacity:0}100%{transform:translateY(0);opacity:1}}
+  @keyframes flipOut{0%{transform:translateY(0);opacity:1}100%{transform:translateY(-100%);opacity:0}}
+  .wh-flip-in{animation:flipIn 0.28s cubic-bezier(0.4,0,0.2,1) forwards;}
+  .wh-flip-out{animation:flipOut 0.28s cubic-bezier(0.4,0,0.2,1) forwards;}
+  #wh-flipper-text:hover{color:#990033;}
+  #wh-flipper{transition:opacity .3s;}
+
+  /* ── Pulse Bar ── */
+  .pulse-bar{position:fixed;bottom:0;left:0;right:0;z-index:50;background:#fff;border:0.5px solid rgba(153,0,51,0.25);border-bottom:none;border-left:3px solid #990033;border-radius:14px 14px 0 0;padding:12px 24px;display:none;align-items:center;gap:14px;box-shadow:0 -6px 28px rgba(0,0,0,0.09);margin:0 16px;width:calc(100% - 32px);}
+  .pulse-bar.visible{display:flex;}
+  .pulse-name{font-family:'ADLaM Display',serif;font-size:14px;color:#990033;white-space:nowrap;}
+  .pulse-divider{width:0.5px;height:18px;background:rgba(0,0,0,0.1);flex-shrink:0;}
+  .pulse-input-wrap{flex:1;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:9px 14px;font-size:12px;color:#1C1C1E;cursor:text;font-family:inherit;transition:border-color .15s,box-shadow .15s;}
+  .pulse-input-wrap::placeholder{color:rgba(153,0,51,0.45);}
+  .pulse-input-wrap:focus{outline:none;border-color:rgba(153,0,51,0.35);box-shadow:0 0 0 3px rgba(153,0,51,0.08);}
+  .pulse-send{width:32px;height:32px;border-radius:8px;background:#1C1C1E;display:flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer;border:none;}
+  .pulse-send svg{pointer-events:none;}
+
+  /* ECG in Pulse bar */
+  /* Pulse sonar animation */
+  .pulse-orb{fill:#990033;}
+  .pulse-ring{fill:none;stroke:#990033;stroke-width:1.2;}
+  .pulse-ring-1{animation:sonarRing 2.4s ease-out infinite;}
+  .pulse-ring-2{animation:sonarRing 2.4s ease-out infinite .8s;}
+  .pulse-ring-3{animation:sonarRing 2.4s ease-out infinite 1.6s;}
+  @keyframes sonarRing{
+    0%{r:4;stroke-opacity:0.7;stroke-width:1.5;}
+    100%{r:14;stroke-opacity:0;stroke-width:0.5;}
+  }
+  @keyframes orbPulse{0%,100%{opacity:1;r:3}50%{opacity:0.6;r:2.2}}
+  .pulse-orb{animation:orbPulse 2.4s ease-in-out infinite;}
+
+  /* Pulse expanded panel */
+  .pulse-panel{position:fixed;bottom:57px;left:16px;right:16px;z-index:49;background:#fff;border:0.5px solid rgba(153,0,51,0.15);border-bottom:none;border-radius:14px 14px 0 0;max-height:0;overflow:hidden;display:flex;flex-direction:column;transition:max-height .3s cubic-bezier(0.4,0,0.2,1),box-shadow .3s;}
+  .pulse-panel.open{max-height:380px;box-shadow:0 -8px 32px rgba(0,0,0,0.08);}
+  .pulse-chat{flex:1;overflow-y:auto;padding:16px 24px;display:flex;flex-direction:column;gap:10px;}
+  .pulse-msg{font-size:12px;line-height:1.55;max-width:72%;}
+  .pulse-msg.user{color:#1C1C1E;background:#F5F5F7;border-radius:10px 10px 10px 4px;padding:9px 12px;align-self:flex-start;}
+  .pulse-msg.ai{color:#fff;background:#990033;border-radius:10px 10px 4px 10px;padding:9px 12px;align-self:flex-end;}
+  .pulse-msg-from{font-size:9px;font-weight:500;color:rgba(255,255,255,0.6);margin-bottom:3px;letter-spacing:.05em;}
+  .pulse-msg.user .pulse-msg-from{color:#AEAEB2;}
+  .pulse-suggestions{display:flex;gap:7px;padding:0 24px 10px;flex-wrap:wrap;}
+  .pulse-sug{font-size:11px;color:#636366;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:16px;padding:5px 12px;cursor:pointer;font-family:inherit;transition:background .15s;}
+  .pulse-sug:hover{background:#EBEBED;}
+  .pulse-collapse{font-size:10px;color:#AEAEB2;cursor:pointer;padding:4px 10px;border-radius:6px;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);white-space:nowrap;font-family:inherit;}
+
+  /* padding bottom so content doesn't hide behind Pulse */
+  #app-content main{padding-bottom:72px !important;}
+</style>
+
+<header class="pn-nav">
+  <div class="pn-wrap">
+    <a class="pn-brand" href="#week-hub">
+      <svg viewBox="0 0 28 28" width="18" height="18" overflow="visible" style="flex-shrink:0;margin-right:8px;">
+        <circle class="pulse-ring pulse-ring-1" cx="14" cy="14" r="4"/>
+        <circle class="pulse-ring pulse-ring-2" cx="14" cy="14" r="4"/>
+        <circle class="pulse-ring pulse-ring-3" cx="14" cy="14" r="4"/>
+        <circle class="pulse-orb" cx="14" cy="14" r="3" fill="#990033"/>
+      </svg>
+      <span class="pn-brand-v">VelOzity</span><span class="pn-brand-p">&nbsp;Pinpoint</span><span style="color:#990033;font-size:13px;margin-left:4px;opacity:0.7;">&rsaquo;&rsaquo;</span>
+      <span style="display:flex;align-items:center;gap:5px;margin-left:10px;padding-left:10px;border-left:0.5px solid rgba(0,0,0,0.12);">
+        <svg width="14" height="14" viewBox="0 0 46 46" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;opacity:0.6;">
+          <path d="M32.73 14.9L26.3 5.77a3.93 3.93 0 0 0-6.6 0l-6.43 9.13L6.1 25.7a3.93 3.93 0 0 0 0 4.38l6.44 8.98 1.18 1.65a3.93 3.93 0 0 0 6.44 0l1.18-1.65 1.66-2.32 5.19-7.25.07-.1 4.47-6.25a3.93 3.93 0 0 0 0-4.24z" fill="#CC785C"/>
+        </svg>
+        <span style="font-size:10px;font-weight:500;color:#6E6E73;letter-spacing:0.01em;white-space:nowrap;">Powered by Anthropic Claude</span>
+      </span>
+    </a>
+    <nav class="pn-nav-items" id="pn-nav-items">
+      <a class="pn-nav-item active" href="#week-hub" id="nav-weekhub" onclick="event.preventDefault();window.show('#week-hub')">Week Hub</a>
+      <a class="pn-nav-item" href="#receiving" id="nav-receiving" onclick="event.preventDefault();window.show('#receiving')">Receiving Ops</a>
+      <a class="pn-nav-item" href="#intake" id="nav-intake-pn" onclick="event.preventDefault();window.show('#intake')">VAS Ops</a>
+      <a class="pn-nav-item" href="#exec" id="nav-exec" onclick="event.preventDefault();window.show('#exec')">Executive</a>
+      <a class="pn-nav-item" href="#map" id="nav-map" onclick="event.preventDefault();window.show('#map')">Live Map</a>
+      <a class="pn-nav-item" href="#reports" id="nav-reports" onclick="event.preventDefault();window.show('#reports')">Reports &amp; Downloads</a>
+      <a class="pn-nav-item" href="#finance" id="nav-finance" onclick="event.preventDefault();window.show('#finance')" style="display:none;">Finance</a>
+    </nav>
+    <div class="pn-user">
+      <div class="pn-date" id="vo-today"></div>
+      <div class="pn-user-info">
+        <div class="pn-user-name" id="user-name-display"></div>
+        <div class="pn-user-meta">
+          <span id="user-role-display"></span>
+          <span id="user-org-display"></span>
+        </div>
+      </div>
+      <button class="pn-signout" onclick="handleSignOut()">Sign out</button>
+    </div>
+  </div>
+</header>
+<main class="vo-wrap py-4">
+<!-- ================= Operations ================= -->
+<section class="hidden" id="page-dashboard">
+<!--
+  ═══════════════════════════════════════════════════════
+  WEEK HUB — Pinpoint 3.0
+  Architecture:
+    • #page-flow is pre-declared here so flow_live_additive.js
+      mounts its S-curve, Week Totals, and Detail tile directly
+      into this page — zero changes to the flow module.
+    • location.hash is set to #flow when Week Hub is shown so
+      the flow module's hash checks pass and it renders.
+    • KPI tiles and header are injected by this shell above
+      the flow module's own skeleton.
+    • All existing IDs (capsules, week-start, btn-upload-plan,
+      btn-zero-plan, all download buttons) are preserved exactly.
+  ═══════════════════════════════════════════════════════
+-->
+
+<!-- Hidden inputs and legacy download buttons (preserved verbatim) -->
+<input class="hidden" id="week-start" type="date"/>
+<input accept=".xlsx,.csv" class="hidden" id="file-plan" type="file"/>
+<div class="hidden" id="capsules"></div>
+<div aria-label="Reports and downloads" class="cmdbar shrink-0 hidden" role="group">
+  <button aria-label="Upload Plan" class="cmd cmd--primary" id="btn-upload-plan" title="Upload planned PO×SKU for the selected week"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 3v12m0-12 4 4m-4-4-4 4M4 17h16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>Upload Plan</button>
+  <button aria-label="Zero Plan" class="cmd cmd--danger" id="btn-zero-plan" title="Clear the plan for this week"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" stroke-linecap="round" stroke-width="1.5"/></svg>Zero Plan</button>
+  <button aria-label="PO × SKU Discrepancy" class="cmd cmd--ghost" id="btn-dl-posku"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3 5h18M3 12h18M3 19h18" stroke-linecap="round" stroke-width="1.5"/></svg>PO × SKU Discrepancy</button>
+  <button aria-label="PO Discrepancy" class="cmd cmd--ghost" id="btn-dl-po"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7" stroke-linecap="round" stroke-width="1.5"/></svg>PO Discrepancy</button>
+  <button aria-label="Shipment Summary" class="cmd cmd--ghost" id="btn-ship-summary"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3 7h13l5 5v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" stroke-linejoin="round" stroke-width="1.5"/><path d="M16 7v5h5" stroke-linecap="round" stroke-width="1.5"/></svg>Shipment Summary</button>
+  <button aria-label="Shipment Details" class="cmd cmd--ghost" id="btn-ship-detail"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M4 6h16M4 12h12M4 18h8" stroke-linecap="round" stroke-width="1.5"/></svg>Shipment Details</button>
+  <button aria-label="Download Applied" class="cmd cmd--ghost" id="btn-dl-week-applied"><svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/></svg>Download Applied</button>
+</div>
+<!-- Legacy ops IDs — kept hidden so existing JS writes don't crash -->
+<span class="hidden" id="ops-insights-subtitle"></span>
+<div class="hidden" id="ops-insights-content"></div>
+<div class="hidden" id="ops-progress-tiles"></div>
+<span class="hidden" id="ops-week-of"></span>
+<span class="hidden" id="ops-week-po-planned"></span>
+<span class="hidden" id="ops-week-po-received"></span>
+<span class="hidden" id="ops-week-units-planned"></span>
+<span class="hidden" id="ops-week-units-applied"></span>
+<span class="hidden" id="ops-week-cartons-in"></span>
+<span class="hidden" id="ops-week-cartons-out"></span>
+<span class="hidden" id="ops-week-cbm-in"></span>
+<span class="hidden" id="ops-week-cbm-out"></span>
+<span class="hidden" id="ops-week-cont-40"></span>
+<span class="hidden" id="ops-week-cont-20"></span>
+<span class="hidden" id="ops-week-suppliers"></span>
+<span class="hidden" id="ops-week-zendesk"></span>
+<span class="hidden" id="ops-week-health"></span>
+<span class="hidden" id="health-dot"></span>
+<span class="hidden" id="health-pill"></span>
+<span class="hidden" id="health-status-dot"></span>
+<span class="hidden" id="vo-health"></span>
+<span class="hidden" id="vo-footer-text"></span>
+
+<!-- ── Week Hub Header Tile ── -->
+<div id="wh-header" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:8px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;flex-wrap:wrap;">
+
+  <!-- Left: Brand + week date + capsules right after -->
+  <div style="display:flex;align-items:center;gap:14px;flex:1;min-width:0;flex-wrap:wrap;">
+    <div style="flex-shrink:0;">
+      <div style="font-size:15px;font-weight:600;color:#1C1C1E;letter-spacing:-0.02em;line-height:1;">Week Hub</div>
+      <input id="wh-week-display" type="date" style="font-size:9px;color:#AEAEB2;border:none;background:transparent;font-family:inherit;cursor:pointer;padding:0;margin-top:2px;outline:none;" onchange="if(typeof window.setWeek==='function')window.setWeek(this.value)"/>
+    </div>
+    <!-- Week capsules immediately after title -->
+    <div id="wh-capsules-display" style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;"></div>
+  </div>
+
+  <!-- Center: Split-flap insight flipper -->
+  <div id="wh-flipper" style="flex:1;display:flex;align-items:center;justify-content:flex-start;min-width:0;padding:0 8px;margin-left:-18%;">
+    <div style="display:flex;align-items:center;justify-content:center;gap:10px;overflow:hidden;max-width:560px;width:100%;">
+      <div style="width:0.5px;height:28px;background:rgba(0,0,0,0.07);flex-shrink:0;"></div>
+      <div id="wh-flipper-icon" style="flex-shrink:0;width:18px;height:18px;display:flex;align-items:center;justify-content:center;color:#6E6E73;"></div>
+      <div style="flex:1;min-width:0;position:relative;height:20px;overflow:hidden;">
+        <div id="wh-flipper-text" style="position:absolute;width:100%;font-size:11.5px;font-weight:500;color:#1C1C1E;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;text-align:center;transition:transform 0.28s cubic-bezier(0.4,0,0.2,1),opacity 0.28s ease;" title="Click to ask Pulse"></div>
+      </div>
+      <div style="width:0.5px;height:28px;background:rgba(0,0,0,0.07);flex-shrink:0;"></div>
+    </div>
+  </div>
+
+  <!-- Right: Actions -->
+  <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+    <button onclick="var b=document.getElementById('flow-download-pdf');if(b)b.click();" style="font-size:11px;color:#6E6E73;background:transparent;border:none;cursor:pointer;padding:4px 6px;display:flex;align-items:center;gap:4px;transition:color .15s;" title="Download PDF">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      PDF
+    </button>
+    <div style="width:0.5px;height:16px;background:rgba(0,0,0,0.08);"></div>
+    <button id="wh-btn-upload" onclick="document.getElementById('file-plan').click()" style="font-size:11px;font-weight:500;color:#1C1C1E;background:#fff;border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:7px 14px;cursor:pointer;display:flex;align-items:center;gap:5px;transition:all .15s;">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m0-12 4 4m-4-4-4 4M4 17h16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Upload Plan
+    </button>
+    <button id="wh-btn-zero" onclick="document.getElementById('btn-zero-plan').click()" style="font-size:11px;font-weight:500;color:#AEAEB2;background:transparent;border:none;cursor:pointer;padding:7px 8px;display:flex;align-items:center;gap:4px;transition:color .15s;" title="Clear plan for this week">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 18L18 6M6 6l12 12" stroke-linecap="round"/></svg>
+      Zero
+    </button>
+  </div>
+</div>
+
+<!-- ── KPI Tiles ── -->
+<div id="wh-kpi-row" style="display:none;">
+  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;">
+    <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px;">Units Planned</div>
+    <div id="wh-kpi-planned" style="font-size:24px;font-weight:600;color:#1C1C1E;letter-spacing:-0.03em;line-height:1;font-variant-numeric:tabular-nums;">—</div>
+    <div style="font-size:10px;color:#6E6E73;margin-top:5px;">This week</div>
+  </div>
+  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;">
+    <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px;">Units Applied</div>
+    <div id="wh-kpi-applied" style="font-size:24px;font-weight:600;color:#1C1C1E;letter-spacing:-0.03em;line-height:1;font-variant-numeric:tabular-nums;">—</div>
+    <div id="wh-kpi-applied-sub" style="font-size:10px;color:#6E6E73;margin-top:5px;">of — planned</div>
+  </div>
+  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;">
+    <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px;">Completion</div>
+    <div id="wh-kpi-pct" style="font-size:24px;font-weight:600;letter-spacing:-0.03em;line-height:1;font-variant-numeric:tabular-nums;color:#1C1C1E;">—</div>
+    <div style="height:3px;background:rgba(0,0,0,0.06);border-radius:2px;margin-top:8px;overflow:hidden;">
+      <div id="wh-kpi-pct-bar" style="height:3px;border-radius:2px;background:#97DC21;width:0%;transition:width .6s ease;"></div>
+    </div>
+  </div>
+  <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;">
+    <div style="font-size:9px;font-weight:500;color:#AEAEB2;text-transform:uppercase;letter-spacing:.07em;margin-bottom:7px;">Week Health</div>
+    <div style="display:flex;align-items:center;gap:7px;margin-top:4px;">
+      <span id="wh-health-dot" style="width:8px;height:8px;border-radius:50%;background:#F5BD25;flex-shrink:0;display:inline-block;"></span>
+      <span id="wh-health-label" style="font-size:18px;font-weight:600;color:#F5BD25;">—</span>
+    </div>
+    <div id="wh-health-sub" style="font-size:10px;color:#6E6E73;margin-top:5px;">Applied: —</div>
+  </div>
+</div>
+
+<!-- ── Flow module mounts here — DO NOT REMOVE #page-flow ── -->
+<!-- flow_live_additive.js finds this element, calls injectSkeleton() on it,
+     which writes: flow-journey (S-curve), flow-footer (right tile),
+     flow-detail (bottom tile). All its functionality is 100% intact. -->
+<section id="page-flow" style="display:block;">
+  <!-- flow_live_additive.js will replace this content with its skeleton -->
+
+<!-- Pre-booked Containers Modal -->
+<div id="prebook-modal" class="hidden" style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.4);display:none;align-items:center;justify-content:center;" onclick="if(event.target===this){this.classList.add('hidden');this.style.display='none';}">
+  <div style="background:#fff;border-radius:14px;padding:28px 32px;width:100%;max-width:380px;position:relative;" onclick="event.stopPropagation()">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+      <div style="font-size:16px;font-weight:600;color:#1C1C1E;">Pre-booked Containers</div>
+      <button onclick="var m=document.getElementById('prebook-modal');m.classList.add('hidden');m.style.display='none';" style="font-size:12px;color:#6E6E73;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:7px;padding:5px 12px;cursor:pointer;font-family:inherit;">Close</button>
+    </div>
+    <div style="font-size:11px;color:#6E6E73;margin-bottom:16px;">Plan inputs for this week — stored locally, used for container pre-booking estimates.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px;">
+      <label>
+        <div style="font-size:11px;font-weight:500;color:#1C1C1E;margin-bottom:6px;">20 ft containers</div>
+        <input id="prebook-20" type="number" min="0" style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:9px 12px;font-size:14px;font-family:inherit;outline:none;" placeholder="0"/>
+      </label>
+      <label>
+        <div style="font-size:11px;font-weight:500;color:#1C1C1E;margin-bottom:6px;">40 ft containers</div>
+        <input id="prebook-40" type="number" min="0" style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:9px 12px;font-size:14px;font-family:inherit;outline:none;" placeholder="0"/>
+      </label>
+    </div>
+    <button onclick="var m=document.getElementById('prebook-modal');m.classList.add('hidden');m.style.display='none';" style="width:100%;background:#1C1C1E;color:#fff;border:none;border-radius:9px;padding:12px;font-size:13px;font-weight:500;cursor:pointer;font-family:inherit;">Save</button>
+  </div>
+</div>
+</section>
+
+<!-- ================= UID Intake ================= -->
+</section>
+<section id="page-intake" class="hidden">
+  <div class="flex items-center justify-between">
+    <div class="flex items-center gap-5">
+      <div class="text-2xl font-semibold">UID Intake (Table Mode)</div>
+
+      <div class="flex items-center gap-2 bg-white border rounded-xl px-3 py-2">
+        <div class="text-sm"><span class="font-semibold">Ops</span> • <span id="intake-bpm">0</span> bpm</div>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-2">
+      <button id="btn-export-day" class="px-3 py-2 rounded-lg text-sm border" aria-label="Export XLSX">Export XLSX</button>
+
+      <button id="btn-upload-applied" class="px-3 py-2 rounded-lg text-sm border" aria-label="Upload UIDs">Upload UIDs</button>
+      <input id="file-upload-applied" type="file" accept=".xlsx,.csv" class="hidden"/>
+
+      <button id="btn-upload-bins" class="px-3 py-2 rounded-lg text-sm border" aria-label="Upload Bin Manifest">Upload Bin Manifest</button>
+      <input id="file-bins" type="file" accept=".xlsx,.csv" class="hidden"/>
+
+      <button id="btn-delete-selected" class="px-3 py-2 rounded-lg text-sm border border-rose-700 text-rose-700" aria-label="Delete Selected">
+        Delete Selected
+      </button>
+    </div>
+  </div>
+
+  <!-- Intake Table -->
+  <div class="mt-3 overflow-auto">
+    <table class="w-full min-w-[1100px] border-collapse border">
+      <thead class="bg-gray-100">
+        <tr>
+          <th class="border px-2 py-1 text-left w-8"><input type="checkbox" id="chk-all"/></th>
+          <th class="border px-2 py-1 text-left">Date</th>
+          <th class="border px-2 py-1 text-left">Mobile Bin (BOX)</th>
+          <th class="border px-2 py-1 text-left">SSCC Label (BOX)</th>
+          <th class="border px-2 py-1 text-left">PO_Number</th>
+          <th class="border px-2 py-1 text-left">SKU_Code</th>
+          <th class="border px-2 py-1 text-left">UID</th>
+          <th class="border px-2 py-1 text-left">Status</th>
+          <th class="border px-2 py-1 text-left">Sync</th>
+          <th class="border px-2 py-1 text-left">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="intake-body"></tbody>
+    </table>
+  </div>
+
+  <div class="mt-3">
+    <button id="btn-add-row" class="px-3 py-2 rounded-lg border text-sm">Add Row</button>
+  </div>
+
+  <!-- Quick Delete by UID -->
+  <div class="mt-4 bg-white rounded-2xl border shadow p-4">
+    <div class="text-base font-semibold mb-2">Delete Applied UID(s)</div>
+    <p class="text-xs text-gray-500 mb-2">
+      Enter one or more UIDs (comma, space, or line separated). The system will remove matching records.
+    </p>
+    <textarea id="uids-to-delete" rows="3" placeholder="Paste UIDs here…" class="w-full border rounded-md px-3 py-2 text-sm outline-none focus:ring-2"></textarea>
+    <div class="mt-2 flex items-center gap-2">
+      <button id="btn-delete-uids" class="px-3 py-2 rounded-lg border border-rose-700 text-rose-700">Delete UID(s)</button>
+      <span id="delete-uids-status" class="text-xs text-gray-500"></span>
+    </div>
+  </div>
+</section>
+  
+<script>
+    // ---------------------------
+    // ---------------------------
+// Small utilities (safe HTML, formatting)
+// ---------------------------
+function escapeHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+
+function firstTwoWords(name){
+  const s = String(name ?? '').trim();
+  if(!s) return '';
+  const parts = s.split(/\s+/).filter(Boolean);
+  return parts.slice(0,2).join(' ');
+}
+function fmt(n, digits = 0) {
+  const x = Number(n);
+  if (!isFinite(x)) return '0';
+  return x.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits });
+}
+
+function pct(n, d, digits = 0) {
+  const nn = Number(n) || 0, dd = Number(d) || 0;
+  if (!dd) return '0%';
+  return (100 * nn / dd).toFixed(digits) + '%';
+}
+
+// Softer / matte palette for Ops insight bars
+const OPS_PLANNED_BG = 'rgb(55,65,81)'; // dark grey planned baseline // slate-400 @ 16% (matte)
+const OPS_PLANNED_FG = 'rgb(55,65,81)'; // dark grey legend dot // slate-400 @ 32%
+const OPS_RECEIVED_FG = 'rgb(240,215,49)'; // matte yellow for received // sky-400 @ 20% (soft)
+const OPS_APPLIED_OPACITY = '1'; // applied solid // applied overlay opacity (matte)
+
+// Bar row helper used by Ops insights (safe even if not used everywhere)
+function barRowHtml(label, val, denom, barColor) {
+  const v = Number(val) || 0, d = Number(denom) || 0;
+  const p = d > 0 ? Math.max(0, Math.min(100, 100 * v / d)) : 0;
+  const c = barColor || OPS_PLANNED_FG;
+  return `
+    <div class="flex items-center gap-3">
+      <div class="w-20 shrink-0 text-[11px] text-gray-500">${escapeHtml(label)}</div>
+      <div class="flex-1 h-2 rounded-full overflow-hidden" style="background:${OPS_PLANNED_BG};">
+        <div class="h-2 rounded-full" style="width:${p}%; background:${c};"></div>
+      </div>
+      <div class="w-24 text-right text-[11px] tabular-nums text-gray-700">${fmt(v)}</div>
+    </div>
   `;
 }
 
-window._finTab=function(tab){
-  _finState.tab=tab;
-  ['invoices','pl','expenses'].forEach(t=>{
-    const btn=el('fin-nav-'+t),content=el('fin-tab-'+t);
-    if(btn)btn.classList.toggle('active',t===tab);
-    if(content)content.style.display=t===tab?'':'none';
-  });
-  const wk=el('fin-sidebar-week');if(wk)wk.style.display=tab==='invoices'?'':'none';
-  // P&L renders its own KPI row — hide the shared top tiles to avoid duplication
-  const kpiGrid=el('fin-kpis');if(kpiGrid)kpiGrid.style.display=tab==='pl'?'none':'';
-  if(tab==='invoices')renderInvoicesTab();
-  if(tab==='pl')renderPLTab();
-  if(tab==='expenses')renderExpensesTab();
-};
-window._finSelectWeek=function(v){_finState.week=safeDate(v);renderInvoiceGrid();};
-window._finCurrencyChange=function(v){
-  _finState.currency=v;renderKPIs();
-  if(_finState.tab==='invoices')renderInvoiceTable();
-  if(_finState.tab==='pl')renderPLTab();
-  if(_finState.tab==='expenses')renderExpensesTab();
-};
-window._finClosePanel=function(){
-  const p=el('fin-panel'),o=el('fin-overlay');
-  if(p)p.style.transform='translateX(100%)';if(o)o.style.display='none';
-};
-function openPanel(html){
-  const p=el('fin-panel'),o=el('fin-overlay');
-  if(p){p.innerHTML=html;p.style.transform='translateX(0)';}if(o)o.style.display='block';
+// Back-compat alias (older refactors called this progressHtml)
+function progressHtml(label, val, denom, barColor) {
+  return barRowHtml(label, val, denom, barColor);
 }
 
-async function renderKPIs(){
-  try{
-    const s=await api('/finance/summary');
-    const rev=parseFloat(s.paid_ytd?.total||0),exp=parseFloat(s.expenses_ytd?.total||0);
-    const net=rev-exp,margin=rev>0?Math.round(net/rev*100):0;
-    const out=s.outstanding||{};
-    const tiles=[
-      {label:'Revenue YTD',value:fmtUSD(rev),sub:'Paid invoices',color:GREEN},
-      {label:'Expenses YTD',value:fmtUSD(exp),sub:'All categories',color:AMBER},
-      {label:'Net Margin',value:margin+'%',sub:fmtUSD(net)+' net',color:margin>20?GREEN:margin>0?AMBER:BRAND},
-      {label:'Outstanding',value:fmtUSD(out.total||0),sub:(out.n||0)+' invoice'+(out.n!==1?'s':''),color:BRAND},
-    ];
-    const cont=el('fin-kpis');if(!cont)return;
-    const kpiAccents=['#166534','#606a9f','#990033','#b8960c'];
-    cont.innerHTML=tiles.map((t,i)=>`<div class="fin-kpi-card" style="--kpi-accent:${kpiAccents[i]};">
-      <div style="font-size:10px;font-weight:600;color:#8e8e93;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">${t.label}</div>
-      <div style="font-size:24px;font-weight:700;color:#1C1C1E;letter-spacing:-0.03em;margin-bottom:5px;">${t.value}</div>
-      <div style="font-size:11px;color:${t.color};font-weight:500;">${t.sub}</div>
-    </div>`).join('');
-  }catch(e){console.warn('[Finance] KPI',e);}
+// Single progress bar: received (soft) + applied (matte) over planned baseline
+function progressBarHtml(planned, received, applied) {
+  const p = Number(planned) || 0, r = Number(received) || 0, a = Number(applied) || 0;
+  const recPct = p > 0 ? Math.max(0, Math.min(100, 100 * r / p)) : 0;
+  const appPct = p > 0 ? Math.max(0, Math.min(100, 100 * a / p)) : 0;
+  return `
+    <div class="relative h-2.5 rounded-full overflow-hidden" style="background:${OPS_PLANNED_BG};">
+      <div class="absolute left-0 top-0 h-2.5 rounded-full" style="width:${recPct}%; background:${OPS_RECEIVED_FG};"></div>
+      <div class="absolute left-0 top-0 h-2.5 rounded-full" style="width:${appPct}%; background:${APPLIED_COLOR}; opacity:${OPS_APPLIED_OPACITY};"></div>
+    </div>
+  `;
 }
 
-async function renderInvoicesTab(){
-  const cont=el('fin-tab-invoices');if(!cont)return;
-  cont.innerHTML=`<div style="color:${LIGHT};font-size:12px;">Loading…</div>`;
-  try{
-    if(!_finState.week)_finState.week=getWeeks()[0];
-    const sel=el('fin-week-sel');if(sel&&_finState.week)sel.value=_finState.week;
-    const invoices=await api('/finance/invoices');
-    _finState.invoices=invoices;
-    cont.innerHTML=`
-      <div id="fin-inv-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:28px;"></div>
-      <div class="fin-card"><div class="fin-section-title">All Invoices</div><div id="fin-inv-table"></div></div>`;
-    renderInvoiceGrid();renderInvoiceTable();
-  }catch(e){cont.innerHTML=`<div style="color:${BRAND};padding:12px;">Error: ${esc(e.message)}</div>`;}
-}
-
-function renderInvoiceGrid(){
-  const cont=el('fin-inv-grid');if(!cont)return;
-  const ws=_finState.week;
-  const weekInvs=_finState.invoices.filter(i=>i.week_start===ws);
-  cont.innerHTML=['VAS','SEA','AIR'].map(type=>{
-    const inv=weekInvs.find(i=>i.type===type);
-    if(inv){
-      return`<div class="fin-card" style="cursor:pointer;transition:box-shadow .15s;" onmouseenter="this.style.boxShadow='0 4px 24px rgba(0,0,0,0.1)'" onmouseleave="this.style.boxShadow='none'" onclick="window._finEditInvoice('${inv.id}')">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-          <div style="display:flex;align-items:center;gap:8px;">
-            <span style="font-size:20px;">${typeIcon(type)}</span>
-            <div><div style="font-size:12px;font-weight:600;color:${DARK};">${type}</div><div style="font-size:10px;color:${LIGHT};">${esc(inv.ref_number)}</div></div>
-          </div>${statusBadge(inv.status)}
-        </div>
-        <div style="font-size:24px;font-weight:700;color:${DARK};margin-bottom:6px;">${fmtUSD(inv.total)}</div>
-        <div style="font-size:10px;color:${MID};margin-bottom:14px;">Due ${fmtDate(inv.due_date)}</div>
-        <div style="display:flex;gap:6px;">
-          <button class="fin-btn fin-btn-ghost" style="flex:1;font-size:11px;" onclick="event.stopPropagation();window._finEditInvoice('${inv.id}')">Edit</button>
-          <button class="fin-btn fin-btn-ghost" style="flex:1;font-size:11px;" onclick="event.stopPropagation();window._finDownloadPDF('${inv.id}','${esc(inv.ref_number)}')">⬇ PDF</button>
-        </div>
-      </div>`;
+function shortTwoWords(name) {
+      const parts = String(name ?? '').trim().split(/\s+/).filter(Boolean);
+      const s = parts.slice(0, 2).join(' ');
+      return s || '—';
     }
-    return`<div class="fin-card" style="cursor:pointer;border:1.5px dashed rgba(0,0,0,0.1);text-align:center;transition:all .15s;" onmouseenter="this.style.borderColor='${BRAND}'" onmouseleave="this.style.borderColor='rgba(0,0,0,0.1)'" onclick="window._finCreateInvoice('${type}','${ws}')">
-      <div style="padding:28px 0;">
-        <div style="font-size:28px;margin-bottom:8px;">${typeIcon(type)}</div>
-        <div style="font-size:12px;font-weight:600;color:${MID};margin-bottom:4px;">${type} Invoice</div>
-        <div style="font-size:10px;color:${LIGHT};margin-bottom:12px;">Not yet created</div>
-        <span style="background:${BRAND};color:#fff;border-radius:20px;padding:5px 16px;font-size:11px;font-weight:600;">+ Create</span>
-      </div>
-    </div>`;
-  }).join('');
+  const BRAND = '#990033';
+  const APPLIED_COLOR = 'rgb(209,226,49)'; // same as cartons IN (ops-green) // matte green (soft) for applied
+  const PLANNED_COLOR = 'rgb(55,65,81)'; // dark grey for planned
+const BASE_BPM = 40;
+  const apiBase = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/,'');
+  const $ = (s)=>document.querySelector(s);
+  // Show "Month DD YYYY • <local TZ>" using the viewer's local timezone
+(function setNavToday(){
+  const d = new Date();
+  const month = d.toLocaleString('en-US', { month: 'long' });
+  const day   = String(d.getDate()).padStart(2, '0');
+  const year  = d.getFullYear();
+  const tzShort = new Intl.DateTimeFormat('en-US', { timeZoneName: 'short' })
+    .formatToParts(d)
+    .find(p => p.type === 'timeZoneName')?.value || '';
+      const __el_vo_today = document.getElementById('vo-today'); if(__el_vo_today) __el_vo_today.textContent = `${month} ${day} ${year} • ${tzShort}`;
+})();
+const iso = (d) => {
+  const x = new Date(d);
+  const y = x.getFullYear();
+  const m = String(x.getMonth() + 1).padStart(2, '0');
+  const day = String(x.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+const mondayOf = (d=new Date()) => { const x=new Date(d); const day=x.getDay(); const diff=(day===0?-6:1)-day; x.setDate(x.getDate()+diff); x.setHours(0,0,0,0); return x; };
+const fmtInt = (n) => Number(n||0).toLocaleString();
+const toNum = (v) => Number(String(v ?? 0).toString().replace(/,/g, '')) || 0;
+const toUI = (isoStr) =>
+  (isoStr && typeof isoStr === 'string' && isoStr.includes('-'))
+    ? isoStr.split('-').reverse().join('-')
+    : (isoStr || '');
+
+// ---- Business timezone helpers (single source of truth: Asia/Shanghai) ----
+const BUSINESS_TZ = document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai';
+
+// Format a Date into 'YYYY-MM-DD' in the given IANA TZ
+function ymdInTZ(d, tz = BUSINESS_TZ) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(d);
+  const get = k => parts.find(p => p.type === k)?.value;
+  return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
-function renderInvoiceTable(){
-  const cont=el('fin-inv-table');if(!cont)return;
-  const invs=[..._finState.invoices].sort((a,b)=>b.week_start.localeCompare(a.week_start));
-  if(!invs.length){cont.innerHTML=`<div style="font-size:11px;color:${LIGHT};padding:12px 0;">No invoices yet.</div>`;return;}
-  cont.innerHTML=`<table class="fin-tbl">
-    <thead><tr><th>Reference</th><th>Type</th><th>Week</th><th>Date</th><th>Due</th><th>Amount</th><th>Status</th><th></th></tr></thead>
-    <tbody>${invs.map(i=>`<tr style="cursor:pointer;" onclick="window._finEditInvoice('${i.id}')">
-      <td style="font-weight:500;font-size:11px;">${esc(i.ref_number)}</td>
-      <td>${typeIcon(i.type)} ${i.type}</td>
-      <td style="color:${MID};font-size:11px;">${weekLabel(i.week_start)}</td>
-      <td style="color:${MID};font-size:11px;">${fmtDate(i.invoice_date)}</td>
-      <td style="color:${MID};font-size:11px;">${fmtDate(i.due_date)}</td>
-      <td style="font-weight:600;">${fmtUSD(i.total)}</td>
-      <td>${statusBadge(i.status)}</td>
-      <td onclick="event.stopPropagation()"><button class="fin-btn fin-btn-ghost" style="font-size:10px;padding:4px 10px;" onclick="window._finDownloadPDF('${i.id}','${esc(i.ref_number)}')">PDF</button></td>
-    </tr>`).join('')}</tbody>
-  </table>`;
+// Today as 'YYYY-MM-DD' in business TZ
+function todayInTZ(tz = BUSINESS_TZ) { return ymdInTZ(new Date(), tz); }
+
+// Day-of-week (0..6 Sun..Sat) for a given 'YYYY-MM-DD' in business TZ
+function dayOfWeekInTZ(ymd, tz = BUSINESS_TZ) {
+  const dt = new Date(ymd + 'T12:00:00Z'); // midday UTC avoids DST edges
+  const name = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: tz }).format(dt);
+  return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].indexOf(name);
 }
 
-window._finCreateInvoice=async function(type,weekStart){
-  const ws=safeDate(weekStart)||_finState.week;
-  openPanel(`<div style="padding:20px;color:${LIGHT};font-size:12px;">Loading ${type} data…</div>`);
-  try{
-    const pf=await api(`/finance/prefill/${type}/${ws}`);
-    renderInvoiceEditor({id:null,type,week_start:ws,invoice_date:isoToday(),due_date:addDays(isoToday(),type==='VAS'?30:7),status:'draft',notes:'',subtotal:pf.subtotal||0,gst:pf.gst||0,customs:pf.customs||0,misc_total:0,total:pf.total||0,lines:pf.lines||[]});
-  }catch(e){openPanel(`<div style="padding:20px;color:${BRAND};">Error: ${esc(e.message)}</div>`);}
-};
+// Monday anchor (returns Monday 'YYYY-MM-DD' for the given day, in business TZ)
+function mondayOfInTZ(ymd, tz = BUSINESS_TZ) {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const anchor = new Date(Date.UTC(y, m - 1, d));
+  const dow = dayOfWeekInTZ(ymd, tz);
+  const offset = dow === 0 ? -6 : (1 - dow);
+  anchor.setUTCDate(anchor.getUTCDate() + offset);
+  return ymdInTZ(anchor, tz);
+}
 
-window._finEditInvoice=async function(id){
-  openPanel(`<div style="padding:20px;color:${LIGHT};font-size:12px;">Loading…</div>`);
-  try{renderInvoiceEditor(await api(`/finance/invoices/${id}`));}
-  catch(e){openPanel(`<div style="padding:20px;color:${BRAND};">Error: ${esc(e.message)}</div>`);}
-};
+// Convert a completed_at timestamp -> 'YYYY-MM-DD' in business TZ
+function ymdFromCompletedAtInTZ(completedAt, tz = BUSINESS_TZ) {
+  return completedAt ? ymdInTZ(new Date(completedAt), tz) : '';
+}
 
-function renderInvoiceEditor(inv){
-  const isNew=!inv.id,type=inv.type;
-  const lines=inv.lines||[];
-  const mainL=lines.filter(l=>!l.gst_free&&!l.is_misc);
-  const custL=lines.filter(l=>l.gst_free&&!l.is_misc);
-  const miscL=lines.filter(l=>l.is_misc);
-  while(miscL.length<2)miscL.push({description:'',unit_label:'',rate:0,quantity:0,total:0,gst_free:0,is_misc:1});
-  window._finCurrentLines=[...mainL,...miscL,...custL].map(l=>({...l}));
+function createHeart(size=24, color=BRAND, bpm=40){
+  const s='http://www.w3.org/2000/svg', svg=document.createElementNS(s,'svg');
+  svg.setAttribute('viewBox','0 0 24 24'); svg.setAttribute('width',size); svg.setAttribute('height',size);
+  const p=document.createElementNS(s,'path');
+  p.setAttribute('d','M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z');
+  p.setAttribute('fill', color); svg.appendChild(p);
+  svg.classList.add('heartbeat'); svg.style.animationDuration = `${(60/Math.max(40,bpm)).toFixed(2)}s`;
+  return svg;
+}
+  // API helpers (🔐 with authentication)
+  const state={weekStart:'', plan:[], records:[], opsView:'overview', weekCartonsIn:0, weekCartonsOut:0};
 
-  function lineHtml(l,idx){
-    const r=`<input class="fin-input" style="width:65px;text-align:right;" data-field="rate" data-idx="${idx}" value="${l.rate||0}" oninput="window._finLCh(${idx})"/>`;
-    const q=`<input class="fin-input" style="width:70px;text-align:right;" data-field="qty" data-idx="${idx}" value="${l.quantity||0}" oninput="window._finLCh(${idx})"/>`;
-    const t=`<span id="flt-${idx}" style="font-size:11px;font-weight:600;">${fmtUSD(l.total)}</span>`;
-    if(type==='VAS')return`<tr><td style="font-size:11px;padding:6px 8px;">${esc(l.description)}</td><td style="font-size:10px;color:${MID};padding:6px 8px;">${esc(l.unit_label)}</td><td style="padding:4px 6px;">${r}</td><td style="padding:4px 6px;">${q}</td><td style="text-align:right;padding:6px 8px;">${t}</td></tr>`;
-    return`<tr><td style="padding:4px 6px;"><input class="fin-input" style="font-size:11px;" data-field="desc" data-idx="${idx}" value="${esc(l.description)}" oninput="window._finLCh(${idx})"/></td><td style="padding:4px 6px;">${r}</td><td style="padding:4px 6px;">${q}</td><td style="text-align:right;padding:6px 8px;">${t}</td></tr>`;
+  async function api(path, opts = {}) {
+    // Get auth token from Clerk
+    let token = null;
+    if (window.Clerk && window.Clerk.session) {
+      try {
+        token = await window.Clerk.session.getToken();
+      } catch (e) {
+        console.error('[API] Failed to get token:', e);
+      }
+    }
+    
+    const headers = {
+      'Content-Type': 'application/json',
+      ...opts.headers
+    };
+    
+    // Add auth token if available
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    const r = await fetch(`${apiBase}${path}`, {
+      method: opts.method || 'GET',
+      headers,
+      body: opts.body ? JSON.stringify(opts.body) : undefined
+    });
+    
+    // Handle 401 - do NOT auto sign-out.
+    // A 401 during init is a race condition (token not ready yet), not a real session expiry.
+    // Auto signing-out here causes a loop: app shows → 401 → signed out → back to login.
+    if (r.status === 401) {
+      console.error('[API] 401 Unauthorized - token may not have been attached yet');
+      throw new Error('Unauthorized');
+    }
+    
+    if (!r.ok) throw new Error(await r.text());
+    
+    const ct = r.headers.get('content-type') || '';
+    return ct.includes('json') ? r.json() : r.text();
   }
-  function miscHtml(l,idx){
-    return`<tr><td colspan="${type==='VAS'?2:1}" style="padding:4px 6px;"><input class="fin-input" placeholder="Optional description" data-field="desc" data-idx="${idx}" value="${esc(l.description)}" oninput="window._finLCh(${idx})"/></td>
-    <td style="padding:4px 6px;"><input class="fin-input" style="width:65px;text-align:right;" data-field="rate" data-idx="${idx}" value="${l.rate||0}" oninput="window._finLCh(${idx})"/></td>
-    <td style="padding:4px 6px;"><input class="fin-input" style="width:65px;text-align:right;" data-field="qty" data-idx="${idx}" value="${l.quantity||0}" oninput="window._finLCh(${idx})"/></td>
-    <td style="text-align:right;padding:6px 8px;"><span id="flt-${idx}">${fmtUSD(l.total)}</span></td></tr>`;
+  
+  async function fetchPlan(w){
+  try {
+    return await api(`/plan/weeks/${w}`);
+  } catch (e) {
+    console.error('[OPS fetchPlan] failed', e);
+    return [];
   }
-  const nM=mainL.length,nMi=miscL.length;
-  const allL=window._finCurrentLines;
-  const col=type==='VAS'?`<th>Service</th><th>Unit</th><th>Rate</th><th>Qty</th><th style="text-align:right">Total</th>`:`<th>Description</th><th>Rate</th><th>Qty/KG</th><th style="text-align:right">Total</th>`;
+}
 
-  openPanel(`
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-      <div><div style="font-size:15px;font-weight:700;color:${DARK};">${typeIcon(type)} ${type} Invoice</div><div style="font-size:11px;color:${LIGHT};">${weekLabel(inv.week_start)}</div></div>
-      <button onclick="window._finClosePanel()" style="width:28px;height:28px;border-radius:8px;border:none;background:${BG};color:${MID};font-size:14px;cursor:pointer;">✕</button>
-    </div>
-    <div style="display:grid;grid-template-columns:1fr auto;gap:10px;margin-bottom:14px;">
-      <div><span class="fin-label">Reference</span><input id="fin-inv-ref" class="fin-input" style="font-weight:600;" value="${esc(inv.ref_number||'')}" placeholder="Auto-generated on save"/></div>
-      <div><span class="fin-label">Status</span><select id="fin-inv-status" class="fin-input" style="width:110px;">${['draft','sent','paid','overdue'].map(s=>`<option value="${s}" ${s===inv.status?'selected':''}>${s[0].toUpperCase()+s.slice(1)}</option>`).join('')}</select></div>
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;">
-      <div><span class="fin-label">Invoice Date</span><input id="fin-inv-date" type="date" class="fin-input" value="${safeDate(inv.invoice_date)||isoToday()}"/></div>
-      <div><span class="fin-label">Due Date</span><input id="fin-inv-due" type="date" class="fin-input" value="${safeDate(inv.due_date)||addDays(isoToday(),30)}"/></div>
-    </div>
-    <span class="fin-label">Line Items</span>
-    <div style="border:0.5px solid rgba(0,0,0,0.08);border-radius:10px;overflow:hidden;margin-bottom:12px;">
-      <table style="width:100%;border-collapse:collapse;">
-        <thead style="background:${BG};"><tr style="font-size:9px;font-weight:600;color:${LIGHT};text-transform:uppercase;">${col}</tr></thead>
-        <tbody>
-          ${allL.slice(0,nM).map((l,i)=>lineHtml(l,i)).join('')}
-          ${nMi?`<tr><td colspan="5" style="font-size:9px;color:${LIGHT};text-transform:uppercase;padding:5px 8px;background:${BG};border-top:0.5px solid rgba(0,0,0,0.05);">Miscellaneous</td></tr>`:''}
-          ${allL.slice(nM,nM+nMi).map((l,i)=>miscHtml(l,nM+i)).join('')}
-          ${custL.length?`<tr><td colspan="5" style="font-size:9px;color:${LIGHT};text-transform:uppercase;padding:5px 8px;background:${BG};border-top:0.5px solid rgba(0,0,0,0.05);">Customs / GST-free</td></tr>`:''}
-          ${allL.slice(nM+nMi).map((l,i)=>lineHtml(l,nM+nMi+i)).join('')}
-        </tbody>
-      </table>
-    </div>
-    <div style="background:${BG};border-radius:10px;padding:12px 14px;margin-bottom:14px;">
-      <div style="display:flex;justify-content:space-between;font-size:11px;color:${MID};margin-bottom:4px;"><span>Subtotal</span><span id="ft-sub">${fmtUSD(inv.subtotal)}</span></div>
-      <div style="display:flex;justify-content:space-between;font-size:11px;color:${MID};margin-bottom:4px;"><span>GST (10%)</span><span id="ft-gst">${fmtUSD(inv.gst)}</span></div>
-      <div style="display:flex;justify-content:space-between;font-size:11px;color:${MID};margin-bottom:8px;"><span>Customs / GST-free</span><span id="ft-cus">${fmtUSD(inv.customs)}</span></div>
-      <div style="display:flex;justify-content:space-between;font-size:13px;font-weight:700;color:${DARK};border-top:0.5px solid rgba(0,0,0,0.08);padding-top:8px;"><span>Total Payable</span><span id="ft-tot">${fmtUSD(inv.total)}</span></div>
-    </div>
-    <span class="fin-label">Notes</span>
-    <textarea id="fin-inv-notes" class="fin-input" rows="2" style="resize:vertical;margin-bottom:16px;">${esc(inv.notes||'')}</textarea>
-    <div style="display:flex;gap:8px;">
-      <button class="fin-btn fin-btn-primary" style="flex:1;" onclick="window._finSaveInv(${isNew?'null':`'${inv.id}'`},'${type}','${safeDate(inv.week_start)}')">${isNew?'Create Invoice':'Save Changes'}</button>
-      ${!isNew?`<button class="fin-btn fin-btn-ghost" onclick="window._finDownloadPDF('${inv.id}','${esc(inv.ref_number||'')}')">⬇ PDF</button>`:''}
-      <button class="fin-btn fin-btn-ghost" onclick="window._finClosePanel()">Cancel</button>
-    </div>
-    ${!isNew?`<div style="margin-top:12px;text-align:center;"><button onclick="window._finDelInv('${inv.id}')" style="background:none;border:none;color:${LIGHT};font-size:11px;cursor:pointer;">Delete invoice</button></div>`:''}
-  `);
+  // Summary-first: dashboards never pull raw /records.
+  async function fetchSummary(fromYMD, toYMD, status='complete'){
+    try{
+      const q = new URLSearchParams();
+      if(fromYMD) q.set('from', fromYMD);
+      if(toYMD) q.set('to', toYMD);
+      if(status) q.set('status', status);
+      return await api(`/records/summary?${q.toString()}`);
+    }catch(e){
+      console.error('[OPS fetchSummary] failed', {fromYMD,toYMD,status,error:e});
+      return null;
+    }
+  }
 
-  window._finLCh=function(idx){
-    const L=window._finCurrentLines;
-    const rE=document.querySelector(`[data-idx="${idx}"][data-field="rate"]`);
-    const qE=document.querySelector(`[data-idx="${idx}"][data-field="qty"]`);
-    const dE=document.querySelector(`[data-idx="${idx}"][data-field="desc"]`);
-    if(dE&&L[idx])L[idx].description=dE.value;
-    const rate=parseFloat(rE?.value||0),qty=parseFloat(qE?.value||0),tot=Math.round(rate*qty*100)/100;
-    if(L[idx]){L[idx].rate=rate;L[idx].quantity=qty;L[idx].total=tot;}
-    const tEl=document.getElementById('flt-'+idx);if(tEl)tEl.textContent=fmtUSD(tot);
-    const nM2=L.filter(l=>!l.gst_free&&!l.is_misc),nC2=L.filter(l=>l.gst_free&&!l.is_misc),nX2=L.filter(l=>l.is_misc);
-    const sub=Math.round([...nM2,...nX2].reduce((s,l)=>s+(parseFloat(l.total)||0),0)*100)/100;
-    const gst=Math.round(sub*0.10*100)/100,cus=nC2.reduce((s,l)=>s+(parseFloat(l.total)||0),0);
-    const T=Math.round((sub+gst+cus)*100)/100;
-    const S=el('ft-sub'),G=el('ft-gst'),C=el('ft-cus'),Tt=el('ft-tot');
-    if(S)S.textContent=fmtUSD(sub);if(G)G.textContent=fmtUSD(gst);if(C)C.textContent=fmtUSD(cus);if(Tt)Tt.textContent=fmtUSD(T);
+
+  // Fallback: pull raw records (used only if /records/summary is unavailable)
+  async function fetchRecordsRange(fromYMD, toYMD, status='complete', limit=200000){
+    try{
+      const q = new URLSearchParams();
+      if(status) q.set('status', status);
+      if(fromYMD) q.set('from', fromYMD);
+      if(toYMD) q.set('to', toYMD);
+      q.set('limit', String(limit));
+      const r = await api(`/records?${q.toString()}`);
+      // API sometimes returns {records:[...]}
+      if(Array.isArray(r)) return r;
+      if(Array.isArray(r?.records)) return r.records;
+      return [];
+    }catch{ return []; }
+  }
+
+  function buildSummaryFromRaw(records){
+    const byPO = new Map();
+    let total = 0;
+    for(const r of (records||[])){
+      if(!r) continue;
+      if(r.status && r.status !== 'complete') continue;
+      const po = String(r.po_number||r.po||'').trim();
+      if(!po) continue;
+      byPO.set(po, (byPO.get(po)||0) + 1);
+      total += 1;
+    }
+    const by_po = Array.from(byPO.entries()).map(([po, units]) => ({po, units}));
+    return { by_po, total_units: total };
+  }
+
+
+  // --- Fetch bins for a week (business week start) ---
+async function fetchBins(ws) {
+  if (!apiBase) return [];
+  try {
+    const r = await api(`/bins/weeks/${ws}`);
+    return Array.isArray(r) ? r : (r.bins || []);
+  } catch {
+    return [];
+  }
+}
+
+// --- Fetch receiving rows for a week (used to estimate cartons-in and "approx received units") ---
+async function fetchReceiving(ws) {
+  if (!apiBase) return [];
+  try {
+    // Matches Flow/Receiving modules
+    const r = await api(`/receiving?weekStart=${encodeURIComponent(ws)}`);
+    return Array.isArray(r) ? r : (r.rows || r.data || []);
+  } catch {
+    return [];
+  }
+}
+
+
+// --- Compute bin QA (cross-check with applied records) ---
+function computeBinQA(ws, records=[], bins=[]) {
+  // stats from bins
+  const binMap = new Map(); // bin -> { units, weight }
+  let binsCount = 0, totalUnitsFromBins = 0, totalWeightKg = 0;
+
+  for (const b of bins) {
+    const id = String(b.mobile_bin || '').trim();
+    if (!id) continue;
+    binsCount++;
+    const u = Number(b.total_units ?? 0) || 0;
+    const w = Number(b.weight_kg ?? 0) || 0;
+    totalUnitsFromBins += u;
+    totalWeightKg += w;
+
+    const rec = binMap.get(id) || { units: 0, weight: 0 };
+    rec.units += u;
+    rec.weight += w;
+    binMap.set(id, rec);
+  }
+
+  // stats from applied records (this week)
+  const byBin = new Map(); // bin -> units counted from UIDs
+  for (const r of records || []) {
+    if (r.status !== 'complete') continue;
+    const bin = String(r.mobile_bin || '').trim();
+    if (!bin) continue;
+    byBin.set(bin, (byBin.get(bin) || 0) + 1);
+  }
+
+  // anomalies
+  const anomalies = [];
+  const suspicious = [];
+
+  // 1) bin exists in manifest but no UIDs, or vice versa
+  const manifestBins = new Set(binMap.keys());
+  const uidBins = new Set(byBin.keys());
+
+  // bins in manifest but zero UIDs
+  for (const b of manifestBins) {
+    const m = binMap.get(b);
+    const uids = byBin.get(b) || 0;
+    if (uids === 0) anomalies.push({ type: 'no_uids_for_manifest_bin', bin: b, units_manifest: m.units, weight_kg: m.weight });
+  }
+  // bins with UIDs but missing in manifest
+  for (const b of uidBins) {
+    if (!manifestBins.has(b)) anomalies.push({ type: 'uids_without_manifest', bin: b, uids: byBin.get(b) });
+  }
+
+  // 2) count mismatch (UIDs vs manifest units)
+  for (const b of manifestBins) {
+    const m = binMap.get(b);
+    const uids = byBin.get(b) || 0;
+    if (m.units && Math.abs(m.units - uids) > 0) {
+      anomalies.push({ type: 'units_mismatch', bin: b, units_manifest: m.units, uids });
+    }
+  }
+
+  // 3) weight plausibility per unit (very light or very heavy)
+  for (const [b, m] of binMap.entries()) {
+    if (!m.units || !m.weight) continue;
+    const per = m.weight / Math.max(1, m.units);
+    if (per < 0.005 || per > 5) {
+      suspicious.push({ type: 'weight_per_unit_outlier', bin: b, units: m.units, weight_kg: m.weight, kg_per_unit: per });
+    }
+  }
+
+  return {
+    ws,
+    binsCount,
+    totalUnitsFromBins,
+    totalWeightKg,
+    avgWeightPerBin: binsCount ? (totalWeightKg / binsCount) : 0,
+    totalsFromUIDs: Array.from(byBin.values()).reduce((s, v) => s + v, 0),
+    anomalies,
+    suspicious,
+    topOutliers: suspicious.sort((a,b) => Math.abs(b.kg_per_unit - 1) - Math.abs(a.kg_per_unit - 1)).slice(0,5),
   };
 }
 
-window._finSaveInv=async function(id,type,weekStart){
-  const L=window._finCurrentLines||[],ws=safeDate(weekStart)||_finState.week;
-  const mL=L.filter(l=>!l.gst_free&&!l.is_misc),cL=L.filter(l=>l.gst_free&&!l.is_misc),xL=L.filter(l=>l.is_misc&&l.description);
-  const customs=cL.reduce((s,l)=>s+(parseFloat(l.total)||0),0),misc_total=xL.reduce((s,l)=>s+(parseFloat(l.total)||0),0);
-  const refOverride=el('fin-inv-ref')?.value?.trim()||'';
-  const payload={type,week_start:ws,invoice_date:el('fin-inv-date')?.value||isoToday(),due_date:el('fin-inv-due')?.value||'',status:el('fin-inv-status')?.value||'draft',notes:el('fin-inv-notes')?.value||'',customs,misc_total,lines:[...mL,...xL,...cL],ref_override:refOverride};
-  try{
-    if(id)await api(`/finance/invoices/${id}`,{method:'PATCH',body:JSON.stringify(payload)});
-    else await api('/finance/invoices',{method:'POST',body:JSON.stringify(payload)});
-    _finState.invoices=await api('/finance/invoices');
-    window._finClosePanel();renderInvoiceGrid();renderInvoiceTable();renderKPIs();
-  }catch(e){alert('Save failed: '+e.message);}
-};
-window._finDownloadPDF=async function(id,ref){
-  try{
-    const token=await getToken();
-    const url=_apiBase+`/finance/invoice/${id}/pdf`+(token?'?_token='+encodeURIComponent(token):'');
-    // Use fetch+blob so browser never navigates away
-    const r=await fetch(url);
-    if(!r.ok){
-      const err=await r.text();
-      throw new Error('PDF failed: '+err);
-    }
-    const blob=await r.blob();
-    const blobUrl=URL.createObjectURL(blob);
-    const a=document.createElement('a');
-    a.href=blobUrl;
-    a.download=(ref||'invoice').replace(/[^a-zA-Z0-9\-_]/g,'_')+'.pdf';
-    document.body.appendChild(a);a.click();a.remove();
-    setTimeout(()=>URL.revokeObjectURL(blobUrl),5000);
-  }catch(e){alert('PDF download failed: '+e.message);}
-};
-window._finDelInv=async function(id){
-  if(!confirm('Delete this invoice?'))return;
-  try{await api(`/finance/invoices/${id}`,{method:'DELETE'});_finState.invoices=_finState.invoices.filter(i=>i.id!==id);window._finClosePanel();renderInvoiceGrid();renderInvoiceTable();renderKPIs();}
-  catch(e){alert('Delete failed: '+e.message);}
-};
 
-async function renderPLTab(){
-  const cont=el('fin-tab-pl');if(!cont)return;
-  cont.innerHTML=`<div style="color:${LIGHT};font-size:12px;">Loading P&L…</div>`;
-  try{
-    const year=new Date().getUTCFullYear();
-    const pl=await api(`/finance/pl?year=${year}`);
-    _finState.pl=pl;
-    const ytd=pl.ytd||{},months=pl.months||[];
+  // ---------- Capsules ----------
+  function addDaysISO(s,days){const [y,m,d]=s.split('-').map(Number);const b=new Date(y,m-1,d);b.setDate(b.getDate()+days);return iso(b)}
+  function renderCapsules(baseISO, plannedTotal = 0, appliedTotal = 0, totalsByWeek = null) {
+  const r = $('#capsules');
+  if (!r) return;
+  r.innerHTML = ''; // keep hidden — wh-capsules-display mirrors this
 
-    // ── Main layout ──
-    cont.innerHTML=`
-      <div style="display:flex;gap:20px;align-items:flex-start;">
+  const list = [-7, 0, 7, 14, 21].map(n => addDaysISO(baseISO, n));
 
-        <!-- LEFT MAIN CONTENT -->
-        <div style="flex:1;min-width:0;">
+  list.forEach(id => {
+    const d = new Date(id + 'T00:00:00');
+    const day = String(d.getDate()).padStart(2, '0');
+    const mon = d.toLocaleString('en-US', { month: 'short' }).toUpperCase().slice(0, 3);
 
-          <!-- ── Page header: title + period + action ── -->
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;">
-            <div style="display:flex;align-items:center;gap:14px;">
-              <div>
-                <div style="font-size:22px;font-weight:800;color:#1C1C1E;letter-spacing:-0.04em;">Profit &amp; Loss</div>
-                <div style="font-size:11px;color:#8e8e93;margin-top:2px;letter-spacing:0.01em;">${year} &nbsp;·&nbsp; Accrual basis incl. draft</div>
-              </div>
-              <div style="display:flex;gap:2px;background:rgba(0,0,0,0.05);border-radius:10px;padding:3px;">
-                <button id="fin-period-ytd" onclick="window._finSetPeriod('ytd')" style="font-size:10px;padding:5px 14px;border-radius:8px;border:none;background:#990033;color:#fff;cursor:pointer;font-family:inherit;font-weight:700;letter-spacing:0.03em;">YTD</button>
-                <button id="fin-period-4w"  onclick="window._finSetPeriod('4w')"  style="font-size:10px;padding:5px 14px;border-radius:8px;border:none;background:transparent;color:#6E6E73;cursor:pointer;font-family:inherit;font-weight:500;">4W</button>
-                <button id="fin-period-8w"  onclick="window._finSetPeriod('8w')"  style="font-size:10px;padding:5px 14px;border-radius:8px;border:none;background:transparent;color:#6E6E73;cursor:pointer;font-family:inherit;font-weight:500;">8W</button>
-              </div>
-            </div>
-            <button class="fin-btn fin-btn-primary" onclick="window._finAddExpense()" style="display:flex;align-items:center;gap:6px;">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-              Add Expense
-            </button>
-          </div>
+    // Use precomputed totals if provided, otherwise fall back to current week numbers for the selected pill only
+    const stats =
+      (totalsByWeek && totalsByWeek[id]) ||
+      (id === state.weekStart
+        ? { planned: plannedTotal, applied: appliedTotal }
+        : { planned: 0, applied: 0 });
 
-          <!-- ── KPI row: 4 metric cards ── -->
-          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">
-            <div style="background:#fff;border-radius:14px;padding:16px 18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);border-top:3px solid #166534;">
-              <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;">Revenue</div>
-              <div id="fin-kpi-rev" style="font-size:22px;font-weight:800;color:#1C1C1E;letter-spacing:-0.03em;">${fmtUSD(ytd.revenue)}</div>
-              <div id="fin-kpi-rev-sub" style="font-size:10px;color:#8e8e93;margin-top:4px;">VAS ${fmtUSD(ytd.rev_vas)} · Sea ${fmtUSD(ytd.rev_sea)} · Air ${fmtUSD(ytd.rev_air)}</div>
-            </div>
-            <div style="background:#fff;border-radius:14px;padding:16px 18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);border-top:3px solid #606a9f;">
-              <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;">Expenses</div>
-              <div id="fin-kpi-exp" style="font-size:22px;font-weight:800;color:#1C1C1E;letter-spacing:-0.03em;">${fmtUSD(ytd.expenses)}</div>
-              <div id="fin-kpi-exp-sub" style="font-size:10px;color:#8e8e93;margin-top:4px;">Labour ${fmtUSD(ytd.exp_labour)} · Freight ${fmtUSD(ytd.exp_freight)} · Other ${fmtUSD(ytd.exp_overhead||0)}</div>
-            </div>
-            <div style="background:#fff;border-radius:14px;padding:16px 18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);border-top:3px solid ${ytd.net>0?'#166534':'#990033'};">
-              <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;">Net &amp; Margin</div>
-              <div id="fin-kpi-net" style="font-size:22px;font-weight:800;color:${ytd.net>0?'#166534':'#990033'};letter-spacing:-0.03em;">${fmtUSD(ytd.net)}</div>
-              <div id="fin-kpi-net-sub" style="font-size:10px;color:#8e8e93;margin-top:4px;">${ytd.margin_pct}% margin on revenue</div>
-            </div>
-            <div style="background:#fff;border-radius:14px;padding:16px 18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);border-top:3px solid #b8960c;">
-              <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;">Units Processed</div>
-              <div id="fin-kpi-units" style="font-size:22px;font-weight:800;color:#1C1C1E;letter-spacing:-0.03em;">${(ytd.units_vas||0).toLocaleString()}</div>
-              <div id="fin-kpi-units-sub" style="font-size:10px;color:#8e8e93;margin-top:4px;">Sea ${(ytd.units_sea||0).toLocaleString()} · Air ${(ytd.units_air||0).toLocaleString()}</div>
-            </div>
-          </div>
+    const el = document.createElement('button');
+    el.className = 'wkcap' + (id === state.weekStart ? ' active' : '');
+    el.setAttribute('data-week-id', id);
 
-          <!-- ── Unit Economics: 4-channel cards in one row ── -->
-          <div style="background:#fff;border-radius:14px;padding:18px 20px;margin-bottom:18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.02em;">Unit Economics</div>
-              <div style="font-size:10px;color:#8e8e93;">Revenue · Cost · Margin per unit processed</div>
-            </div>
-            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;" id="fin-ue-strip">
-              ${apoUnitCard('VAS', ytd.vas_rev_pu, ytd.vas_cost_pu, ytd.rev_vas, ytd.exp_labour, ytd.units_vas)}
-              ${apoUnitCard('Sea', ytd.sea_rev_pu, ytd.sea_cost_pu, ytd.rev_sea, ytd.exp_freight_sea||0, ytd.units_sea)}
-              ${apoUnitCard('Air', ytd.air_rev_pu, ytd.air_cost_pu, ytd.rev_air, ytd.exp_freight_air||0, ytd.units_air)}
-              ${apoUnitCard('Blended', ytd.blended_rev_pu, ytd.blended_cost_pu, ytd.revenue, ytd.expenses, ytd.units_vas)}
-            </div>
-          </div>
+    const p = (stats.planned > 0)
+      ? Math.min(100, Math.round(((stats.applied || 0) * 100) / stats.planned))
+      : 0;
 
-          <!-- ── Heatmap ── -->
-          <div style="background:#fff;border-radius:14px;padding:18px 20px;margin-bottom:18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.02em;">Monthly Heatmap</div>
-              <div style="display:flex;gap:3px;background:rgba(0,0,0,0.04);border-radius:8px;padding:2px;">
-                <button id="plc-rev" onclick="window._finPlChart('rev')" style="font-size:10px;padding:4px 12px;border-radius:6px;border:none;background:#990033;color:#fff;cursor:pointer;font-family:inherit;font-weight:600;">Revenue</button>
-                <button id="plc-pu"  onclick="window._finPlChart('pu')"  style="font-size:10px;padding:4px 12px;border-radius:6px;border:none;background:transparent;color:#6E6E73;cursor:pointer;font-family:inherit;font-weight:500;">Per Unit</button>
-              </div>
-            </div>
-            <div id="fin-heatmap" style="overflow-x:auto;"></div>
-          </div>
+    // SVG ring: r=26, circumference=2π*26≈163.4
+    const R = 26, CX = 29, CY = 29;
+    const circ = 2 * Math.PI * R;
+    const offset = circ * (1 - p / 100);
+    const isActive = id === state.weekStart;
 
-          <!-- ── Monthly Breakdown ── -->
-          <div style="background:#fff;border-radius:14px;padding:18px 20px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.02em;">Monthly Detail</div>
-              <div style="display:flex;align-items:center;gap:6px;">
-                <span style="font-size:10px;color:#8e8e93;">/u = per unit</span>
-                <button onclick="window._finExpandAll(true)"  style="font-size:10px;padding:4px 12px;border-radius:7px;border:1px solid rgba(0,0,0,0.09);background:#f5f5f7;color:#1C1C1E;cursor:pointer;font-family:inherit;font-weight:500;">Expand All</button>
-                <button onclick="window._finExpandAll(false)" style="font-size:10px;padding:4px 12px;border-radius:7px;border:1px solid rgba(0,0,0,0.09);background:#f5f5f7;color:#1C1C1E;cursor:pointer;font-family:inherit;font-weight:500;">Collapse All</button>
-              </div>
-            </div>
-            <div style="overflow-x:auto;">
-            <table class="fin-tbl" style="min-width:700px;">
-              <thead><tr>
-                <th style="width:130px;">Month</th>
-                <th>Revenue</th>
-                <th>Expenses</th>
-                <th style="text-align:right;">Net</th>
-                <th style="text-align:right;">Cash Flow</th>
-                <th style="text-align:right;"></th>
-              </tr></thead>
-              <tbody id="fin-pl-tbody"></tbody>
-            </table>
-            </div>
-          </div>
-
-        </div>
-
-        <!-- ── RIGHT: Insights panel ── -->
-        <div style="width:280px;flex-shrink:0;">
-          <div style="position:sticky;top:16px;background:#fff;border-radius:14px;padding:18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04),0 4px 16px rgba(0,0,0,0.03);">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;">
-              <div style="width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,#990033,#7a0029);display:flex;align-items:center;justify-content:center;box-shadow:0 3px 8px rgba(153,0,51,0.3);flex-shrink:0;">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-              </div>
-              <div style="flex:1;min-width:0;">
-                <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.01em;">AI Insights</div>
-                <div style="font-size:9px;color:#8e8e93;">Auto-loads on open</div>
-              </div>
-              <span style="font-size:9px;background:rgba(153,0,51,0.08);color:#990033;padding:2px 7px;border-radius:6px;font-weight:700;letter-spacing:0.03em;">AI</span>
-            </div>
-            <button id="fin-insights-btn" onclick="window._finLoadInsights()" style="width:100%;font-size:11px;padding:8px 0;border-radius:8px;border:none;background:linear-gradient(135deg,#990033,#7a0029);color:#fff;cursor:pointer;font-family:inherit;font-weight:600;margin-bottom:16px;box-shadow:0 2px 8px rgba(153,0,51,0.2);letter-spacing:0.02em;">↻ Refresh</button>
-            <div id="fin-insights-content" style="color:#8e8e93;font-size:11px;line-height:1.5;"></div>
-          </div>
-        </div>
-
+    el.innerHTML = `
+      <svg class="cap-ring" viewBox="0 0 58 58">
+        <circle class="cap-ring-track" cx="${CX}" cy="${CY}" r="${R}"/>
+        <circle class="cap-ring-prog" cx="${CX}" cy="${CY}" r="${R}"
+          stroke-dasharray="${circ.toFixed(1)}"
+          stroke-dashoffset="${offset.toFixed(1)}"
+          style="transform:rotate(-90deg);transform-origin:${CX}px ${CY}px;${p===0?'opacity:0.3':''}"/>
+      </svg>
+      <div class="cap-inner">
+        <span class="m">${mon}</span>
+        <span class="d">${day}</span>
+        <span class="t" id="cap-total-${id}">${stats.planned ? fmtInt(stats.planned)+'u' : '—'}</span>
       </div>
     `;
-    // ── Period filter logic ──
-    window._finPeriod = 'ytd';
-    window._finSetPeriod = function(p){
-      window._finPeriod = p;
-      ['ytd','4w','8w'].forEach(id=>{
-        const btn=el('fin-period-'+id);if(!btn)return;
-        btn.style.background = id===p ? BRAND : 'transparent';
-        btn.style.color = id===p ? '#fff' : MID;
-      });
-      const now = new Date();
-      const cutoff = p==='4w' ? new Date(now-28*864e5).toISOString().slice(0,7)
-                   : p==='8w' ? new Date(now-56*864e5).toISOString().slice(0,7)
-                   : '0000-00';
-      const filtered = p==='ytd' ? months : months.filter(m=>m.month_key>=cutoff);
-      renderPLCharts(filtered, window._finPlChartMode||'rev');
-      // Recompute KPI tiles for filtered period
-      const agg = filtered.reduce((a,m)=>({
-        revenue:a.revenue+m.revenue, rev_vas:a.rev_vas+m.rev_vas,
-        rev_sea:a.rev_sea+m.rev_sea, rev_air:a.rev_air+m.rev_air,
-        expenses:a.expenses+m.expenses, exp_labour:a.exp_labour+m.exp_labour,
-        exp_freight:a.exp_freight+m.exp_freight,
-        net:a.net+m.net, units_vas:a.units_vas+m.units_vas,
-        units_sea:a.units_sea+m.units_sea, units_air:a.units_air+m.units_air,
-      }),{revenue:0,rev_vas:0,rev_sea:0,rev_air:0,expenses:0,exp_labour:0,exp_freight:0,net:0,units_vas:0,units_sea:0,units_air:0});
-      const mp = agg.revenue>0?Math.round(agg.net/agg.revenue*100):0;
-      const setT=(id,v)=>{const e2=el(id);if(e2)e2.innerHTML=v;};
-      setT('fin-kpi-rev', fmtUSD(agg.revenue));
-      setT('fin-kpi-rev-sub',`VAS ${fmtUSD(agg.rev_vas)} · Sea ${fmtUSD(agg.rev_sea)} · Air ${fmtUSD(agg.rev_air)}`);
-      setT('fin-kpi-exp', fmtUSD(agg.expenses));
-      setT('fin-kpi-exp-sub',`Labour ${fmtUSD(agg.exp_labour)} · Freight ${fmtUSD(agg.exp_freight)}`);
-      setT('fin-kpi-net', fmtUSD(agg.net));
-      setT('fin-kpi-net-sub', mp+'% margin');
-      setT('fin-kpi-units', (agg.units_vas||0).toLocaleString());
-      setT('fin-kpi-units-sub', `Sea ${(agg.units_sea||0).toLocaleString()} · Air ${(agg.units_air||0).toLocaleString()}`);
-      // Update unit economics strip
-      const freightTotal=agg.rev_sea+agg.rev_air||1;
-      const seaFrac=agg.rev_sea/freightTotal, airFrac=agg.rev_air/freightTotal;
-      const exp_fsea=Math.round(agg.exp_freight*seaFrac*100)/100;
-      const exp_fair=Math.round(agg.exp_freight*airFrac*100)/100;
-      const ueStrip=el('fin-ue-strip');
-      if(ueStrip) ueStrip.innerHTML=
-        apoUnitCard('⚙️ VAS', agg.units_vas>0?Math.round(agg.rev_vas/agg.units_vas*100)/100:null, agg.units_vas>0?Math.round(agg.exp_labour/agg.units_vas*100)/100:null, agg.rev_vas, agg.exp_labour, agg.units_vas)+
-        apoUnitCard('🚢 Sea', agg.units_sea>0?Math.round(agg.rev_sea/agg.units_sea*100)/100:null, agg.units_sea>0?Math.round(exp_fsea/agg.units_sea*100)/100:null, agg.rev_sea, exp_fsea, agg.units_sea)+
-        apoUnitCard('✈️ Air', agg.units_air>0?Math.round(agg.rev_air/agg.units_air*100)/100:null, agg.units_air>0?Math.round(exp_fair/agg.units_air*100)/100:null, agg.rev_air, exp_fair, agg.units_air)+
-        apoUnitCard('◈ Blended', agg.units_vas>0?Math.round(agg.revenue/agg.units_vas*100)/100:null, agg.units_vas>0?Math.round(agg.expenses/agg.units_vas*100)/100:null, agg.revenue, agg.expenses, agg.units_vas);
-    };
-
-    // ── Monthly rows ──
-    // ── Modern accordion months ──
-    const tbody=el('fin-pl-tbody');
-    let runningCF=0;
-    const maxRev=Math.max(...months.map(m=>m.revenue||0),1);
-    const maxExp=Math.max(...months.map(m=>m.expenses||0),1);
-    if(tbody)tbody.innerHTML=months.map(m=>{
-      const hasData=m.revenue>0||m.expenses>0;
-      const mn=new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'numeric'});
-      if(hasData)runningCF+=m.net;
-      const cfColor=runningCF>=0?'#166534':'#990033';
-      const mColor=m.margin_pct>20?'#166534':m.margin_pct>0?'#606a9f':'#990033';
-      const netColor=m.net>0?'#166534':m.net<0?'#990033':'#8e8e93';
-      const revBar=Math.round(Math.min(100,m.revenue/maxRev*100));
-      const expBar=Math.round(Math.min(100,m.expenses/maxExp*100));
-      if(!hasData)return`<tr><td colspan="2" style="padding:10px 14px;color:#AEAEB2;font-size:11px;">${mn}</td>
-        <td colspan="4" style="padding:10px 14px;"><span style="font-size:10px;color:#AEAEB2;">No activity</span></td>
-        <td style="text-align:right;padding:10px 14px;">
-          <button class="fin-btn fin-btn-ghost" style="font-size:10px;padding:3px 10px;" onclick="window._finAddExpense('${m.month_key}')">+ Expense</button>
-        </td></tr>`;
-      return`
-      <tr style="border-bottom:1px solid rgba(0,0,0,0.04);">
-        <!-- Month + expand -->
-        <td style="padding:14px 14px;white-space:nowrap;min-width:120px;">
-          <div style="display:flex;align-items:center;gap:8px;">
-            <button onclick="window._finToggleMonth('${m.month_key}')" id="fin-exp-icon-${m.month_key}"
-              style="width:20px;height:20px;border-radius:6px;border:1px solid rgba(0,0,0,0.10);background:#f5f5f7;cursor:pointer;font-size:9px;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-family:inherit;transition:all .15s;">▶</button>
-            <div>
-              <div style="font-size:12px;font-weight:600;color:#1C1C1E;">${mn}</div>
-              <div style="font-size:9px;color:#8e8e93;margin-top:1px;">${(m.units_vas||0).toLocaleString()} units</div>
-            </div>
-          </div>
-        </td>
-        <!-- Revenue bar -->
-        <td style="padding:14px 10px;min-width:160px;">
-          <div style="font-size:11px;font-weight:600;color:#166534;margin-bottom:4px;">${fmtUSD(m.revenue)}</div>
-          <div style="height:5px;background:rgba(0,0,0,0.06);border-radius:3px;overflow:hidden;">
-            <div style="height:100%;width:${revBar}%;background:linear-gradient(90deg,#990033,#a76e6e);border-radius:3px;"></div>
-          </div>
-          <div style="font-size:9px;color:#8e8e93;margin-top:3px;">
-            ${m.rev_vas>0?`<span style="color:#990033;">VAS ${fmtUSD(m.rev_vas)}</span>`:''}
-            ${m.rev_sea>0?` · <span style="color:#a76e6e;">Sea ${fmtUSD(m.rev_sea)}</span>`:''}
-            ${m.rev_air>0?` · <span style="color:#b8960c;">Air ${fmtUSD(m.rev_air)}</span>`:''}
-          </div>
-        </td>
-        <!-- Expenses bar -->
-        <td style="padding:14px 10px;min-width:140px;">
-          <div style="font-size:11px;font-weight:600;color:#606a9f;margin-bottom:4px;">${fmtUSD(m.expenses)}</div>
-          <div style="height:5px;background:rgba(0,0,0,0.06);border-radius:3px;overflow:hidden;">
-            <div style="height:100%;width:${expBar}%;background:linear-gradient(90deg,#606a9f,#a76e6e);border-radius:3px;"></div>
-          </div>
-        </td>
-        <!-- Net -->
-        <td style="padding:14px 10px;text-align:right;min-width:100px;">
-          <div style="font-size:12px;font-weight:700;color:${netColor};">${fmtUSD(m.net)}</div>
-          <div style="font-size:9px;font-weight:600;color:${mColor};margin-top:2px;">${m.margin_pct}% margin</div>
-        </td>
-        <!-- Cash flow -->
-        <td style="padding:14px 10px;text-align:right;min-width:100px;">
-          <div style="font-size:12px;font-weight:700;color:${cfColor};">${fmtUSD(runningCF)}</div>
-          <div style="font-size:9px;color:#8e8e93;margin-top:2px;">cumulative</div>
-        </td>
-        <!-- Actions -->
-        <td style="padding:14px 14px;text-align:right;">
-          <button class="fin-btn fin-btn-ghost" style="font-size:10px;padding:4px 10px;" onclick="window._finAddExpense('${m.month_key}')">+ Expense</button>
-        </td>
-      </tr>
-      <tr id="fin-pl-expand-${m.month_key}" style="display:none;">
-        <td colspan="6" style="padding:0;background:rgba(0,0,0,0.015);">
-          <div id="fin-pl-ec-${m.month_key}" style="padding:16px 20px;border-top:1px solid rgba(0,0,0,0.05);"></div>
-        </td>
-      </tr>`;
-    }).join('');
-
-    // ── Chart mode ──
-    window._finPlChartMode='rev';
-    window._finPlChart=function(mode){
-      window._finPlChartMode=mode;
-      const rBtn=el('plc-rev'),pBtn=el('plc-pu');
-      if(rBtn){rBtn.style.background=mode==='rev'?BRAND:BG;rBtn.style.color=mode==='rev'?'#fff':MID;}
-      if(pBtn){pBtn.style.background=mode==='pu'?BRAND:BG;pBtn.style.color=mode==='pu'?'#fff':MID;}
-      const period=window._finPeriod||'ytd';
-      const now=new Date();
-      const cutoff=period==='4w'?new Date(now-28*864e5).toISOString().slice(0,7):period==='8w'?new Date(now-56*864e5).toISOString().slice(0,7):'0000-00';
-      const filtered=period==='ytd'?months:months.filter(m=>m.month_key>=cutoff);
-      renderPLCharts(filtered,mode);
-    };
-
-    renderPLCharts(months,'rev');
-
-    // ── Expand month row ──
-    window._finExpandAll=function(expand){
-      const months2=document.querySelectorAll('[id^="fin-pl-expand-"]');
-      months2.forEach(row=>{
-        const mk=row.id.replace('fin-pl-expand-','');
-        const icon=el('fin-exp-icon-'+mk);
-        if(expand&&row.style.display==='none'){window._finToggleMonth(mk);}
-        else if(!expand&&row.style.display!=='none'){row.style.display='none';if(icon){icon.textContent='▶';icon.style.color='';icon.style.background='';icon.style.borderColor='rgba(0,0,0,0.1)';}}
-      });
-    };
-    window._finToggleMonth=async function(mk){
-      const row=el('fin-pl-expand-'+mk);if(!row)return;
-      const icon=el('fin-exp-icon-'+mk);
-      if(row.style.display==='none'){
-        if(icon){icon.textContent='▼';icon.style.color='#fff';icon.style.background=BRAND;icon.style.borderColor=BRAND;}
-        row.style.display='';
-        const c=el('fin-pl-ec-'+mk);if(!c)return;
-        c.innerHTML=`<div style="color:${LIGHT};font-size:11px;">Loading…</div>`;
-        try{
-          const exps=await api(`/finance/expenses?month_key=${mk}`);
-          const m=months.find(m=>m.month_key===mk);
-          const invs=m?.invoices||[];
-          c.innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
-            <div>
-              <div class="fin-label">Revenue</div>
-              ${invs.length?invs.map(i=>`<div style="display:flex;justify-content:space-between;font-size:11px;padding:5px 0;border-bottom:0.5px solid rgba(0,0,0,0.05);">
-                <span style="color:${MID};">${typeIcon(i.type||'')} ${esc(i.ref||i.type)} <span style="font-size:9px;color:${LIGHT};">${i.status}</span></span>
-                <span style="font-weight:600;color:${GREEN};">${fmtUSD(i.amount)}</span>
-              </div>`).join(''):`<div style="font-size:11px;color:${LIGHT};">No invoices</div>`}
-            </div>
-            <div>
-              <div class="fin-label">Expenses <button onclick="window._finAddExpense('${mk}')" style="background:none;border:none;color:${BRAND};cursor:pointer;font-size:10px;font-weight:600;margin-left:6px;">+ Add</button></div>
-              ${exps.length?exps.map(e=>`<div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;padding:5px 0;border-bottom:0.5px solid rgba(0,0,0,0.05);">
-                <div><span style="color:${DARK};">${esc(e.description)}</span><span style="color:${LIGHT};margin-left:5px;font-size:9px;">${esc(e.category)}</span>${e.is_recurring?`<span style="color:${BLUE};font-size:9px;margin-left:3px;">↻</span>`:''}</div>
-                <div style="display:flex;align-items:center;gap:8px;">
-                  <span style="font-weight:600;color:${AMBER};">${fmtUSD(e.amount)}</span>
-                  <button onclick="window._finEditExpense('${e.id}')" style="background:none;border:none;color:${LIGHT};cursor:pointer;font-size:11px;">✎</button>
-                  <button onclick="window._finDeleteExpense('${e.id}')" style="background:none;border:none;color:${LIGHT};cursor:pointer;font-size:11px;">✕</button>
-                </div>
-              </div>`).join(''):`<div style="font-size:11px;color:${LIGHT};">No expenses yet</div>`}
-            </div>
-            <div>
-              <div class="fin-label">Unit Economics</div>
-              ${[
-                ['⚙️ VAS', m?.vas_rev_pu, m?.vas_cost_pu, m?.units_vas, m?.rev_vas, m?.exp_labour],
-                ['🚢 Sea', m?.sea_rev_pu, m?.sea_cost_pu, m?.units_sea, m?.rev_sea, m?.exp_freight_sea],
-                ['✈️ Air', m?.air_rev_pu, m?.air_cost_pu, m?.units_air, m?.rev_air, m?.exp_freight_air],
-              ].map(([label,rev,cost,units,totRev,totCost])=>`<div style="padding:6px 0;border-bottom:0.5px solid rgba(0,0,0,0.05);">
-                <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:2px;">
-                  <span style="color:${MID};font-weight:500;">${label} <span style="font-size:9px;font-weight:400;">(${(units||0).toLocaleString()}u)</span></span>
-                  <span style="color:${GREEN};font-size:10px;">${totRev?fmtUSD(totRev):'-'}</span>
-                </div>
-                <div style="display:flex;justify-content:space-between;font-size:10px;">
-                  <span style="color:${LIGHT};">$${rev!==null&&rev!==undefined?Number(rev).toFixed(3):'-'}/u rev · $${cost!==null&&cost!==undefined?Number(cost).toFixed(3):'-'}/u cost</span>
-                  <span style="color:${AMBER};font-size:10px;">${totCost?fmtUSD(totCost):'-'}</span>
-                </div>
-              </div>`).join('')}
-            </div>
-          </div>`;
-        }catch(e){c.innerHTML=`<div style="color:${BRAND};font-size:11px;">${e.message}</div>`;}
-      }else{row.style.display='none';if(icon){icon.textContent='▶';icon.style.color='';icon.style.background='';icon.style.borderColor='rgba(0,0,0,0.1)';}}
-    };
-
-    // ── Claude insights — routes through /pulse/chat backend (avoids CORS) ──
-    window._finLoadInsights=async function(){
-      const cont2=el('fin-insights-content');if(!cont2)return;
-      const genBtn=el('fin-insights-btn');
-      if(genBtn){genBtn.disabled=true;genBtn.textContent='Analysing…';}
-      cont2.innerHTML=`<div style="color:${LIGHT};font-size:11px;text-align:center;padding:20px 0;">Analysing your P&L data…</div>`;
-      try{
-        const apiBase=(document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
-        let token=null;
-        if(window.Clerk?.session){try{token=await window.Clerk.session.getToken();}catch(_){}}
-        const summary={year,ytd,months_with_data:months.filter(m=>m.revenue>0||m.expenses>0).map(m=>({
-          month:m.month_key, revenue:m.revenue, rev_vas:m.rev_vas, rev_sea:m.rev_sea, rev_air:m.rev_air,
-          expenses:m.expenses, exp_labour:m.exp_labour, exp_freight:m.exp_freight, exp_overhead:m.exp_overhead,
-          net:m.net, margin_pct:m.margin_pct,
-          units_vas:m.units_vas, units_sea:m.units_sea, units_air:m.units_air,
-          vas_rev_pu:m.vas_rev_pu, vas_cost_pu:m.vas_cost_pu, vas_margin_pu:m.vas_margin_pu,
-          sea_rev_pu:m.sea_rev_pu, sea_cost_pu:m.sea_cost_pu, air_rev_pu:m.air_rev_pu, air_cost_pu:m.air_cost_pu,
-        }))};
-        const prompt=`You are a financial analyst for VelOzity, a 3PL/VAS company. Revenue channels: VAS (value added services - labelling/processing units), Sea Freight, Air Freight. Labour expenses = direct VAS processing cost. Freight expenses split between Sea and Air. Analyse this P&L and give exactly 5 specific actionable insights to improve profitability. Be direct with numbers. Return ONLY a JSON array, no markdown, each object has: title (short 3-5 words), insight (1-2 sentences with specific numbers from data), action (one concrete next step), impact (High/Medium/Low), channel (VAS/Sea/Air/Overall). P&L data: ${JSON.stringify(summary)}`;
-        const resp=await fetch(apiBase+'/finance/insights',{method:'POST',
-          headers:Object.assign({'Content-Type':'application/json'},token?{'Authorization':'Bearer '+token}:{}),
-          body:JSON.stringify({pl_data:summary})});
-        if(!resp.ok)throw new Error('Server error '+resp.status);
-        const d=await resp.json();
-        let insights=d.insights||[];
-        if(!Array.isArray(insights)||!insights.length)throw new Error('No insights returned');
-        const impColors={'High':'#990033','Medium':'#606a9f','Low':'#a76e6e'};
-        const chColors={'VAS':'#990033','Sea':'#a76e6e','Air':'#b8960c','Overall':'#606a9f'};
-        cont2.innerHTML=insights.slice(0,5).map(ins=>{
-          const impColor=impColors[ins.impact]||'#606a9f';
-          const chColor=chColors[ins.channel]||'#8e8e93';
-          return`<div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:8px;border:1px solid rgba(0,0,0,0.07);border-left:3px solid ${impColor};box-shadow:0 1px 3px rgba(0,0,0,0.04);">
-            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px;margin-bottom:5px;">
-              <div style="font-size:11px;font-weight:700;color:#1C1C1E;line-height:1.3;">${esc(ins.title||'')}</div>
-              <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex-shrink:0;">
-                <span style="font-size:8px;padding:1px 6px;border-radius:5px;background:rgba(0,0,0,0.05);color:${chColor};font-weight:700;white-space:nowrap;">${esc(ins.channel||'')}</span>
-                <span style="font-size:8px;color:${impColor};font-weight:700;text-transform:uppercase;letter-spacing:0.04em;">${ins.impact||''}</span>
-              </div>
-            </div>
-            <div style="font-size:10px;color:#6E6E73;margin-bottom:8px;line-height:1.55;">${esc(ins.insight||'')}</div>
-            <div style="font-size:10px;color:#1C1C1E;background:#fafafa;padding:6px 8px;border-radius:6px;border:1px solid rgba(0,0,0,0.06);">→ ${esc(ins.action||'')}</div>
-          </div>`;
-        }).join('');
-        if(genBtn){genBtn.disabled=false;genBtn.textContent='Refresh Insights';}
-      }catch(e){
-        cont2.innerHTML=`<div style="color:${BRAND};font-size:11px;padding:8px;">Unable to load insights: ${esc(e.message)}</div>`;
-        if(genBtn){genBtn.disabled=false;genBtn.textContent='Retry';}
-      }
-    };
-    // Auto-load insights when page renders
-    setTimeout(()=>window._finLoadInsights&&window._finLoadInsights(), 800);
-
-  }catch(e){cont.innerHTML=`<div style="color:${BRAND};padding:20px;">P&L failed: ${esc(e.message)}</div>`;}
+    el.onclick = () => { $('#week-start').value = id; setWeek(id); };
+    r.appendChild(el);
+  });
 }
 
-function apoUnitCard(label, revPu, costPu, totalRev, totalCost, totalUnits){
-  const marginPu = revPu!==null&&costPu!==null ? Math.round((revPu-costPu)*100)/100 : null;
-  const mColor = marginPu===null ? LIGHT : marginPu>0 ? '#166534' : BRAND;
-  const unitsStr = totalUnits ? Number(totalUnits).toLocaleString()+'u' : '—';
-  const channelColor = label.includes('VAS')?'#990033':label.includes('Sea')?'#a76e6e':label.includes('Air')?'#b8960c':'#606a9f';
-  const COST_COLOR = '#4a4a6a'; // dark slate — neutral, not alarming
-  return`<div style="background:#fff;border-radius:10px;padding:12px 14px;border:0.5px solid rgba(0,0,0,0.07);border-top:3px solid ${channelColor};">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
-      <div style="font-size:11px;font-weight:600;color:${DARK};">${label}</div>
-      <div style="font-size:9px;background:rgba(0,0,0,0.04);padding:2px 7px;border-radius:8px;color:${MID};">${unitsStr}</div>
-    </div>
-    <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:3px;">
-      <span style="color:${LIGHT};">Revenue</span>
-      <span style="font-weight:600;color:#166534;">${totalRev!==null&&totalRev!==undefined?fmtUSD(totalRev):'—'}</span>
-    </div>
-    <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:3px;">
-      <span style="color:${LIGHT};">Cost</span>
-      <span style="font-weight:600;color:${COST_COLOR};">${totalCost!==null&&totalCost!==undefined?fmtUSD(totalCost):'—'}</span>
-    </div>
-    <div style="height:0.5px;background:rgba(0,0,0,0.06);margin:7px 0;"></div>
-    <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:3px;">
-      <span style="color:${LIGHT};">Rev/unit</span>
-      <span style="font-weight:600;color:#166534;">${revPu!==null?'$'+Number(revPu).toFixed(3):'—'}</span>
-    </div>
-    <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:3px;">
-      <span style="color:${LIGHT};">Cost/unit</span>
-      <span style="font-weight:600;color:${COST_COLOR};">${costPu!==null?'$'+Number(costPu).toFixed(3):'—'}</span>
-    </div>
-    <div style="height:0.5px;background:rgba(0,0,0,0.06);margin:7px 0;"></div>
-    <div style="display:flex;justify-content:space-between;font-size:10px;">
-      <span style="color:${LIGHT};font-weight:500;">Margin/unit</span>
-      <span style="font-weight:700;color:${mColor};">${marginPu!==null?'$'+Number(marginPu).toFixed(3):'—'}</span>
+  // ---------- Aggregations ----------
+  // aggregate() supports:
+  // 1) raw records: { status:'complete', po_number, sku_code }
+  // 2) summary rows: { po, units } (from /records/summary by_po)
+  function aggregate(rows){
+    const byPO=new Map(),bySKU=new Map();
+    for(const r of (rows||[])){
+      if(!r) continue;
+      // summary row
+      if(('po' in r) && ('units' in r) && !('po_number' in r)){
+        const po=String(r.po||'').trim();
+        const u=Number(r.units||0)||0;
+        if(po) byPO.set(po,(byPO.get(po)||0)+u);
+        continue;
+      }
+      if(r.status!=='complete') continue;
+      const po=String(r.po_number||'').trim(), sku=String(r.sku_code||'').trim();
+      if(po) byPO.set(po,(byPO.get(po)||0)+1);
+      if(sku) bySKU.set(sku,(bySKU.get(sku)||0)+1);
+    }
+    return {byPO,bySKU};
+  }
+  function joinPOProgress(plan, byPO){
+    const map=new Map();
+    for(const p of plan||[]){ const po=String(p.po_number||'').trim(); if(!po) continue; const rec=map.get(po)||{due:p.due_date,planned:0,applied:0}; rec.planned+=toNum(p.target_qty); if(rec.due!==p.due_date) rec.due = rec.due < p.due_date ? rec.due : p.due_date; map.set(po,rec); }
+    for(const [po,ap] of byPO.entries()){ const rec=map.get(po)||{due:'',planned:0,applied:0}; rec.applied+=ap; map.set(po,rec);}
+    const list=[]; for(const [po,rec] of map.entries()){ list.push({po,due:rec.due,planned:rec.planned,applied:rec.applied,pct:rec.planned>0?Math.round(rec.applied*100/rec.planned):100}); }
+    list.sort((a,b)=>String(a.due).localeCompare(String(b.due))); return list;
+  }
+
+  // ---------- Dashboard render ----------
+  function computeRisk(rows){
+  // Show top items with remaining > 0, regardless of week end
+  const out = [];
+  for (const r of rows || []) {
+    const planned = Number(r.planned || 0);
+    const applied = Number(r.applied || 0);
+    const remaining = Math.max(0, planned - applied);
+    if (remaining > 0) {
+      out.push({
+        key: r.po || r.sku || r.key,
+        due_date: r.due || r.due_date || '',
+        planned,
+        applied,
+        remaining,
+        pct: planned > 0 ? Math.round((applied / planned) * 100) : 0,
+      });
+    }
+  }
+  // Prioritize by remaining qty, then earliest due date if available
+  out.sort((a, b) => b.remaining - a.remaining ||
+                     (new Date(a.due_date || '9999-12-31')) -
+                     (new Date(b.due_date || '9999-12-31')));
+  return out.slice(0, 5);
+}
+  
+  function setFooterHealth(pct, appliedWeek){
+    // Legacy elements (kept for safety)
+    const pill=$('#health-pill'), dot=$('#health-dot');
+    let label='On-Plan', color='#F5BD25';
+    if(pct>=100){ label='Ahead'; color='#97DC21'; }
+    else if(pct<80){ label='At-Risk'; color='#D61A3C'; }
+    if(pill){ pill.textContent=label; pill.style.color=color; }
+    if(dot){ dot.style.background=color; }
+    // New Week Hub health tile
+    const hDot = document.getElementById('health-dot');
+    const hPill = document.getElementById('health-pill');
+    const hStatus = document.getElementById('health-status-dot');
+    const voHealth = document.getElementById('vo-health');
+    const voFooter = document.getElementById('vo-footer-text');
+    const opsHealth = document.getElementById('ops-week-health');
+    if(hDot) hDot.style.background = color;
+    if(hPill) { hPill.textContent = label; hPill.style.color = color; }
+    if(hStatus) hStatus.style.background = color;
+    if(voHealth) voHealth.textContent = label;
+    if(voFooter) voFooter.textContent = 'Applied: ' + fmtInt(appliedWeek);
+    if(opsHealth) opsHealth.textContent = label;
+    // Update wh KPI health tile
+    var whDot=document.getElementById('wh-health-dot');
+    var whLabel=document.getElementById('wh-health-label');
+    var whSub=document.getElementById('wh-health-sub');
+    if(whDot) whDot.style.background=color;
+    if(whLabel){whLabel.textContent=label;whLabel.style.color=color;}
+    if(whSub) whSub.textContent='Applied: '+fmtInt(appliedWeek);
+  }
+
+  // ---------- Downloads ----------
+  function toCSV(header,rows){
+    const esc=v=>{v=String(v??''); return /[",\n]/.test(v)?('"'+v.replace(/"/g,'""')+'"'):v;}
+    const head=header.map(esc).join(','), body=rows.map(r=>header.map(h=>esc(r[h])).join(',')).join('\r\n');
+    return '\ufeff'+head+'\r\n'+body+'\r\n';
+  }
+function buildDiscrepancyPOSKU(plan, recRows){
+const byPS=new Map();
+const binsByPS=new Map();
+
+for(const r of recRows||[]){
+  if(!r) continue;
+
+  // Summary row: { po, sku, units }
+  if(('po' in r) && ('sku' in r) && ('units' in r) && !('po_number' in r)){
+    const po=String(r.po||'').trim();
+    const sku=String(r.sku||'').trim();
+    const u=Number(r.units||0)||0;
+    if(!po||!sku) continue;
+    const k=`${po}|||${sku}`;
+    byPS.set(k,(byPS.get(k)||0)+u);
+    continue;
+  }
+
+  // Raw record: { status, po_number, sku_code, mobile_bin }
+  if(r.status!=='complete') continue;
+  const po=String(r.po_number||'').trim();
+  const sku=String(r.sku_code||'').trim();
+  if(!po||!sku) continue;
+  const k=`${po}|||${sku}`;
+  byPS.set(k,(byPS.get(k)||0)+1);
+
+  const mb = String(r.mobile_bin || r.bin || '').trim();
+  if (mb) {
+    if (!binsByPS.has(k)) binsByPS.set(k, new Set());
+    binsByPS.get(k).add(mb);
+  }
+}
+
+
+  const seen=new Set(); const outRows=[];
+  for(const p of plan||[]){
+    const po=String(p.po_number||'').trim(), sku=String(p.sku_code||'').trim();
+    if(!po||!sku) continue;
+    const k=`${po}|||${sku}`;
+    if(seen.has(k)) continue;
+    seen.add(k);
+
+    const planned=toNum(p.target_qty), applied=byPS.get(k)||0;
+
+const binSet = binsByPS.get(k) || new Set();
+const binList = Array.from(binSet).sort();
+
+outRows.push({
+  'PO': po,
+  'SKU': sku,
+  'Supplier Name': p.supplier_name || '',
+  'Facility Name': p.facility_name || '',
+  'Freight Type': p.freight_type || '',
+  'Zendesk Ticket #': p.zendesk_ticket || '',
+  'Mobile Bin Count': binList.length,
+  'Mobile Bins': binList.join('; '),
+  'Planned': planned,
+  'Applied': applied,
+  'Discrepancy (Applied - Planned)': applied - planned
+});
+  }
+  return outRows;
+}
+
+function buildDiscrepancyPO(joined, plan){
+  // pick first non-empty meta per PO from the plan
+  const metaByPO = new Map();
+  for (const p of plan || []) {
+    const po = String(p.po_number || '').trim();
+    if (!po) continue;
+    if (!metaByPO.has(po)) {
+      metaByPO.set(po, {
+        supplier_name: p.supplier_name || '',
+        facility_name: p.facility_name || '',
+        freight_type: p.freight_type || '',
+        zendesk_ticket: p.zendesk_ticket || '',
+      });
+    }
+  }
+
+  return (joined || []).map(r => {
+    const m = metaByPO.get(r.po) || { supplier_name:'', facility_name:'', freight_type:'', zendesk_ticket:'' };
+    const planned = r.planned || 0;
+    const applied = r.applied || 0;
+
+    return {
+      'PO': r.po,
+      'Supplier Name': m.supplier_name,
+      'Facility Name': m.facility_name,
+      'Freight Type': m.freight_type,
+      'Zendesk Ticket #': m.zendesk_ticket,
+      'Planned': planned,
+      'Applied': applied,
+      'Discrepancy (Applied - Planned)': applied - planned
+    };
+  });
+}
+
+function buildShipmentSummary(plan = [], records = [], bins = []) {
+  const completed = (records || []).filter(r => r.status === 'complete');
+
+  const planByKey = new Map();
+  for (const p of plan || []) {
+    const po = String(p.po_number || '').trim();
+    const sku = String(p.sku_code || '').trim();
+    if (!po || !sku) continue;
+    planByKey.set(`${po}|||${sku}`, p);
+  }
+
+  const binWeight = new Map();
+  for (const b of bins || []) {
+    const mb = String(b.mobile_bin ?? b.bin ?? '').trim();
+    if (!mb) continue;
+    const w = Number(b.gross_weight ?? b.weight ?? b.weight_kg ?? 0) || 0;
+    binWeight.set(mb, w);
+  }
+
+  const norm = (v) => {
+    const s = String(v ?? '').trim();
+    return s ? s : '(Unspecified)';
+  };
+
+  const groups = new Map();
+  const binAssignedGroup = new Map();
+
+  for (const r of completed) {
+    const po = String(r.po_number || '').trim();
+    const sku = String(r.sku_code || '').trim();
+    if (!po || !sku) continue;
+
+    const p = planByKey.get(`${po}|||${sku}`) || {};
+    const supplier = norm(p.supplier_name);
+    const zendesk  = norm(p.zendesk_ticket ?? p.zendesk_ticket_number ?? p.zendesk);
+    const freight  = norm(p.freight_type);
+    const facility = norm(p.facility_name);
+
+    const gkey = `${supplier}|||${zendesk}|||${freight}|||${facility}`;
+
+    if (!groups.has(gkey)) {
+      groups.set(gkey, {
+        'Supplier Name': supplier,
+        'Zendesk Ticket #': zendesk,
+        'Freight Type': freight,
+        'Facility Name': facility,
+        _poSet: new Set(),
+        _binSet: new Set(),
+        'Total Units Applied': 0,
+        'Gross Weight': 0
+      });
+    }
+
+    const g = groups.get(gkey);
+    g['Total Units Applied'] += 1;
+    g._poSet.add(po);
+
+    const mb = String(r.mobile_bin || r.bin || '').trim();
+    if (mb) {
+      g._binSet.add(mb);
+      const w = binWeight.get(mb) || 0;
+
+      if (!binAssignedGroup.has(mb)) {
+        binAssignedGroup.set(mb, gkey);
+        g['Gross Weight'] += w;
+      }
+    }
+  }
+
+  const out = [];
+  for (const g of groups.values()) {
+    const binCount = g._binSet.size;
+    out.push({
+      'Supplier Name': g['Supplier Name'],
+      'Zendesk Ticket #': g['Zendesk Ticket #'],
+      'Freight Type': g['Freight Type'],
+      'Facility Name': g['Facility Name'],
+      'Unique PO Count': g._poSet.size,
+      'Total Units Applied': g['Total Units Applied'],
+      'Total Mobile Bins': binCount,
+      'Gross Weight': round2(g['Gross Weight']),
+      'CBM': round3(binCount * 0.046)
+    });
+  }
+
+  out.sort((a, b) =>
+    String(a['Supplier Name']).localeCompare(String(b['Supplier Name'])) ||
+    String(a['Zendesk Ticket #']).localeCompare(String(b['Zendesk Ticket #'])) ||
+    String(a['Freight Type']).localeCompare(String(b['Freight Type'])) ||
+    String(a['Facility Name']).localeCompare(String(b['Facility Name']))
+  );
+
+  return out;
+}
+
+function buildShipmentDetail(plan = [], records = [], bins = []) {
+  const completed = (records || []).filter(r => r.status === 'complete');
+
+  const planByKey = new Map();
+  for (const p of plan || []) {
+    const po = String(p.po_number || '').trim();
+    const sku = String(p.sku_code || '').trim();
+    if (!po || !sku) continue;
+    planByKey.set(`${po}|||${sku}`, p);
+  }
+
+  const binWeight = new Map();
+  for (const b of bins || []) {
+    const mb = String(b.mobile_bin ?? b.bin ?? '').trim();
+    if (!mb) continue;
+    const w = Number(b.gross_weight ?? b.weight ?? b.weight_kg ?? 0) || 0;
+    binWeight.set(mb, w);
+  }
+
+  const norm = (v) => {
+    const s = String(v ?? '').trim();
+    return s ? s : '(Unspecified)';
+  };
+
+  const groups = new Map();
+  const binAssignedGroup = new Map();
+
+  for (const r of completed) {
+    const po = String(r.po_number || '').trim();
+    const sku = String(r.sku_code || '').trim();
+    if (!po || !sku) continue;
+
+    const p = planByKey.get(`${po}|||${sku}`) || {};
+    const supplier = norm(p.supplier_name);
+    const zendesk  = norm(p.zendesk_ticket ?? p.zendesk_ticket_number ?? p.zendesk);
+    const freight  = norm(p.freight_type);
+    const facility = norm(p.facility_name);
+
+    const gkey = `${supplier}|||${zendesk}|||${freight}|||${facility}|||${po}`;
+
+    if (!groups.has(gkey)) {
+      groups.set(gkey, {
+        'Supplier Name': supplier,
+        'Zendesk Ticket #': zendesk,
+        'Freight Type': freight,
+        'Facility Name': facility,
+        'PO': po,
+        _binSet: new Set(),
+        'Total Units Applied': 0,
+        'Gross Weight': 0
+      });
+    }
+
+    const g = groups.get(gkey);
+    g['Total Units Applied'] += 1;
+
+    const mb = String(r.mobile_bin || r.bin || '').trim();
+    if (mb) {
+      g._binSet.add(mb);
+      const w = binWeight.get(mb) || 0;
+
+      if (!binAssignedGroup.has(mb)) {
+        binAssignedGroup.set(mb, gkey);
+        g['Gross Weight'] += w;
+      } else if (binAssignedGroup.get(mb) === gkey) {
+        // same group ok
+      } else {
+        // collision: do not double-count weight
+      }
+    }
+  }
+
+  const out = [];
+  for (const g of groups.values()) {
+    const binCount = g._binSet.size;
+    out.push({
+      'Supplier Name': g['Supplier Name'],
+      'Zendesk Ticket #': g['Zendesk Ticket #'],
+      'Freight Type': g['Freight Type'],
+      'Facility Name': g['Facility Name'],
+      'PO': g['PO'],
+      'Total Units Applied': g['Total Units Applied'],
+      'Total Mobile Bins': binCount,
+      'Gross Weight': round2(g['Gross Weight']),
+      'CBM': round3(binCount * 0.046)
+    });
+  }
+
+  out.sort((a, b) =>
+    String(a['Supplier Name']).localeCompare(String(b['Supplier Name'])) ||
+    String(a['Zendesk Ticket #']).localeCompare(String(b['Zendesk Ticket #'])) ||
+    String(a['Freight Type']).localeCompare(String(b['Freight Type'])) ||
+    String(a['Facility Name']).localeCompare(String(b['Facility Name'])) ||
+    String(a['PO']).localeCompare(String(b['PO']))
+  );
+
+  return out;
+}
+
+function round2(n){ return Math.round((Number(n)||0) * 100) / 100; }
+function round3(n){ return Math.round((Number(n)||0) * 1000) / 1000; }
+
+
+async function downloadAppliedWeek() {
+  const ws = window._reportsWeek || state.weekStart;
+  const weDate = new Date(ws);
+  weDate.setDate(weDate.getDate() + 6);
+  const we = iso(weDate);
+
+  if (!apiBase) {
+    alert('API not configured');
+    return;
+  }
+
+  // At scale, never build this CSV in the browser.
+  // Stream it from the server (fast + safe for 2M+ rows).
+  const url = `${apiBase}/export/applied?from=${encodeURIComponent(ws)}&to=${encodeURIComponent(we)}&status=complete`;
+
+  // Must fetch with auth header (can't use a.href — no auth headers on browser navigation)
+  try {
+    let token = null;
+    if (window.Clerk && window.Clerk.session) {
+      try { token = await window.Clerk.session.getToken(); } catch(e) {}
+    }
+    const res = await fetch(url, {
+      headers: token ? { 'Authorization': 'Bearer ' + token } : {}
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `Applied_UIDs_${ws}_to_${we}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 250);
+  } catch(e) {
+    alert('Download failed: ' + (e.message || e));
+  }
+}
+
+
+  function buildExecHTML({
+  ws, we,
+  plannedTotal, appliedTotal, pct,
+  uniqueBins,
+  topPOSKU,             // [{po, sku, planned, applied, pct}]
+  topBins,              // [{bin, units, uniqueSkus}]
+  insights,             // [string, ...]
+  binQA                  // { binsCount, totalUnitsFromBins, totalWeightKg, avgWeightPerBin, anomalies[], suspicious[], ... }
+}) {
+  const pretty = s => (s||'').split('-').reverse().join('-');
+
+  const rowsPOSKU = (topPOSKU||[])
+    .map(r=>`<tr>
+      <td>${r.po}</td>
+      <td>${r.sku}</td>
+      <td style="text-align:right">${(r.planned||0).toLocaleString()}</td>
+      <td style="text-align:right">${(r.applied||0).toLocaleString()}</td>
+      <td style="text-align:right">${r.pct}%</td>
+    </tr>`).join('');
+
+  const rowsBins = (topBins||[])
+    .map(r=>`<tr>
+      <td>${r.bin}</td>
+      <td style="text-align:right">${(r.units||0).toLocaleString()}</td>
+      <td style="text-align:right">${(r.uniqueSkus||0).toLocaleString()}</td>
+    </tr>`).join('');
+
+  const bullets = (insights||[])
+    .map(t=>`<li>${t}</li>`).join('');
+
+  // Bin summary rows
+  const binSummary = binQA ? `
+    <table style="width:100%;border-collapse:collapse;margin:8px 0 0 0;font-size:13px">
+      <tbody>
+        <tr><td style="padding:6px 4px;border:1px solid #eee">Bins (count)</td><td style="padding:6px 4px;border:1px solid #eee;text-align:right">${(binQA.binsCount||0).toLocaleString()}</td></tr>
+        <tr><td style="padding:6px 4px;border:1px solid #eee">Units (manifest)</td><td style="padding:6px 4px;border:1px solid #eee;text-align:right">${(binQA.totalUnitsFromBins||0).toLocaleString()}</td></tr>
+        <tr><td style="padding:6px 4px;border:1px solid #eee">Weight (kg, total)</td><td style="padding:6px 4px;border:1px solid #eee;text-align:right">${(binQA.totalWeightKg||0).toFixed(1)}</td></tr>
+        <tr><td style="padding:6px 4px;border:1px solid #eee">Avg kg / bin</td><td style="padding:6px 4px;border:1px solid #eee;text-align:right">${(binQA.avgWeightPerBin||0).toFixed(2)}</td></tr>
+        <tr><td style="padding:6px 4px;border:1px solid #eee">UID Units (this week)</td><td style="padding:6px 4px;border:1px solid #eee;text-align:right">${(binQA.totalsFromUIDs||0).toLocaleString()}</td></tr>
+        <tr><td style="padding:6px 4px;border:1px solid #eee">Anomalies (count)</td><td style="padding:6px 4px;border:1px solid #eee;text-align:right">${(((binQA.anomalies||[]).length) + ((binQA.suspicious||[]).length)).toLocaleString()}</td></tr>
+      </tbody>
+    </table>
+  ` : '<div style="color:#888">No bin manifest uploaded for this week.</div>';
+
+  const topOutliers = (binQA?.topOutliers || []).slice(0,5).map(x =>
+    `<li>Bin ${x.bin}: ${x.units.toLocaleString()} units, ${x.weight_kg.toFixed(1)} kg (${x.kg_per_unit.toFixed(3)} kg/unit)</li>`
+  ).join('');
+
+  return `<!doctype html><meta charset="utf-8">
+  <style>
+    @page { size: A4 landscape; margin: 16mm; }
+    body  { font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:#111; line-height:1.35; }
+    h1    { margin:0 0 8px; font-size:22px; color:${BRAND}; }
+    h2    { font-size:16px; margin:16px 0 8px; }
+    table { border-collapse:collapse; width:100%; }
+    th, td { border:1px solid #eee; padding:6px 4px; }
+    th    { text-align:left; }
+    .kpi  { margin-bottom:16px; }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+  </style>
+
+  <div>
+    <h1>VAS Weekly Executive Summary</h1>
+    <div style="color:#555;font-size:11px;margin-bottom:16px">Week: ${pretty(ws)} – ${pretty(we)}</div>
+
+    <!-- KPIs -->
+    <table class="kpi">
+      <tr>
+        <td>
+          <div style="font-size:11px;color:#666;margin-bottom:4px">Planned</div>
+          <div style="font-size:20px;font-weight:700">${plannedTotal.toLocaleString()}</div>
+        </td>
+        <td>
+          <div style="font-size:11px;color:#666;margin-bottom:4px">Applied</div>
+          <div style="font-size:20px;font-weight:700">${appliedTotal.toLocaleString()}</div>
+        </td>
+        <td>
+          <div style="font-size:11px;color:#666;margin-bottom:4px">Completion</div>
+          <div style="font-size:20px;font-weight:700">${pct}%</div>
+        </td>
+        <td>
+          <div style="font-size:11px;color:#666;margin-bottom:4px">Mobile Bins (wk, from UIDs)</div>
+          <div style="font-size:20px;font-weight:700">${uniqueBins.toLocaleString()}</div>
+        </td>
+      </tr>
+    </table>
+
+    <div class="grid">
+      <div>
+        <h2>Top Insights</h2>
+        <ul style="margin:0 0 16px 16px;padding:0">${bullets || '<li style="color:#888">No notable insights.</li>'}</ul>
+
+        <h2>Mobile Bin Summary</h2>
+        ${binSummary}
+        ${topOutliers ? `<div style="margin-top:8px"><strong>Outliers (kg/unit):</strong><ul>${topOutliers}</ul></div>` : ''}
+      </div>
+
+      <div>
+        <h2>PO × SKU — Applied (Top)</h2>
+        <table style="font-size:13px; margin-bottom:16px">
+          <thead>
+            <tr>
+              <th>PO #</th>
+              <th>SKU</th>
+              <th style="text-align:right">Planned</th>
+              <th style="text-align:right">Applied</th>
+              <th style="text-align:right">%</th>
+            </tr>
+          </thead>
+          <tbody>${rowsPOSKU || `<tr><td colspan="5" style="color:#888;padding:10px 4px">No PO × SKU rows found.</td></tr>`}</tbody>
+        </table>
+
+        <h2>Units by Mobile Bin (Top)</h2>
+        <table style="font-size:13px">
+          <thead>
+            <tr>
+              <th>Mobile Bin</th>
+              <th style="text-align:right">Units</th>
+              <th style="text-align:right">Unique SKUs</th>
+            </tr>
+          </thead>
+          <tbody>${rowsBins || `<tr><td colspan="3" style="color:#888;padding:10px 4px">No bin data found.</td></tr>`}</tbody>
+        </table>
+      </div>
     </div>
   </div>`;
 }
 
+// ----- PO Progress table -----
+function renderPOProgress(rows){
+  const tbody = document.getElementById('po-progress-body');
+  if (!tbody) return;
+  tbody.innerHTML = '';
 
-function loadChartJS(cb){if(window.Chart){cb();return;}const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js';s.onload=cb;document.head.appendChild(s);}
-
-// ── Heatmap renderer — replaces bar/line chart ──
-function renderPLCharts(months, mode='rev'){
-  const wrap=el('fin-heatmap');
-  if(!wrap)return;
-  if(window._fcR){try{window._fcR.destroy();}catch(_){}window._fcR=null;}
-  if(window._fcE){try{window._fcE.destroy();}catch(_){}window._fcE=null;}
-
-  const active=months.filter(m=>m.revenue>0||m.expenses>0||m.units_vas>0);
-  if(!active.length){wrap.innerHTML='<div style="color:#AEAEB2;font-size:12px;padding:30px;text-align:center;">No data for this period</div>';return;}
-
-  const labels=active.map(m=>new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'2-digit'}));
-  const nullZ=arr=>arr.map(v=>(v&&v>0)?v:null);
-
-  if(mode==='rev'){
-    // ── Three-panel chart: stacked area + net margin sparkline + units bar ──
-    wrap.innerHTML=`
-      <div style="display:grid;grid-template-columns:1fr;gap:0;">
-        <!-- Revenue channels area chart -->
-        <div style="position:relative;padding-bottom:12px;border-bottom:1px solid rgba(0,0,0,0.05);">
-          <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:8px;">Channel Revenue</div>
-          <div style="height:140px;position:relative;"><canvas id="fin-ch-rev"></canvas></div>
-        </div>
-        <!-- Net margin + expenses panel -->
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;padding-top:14px;padding-bottom:12px;border-bottom:1px solid rgba(0,0,0,0.05);">
-          <div>
-            <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:8px;">Net &amp; Margin %</div>
-            <div style="height:90px;"><canvas id="fin-ch-net"></canvas></div>
-          </div>
-          <div>
-            <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:8px;">Expense Breakdown</div>
-            <div style="height:90px;"><canvas id="fin-ch-exp"></canvas></div>
-          </div>
-        </div>
-        <!-- Legend -->
-        <div style="display:flex;align-items:center;gap:14px;padding-top:10px;flex-wrap:wrap;">
-          ${[['VAS','#990033'],['Sea','#a76e6e'],['Air','#b8960c'],['Expenses','#606a9f'],['Net','#166534']].map(([l,c])=>
-            `<span style="display:inline-flex;align-items:center;gap:5px;font-size:9px;color:#6E6E73;">
-              <span style="width:16px;height:3px;background:${c};border-radius:2px;display:inline-block;"></span>${l}
-            </span>`).join('')}
-        </div>
-      </div>`;
-
-    // Revenue area chart
-    const ctxR=document.getElementById('fin-ch-rev');
-    if(ctxR&&window.Chart){
-      window._fcR=new window.Chart(ctxR,{type:'line',data:{labels,datasets:[
-        {label:'VAS',  data:nullZ(active.map(m=>m.rev_vas)),  borderColor:'#990033',backgroundColor:'rgba(153,0,51,0.12)',borderWidth:2,fill:true,tension:0.4,pointRadius:3,pointBackgroundColor:'#fff',pointBorderColor:'#990033',pointBorderWidth:1.5,spanGaps:false},
-        {label:'Sea',  data:nullZ(active.map(m=>m.rev_sea)),  borderColor:'#a76e6e',backgroundColor:'rgba(167,110,110,0.08)',borderWidth:2,fill:true,tension:0.4,pointRadius:3,pointBackgroundColor:'#fff',pointBorderColor:'#a76e6e',pointBorderWidth:1.5,spanGaps:false},
-        {label:'Air',  data:nullZ(active.map(m=>m.rev_air)),  borderColor:'#b8960c',backgroundColor:'rgba(184,150,12,0.08)',borderWidth:2,fill:true,tension:0.4,pointRadius:3,pointBackgroundColor:'#fff',pointBorderColor:'#b8960c',pointBorderWidth:1.5,spanGaps:false},
-      ]},options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false,callbacks:{label:ctx=>`${ctx.dataset.label}: $${(ctx.parsed.y||0).toLocaleString()}`}}},
-        scales:{x:{ticks:{font:{size:9},color:'#8e8e93'},grid:{display:false},border:{display:false}},
-                y:{ticks:{font:{size:9},color:'#8e8e93',callback:v=>'$'+v.toLocaleString()},grid:{color:'rgba(0,0,0,0.04)'},border:{display:false}}}}});
-    }
-
-    // Net margin combo (bar=net $, line=margin %)
-    const ctxN=document.getElementById('fin-ch-net');
-    if(ctxN&&window.Chart){
-      window._fcN=new window.Chart(ctxN,{type:'bar',data:{labels,datasets:[
-        {label:'Net',data:active.map(m=>m.net||0),backgroundColor:active.map(m=>m.net>0?'rgba(22,101,52,0.7)':'rgba(153,0,51,0.55)'),borderRadius:3,order:2},
-        {label:'Margin%',data:active.map(m=>m.margin_pct||0),type:'line',borderColor:'#606a9f',borderWidth:2,pointRadius:2,fill:false,tension:0.4,yAxisID:'y2',order:1},
-      ]},options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false}},
-        scales:{x:{ticks:{font:{size:8},color:'#8e8e93'},grid:{display:false},border:{display:false}},
-                y:{ticks:{font:{size:8},color:'#8e8e93',callback:v=>'$'+v.toLocaleString()},grid:{color:'rgba(0,0,0,0.04)'},border:{display:false}},
-                y2:{position:'right',ticks:{font:{size:8},color:'#606a9f',callback:v=>v+'%'},grid:{display:false},border:{display:false}}}}});
-    }
-
-    // Expense stacked bar
-    const ctxE=document.getElementById('fin-ch-exp');
-    if(ctxE&&window.Chart){
-      window._fcE=new window.Chart(ctxE,{type:'bar',data:{labels,datasets:[
-        {label:'Labour',   data:active.map(m=>m.exp_labour||0),   backgroundColor:'rgba(153,0,51,0.75)',borderRadius:2,stack:'s'},
-        {label:'Freight',  data:active.map(m=>m.exp_freight||0),  backgroundColor:'rgba(96,106,159,0.75)',borderRadius:2,stack:'s'},
-        {label:'Overhead', data:active.map(m=>m.exp_overhead||0), backgroundColor:'rgba(167,110,110,0.60)',borderRadius:2,stack:'s'},
-      ]},options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false}},
-        scales:{x:{ticks:{font:{size:8},color:'#8e8e93'},grid:{display:false},border:{display:false}},
-                y:{ticks:{font:{size:8},color:'#8e8e93',callback:v=>'$'+v.toLocaleString()},grid:{color:'rgba(0,0,0,0.04)'},border:{display:false}}}}});
-    }
-
-  } else {
-    // ── Per Unit view: grouped bar per channel ──
-    wrap.innerHTML=`
-      <div>
-        <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.07em;margin-bottom:10px;">Revenue per Unit by Channel</div>
-        <div style="height:160px;"><canvas id="fin-ch-pu"></canvas></div>
-        <div style="display:flex;align-items:center;gap:14px;margin-top:10px;flex-wrap:wrap;">
-          ${[['VAS Rev/u','#990033'],['VAS Cost/u','rgba(153,0,51,0.3)'],['Sea Rev/u','#a76e6e'],['Air Rev/u','#b8960c']].map(([l,c])=>
-            `<span style="display:inline-flex;align-items:center;gap:5px;font-size:9px;color:#6E6E73;">
-              <span style="width:16px;height:3px;background:${c};border-radius:2px;display:inline-block;"></span>${l}
-            </span>`).join('')}
-        </div>
-      </div>`;
-    const ctxP=document.getElementById('fin-ch-pu');
-    if(ctxP&&window.Chart){
-      window._fcR=new window.Chart(ctxP,{type:'bar',data:{labels,datasets:[
-        {label:'VAS Rev/u', data:active.map(m=>m.vas_rev_pu),  backgroundColor:'#990033',borderRadius:4,barPercentage:0.6},
-        {label:'VAS Cost/u',data:active.map(m=>m.vas_cost_pu), backgroundColor:'rgba(153,0,51,0.3)',borderRadius:4,barPercentage:0.6},
-        {label:'Sea Rev/u', data:active.map(m=>m.sea_rev_pu),  backgroundColor:'#a76e6e',borderRadius:4,barPercentage:0.6},
-        {label:'Air Rev/u', data:active.map(m=>m.air_rev_pu),  backgroundColor:'#b8960c',borderRadius:4,barPercentage:0.6},
-      ]},options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false,callbacks:{label:ctx=>`${ctx.dataset.label}: $${Number(ctx.parsed.y||0).toFixed(3)}/u`}}},
-        scales:{x:{ticks:{font:{size:9},color:'#8e8e93'},grid:{display:false},border:{display:false}},
-                y:{ticks:{font:{size:9},color:'#8e8e93',callback:v=>'$'+Number(v).toFixed(3)},grid:{color:'rgba(0,0,0,0.04)'},border:{display:false}}}}});
-    }
+  if (!rows || !rows.length){
+    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-xs text-gray-400 py-3">No data</td></tr>';
+    return;
   }
+
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.className = 'odd:bg-gray-50';
+    tr.innerHTML = `
+      <td class="py-1 pr-2">${r.po}</td>
+      <td class="py-1 pr-2">${r.due ? toUI(r.due) : ''}</td>
+      <td class="py-1 pr-2 text-right tabular-nums">${(r.planned||0).toLocaleString()}</td>
+      <td class="py-1 pr-2 text-right tabular-nums">${(r.applied||0).toLocaleString()}</td>
+      <td class="py-1 text-right tabular-nums">${r.pct||0}%</td>
+    `;
+    tbody.appendChild(tr);
+  });
 }
 
+function supplierRingSVG(applied, planned) {
+  const a = toNum(applied);
+  const p = Math.max(1, toNum(planned)); // avoid divide by zero
+  const ratio = Math.min(a / p, 1);
+  const pct = Math.round((a * 100) / p);
 
+  const size = 78;
+  const stroke = 10;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const dash = ratio * c;
 
-function renderExpList(exps){
-  const c=el('fin-exp-list');if(!c)return;
-  if(!exps.length){c.innerHTML=`<div style="font-size:11px;color:${LIGHT};padding:12px 0;">No expenses yet.</div>`;return;}
-  c.innerHTML=`<table class="fin-tbl"><thead><tr><th>Description</th><th>Category</th><th>Date</th><th>Amount</th><th>Recurring</th><th></th></tr></thead>
-  <tbody>${exps.map(e=>`<tr>
-    <td style="font-weight:500;">${esc(e.description)}</td><td style="color:${MID};">${esc(e.category)}</td>
-    <td style="color:${MID};font-size:11px;">${fmtDate(e.expense_date)}</td>
-    <td style="font-weight:600;color:${AMBER};">${fmtUSD(e.amount)}</td>
-    <td>${e.is_recurring?`<span style="color:${BLUE};font-size:10px;font-weight:600;">↻ ${e.recur_freq||'monthly'}</span>`:'—'}</td>
-    <td><button class="fin-btn fin-btn-ghost" style="font-size:10px;padding:3px 8px;margin-right:4px;" onclick="window._finEditExpense('${e.id}')">Edit</button>
-    <button style="background:none;border:none;color:${LIGHT};cursor:pointer;" onclick="window._finDeleteExpense('${e.id}')">✕</button></td>
-  </tr>`).join('')}</tbody></table>`;
+  // Using currentColor for strokes so Tailwind text colors can control it later
+  return `
+    <div class="flex items-center justify-center w-full">
+      <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-label="Facility progress ring">
+        <circle cx="${size/2}" cy="${size/2}" r="${r}"
+          fill="none" stroke="#E5E7EB" stroke-width="${stroke}" />
+        <circle cx="${size/2}" cy="${size/2}" r="${r}"
+          fill="none" stroke="#990033" stroke-width="${stroke}"
+          stroke-linecap="round"
+          stroke-dasharray="${dash} ${c}"
+          transform="rotate(-90 ${size/2} ${size/2})" />
+        <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle"
+          font-size="16" font-weight="700" fill="#111827">${pct}%</text>
+      </svg>
+    </div>
+  `;
 }
 
-window._finAddExpense=function(defaultMonth){
-  renderExpEditor({id:null,category:'Other',description:'',amount:0,currency:'USD',expense_date:defaultMonth?defaultMonth+'-01':isoToday(),is_recurring:0,recur_freq:'monthly',recur_end:''});
-};
-window._finEditExpense=async function(id){
-  const exp=_finState.expenses.find(e=>e.id===id);
-  if(exp){renderExpEditor(exp);}else{try{const a=await api('/finance/expenses');const f=a.find(e=>e.id===id);if(f)renderExpEditor(f);}catch{}}
-};
-function renderExpEditor(exp){
-  const isNew=!exp.id;
-  openPanel(`
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-      <div style="font-size:15px;font-weight:700;color:${DARK};">${isNew?'New Expense':'Edit Expense'}</div>
-      <button onclick="window._finClosePanel()" style="width:28px;height:28px;border-radius:8px;border:none;background:${BG};color:${MID};font-size:14px;cursor:pointer;">✕</button>
-    </div>
-    <div style="margin-bottom:12px;"><span class="fin-label">Category</span><select id="exp-cat" class="fin-input">${EXPENSE_CATS.map(c=>`<option value="${c}" ${c===exp.category?'selected':''}>${c}</option>`).join('')}</select></div>
-    <div style="margin-bottom:12px;"><span class="fin-label">Description</span><input id="exp-desc" class="fin-input" value="${esc(exp.description)}" placeholder="e.g. COSCO sea freight"/></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
-      <div><span class="fin-label">Amount</span><input id="exp-amount" type="number" step="0.01" class="fin-input" value="${exp.amount||0}"/></div>
-      <div><span class="fin-label">Currency</span><select id="exp-currency" class="fin-input">${['USD','AUD','EUR','GBP'].map(c=>`<option value="${c}" ${c===exp.currency?'selected':''}>${c}</option>`).join('')}</select></div>
-    </div>
-    <div style="margin-bottom:12px;"><span class="fin-label">Date</span><input id="exp-date" type="date" class="fin-input" value="${safeDate(exp.expense_date)||isoToday()}"/></div>
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:12px;">
-      <input type="checkbox" id="exp-recur" ${exp.is_recurring?'checked':''} style="width:14px;height:14px;accent-color:${BRAND};" onchange="document.getElementById('exp-recur-opts').style.display=this.checked?'':'none'"/>
-      <span style="font-size:12px;color:${DARK};">Recurring expense</span>
-    </label>
-    <div id="exp-recur-opts" style="display:${exp.is_recurring?'':'none'};margin-bottom:12px;padding:12px;background:${BG};border-radius:8px;">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-        <div><span class="fin-label">Frequency</span><select id="exp-freq" class="fin-input"><option value="monthly" ${exp.recur_freq==='monthly'?'selected':''}>Monthly</option><option value="quarterly" ${exp.recur_freq==='quarterly'?'selected':''}>Quarterly</option><option value="annually" ${exp.recur_freq==='annually'?'selected':''}>Annually</option></select></div>
-        <div><span class="fin-label">End Date</span><input id="exp-end" type="date" class="fin-input" value="${safeDate(exp.recur_end)||''}"/></div>
+function facilityBarHTML(applied, planned) {
+  const a = toNum(applied);
+  const p = Math.max(0, toNum(planned));
+  const ratio = p > 0 ? Math.min(a / p, 1) : 0;
+  const pct = p > 0 ? Math.round((a * 100) / p) : 0;
+
+  return `
+    <div class="w-full">
+      <div class="h-4 w-full rounded-full bg-gray-200 overflow-hidden border">
+        <div class="h-full" style="background-color:${APPLIED_COLOR};width:${(ratio * 100).toFixed(1)}%"></div>
+      </div>
+      <div class="mt-2 flex items-center justify-between text-xs text-gray-600">
+        <div class="tabular-nums">${fmtInt(a)} applied</div>
+        <div class="tabular-nums">${pct}%</div>
       </div>
     </div>
-    <div style="display:flex;gap:8px;margin-top:20px;">
-      <button class="fin-btn fin-btn-primary" style="flex:1;" onclick="window._finSaveExp('${exp.id||''}')">${isNew?'Add Expense':'Save'}</button>
-      <button class="fin-btn fin-btn-ghost" onclick="window._finClosePanel()">Cancel</button>
-    </div>
-    ${!isNew?`<div style="margin-top:12px;text-align:center;"><button onclick="window._finDeleteExpense('${exp.id}')" style="background:none;border:none;color:${LIGHT};font-size:11px;cursor:pointer;">Delete &amp; recurring copies</button></div>`:''}
-  `);
+  `;
 }
 
-window._finSaveExp=async function(id){
-  const payload={category:el('exp-cat')?.value,description:el('exp-desc')?.value,amount:parseFloat(el('exp-amount')?.value||0),currency:el('exp-currency')?.value||'USD',expense_date:el('exp-date')?.value,is_recurring:el('exp-recur')?.checked?1:0,recur_freq:el('exp-freq')?.value||null,recur_end:el('exp-end')?.value||null};
-  try{
-    if(id)await api(`/finance/expenses/${id}`,{method:'PATCH',body:JSON.stringify(payload)});
-    else await api('/finance/expenses',{method:'POST',body:JSON.stringify(payload)});
-    window._finClosePanel();
-    if(_finState.tab==='expenses')renderExpensesTab();
-    if(_finState.tab==='pl')renderPLTab();
-    renderKPIs();
-  }catch(e){alert('Save failed: '+e.message);}
-};
-window._finDeleteExpense=async function(id){
-  if(!confirm('Delete this expense and any recurring copies?'))return;
-  try{await api(`/finance/expenses/${id}`,{method:'DELETE'});window._finClosePanel();if(_finState.tab==='expenses')renderExpensesTab();if(_finState.tab==='pl')renderPLTab();renderKPIs();}
-  catch(e){alert('Delete failed: '+e.message);}
+function freightLanesHTML(plannedMap, appliedMap) {
+  // Prefer showing Air + Sea; include Other if it exists
+  const keysAll = Array.from(new Set([...(plannedMap?.keys?.() || []), ...(appliedMap?.keys?.() || [])]));
+
+  const normKey = (k) => String(k || '').toLowerCase();
+  const pick = (contains) => keysAll.find(k => normKey(k).includes(contains));
+
+  const airKey = pick('air') || 'Air';
+  const seaKey = pick('sea') || pick('ocean') || 'Sea';
+
+  // "Other" = everything not air/sea and not blank placeholder unless it’s the only thing
+  const otherKeys = keysAll.filter(k => k !== airKey && k !== seaKey);
+  const showOther = otherKeys.length > 0;
+
+  const lanes = [
+    { label: 'Air', key: airKey, icon: '✈️' },
+    { label: 'Sea', key: seaKey, icon: '🚢' },
+  ];
+
+  if (showOther) {
+    // If multiple others exist, roll them up into one lane
+    lanes.push({ label: 'Other', key: '__OTHER__', icon: '📦' });
+  }
+
+  function laneNumbers(k) {
+    if (k === '__OTHER__') {
+      const planned = otherKeys.reduce((s, kk) => s + (plannedMap.get(kk) || 0), 0);
+      const applied = otherKeys.reduce((s, kk) => s + (appliedMap.get(kk) || 0), 0);
+      return { planned, applied };
+    }
+    return { planned: plannedMap.get(k) || 0, applied: appliedMap.get(k) || 0 };
+  }
+
+  function laneRow(l) {
+    const { planned, applied } = laneNumbers(l.key);
+    const ratio = planned > 0 ? Math.min(applied / planned, 1) : 0;
+
+    return `
+      <div class="flex items-center gap-2">
+        <div class="w-7 text-center" aria-hidden="true">${l.icon}</div>
+        <div class="flex-1">
+          <div class="flex items-center justify-between text-[11px] text-gray-600">
+            <div class="font-semibold text-gray-800">${l.label}</div>
+            <div class="tabular-nums">${fmtInt(applied)} / ${fmtInt(planned)}</div>
+          </div>
+          <div class="h-2 w-full rounded-full bg-gray-200 overflow-hidden border mt-1">
+            <div class="h-full" style="background-color:${APPLIED_COLOR};width:${(ratio * 100).toFixed(1)}%"></div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="w-full flex flex-col gap-2">
+      ${lanes.map(laneRow).join('')}
+    </div>
+  `;
+}
+
+function zendeskBulletHTML(applied, planned) {
+  const a = toNum(applied);
+  const p = toNum(planned);
+
+  // scale: use max of planned/applied so marker stays in view when applied > planned
+  const max = Math.max(1, p, a);
+  const appliedPct = Math.min((a / max) * 100, 100);
+  const markerPct = Math.min((p / max) * 100, 100);
+
+  const over = a > p ? (a - p) : 0;
+
+  return `
+    <div class="w-full">
+      <div class="text-[11px] text-gray-600 mb-2">
+        Target marker = Planned
+        ${over ? `<span class="ml-2 text-gray-900 font-semibold tabular-nums">Over by ${fmtInt(over)}</span>` : ``}
+      </div>
+      <div class="relative h-4 w-full rounded-full bg-gray-200 overflow-hidden border">
+        <div class="h-full" style="background-color:${APPLIED_COLOR};width:${appliedPct.toFixed(1)}%"></div>
+        <div class="absolute top-[-2px] bottom-[-2px] w-[2px] bg-gray-700"
+             style="left:${markerPct.toFixed(1)}%"></div>
+      </div>
+      <div class="mt-2 flex items-center justify-between text-xs text-gray-600">
+        <div class="tabular-nums">${fmtInt(a)} applied</div>
+        <div class="tabular-nums">${fmtInt(p)} planned</div>
+      </div>
+    </div>
+  `;
+}
+
+// ----- Progress Tiles (Facility / Facility / Freight / Zendesk) -----
+function renderProgressTiles(plan = [], records = []) {
+  const tilesRoot = document.getElementById('ops-progress-tiles');
+  if (!tilesRoot) return;
+
+  // Support two modes:
+  // 1) Raw records: [{status, po_number, sku_code, ...}]
+  // 2) Summary-by-PO (preferred at scale): [{po, units, cartons_out?}]
+  const sample = (records || [])[0] || null;
+  const isSummaryByPO = Boolean(sample && ('po' in sample) && ('units' in sample) && !('po_number' in sample));
+
+  // Only count "applied" as completed units (raw mode)
+  const completed = isSummaryByPO ? [] : (records || []).filter(r => r.status === 'complete');
+
+  // Index plan by PO+SKU so we can map completed records to their plan metadata (raw mode)
+  const planByKey = new Map();
+  for (const p of plan || []) {
+    const po = String(p.po_number || '').trim();
+    const sku = String(p.sku_code || '').trim();
+    if (!po || !sku) continue;
+    planByKey.set(`${po}|||${sku}`, p);
+  }
+
+  // In summary-by-PO mode, we need PO -> meta (supplier/facility/freight/zendesk)
+  const metaByPO = new Map();
+  if (isSummaryByPO) {
+    for (const p of plan || []) {
+      const po = String(p.po_number || '').trim();
+      if (!po || metaByPO.has(po)) continue;
+      metaByPO.set(po, p);
+    }
+  }
+
+  // Helper: normalize display values (blank -> (Unspecified))
+  const normVal = (v) => {
+    const s = String(v ?? '').trim();
+    return s ? s : '(Unspecified)';
+  };
+
+  // Build planned totals by field value
+  function plannedByField(field) {
+    const m = new Map();
+    for (const p of plan || []) {
+      const key = normVal(p?.[field]);
+      m.set(key, (m.get(key) || 0) + toNum(p.target_qty));
+    }
+    return m;
+  }
+
+  // Build applied totals by field value
+  function appliedByField(field) {
+    const m = new Map();
+    if (isSummaryByPO) {
+      for (const r of records || []) {
+        const po = String(r.po || '').trim();
+        const u = Number(r.units || 0) || 0;
+        if (!po || u <= 0) continue;
+        const p = metaByPO.get(po);
+        const key = normVal(p?.[field]);
+        m.set(key, (m.get(key) || 0) + u);
+      }
+    } else {
+      for (const r of completed) {
+        const po = String(r.po_number || '').trim();
+        const sku = String(r.sku_code || '').trim();
+        if (!po || !sku) continue;
+
+        const p = planByKey.get(`${po}|||${sku}`);
+        const key = normVal(p?.[field]); // if record not in plan, it falls into (Unspecified)
+        m.set(key, (m.get(key) || 0) + 1);
+      }
+    }
+    return m;
+  }
+
+  function pickDefault(plannedMap, appliedMap) {
+    // default = highest planned; tie-breaker = highest applied; final = alpha
+    const keys = Array.from(new Set([...plannedMap.keys(), ...appliedMap.keys()]));
+    if (!keys.length) return '';
+    keys.sort((a, b) => {
+      const pa = plannedMap.get(a) || 0, pb = plannedMap.get(b) || 0;
+      if (pb !== pa) return pb - pa;
+      const aa = appliedMap.get(a) || 0, ab = appliedMap.get(b) || 0;
+      if (ab !== aa) return ab - aa;
+      return a.localeCompare(b);
+    });
+    return keys[0];
+  }
+
+  function fillSelect(selectId, keys, selected) {
+    const sel = document.getElementById(selectId);
+    if (!sel) return null;
+
+    sel.innerHTML = '';
+    if (!keys.length) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No values';
+      sel.appendChild(opt);
+      return sel;
+    }
+
+    for (const k of keys) {
+      const opt = document.createElement('option');
+      opt.value = k;
+      opt.textContent = k;
+      sel.appendChild(opt);
+    }
+
+    sel.value = selected || keys[0];
+    return sel;
+  }
+
+  function updateTile(field, selectId, metricId, pctId, vizId) {
+    const plannedMap = plannedByField(field);
+    const appliedMap = appliedByField(field);
+
+    const keys = Array.from(new Set([...plannedMap.keys(), ...appliedMap.keys()]));
+    keys.sort((a, b) => a.localeCompare(b));
+
+    const defaultKey = pickDefault(plannedMap, appliedMap);
+    const sel = fillSelect(selectId, keys, defaultKey);
+
+    const metricEl = document.getElementById(metricId);
+    const pctEl = document.getElementById(pctId);
+    const vizEl = document.getElementById(vizId);
+
+    const render = () => {
+      const k = sel ? sel.value : defaultKey;
+      const planned = plannedMap.get(k) || 0;
+      const applied = appliedMap.get(k) || 0;
+      const pct = planned > 0 ? Math.round((applied * 100) / planned) : (plan.length ? 0 : 100);
+
+      if (metricEl) metricEl.textContent = `${fmtInt(applied)} / ${fmtInt(planned)}`;
+      if (pctEl) pctEl.textContent = `${pct}%`;
+
+     // Facility gets a circular progress ring; others stay as text for now
+if (vizEl) {
+  if (!planned) {
+    vizEl.textContent = 'No plan for selection';
+} else if (field === 'supplier_name') {
+  vizEl.innerHTML = supplierRingSVG(applied, planned);
+} else if (field === 'facility_name') {
+  vizEl.innerHTML = facilityBarHTML(applied, planned);
+} else if (field === 'freight_type') {
+  vizEl.innerHTML = freightLanesHTML(plannedMap, appliedMap);
+} else if (field === 'zendesk_ticket') {
+  vizEl.innerHTML = zendeskBulletHTML(applied, planned);
+} else {
+  vizEl.textContent = `Applied ${fmtInt(applied)} of ${fmtInt(planned)}`;
+}
+}
+
+    };
+
+    if (sel) sel.onchange = render;
+    render();
+  }
+
+  updateTile('supplier_name',  'supplier-filter', 'supplier-metric', 'supplier-pct', 'supplier-viz');
+  updateTile('facility_name',  'facility-filter', 'facility-metric', 'facility-pct', 'facility-viz');
+  updateTile('freight_type',   'freight-filter',  'freight-metric',  'freight-pct',  'freight-viz');
+  updateTile('zendesk_ticket', 'zendesk-filter',  'zendesk-metric',  'zendesk-pct',  'zendesk-viz');
+}
+
+
+
+// ----- Risk tables (PO / SKU) -----
+function renderRisk(list, selector){
+  const tbody = document.querySelector(selector);
+  if (!tbody) return;
+  tbody.innerHTML = '';
+
+  if (!list || !list.length){
+    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-xs text-gray-400 py-3">No items at risk this week.</td></tr>';
+    return;
+  }
+
+  list.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.className = 'odd:bg-gray-50';
+    tr.innerHTML = `
+      <td class="py-1 pr-2 truncate" title="${r.key||r.po||''}">${r.key||r.po||''}</td>
+      <td class="py-1 pr-2">${r.due_date ? toUI(r.due_date) : ''}</td>
+      <td class="py-1 pr-2 text-right tabular-nums">${(r.planned||0).toLocaleString()}</td>
+      <td class="py-1 pr-2 text-right tabular-nums">${(r.applied||0).toLocaleString()}</td>
+      <td class="py-1 pr-2 text-right tabular-nums">${(r.remaining||0).toLocaleString()}</td>
+      <td class="py-1 text-right tabular-nums">${r.pct||0}%</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+// ---------- Actionable Top Insights (with Duplicates & Bin diversity) ----------
+function renderInsights(records, plan = [], weekStartISO = '') {
+  const ul   = document.getElementById('insights');
+  const mini = document.getElementById('insights-mini');
+  if (!ul) return;
+
+  // --- dates & helpers ---
+  const today = todayISO();
+  const ws    = weekStartISO || (typeof mondayOf === 'function' ? iso(mondayOf(new Date())) : today);
+  const wsDate = new Date(ws + 'T00:00:00');
+  const weDate = new Date(ws + 'T00:00:00'); weDate.setDate(weDate.getDate() + 6);
+  const we = iso(weDate);
+  const dayDiff = (a,b)=> Math.round((new Date(a+'T00:00:00') - new Date(b+'T00:00:00'))/86400000);
+  const clamp01 = n => (n < 1 ? 1 : n);
+
+  // --- applied aggregates (this week window only) ---
+  const rows = Array.isArray(records) ? records : [];
+  const isSummary = rows.length && ('po' in (rows[0] || {})) && ('units' in (rows[0] || {})) && !('po_number' in (rows[0] || {}));
+
+  let weekRows = [];
+  if (isSummary) {
+    // In summary-only mode, "records" is actually /records/summary.by_po already scoped to the week.
+    weekRows = rows;
+  } else {
+    const inWeek = (r) => {
+      if (!r || r.status !== 'complete') return false;
+      const dl = toISODate(r.date_local);
+      return dl && dl >= ws && dl <= we;
+    };
+    weekRows = rows.filter(inWeek);
+  }
+
+  // per-PO & per-SKU counts in week
+  const appliedPO  = new Map();
+  const appliedSKU = new Map();
+  for (const r of weekRows) {
+    if (isSummary) {
+      const po = String(r.po || '').trim();
+      const u = Number(r.units || 0) || 0;
+      if (po) appliedPO.set(po, (appliedPO.get(po) || 0) + u);
+    } else {
+      const po  = String(r.po_number||'').trim();
+      const sku = String(r.sku_code||'').trim();
+      if (po)  appliedPO.set(po,  (appliedPO.get(po)||0)  + 1);
+      if (sku) appliedSKU.set(sku, (appliedSKU.get(sku)||0) + 1);
+    }
+  }
+
+  // --- plan aggregates (planned totals & earliest due) ---
+  const planPO = new Map();   // po -> { planned, due }
+  const planSKU = new Map();  // sku -> { planned, due }
+  let plannedTotal = 0;
+
+  for (const p of plan || []) {
+    const po  = String(p.po_number||'').trim();
+    const sku = String(p.sku_code||'').trim();
+    const due = String(p.due_date||'').trim();
+    const qty = toNum(p.target_qty);
+    plannedTotal += qty;
+
+    if (po) {
+      const cur = planPO.get(po) || { planned:0, due: due || '' };
+      cur.planned += qty;
+      if (!cur.due || (due && new Date(due) < new Date(cur.due))) cur.due = due;
+      planPO.set(po, cur);
+    }
+    if (sku) {
+      const cur = planSKU.get(sku) || { planned:0, due: due || '' };
+      cur.planned += qty;
+      if (!cur.due || (due && new Date(due) < new Date(cur.due))) cur.due = due;
+      planSKU.set(sku, cur);
+    }
+  }
+
+  // --- priority lists (highest remaining, earliest due first) ---
+  function buildPriority(listMap, appliedMap, keyName) {
+    const rows = [];
+    for (const [key, v] of listMap.entries()) {
+      const planned = v.planned || 0;
+      const applied = appliedMap.get(key) || 0;
+      const remaining = Math.max(0, planned - applied);
+      rows.push({ [keyName]: key, planned, applied, remaining, due: v.due || '' });
+    }
+    rows.sort((a, b) =>
+      (b.remaining - a.remaining) || (new Date(a.due||'9999-12-31') - new Date(b.due||'9999-12-31'))
+    );
+    return rows;
+  }
+  const priorityPO  = buildPriority(planPO, appliedPO, 'po');
+  const prioritySKU = buildPriority(planSKU, appliedSKU, 'sku');
+
+
+// --- Mobile bins / Duplicate UIDs ---
+// These require raw records. In summary-only mode we skip these insights.
+const binsWeek = new Set();
+const binsByDiversity = [];
+let dupScanCount = 0;
+let dupPairs = [];
+let dupExamples = [];
+
+if (!isSummary) {
+  // Mobile bins: unique (this week) + top 5 by SKU diversity (this week)
+  for (const r of (weekRows || [])) {
+    const bin = String(r.mobile_bin || '').trim();
+    if (bin) binsWeek.add(bin);
+  }
+
+  // diversity across the week: bin -> set(sku)
+  const binSkuSet = new Map();
+  for (const r of (weekRows || [])) {
+    const bin = String(r.mobile_bin || '').trim();
+    const sku = String(r.sku_code  || '').trim();
+    if (!bin || !sku) continue;
+    if (!binSkuSet.has(bin)) binSkuSet.set(bin, new Set());
+    binSkuSet.get(bin).add(sku);
+  }
+  binsByDiversity.push(
+    ...Array.from(binSkuSet.entries())
+      .map(([bin, set]) => ({ bin, uniqueSkus: set.size }))
+      .sort((a,b) => b.uniqueSkus - a.uniqueSkus)
+      .slice(0, 5)
+  );
+
+  // Duplicate UID detection (this week)
+  const pairCounts = new Map();
+  for (const r of (weekRows || [])) {
+    const sku = String(r.sku_code||'').trim();
+    const uid = String(r.uid||'').trim();
+    if (!sku || !uid) continue;
+    const k = `${sku}||${uid}`;
+    pairCounts.set(k, (pairCounts.get(k)||0) + 1);
+  }
+  for (const [k, c] of pairCounts.entries()) {
+    if (c > 1) {
+      const [sku, uid] = k.split('||');
+      dupPairs.push({ sku, uid, count: c });
+      dupScanCount += c;
+    }
+  }
+  dupPairs.sort((a,b)=> b.count - a.count);
+  dupExamples = dupPairs.slice(0,3).map(x => `${x.sku}×${x.uid}${x.count>2?`×${x.count}`:''}`);
+}
+
+  // --- Pace calculations (week + due-in-3-days horizon) ---
+  const daysElapsed       = clamp01(7 - clamp01(dayDiff(ws, today) * -1));
+  const appliedSoFar      = isSummary
+    ? Array.from(appliedPO.values()).reduce((s, v) => s + (Number(v) || 0), 0)
+    : (weekRows || []).length;
+  const avgPerDaySoFar    = Math.round(appliedSoFar / daysElapsed);
+  const daysLeftInWeek    = clamp01(dayDiff(we, today) + 1);
+  const remainingWeek     = Math.max(0, plannedTotal - appliedSoFar);
+  const needPerDayWeek    = Math.ceil(remainingWeek / daysLeftInWeek);
+
+  const due3Date = new Date(today + 'T00:00:00'); due3Date.setDate(due3Date.getDate() + 2);
+  const due3ISO  = iso(due3Date);
+  function sumPlannedDueBy(map) {
+    let sum = 0;
+    for (const v of map.values()) {
+      if (!v.due) continue;
+      if (v.due >= today && v.due <= due3ISO) sum += v.planned || 0;
+    }
+    return sum;
+  }
+  const plannedDue3 = sumPlannedDueBy(planPO);
+  let appliedAgainstDue3 = 0;
+  for (const [po, v] of planPO.entries()) {
+    if (v.due && v.due >= today && v.due <= due3ISO) {
+      appliedAgainstDue3 += appliedPO.get(po) || 0;
+    }
+  }
+  const remainingDue3   = Math.max(0, plannedDue3 - appliedAgainstDue3);
+  const daysLeftForDue3 = clamp01(Math.min(3, dayDiff(due3ISO, today) + 1));
+  const needPerDayDue3  = remainingDue3 ? Math.ceil(remainingDue3 / daysLeftForDue3) : 0;
+
+  // --- Build insight bullets (max 5) ---
+  const bullets = [];
+
+  // 1–2) Priority POs/SKUs to start
+  if (priorityPO.length && priorityPO[0].remaining > 0) {
+    const p = priorityPO[0];
+    bullets.push(`Start with PO ${p.po} (remaining ${p.remaining.toLocaleString()} • due ${p.due ? toUI(p.due) : 'n/a'})`);
+  }
+  if (prioritySKU.length && prioritySKU[0].remaining > 0) {
+    const s = prioritySKU[0];
+    bullets.push(`Focus SKU ${s.sku} (remaining ${s.remaining.toLocaleString()} • due ${s.due ? toUI(s.due) : 'n/a'})`);
+  }
+
+  // 3) Mobile bins: total unique (this week) + top 5 by SKU diversity (this week)
+if (binsByDiversity.length) {
+  const tops = binsByDiversity.map(b => `${b.bin} (${b.uniqueSkus})`).join(', ');
+  bullets.push(`Mobile bins (wk): ${binsWeek.size.toLocaleString()} • Top bins by SKU diversity (wk): ${tops}`);
+} else {
+  bullets.push(`Mobile bins (wk): ${binsWeek.size.toLocaleString()}`);
+}
+
+  // 4) Duplicate UID alert, if any
+  if (dupPairs.length) {
+    bullets.push(
+      `Duplicate UIDs detected: ${dupScanCount.toLocaleString()} scans across ${dupPairs.length} pairs ` +
+      `${dupExamples.length ? `(e.g., ${dupExamples.join(', ')})` : ''}`
+    );
+  } else {
+    bullets.push(`No duplicate UIDs detected this week.`);
+  }
+
+  // 5) Weekly pace vs target (and 3-day horizon if relevant)
+  const weekPace = `Weekly plan pace: need ~${needPerDayWeek.toLocaleString()}/day (current ${avgPerDaySoFar.toLocaleString()}/day)`;
+  if (remainingDue3 > 0) {
+    bullets.push(
+      `${weekPace} • Due≤3d: target ~${needPerDayDue3.toLocaleString()}/day (rem ${remainingDue3.toLocaleString()})`
+    );
+  } else {
+    bullets.push(weekPace);
+  }
+
+  // Render
+  ul.innerHTML = bullets.slice(0, 5).map(t => `<li>${t}</li>`).join('');
+  if (mini) mini.textContent = `Applied so far: ${appliedSoFar.toLocaleString()} • Remaining: ${remainingWeek.toLocaleString()}`;
+}
+
+
+
+function weekEndISO(ws){ const d=new Date(ws); d.setDate(d.getDate() + 6); return iso(d); }
+
+function inWeekByDateLocal(r, ws){
+  if (!r || r.status !== 'complete') return false;
+  const we = weekEndISO(ws);                  // YYYY-MM-DD
+  const dl = String(r.date_local || '').trim();
+  return !!dl && dl >= ws && dl <= we;        // pure string compare on YYYY-MM-DD
+}
+
+function inWeekByCompletedAt(r, ws){
+  if (!r || r.status !== 'complete' || !r.completed_at) return false;
+  const ymd = ymdFromCompletedAtInTZ(r.completed_at); // business-day bucket
+  const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
+  const we  = iso(weD); // NOTE: 'to' is treated as exclusive in most endpoints
+  return ymd && ymd >= ws && ymd <= we;
+}
+
+  // ---------- setWeek ----------
+  async function setWeek(ws){
+    state.weekStart=ws; $('#week-start').value=ws;
+    const weDate=new Date(ws); weDate.setDate(weDate.getDate() + 6); const we=iso(weDate);
+const [plan, summary, receiving] = await Promise.all([
+  fetchPlan(ws),
+  fetchSummary(ws, we, 'complete'),
+  fetchReceiving(ws)
+]);
+state.plan = Array.isArray(plan) ? plan : [];
+// Always extract facility from plan rows — plan data is authoritative
+const planFac = (state.plan || []).map(p => String(p.facility_name || p.facility || '').trim()).find(Boolean);
+if (planFac) state.facility = planFac;
+
+// Summary-first: for normal dashboard operation we keep only PO rollups.
+// (Raw records are loaded only for explicit drilldowns.)
+let _summary = summary;
+if(!Array.isArray(_summary?.by_po) && !Number(_summary?.total_units||0)){
+  // Fallback: some deployments don't support /records/summary with from/to/status.
+  const raw = await fetchRecordsRange(ws, we, 'complete', 250000);
+  _summary = buildSummaryFromRaw(raw);
+}
+state.records = Array.isArray(_summary?.by_po) ? _summary.by_po : [];
+state.summary = _summary || null;
+state.receiving = Array.isArray(receiving) ? receiving : [];
+
+const bins = await fetchBins(ws);
+state.bins = Array.isArray(bins) ? bins : [];
+// Bin QA requires raw records (mobile_bin). In summary-only mode we skip.
+state.binQA = computeBinQA(ws, [], state.bins);
+
+    const agg=aggregate(state.records);
+    const plannedTotal = state.plan.reduce((s,p)=> s + toNum(p.target_qty), 0);
+    const appliedTotal = Array.from(agg.byPO.values()).reduce((s,v)=> s+v, 0);
+    const pct = plannedTotal>0? Math.round(appliedTotal*100/plannedTotal) : (state.plan.length?0:100);
+    const _setText = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+
+    const setTxt = (id, val) => { const el = $(id); if (el) el.textContent = val; };
+    setTxt('#planned-range', `${ws} – ${we}`);
+    setTxt('#applied-range', `${ws} – ${we}`);
+    setTxt('#planned-total', fmtInt(plannedTotal));
+    setTxt('#applied-total', fmtInt(appliedTotal));
+    setTxt('#pct-week', `${pct}%`);
+    setTxt('#avg-week', fmtInt(appliedTotal));
+    setTxt('#avg-day', fmtInt(Math.round((appliedTotal||0)/7)));
+    // Build capsule totals for the visible week pills [-1, 0, +1, +2, +3] relative to ws
+const capsuleIds = [-7, 0, 7, 14, 21].map(n => addDaysISO(ws, n));
+
+let plansByWeek = {};
+try {
+  const planLists = await Promise.all(capsuleIds.map(id => fetchPlan(id)));
+  planLists.forEach((pl, i) => {
+    plansByWeek[capsuleIds[i]] = Array.isArray(pl) ? pl : [];
+  });
+} catch (e) {
+  plansByWeek = {};
+}
+
+const totalsByWeek = {};
+try {
+  const summs = await Promise.all(capsuleIds.map(id => {
+    const end = addDaysISO(id, 6);
+    return fetchSummary(id, end, 'complete');
+  }));
+  capsuleIds.forEach((id, i) => {
+    const pTotal = (plansByWeek[id] || []).reduce((s, p) => s + toNum(p.target_qty), 0);
+    const aTotal = Number(summs[i]?.total_units || 0);
+    totalsByWeek[id] = { planned: pTotal, applied: aTotal };
+  });
+} catch {
+  capsuleIds.forEach(id => {
+    const pTotal = (plansByWeek[id] || []).reduce((s, p) => s + toNum(p.target_qty), 0);
+    totalsByWeek[id] = { planned: pTotal, applied: 0 };
+  });
+}
+
+// Render capsules with correct bars for ALL pills (not only the selected week)
+renderCapsules(ws, plannedTotal, appliedTotal, totalsByWeek);
+    setFooterHealth(pct, appliedTotal);
+
+    const poRows = joinPOProgress(state.plan, agg.byPO);
+    renderProgressTiles(state.plan, state.records);
+
+    const riskPO = computeRisk(poRows.map(r=>({po:r.po,due:r.due,planned:r.planned,applied:r.applied})));
+    // build per SKU progress
+    const perSKU=new Map();
+    for(const p of state.plan){
+      const sku=String(p.sku_code||'').trim(); if(!sku) continue;
+      const r=perSKU.get(sku)||{due:p.due_date,planned:0,applied:0};
+      r.planned+=toNum(p.target_qty);
+      if(r.due!==p.due_date) r.due = r.due < p.due_date ? r.due : p.due_date;
+      perSKU.set(sku,r);
+    }
+    for(const [sku,v] of agg.bySKU.entries()){const r=perSKU.get(sku)||{due:'',planned:0,applied:0}; r.applied+=v; perSKU.set(sku,r);}
+    const skuRows=Array.from(perSKU.entries()).map(([sku,r])=>({key:sku,due:r.due,planned:r.planned,applied:r.applied}));
+    const riskSKU = computeRisk(skuRows);
+    renderRisk(riskPO,'#risk-po-body');
+    renderRisk(riskSKU,'#risk-sku-body');
+
+// 👉 add/keep this:
+renderInsights(state.records, state.plan, state.weekStart);
+
+    // download buttons
+    const __btnDlPosku = $('#btn-dl-posku');
+    if(__btnDlPosku) __btnDlPosku.onclick=async()=>{
+      const dlWs = window._reportsWeek || state.weekStart;
+      const dlWe = (() => { try { const d=new Date(dlWs); d.setDate(d.getDate()+6); return d.toISOString().slice(0,10); } catch{ return dlWs; } })();
+      const p = new URLSearchParams({ from: dlWs, to: dlWe, status: 'complete' });
+      const resp = await api(`/summary/po_sku?${p.toString()}`).catch(()=>({}));
+      const rows=buildDiscrepancyPOSKU(state.plan, resp?.rows || []);
+      const csv=toCSV(
+  ['PO','SKU','Supplier Name','Facility Name','Freight Type','Zendesk Ticket #','Planned','Applied','Discrepancy (Applied - Planned)'],
+  rows
+);
+      const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download=`po_sku_discrepancy_${dlWs}.csv`; a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),250);
+    };
+    const __btnDlPo = $('#btn-dl-po');
+    if(__btnDlPo) __btnDlPo.onclick=()=>{
+      const dlWs = window._reportsWeek || state.weekStart;
+      const rows=buildDiscrepancyPO(poRows, state.plan);
+const csv=toCSV(
+  ['PO','SKU','Supplier Name','Facility Name','Freight Type','Zendesk Ticket #','Mobile Bin Count','Mobile Bins','Planned','Applied','Discrepancy (Applied - Planned)'],
+  rows
+);
+      const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download=`po_discrepancy_${dlWs}.csv`; a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),250);
+    };
+
+const __btnShipSummary = $('#btn-ship-summary');
+if(__btnShipSummary) __btnShipSummary.onclick = () => {
+  const ws = window._reportsWeek || state.weekStart;
+  api(`/summary/shipment_summary?weekStart=${encodeURIComponent(ws)}`)
+    .then(resp => {
+      const rows = (resp && resp.rows) ? resp.rows : [];
+      const csv = toCSV(
+        [
+          'Supplier Name',
+          'Zendesk Ticket #',
+          'Freight Type',
+          'Facility Name',
+          'Unique PO Count',
+          'Total Units Applied',
+          'Total Mobile Bins',
+          'Gross Weight',
+          'CBM'
+        ],
+        rows
+      );
+
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+      a.download=`shipment_report_summary_${ws}.csv`;
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),250);
+    })
+    .catch(() => alert('Shipment Summary download failed.'));
 };
 
-window.showFinancePage=async function(){
-  _apiBase=(document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
-  const main=document.querySelector('main.vo-wrap')||document.querySelector('main')||document.body;
-  ['page-dashboard','page-intake','page-exec','page-receiving','page-reports','page-map'].forEach(id=>{
-    const e=document.getElementById(id);if(e){e.classList.add('hidden');e.style.display='none';}
-  });
-  if(typeof window.hideReceivingPage==='function')window.hideReceivingPage();
-  let page=document.getElementById('page-finance');
-  if(!page){page=document.createElement('section');page.id='page-finance';main.appendChild(page);}
-  page.classList.remove('hidden');page.style.display='block';
-  if(!page.dataset.init){
-    page.dataset.init='1';injectSkeleton(page);
-    fetchFX().then(()=>{const lbl=el('fin-fx-label');if(lbl)lbl.textContent=_finState.fxLabel;});
-  }
-  if(!_finState.week)_finState.week=getWeeks()[0];
-  await renderKPIs();
-  window._finTab(_finState.tab||'invoices');
+const __btnShipDetail = $('#btn-ship-detail');
+if(__btnShipDetail) __btnShipDetail.onclick = () => {
+  const ws = window._reportsWeek || state.weekStart;
+  api(`/summary/shipment_detail?weekStart=${encodeURIComponent(ws)}`)
+    .then(resp => {
+      const rows = (resp && resp.rows) ? resp.rows : [];
+      const csv = toCSV(
+        [
+          'Supplier Name',
+          'Zendesk Ticket #',
+          'Freight Type',
+          'Facility Name',
+          'PO',
+          'Total Units Applied',
+          'Total Mobile Bins',
+          'Gross Weight',
+          'CBM'
+        ],
+        rows
+      );
+
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+      a.download=`shipment_report_detail_${ws}.csv`;
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),250);
+    })
+    .catch(() => alert('Shipment Detail download failed.'));
 };
+
+const __btnDlWeekApplied = $('#btn-dl-week-applied');
+if(__btnDlWeekApplied) __btnDlWeekApplied.onclick = downloadAppliedWeek;
+
+function generateExecDoc() {
+  const wsISO = state.weekStart;
+  const weD = new Date(wsISO); weD.setDate(weD.getDate() + 6);
+  const weISO = iso(weD);
+
+  const plannedTotal = (state.plan||[]).reduce((s,p)=> s + toNum(p.target_qty), 0);
+  const recs = (state.records||[]).filter(r => r.status === 'complete');
+  const appliedTotal = recs.length;
+  const pct = plannedTotal>0 ? Math.round(appliedTotal*100/plannedTotal) : (state.plan.length?0:100);
+
+  // PO×SKU aggregates
+  const planPOSKU = new Map();
+  for (const p of state.plan||[]) {
+    const po = String(p.po_number||'').trim();
+    const sku = String(p.sku_code||'').trim();
+    if (!po || !sku) continue;
+    const k = `${po}||${sku}`;
+    planPOSKU.set(k, (planPOSKU.get(k)||0) + toNum(p.target_qty));
+  }
+  const appliedPOSKU = new Map();
+  for (const r of recs) {
+    const po = String(r.po_number||'').trim();
+    const sku = String(r.sku_code||'').trim();
+    if (!po || !sku) continue;
+    const k = `${po}||${sku}`;
+    appliedPOSKU.set(k, (appliedPOSKU.get(k)||0) + 1);
+  }
+  const poskuRows = Array.from(appliedPOSKU.entries()).map(([k, applied]) => {
+    const [po, sku] = k.split('||');
+    const planned = planPOSKU.get(k) || 0;
+    const pct = planned>0 ? Math.round(applied*100/planned) : 100;
+    return { po, sku, planned, applied, pct };
+  }).sort((a,b)=> b.applied - a.applied).slice(0, 50);
+
+  // Mobile bins (units + diversity)
+  const binUnits = new Map();
+  const binSkuSet = new Map();
+  for (const r of recs) {
+    const bin = String(r.mobile_bin||'').trim();
+    const sku = String(r.sku_code||'').trim();
+    if (!bin) continue;
+    binUnits.set(bin, (binUnits.get(bin)||0) + 1);
+    if (sku) {
+      if (!binSkuSet.has(bin)) binSkuSet.set(bin, new Set());
+      binSkuSet.get(bin).add(sku);
+    }
+  }
+  const uniqueBins = binUnits.size;
+  const topBins = Array.from(binUnits.entries())
+    .map(([bin, units]) => ({ bin, units, uniqueSkus: (binSkuSet.get(bin)||new Set()).size }))
+    .sort((a,b)=> b.units - a.units)
+    .slice(0, 25);
+
+  // Bin QA insight (if available)
+  const insights = [];
+  try {
+    if (state?.binQA && state.binQA.ws === wsISO) {
+      const q = state.binQA;
+      const aCount = (q.anomalies?.length || 0) + (q.suspicious?.length || 0);
+      const top3 = (q.topOutliers || []).slice(0,3).map(x => `${x.bin} (${(x.kg_per_unit).toFixed(3)} kg/unit)`).join(', ');
+      insights.push(
+        `Bin QA: ${q.binsCount.toLocaleString()} bins • ` +
+        `${q.totalUnitsFromBins.toLocaleString()} units • ` +
+        `${q.totalWeightKg.toFixed(1)} kg total • ` +
+        `Anomalies: ${aCount ? aCount : 'none'}${top3 ? ` (e.g., ${top3})` : ''}`
+      );
+    }
+  } catch {}
+
+  const leadPOSKU = poskuRows[0];
+  if (leadPOSKU) {
+    insights.push(`Highest volume: PO ${leadPOSKU.po} × SKU ${leadPOSKU.sku} — ${leadPOSKU.applied.toLocaleString()} applied (${leadPOSKU.pct}% of ${leadPOSKU.planned.toLocaleString()} planned).`);
+  }
+  if (uniqueBins) {
+    const tops = topBins.slice(0,5).map(b => `${b.bin} (${b.units.toLocaleString()})`).join(', ');
+    insights.push(`Mobile bins used: ${uniqueBins.toLocaleString()} • Top bins by units: ${tops}.`);
+  }
+  const avgPerDay = Math.round(appliedTotal/7);
+  const rem = Math.max(0, plannedTotal - appliedTotal);
+  insights.push(`Pace: ~${avgPerDay.toLocaleString()}/day • Remaining vs plan: ${rem.toLocaleString()}.`);
+
+  const html = buildExecHTML({
+    ws: wsISO, we: weISO,
+    plannedTotal, appliedTotal, pct,
+    uniqueBins,
+    topPOSKU: poskuRows,
+    topBins,
+    insights, binQA: state.binQA
+  });
+
+  const blob = new Blob([html], { type: 'application/msword' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `VAS_Executive_Summary_${wsISO}.doc`;
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 250);
+}
+
+// Bind both buttons to the same generator
+document.getElementById('btn-exec')?.addEventListener('click', generateExecDoc);
+document.getElementById('btn-exec-doc')?.addEventListener('click', generateExecDoc);
+
+// Optional: PO×SKU CSV from the Executive page
+document.getElementById('btn-exec-csv')?.addEventListener('click', () => {
+  const rows = buildDiscrepancyPOSKU(state.plan, state.records);
+  const csv  = toCSV(['PO','SKU','Planned','Applied','Discrepancy (Applied - Planned)'], rows);
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(new Blob([csv], { type:'text/csv;charset=utf-8' }));
+  a.download = `po_sku_week_${state.weekStart}.csv`;
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),250);
+});
+        // Ensure week totals (POs received, cartons in/out, etc.) are computed for the selected week
+    try { await refreshDashboardTotals(); } catch (e) { console.warn('[OPS] refreshDashboardTotals failed:', e); }
+
+// Re-render insights for currently selected view now that week data is loaded
+    try {
+      const active = document.querySelector('.ops-pill--active');
+      const v = (active && active.getAttribute('data-opsview')) ? active.getAttribute('data-opsview') : 'overview';
+      renderOpsInsights(v);
+    } catch (e) {}
+
+  // ── Trigger flipper insight refresh for this week ──
+  try { refreshFlipperInsights(ws); } catch(e) { console.warn('[Flipper] refresh failed:', e); }
+};
+
+
+  // ---------- Plan upload / zero (unchanged) ----------
+  const __btnUploadPlan = $('#btn-upload-plan');
+  const __filePlan = $('#file-plan');
+  if(__btnUploadPlan && __filePlan) __btnUploadPlan.onclick=()=>__filePlan.click();
+$('#file-plan').addEventListener('change', async (e) => {
+  const f = e.target.files?.[0];
+  e.target.value = '';
+  if (!f || !apiBase) return;
+
+  const weekStart = $('#week-start').value;
+  let rows = [];
+
+  try {
+    // Always use SheetJS — TIC sends .xlsx direct from Google Sheets
+    const buf = await f.arrayBuffer();
+    // cellFormula:false tells SheetJS not to parse formulas as formulas
+    // but we need raw:true so dates come as serial numbers and formulas
+    // return their cached/display value rather than the formula string
+    const wb = XLSX.read(buf, { type: 'array', cellFormula: true, cellDates: false });
+    rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {
+      defval: '',
+      raw: true,    // keep numbers as numbers, dates as serials
+    });
+  } catch (err) {
+    console.error('Parsing failed', err);
+    alert('Could not parse file');
+    return;
+  }
+
+  if (!rows.length) return alert('No rows found.');
+
+  // ── Normalise header keys: trim + lowercase + spaces→underscore ──
+  const normalizeKeys = (r) => {
+    const n = {};
+    for (const k in r) {
+      const key = k.trim().toLowerCase().replace(/\s+/g, '_');
+      n[key] = r[k];
+    }
+    return n;
+  };
+
+  // ── Extract actual value from Google Sheets IFERROR formula strings ──
+  // TIC exports contain =IFERROR(__xludf.DUMMYFUNCTION(...),ACTUAL_VALUE)
+  // The real value is always the last argument before the closing paren
+  const extractIferror = (val) => {
+    if (val == null) return '';
+    const s = String(val).trim();
+    if (!s.startsWith('=IFERROR')) return s;
+    // Match last argument: either "quoted string" or a plain number
+    const m = s.match(/,\s*("([^"]*)"|(\d+))\s*\)\s*$/);
+    if (!m) return '';
+    return m[2] !== undefined ? m[2] : m[3]; // quoted string or number
+  };
+
+  // ── Normalise freight type → Sea / Air / TBD (matches existing lane key format) ──
+  const normalizeFreight = (val) => {
+    const v = extractIferror(val).trim().toLowerCase();
+    if (v === 'sea') return 'Sea';
+    if (v === 'air') return 'Air';
+    return 'TBD';
+  };
+
+  // ── Split item_sku into style + sku_code ──
+  // Format: DA131SH16OW-11852130 → style=DA131SH16OW, sku_code=11852130
+  // Split on last hyphen so style codes with hyphens are preserved
+  const splitItemSku = (val) => {
+    const s = String(val || '').trim();
+    const idx = s.lastIndexOf('-');
+    if (idx === -1) return { style: '', sku_code: s };
+    return {
+      style:    s.slice(0, idx).trim(),
+      sku_code: s.slice(idx + 1).trim(),
+    };
+  };
+
+  const raw = rows.map(normalizeKeys);
+  console.log('[plan-upload] parsed rows:', raw.length, '| sample:', raw[0]);
+
+  const items = raw
+    .map(r => {
+      // SKU Number (new file) or item_sku (old file) — format: STYLE-SKUNUMBER
+      const { style, sku_code } = splitItemSku(r.sku_number ?? r.item_sku ?? '');
+      return {
+        // ── Core identity fields ──
+        po_number:  String(r.po_number ?? r.po ?? '').trim(),
+        sku_code,                                                       // after last hyphen
+        style,                                                          // before last hyphen
+        vendor_sku: String(r.vendor_item_number ?? r.sku ?? '').trim(), // Vendor Item Number (new) / SKU (old)
+        start_date: weekStart,
+
+        // ── Dates ──
+        due_date: toISODate(r.latest_delivery_date ?? r.due_date ?? r.due ?? ''),
+
+        // ── Quantity ──
+        target_qty: toNum(r.po_qty ?? r.target_qty ?? r.planned ?? 0),
+
+        // ── Supplier / logistics ──
+        supplier_name:          String(r.supplier_name ?? r.supplier ?? '').trim() || undefined,
+        supplier_contact:       String(r.supplier_contact ?? '').trim() || undefined,
+        supplier_contact_email: String(r.supplier_contact_email ?? '').trim() || undefined,
+        supplier_contact_phone: String(r.supplier_contact_phone ?? '').trim() || undefined,
+        vendor_code:            String(r.vendor_code ?? '').trim() || undefined,
+        vendor_item_no:         String(r.vendor_item_no ?? '').trim() || undefined,
+        facility_name:          String(r.facility_name ?? r.facility ?? '').trim() || undefined,
+        freight_type:           normalizeFreight(r.transport_mode ?? r.freight_type ?? r.freight ?? ''),
+        zendesk_ticket:         String(extractIferror(r.zendesk_ticket ?? '')).trim() || undefined,
+
+        // ── Item detail fields ──
+        item_description: String(r.item_description ?? '').trim() || undefined,
+        item_color:       String(r.item_color ?? '').trim() || undefined,
+        item_size:        String(r.item_size ?? '').trim() || undefined,
+        department_code:  String(r.department_code ?? '').trim() || undefined,
+        brand_name:       String(r.brand_name ?? '').trim() || undefined,
+        season:           String(r.season ?? '').trim() || undefined,
+        ean:              String(r.ean_number ?? r.ean ?? '').trim() || undefined,
+        cost:             toNum(r.cost ?? 0) || undefined,
+      };
+    })
+    .filter(r => r.po_number && r.sku_code);  // must have PO + sku_code to be valid
+
+  console.log('[plan-upload] valid rows (PO+SKU):', items.length);
+  console.log('[plan-upload] freight types:', [...new Set(items.map(r=>r.freight_type))]);
+  console.log('[plan-upload] sample item:', items[0]);
+
+try {
+  await api(`/plan/weeks/${weekStart}`, { method: 'PUT', body: items });
+} catch(e) {
+  alert('Upload failed: ' + (e.message || e));
+  return;
+}
+
+  alert(`Plan uploaded: ${items.length} rows`);
+  setWeek(weekStart);
+});
+  const __btnZeroPlan = $('#btn-zero-plan');
+  if(__btnZeroPlan) __btnZeroPlan.onclick=async()=>{
+    if(!apiBase) return alert('API not configured');
+    const ws=$('#week-start').value;
+    try{
+      try { await api(`/plan/weeks/${ws}/zero`, {method:'POST'}); }
+      catch(e) {
+        if (!String(e.message).includes('404')) throw e;
+        await api(`/plan/weeks/${ws}`, {method:'PUT', body:[]});
+      }
+      alert('Plan zeroed'); setWeek(ws);
+    }catch(e){alert('Zero failed: '+(e.message||e))}
+  };
+
+  // ===================== INTAKE moved to intake.js =====================
+function toISODate(v) {
+  if (v == null || v === '') return '';
+  if (typeof v === 'number') {
+    const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+    return iso(d);
+  }
+  if (v instanceof Date) return iso(v);
+  const str = String(v).trim();
+  const m = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (m) {
+    const [_, d, mth, y] = m;
+    const yyyy = y.length === 2 ? '20' + y : y;
+    return `${yyyy}-${mth.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+  const d2 = new Date(str);
+  return isNaN(d2) ? '' : iso(d2);
+}
+
+  // ---------- Ops metrics & Ops Pulse → moved to intake.js ----------
+  function todayISO(){ return todayInTZ(); }
+
+  // ---------- Dashboard weekly refresh from completion timestamps ----------
+async function refreshDashboardTotals(){
+  if(!apiBase) return;
+  const ws = state.weekStart;
+  const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
+  const we  = iso(weD);
+
+  const summary = await fetchSummary(ws, we, 'complete');
+  const summaryReceived = await fetchSummary(ws, we, 'received');
+  state._summary_complete = summary;
+  state._summary_received = summaryReceived;
+  const appliedTotal = Number(summary?.total_units || 0);
+  const plannedTotal = (state.plan||[]).reduce((s,p)=>s+toNum(p.target_qty),0);
+  const pct = plannedTotal>0?Math.round(appliedTotal*100/plannedTotal):(state.plan.length?0:100);
+  // Week totals side panel (Ops)
+  try{
+    
+const poPlanned = new Set((state.plan||[]).map(p=>String(p.po_number||'').trim()).filter(Boolean));
+
+// Normalize /records/summary by_po which can be either:
+//  - object keyed by PO: { "WACA000123": {..}, ... }
+//  - array of rows:      [ {po_number:"WACA000123", ..}, ... ]
+const normByPO = (by_po) => {
+  const map = {};
+  const list = [];
+  if (Array.isArray(by_po)){
+    for (const it of by_po){
+      if(!it) continue;
+      const po = String(it.po_number ?? it.po ?? it.poNumber ?? it.po_id ?? it.key ?? '').trim();
+      if (po) map[po] = it;
+      list.push(it);
+    }
+  } else if (by_po && typeof by_po === 'object'){
+    for (const [k,v] of Object.entries(by_po)){
+      if(!v) continue;
+      const po = String(k||'').trim();
+      if (po) map[po] = v;
+      list.push(v);
+    }
+  }
+  return { map, list };
+};
+
+const recvNorm = normByPO(summaryReceived?.by_po);
+const compNorm = normByPO(summary?.by_po);
+
+const byPORecv = recvNorm.map;
+const byPORecvList = recvNorm.list;
+const byPOCompList = compNorm.list;
+
+let poReceived = new Set(Object.keys(byPORecv));
+// Fallback: derive received POs from /receiving endpoint if summary received is empty
+if(poReceived.size===0 && Array.isArray(state.receiving)){
+  for(const r of state.receiving){
+    const po = String(r?.po_number ?? r?.po ?? r?.poNumber ?? r?.po_id ?? '').trim();
+    const ci = Number(r?.cartons_in ?? r?.cartonsIn ?? r?.cartons_received ?? r?.cartonsReceived ?? r?.cartons ?? r?.carton_count ?? r?.cartons_received ?? r?.received_cartons ?? 0) || 0;
+    if(po && ci>0) poReceived.add(po);
+  }
+}
+
+
+    const appliedTotal2 = Number(summary?.total_units || 0);
+
+    // Approximate received units using cartons-in by PO (same principle as Flow):
+    // - If planned cartons are available, scale planned units by cartons_in / planned_cartons.
+    // - If planned cartons are missing, treat any cartons_in>0 as fully received (planned units).
+    let receivedTotal = 0;
+    for (const p of (state.plan||[])){
+      const po = String(p.po_number||'').trim();
+      if(!po) continue;
+      const planned = toNum(p.target_qty);
+      const plannedCartons = toNum(p.planned_cartons ?? p.cartons_planned ?? p.planned_carton_count ?? p.planned_cartons_count);
+      const cartonsInPO = toNum(byPORecv[po]?.cartons_in ?? byPORecv[po]?.cartons_out);
+      if(planned<=0) continue;
+      if(plannedCartons>0){
+        const ratio = Math.min(1, cartonsInPO / plannedCartons);
+        receivedTotal += planned * ratio;
+      } else if(cartonsInPO>0){
+        receivedTotal += planned;
+      }
+    }
+    receivedTotal = Math.round(receivedTotal);
+
+    const unitOf = (v) => {
+      if (v == null) return 0;
+      if (typeof v === 'number') return v;
+      return Number(v.total_units ?? v.units ?? v.count ?? 0) || 0;
+    };
+
+    
+const getCartonsIn = (o) => {
+  if(!o) return 0;
+  const v = (o.cartons_in ?? o.cartonsIn ?? o.cartons_received ?? o.received_cartons ?? o.cartons ?? o.bin_count ?? o.bins ?? o.mobile_bins);
+  const v2 = (o.cartons_out ?? o.cartonsOut ?? o.cartons_complete ?? o.ready_cartons ?? o.bins_out ?? o.mobile_bins_out);
+  return Number(v ?? v2) || 0;
+};
+const getCartonsOut = (o) => {
+  if(!o) return 0;
+  const v = (o.cartons_out ?? o.cartonsOut ?? o.cartons_complete ?? o.ready_cartons ?? o.bins_out ?? o.mobile_bins_out);
+  const v2 = (o.cartons_in ?? o.cartonsIn ?? o.cartons_received ?? o.received_cartons ?? o.cartons ?? o.bin_count ?? o.bins ?? o.mobile_bins);
+  return Number(v ?? v2) || 0;
+};
+
+// Cartons IN from RECEIVED status summary (shape-safe)
+const cartonsIn  = byPORecvList.reduce((s,o)=> s + getCartonsIn(o), 0);
+// Cartons OUT from COMPLETE status summary (shape-safe)
+const cartonsOut = byPOCompList.reduce((s,o)=> s + getCartonsOut(o), 0);
+// If summary doesn't expose carton fields (common), fall back to raw records:
+// we approximate cartons as UNIQUE mobile_bin counts for the week.
+let cartonsInFinal = cartonsIn;
+let cartonsOutFinal = cartonsOut;
+
+const summaryHasAnyCartonField = (list, getter) => (list||[]).some(o => {
+  if(!o) return false;
+  return (o.cartons_in!=null || o.cartons_out!=null || o.cartonsIn!=null || o.cartonsOut!=null ||
+          o.bin_count!=null || o.bins!=null || o.mobile_bins!=null || o.mobile_bin_count!=null ||
+          o.mobile_bins_out!=null || o.bins_out!=null || o.cartons!=null);
+});
+
+const recvHasCartons = summaryHasAnyCartonField(byPORecvList, getCartonsIn);
+const compHasCartons = summaryHasAnyCartonField(byPOCompList, getCartonsOut);
+
+if((!recvHasCartons && cartonsInFinal===0) || (!compHasCartons && cartonsOutFinal===0)){
+  try{
+    // Prefer /receiving for cartons-in when summary doesn't provide carton fields
+    if(!recvHasCartons && cartonsInFinal===0 && Array.isArray(state.receiving) && state.receiving.length){
+      let s=0;
+      for(const r of state.receiving){
+        s += Number(r?.cartons_in ?? r?.cartonsIn ?? r?.cartons_received ?? r?.cartonsReceived ?? r?.cartons ?? r?.carton_count ?? r?.cartons_received ?? r?.received_cartons ?? 0) || 0;
+      }
+      if(s>0) cartonsInFinal = s;
+    }
+
+    // /records (bins) is already loaded for this week; use it for cartons-out as unique bins if summary doesn't provide it
+    if(!compHasCartons && cartonsOutFinal===0 && Array.isArray(state.bins) && state.bins.length){
+      const set = new Set();
+      for(const row of state.bins){
+        const b = String(row?.mobile_bin ?? row?.mobileBin ?? row?.bin ?? row?.bin_number ?? row?.mobile_bin_number ?? '').trim();
+        if(b) set.add(b);
+      }
+      if(set.size>0) cartonsOutFinal = set.size;
+    }
+
+    const fetchAllRecords = async (status) => {
+      const j = await api(`/records?from=${encodeURIComponent(ws)}&to=${encodeURIComponent(we)}&status=${encodeURIComponent(status)}&limit=250000`);
+      return j?.records || j?.data || j || [];
+    };
+
+    const uniqueBins = (rows) => {
+      const set = new Set();
+      for(const row of (rows||[])){
+        const b = String(row?.mobile_bin ?? row?.mobileBin ?? row?.bin ?? row?.bin_number ?? row?.mobile_bin_number ?? '').trim();
+        if(b) set.add(b);
+      }
+      return set.size;
+    };
+
+    if(!recvHasCartons && cartonsInFinal===0){
+      const rec = await fetchAllRecords('received');
+      cartonsInFinal = uniqueBins(rec);
+    }
+    if(!compHasCartons && cartonsOutFinal===0){
+      const comp = await fetchAllRecords('complete');
+      cartonsOutFinal = uniqueBins(comp);
+    }
+  }catch(e){
+    console.error('[OPS cartons fallback] raw records fallback failed:', e);
+  }
+}
+
+const cartonsInUse = cartonsInFinal;
+const cartonsOutUse = cartonsOutFinal;
+
+    const suppliers = new Set((state.plan||[]).map(p=>String(p.supplier_name||p.supplier||p.vendor||p.vendor_name||p.factory||'').trim()).filter(Boolean));
+    const zendesk   = new Set((state.plan||[]).map(p=>String(p.zendesk_ticket||'').trim()).filter(Boolean));
+
+    const setTxt=(id,v)=>{ const el=$(id); if(el) el.textContent = v; };
+
+    setTxt('#ops-week-of', state.weekStart || '—');
+    setTxt('#ops-week-po-planned', poPlanned.size.toLocaleString());
+    setTxt('#ops-week-po-received', poReceived.size.toLocaleString());
+    setTxt('#ops-week-units-planned', plannedTotal.toLocaleString());
+    setTxt('#ops-week-units-applied', appliedTotal2.toLocaleString());
+    setTxt('#ops-week-cartons-in', cartonsInUse.toLocaleString());
+    setTxt('#ops-week-cartons-out', cartonsOutUse.toLocaleString());
+        const cbmIn = (Number(cartonsInUse)||0) * 0.046;
+    const cbmOut = (Number(cartonsOutUse)||0) * 0.046;
+    setTxt('#ops-week-cbm-in', cbmIn.toFixed(3));
+    setTxt('#ops-week-cbm-out', cbmOut.toFixed(3));
+    // Approximate containers (planning units as volume basis)
+    const unitsForShip = Number(plannedTotal||0) || 0;
+    const full40 = Math.floor(unitsForShip/16000);
+    const residual = unitsForShip - full40*16000;
+    let cont40 = full40;
+    let cont20 = 0;
+    if(residual>0){
+      if(residual<=8000){ cont20 = 1; }
+      else { cont40 = full40 + 1; cont20 = 0; }
+    }
+    setTxt('#ops-week-cont-40', String(cont40));
+    setTxt('#ops-week-cont-20', String(cont20));
+state.weekCartonsIn = cartonsInUse;
+    state.weekCartonsOut = cartonsOutUse;
+    // If user is currently on Carton view, re-render so waffle updates immediately
+    if(state.opsView==='carton'){ try{ renderOpsInsights('carton'); }catch(e){} }
+
+    setTxt('#ops-week-suppliers', suppliers.size.toLocaleString());
+    setTxt('#ops-week-zendesk', zendesk.size.toLocaleString());
+
+    // ── Week Hub KPI tiles ──
+    try {
+      const whPlanned = document.getElementById('wh-kpi-planned');
+      const whApplied = document.getElementById('wh-kpi-applied');
+      const whAppliedSub = document.getElementById('wh-kpi-applied-sub');
+      const whPct     = document.getElementById('wh-kpi-pct');
+      const whBar     = document.getElementById('wh-kpi-pct-bar');
+      if(whPlanned) whPlanned.textContent = plannedTotal.toLocaleString();
+      if(whApplied) whApplied.textContent = appliedTotal2.toLocaleString();
+      if(whAppliedSub) whAppliedSub.textContent = 'of ' + plannedTotal.toLocaleString() + ' planned';
+      const pctVal = plannedTotal > 0 ? Math.round(appliedTotal2 * 100 / plannedTotal) : (state.plan.length ? 0 : 100);
+      if(whPct){
+        whPct.textContent = pctVal + '%';
+        whPct.style.color = pctVal >= 100 ? '#97DC21' : pctVal < 80 ? '#D61A3C' : '#FFA203';
+      }
+      if(whBar){
+        whBar.style.width = Math.min(100, pctVal) + '%';
+        whBar.style.background = pctVal >= 100 ? '#97DC21' : pctVal < 80 ? '#D61A3C' : '#FFA203';
+      }
+    } catch(e) { /* never break refreshDashboardTotals */ }
+
+    const pctNow = plannedTotal>0?Math.round(appliedTotal2*100/plannedTotal):(state.plan.length?0:100);
+    const h=$('#ops-week-health');
+    if(h){
+      const wsNow = state.weekStart || '';
+      const todayNow = (typeof todayISO==='function') ? todayISO() : new Date().toISOString().slice(0,10);
+      const weekIsFuture = wsNow > todayNow;
+      let label = 'On-Plan';
+      if(pctNow < 75) label='At-Risk';
+      if(pctNow < 50) label = (weekIsFuture && appliedTotal2===0) ? 'Upcoming' : 'Delayed';
+      h.textContent = label;
+    }
+  }catch(e){ console.error('[OPS refreshDashboardTotals] week totals error', e); }
+  // PO progress tile (totals + table)
+  try{
+    const setTxt=(id,v)=>{ const el=$(id); if(el) el.textContent = v; };
+    const plannedTotal2 = (state.plan||[]).reduce((s,p)=>s+toNum(p.target_qty),0);
+    const receivedTotal2 = Number(summaryReceived?.total_units || 0);
+    const appliedTotal3 = Number(summary?.total_units || 0);
+
+    setTxt('#ops-po-planned-total', plannedTotal2.toLocaleString());
+    setTxt('#ops-po-planned-total-2', plannedTotal2.toLocaleString());
+    setTxt('#ops-po-received-total', receivedTotal2.toLocaleString());
+    setTxt('#ops-po-applied-total', appliedTotal3.toLocaleString());
+
+    const pctR = plannedTotal2>0 ? Math.min(100, Math.round(receivedTotal2*100/plannedTotal2)) : 0;
+    const pctA = plannedTotal2>0 ? Math.min(100, Math.round(appliedTotal3*100/plannedTotal2)) : 0;
+
+    const br=$('#ops-po-received-bar'); if(br) br.style.width = pctR + '%';
+    const ba=$('#ops-po-applied-bar'); if(ba) ba.style.width = pctA + '%';
+
+    const unitOf = (v) => {
+      if (v == null) return 0;
+      if (typeof v === 'number') return v;
+      return Number(v.total_units ?? v.units ?? v.count ?? 0) || 0;
+    };
+
+    // Build PO rows from plan + summaries
+    const planByPO = new Map(); // po -> {planned, supplier, facility, freight, zendesk}
+    for(const p of (state.plan||[])){
+      const po = String(p.po_number||'').trim();
+      if(!po) continue;
+      const r = planByPO.get(po) || {
+        po,
+        planned: 0,
+        supplier: String(p.supplier_name||p.supplier||p.vendor||p.vendor_name||p.factory||'').trim(),
+        facility: String(p.facility_name||'').trim(),
+        freight: String(p.freight_type||'').trim(),
+        zendesk: String(p.zendesk_ticket||'').trim(),
+      };
+      r.planned += toNum(p.target_qty);
+      // Prefer first non-empty meta
+      if(!r.supplier && (p.supplier_name||p.supplier||p.vendor||p.vendor_name||p.factory)) r.supplier = String(p.supplier_name||p.supplier||p.vendor||p.vendor_name||p.factory).trim();
+      if(!r.facility && p.facility_name) r.facility = String(p.facility_name).trim();
+      if(!r.freight && p.freight_type) r.freight = String(p.freight_type).trim();
+      if(!r.zendesk && p.zendesk_ticket) r.zendesk = String(p.zendesk_ticket).trim();
+      planByPO.set(po, r);
+    }
+
+    const byPOComplete = summary?.by_po || {};
+    const byPOReceived = summaryReceived?.by_po || {};
+
+    const rows = [];
+    for(const [po, r] of planByPO.entries()){
+      const planned = Number(r.planned||0);
+      const received = unitOf(byPOReceived[po]);
+      const applied = unitOf(byPOComplete[po]);
+      const rem = Math.max(0, planned - applied);
+      const pct = planned>0 ? Math.min(100, Math.round(applied*100/planned)) : 0;
+      rows.push({po, supplier:r.supplier, facility:r.facility, freight:r.freight, zendesk:r.zendesk, planned, received, applied, rem, pct});
+    }
+    rows.sort((a,b)=> (b.pct - a.pct) || (b.planned - a.planned) || a.po.localeCompare(b.po));
+    state._ops_po_rows = rows;
+
+    function renderTable(filterTerm){
+      const body = $('#ops-po-table-body'); if(!body) return;
+      const term = String(filterTerm||'').trim().toUpperCase();
+      const list = term ? rows.filter(x=> x.po.toUpperCase().includes(term)) : rows;
+
+      if(!list.length){
+        body.innerHTML = '<tr><td colspan="11" class="text-center text-xs text-gray-400 py-6">No matching POs.</td></tr>';
+        return;
+      }
+
+      const fmt = (n)=> (Number(n)||0).toLocaleString();
+      const esc = (s)=> String(s||'—').replace(/[&<>"]/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+      body.innerHTML = list.slice(0, 500).map(r=>{
+        const wR = r.planned>0 ? Math.min(100, Math.round(r.received*100/r.planned)) : 0;
+        const wA = r.planned>0 ? Math.min(100, Math.round(r.applied*100/r.planned)) : 0;
+        return `<tr class="border-t">
+          <td class="py-2 px-3 font-medium">${esc(r.po)}</td>
+          <td class="py-2 px-3">${esc(r.supplier)}</td>
+          <td class="py-2 px-3">${esc(r.facility)}</td>
+          <td class="py-2 px-3">${esc(r.freight)}</td>
+          <td class="py-2 px-3">${esc(r.zendesk)}</td>
+          <td class="py-2 px-3 text-right tabular-nums">${fmt(r.planned)}</td>
+          <td class="py-2 px-3 text-right tabular-nums">${fmt(r.received)}</td>
+          <td class="py-2 px-3 text-right tabular-nums">${fmt(r.applied)}</td>
+          <td class="py-2 px-3 text-right tabular-nums">${fmt(r.rem)}</td>
+          <td class="py-2 px-3 text-right tabular-nums">${r.pct}%</td>
+          <td class="py-2 px-3">
+            <div class="h-2 bg-gray-100 rounded-full overflow-hidden relative">
+              <div class="h-full ops-bar-planned" style="width:${wR}%"></div>
+              <div class="h-full" style="width:${wA}%; background:${APPLIED_COLOR};opacity:.75; position:absolute; top:0; left:0;"></div>
+            </div>
+          </td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Bind search once
+    if(!state._ops_po_bound){
+      state._ops_po_bound = true;
+      const input = $('#ops-po-search');
+      const clear = $('#ops-po-clear');
+      if(input){
+        input.addEventListener('input', ()=> renderTable(input.value));
+        input.addEventListener('change', ()=> renderTable(input.value));
+      }
+      if(clear && input){
+        clear.addEventListener('click', ()=>{ input.value=''; renderTable(''); });
+      }
+    }
+
+    // Initial render
+    const input = $('#ops-po-search');
+    renderTable(input ? input.value : '');
+
+  }catch(e){ console.error('[OPS refreshDashboardTotals] week totals error', e); }
+
+
+
+      const __el_planned_total = document.getElementById('planned-total'); if(__el_planned_total) __el_planned_total.textContent = plannedTotal.toLocaleString();
+      const __el_applied_total = document.getElementById('applied-total'); if(__el_applied_total) __el_applied_total.textContent = appliedTotal.toLocaleString();
+      const __el_pct_week = document.getElementById('pct-week'); if(__el_pct_week) __el_pct_week.textContent = pct+'%';
+      const __el_avg_week = document.getElementById('avg-week'); if(__el_avg_week) __el_avg_week.textContent = appliedTotal.toLocaleString();
+      const __el_avg_day = document.getElementById('avg-day'); if(__el_avg_day) __el_avg_day.textContent = Math.round((appliedTotal||0)/7).toLocaleString();
+  setFooterHealth(pct, appliedTotal);
+}
+
+  // ---------- Simple Search ----------
+  (function attachSearch(){
+    const el=$('#search-input'); if(!el) return; let t=null;
+    el.addEventListener('input',(e)=>{
+      clearTimeout(t);
+      t=setTimeout(()=>{
+        const term=String(e.target.value||'').trim();
+        const wrap=$('#search-results'); if(!term){wrap.classList.add('hidden'); wrap.innerHTML=''; return;}
+        const agg=aggregate(state.records); const rows=[];
+        const plannedPO=state.plan.filter(p=>String(p.po_number).trim()===term).reduce((s,p)=>s+toNum(p.target_qty),0);
+        let appliedPO=0; for(const [k,v] of agg.byPO.entries()){ if(k===term) appliedPO+=v; }
+        if(plannedPO||appliedPO) rows.push({scope:'PO',planned:plannedPO,applied:appliedPO,pct:plannedPO>0?Math.round((appliedPO/plannedPO)*100):0});
+        const plannedSKU=state.plan.filter(p=>String(p.sku_code).trim()===term).reduce((s,p)=>s+toNum(p.target_qty),0);
+        let appliedSKU=0; for(const [k,v] of agg.bySKU.entries()){ if(k===term) appliedSKU+=v; }
+        if(plannedSKU||appliedSKU) rows.push({scope:'SKU',planned:plannedSKU,applied:appliedSKU,pct:plannedSKU>0?Math.round((appliedSKU/plannedSKU)*100):0});
+        wrap.classList.remove('hidden');
+        // Rich cards + PO details table
+        const cards = [];
+        const poPlanRows = state.plan.filter(p=>String(p.po_number).trim()===term);
+        const skuPlanRows = state.plan.filter(p=>String(p.sku_code).trim()===term);
+
+        function safe(v){ return (v===undefined||v===null||v==='') ? '—' : String(v); }
+        function sumQty(list){ return list.reduce((s,p)=>s+toNum(p.target_qty),0); }
+
+        if (poPlanRows.length){
+          const sample = poPlanRows[0] || {};
+          const z = safe(sample.zendesk_ticket || sample.zendesk || sample.ticket);
+          const plannedU = sumQty(poPlanRows);
+          const pctPO = plannedU>0 ? Math.round(appliedPO*100/plannedU) : 0;
+
+          cards.push(`
+            <div class="bg-gray-50 rounded-xl p-3 border">
+              <div class="flex items-center justify-between">
+                <div class="text-xs text-gray-500">PO</div>
+                <div class="text-xs font-semibold">${safe(term)}</div>
+              </div>
+              <div class="mt-2 text-sm leading-6">
+                <div><span class="text-gray-500">Supplier:</span> <span class="font-medium">${safe(sample.supplier)}</span></div>
+                <div><span class="text-gray-500">Facility:</span> <span class="font-medium">${safe(sample.facility)}</span></div>
+                <div><span class="text-gray-500">Freight:</span> <span class="font-medium">${safe(sample.freight_type)}</span></div>
+                <div><span class="text-gray-500">Zendesk:</span> <span class="font-medium">${z}</span></div>
+              </div>
+              <div class="mt-2 text-sm">
+                <div><span class="text-gray-500">Planned units:</span> <span class="font-semibold tabular-nums">${fmtInt(plannedU)}</span></div>
+                <div><span class="text-gray-500">Applied units:</span> <span class="font-semibold tabular-nums">${fmtInt(appliedPO)}</span></div>
+                <div><span class="text-gray-500">Completion:</span> <span class="font-semibold tabular-nums">${pctPO}%</span></div>
+              </div>
+            </div>
+          `);
+
+          // PO details table
+          const tbody = $('#ops-po-detail-body');
+          const title = $('#ops-po-detail-title');
+          if (tbody){
+            title.textContent = String(term);
+            const skuCount = new Set(poPlanRows.map(r=>String(r.sku_code).trim()).filter(Boolean)).size;
+            const fields = [
+              ['PO #', term],
+              ['Supplier', safe(sample.supplier)],
+              ['Facility', safe(sample.facility)],
+              ['Freight type', safe(sample.freight_type)],
+              ['Zendesk ticket', z],
+              ['Planned units', fmtInt(plannedU)],
+              ['Applied units', fmtInt(appliedPO)],
+              ['Completion', pctPO+'%'],
+              ['SKUs (count)', String(skuCount)],
+            ];
+            tbody.innerHTML = fields.map(([k,v])=>`<tr><td class="py-1 pr-2 text-gray-500">${k}</td><td class="py-1 font-medium">${v}</td></tr>`).join('');
+          }
+        } else {
+          // Clear PO details if not a PO match
+          const tbody = $('#ops-po-detail-body');
+          const title = $('#ops-po-detail-title');
+          if (tbody){
+            title.textContent='—';
+            tbody.innerHTML = '<tr><td colspan="2" class="text-center text-xs text-gray-400 py-3">Search a PO to load details.</td></tr>';
+          }
+        }
+
+        if (skuPlanRows.length){
+          const planned = sumQty(skuPlanRows);
+          const pctSKU = planned>0 ? Math.round(appliedSKU*100/planned) : 0;
+          cards.push(`
+            <div class="bg-gray-50 rounded-xl p-3 border">
+              <div class="flex items-center justify-between">
+                <div class="text-xs text-gray-500">SKU</div>
+                <div class="text-xs font-semibold">${safe(term)}</div>
+              </div>
+              <div class="mt-2 text-sm leading-6">
+                <div><span class="text-gray-500">Planned units:</span> <span class="font-semibold tabular-nums">${fmtInt(planned)}</span></div>
+                <div><span class="text-gray-500">Applied units:</span> <span class="font-semibold tabular-nums">${fmtInt(appliedSKU)}</span></div>
+                <div><span class="text-gray-500">Completion:</span> <span class="font-semibold tabular-nums">${pctSKU}%</span></div>
+                <div><span class="text-gray-500">POs (count):</span> <span class="font-semibold tabular-nums">${new Set(skuPlanRows.map(r=>String(r.po_number).trim()).filter(Boolean)).size}</span></div>
+              </div>
+            </div>
+          `);
+        }
+
+        // fallback to simple rows if no plan context
+        if (!cards.length && rows.length){
+          cards.push(...rows.map(r=>`<div class="bg-gray-50 rounded-xl p-3 border"><div class="text-xs text-gray-500">${r.scope}</div><div class="text-sm mt-1">Planned: ${fmtInt(r.planned)} · Applied: ${fmtInt(r.applied)} · ${r.pct}%</div></div>`));
+        }
+
+        wrap.innerHTML = cards.length ? cards.join('') : '<div class="text-xs text-gray-500">No matches in this week.</div>';
+      },300);
+    });
+  })();
+
+
+// ---------- Routing & Init ----------
+(function init(){
+  const ws = mondayOfInTZ(todayInTZ());
+  $('#week-start').value = ws;
+  // Defer setWeek until Clerk session is confirmed — calling it here fires API requests
+  // before the auth token exists, causing 401s that were triggering auto sign-out.
+  window._pendingWeekStart = ws;
+
+function syncNav() {
+  const hash = (location.hash || '#week-hub');
+  // Also sync the new Pinpoint nav
+  if(typeof syncPinpointNav === 'function'){
+    if(hash==='#exec') syncPinpointNav('#exec');
+    else if(hash==='#reports') syncPinpointNav('#reports');
+    else syncPinpointNav('#week-hub');
+  }
+  // Legacy nav elements (kept for module compatibility)
+  const dash   = document.getElementById('nav-dash');
+  const intake = document.getElementById('nav-intake');
+  const exec   = document.getElementById('nav-exec');
+  const recv   = document.getElementById('nav-receiving');
+  const flow   = document.getElementById('nav-flow');
+  [dash,intake,exec,recv,flow].filter(Boolean).forEach(el=>{
+    el.classList.remove('active'); el.removeAttribute('aria-current');
+  });
+  if(hash==='#exec' && exec){ exec.classList.add('active'); exec.setAttribute('aria-current','page'); }
+  else if(dash){ dash.classList.add('active'); dash.setAttribute('aria-current','page'); }
+}
+
+  
+function getRouteHash(){
+  // Support: #intake, #/intake, /intake (direct path), and default (/ or #)
+  let h = (location.hash || '').trim();
+  if (h === '#') h = '';
+  // Normalize hash formats like "#/intake" -> "#intake"
+  if (h.startsWith('#/')) h = '#' + h.slice(2);
+  if (h && h !== '#') return h;
+
+  const p = (location.pathname || '').toLowerCase();
+  if (p.endsWith('/intake')) return '#intake';
+  if (p.endsWith('/receiving')) return '#receiving';
+  if (p.endsWith('/operations')) return '#ops';
+  if (p.endsWith('/flow')) return '#flow';
+  // Default route (ops dashboard)
+  return '#ops';
+}
+
+function show(hash){
+  // Normalize hash formats like "#/intake" -> "#intake"
+  let h = (hash || '').trim();
+  if (h === '#') h = '';
+  if (h.startsWith('#/')) h = '#' + h.slice(2);
+  if (!h) h = '#operations';
+
+  // If navigating to receiving, let its own module handle everything
+  if(h === '#receiving') {
+    if(typeof window.showReceivingPage === 'function') {
+      window.showReceivingPage();
+      syncPinpointNav('#receiving');
+    } else {
+      // Module not ready yet — set hash and it will self-init
+      location.hash = '#receiving';
+    }
+    return;
+  }
+
+  // For all other pages: hide everything including receiving
+  ['page-dashboard','page-intake','page-exec','page-receiving','page-flow'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.add('hidden');
+    el.style.display = 'none';
+  });
+  if(typeof window.hideReceivingPage === 'function') window.hideReceivingPage();
+
+  // Show target page + render hooks
+if (h === '#intake') {
+  // Let intake module handle via hashchange
+  location.hash = '#intake';
+  // New: Intake module entrypoint
+  if (window.IntakePage && typeof window.IntakePage.show === 'function') {
+    try { window.IntakePage.show(); } catch (e) { console.warn('IntakePage.show failed', e); }
+  } else if (typeof window.renderIntake === 'function') {
+    // Backward compatibility (optional)
+    try { window.renderIntake(); } catch (e) { console.warn('renderIntake failed', e); }
+  }
+  } else if (h === '#flow') {
+    // #page-flow now lives inside #page-dashboard (Week Hub)
+    const el = document.getElementById('page-dashboard');
+    el && el.classList.remove('hidden');
+    el && (el.style.display = 'block');
+  } else if (h === '#exec') {
+    const el = document.getElementById('page-exec');
+    el && el.classList.remove('hidden');
+  } else {
+    // default ops
+    const el = document.getElementById('page-dashboard');
+    el && el.classList.remove('hidden');
+    if (typeof window.renderDashboard === 'function') {
+      try { window.renderDashboard(); } catch(e) { console.warn('renderDashboard failed', e); }
+    }
+  }
+
+  // Hard fallback: if Tailwind hidden class isn't behaving for some reason, enforce display.
+  // Hard fallback — page-flow excluded: it now lives inside page-dashboard
+  ['page-dashboard','page-intake','page-exec','page-receiving'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const isHidden = el.classList.contains('hidden');
+    el.style.display = isHidden ? 'none' : (id === 'page-receiving' ? 'block' : 'block');
+  });
+
+  // Nav highlight helper (different baselines use different function names).
+  try {
+    if (typeof syncNavActive === 'function') syncNavActive(h);
+    else if (typeof syncNav === 'function') syncNav();
+  } catch (e) {
+    // Never break routing due to nav highlighting.
+  }
+  // New: ensure Intake cleans up when leaving the route
+if (h !== '#intake' && window.IntakePage && typeof window.IntakePage.hide === 'function') {
+  try { window.IntakePage.hide(); } catch (e) { /* never break routing */ }
+}
+}
+  
+/* ================= Ops right panel wiring (downloads + insights) ================= */
+function wireOpsDownloads(){
+  // mirror old buttons into the new right-panel tile
+  const map = [
+    ['ops-dl-posku','btn-dl-posku'],
+    ['ops-dl-po','btn-dl-po'],
+    ['ops-dl-ship-summary','btn-ship-summary'],
+    ['ops-dl-ship-detail','btn-ship-detail'],
+    ['ops-dl-week-applied','btn-dl-week-applied'],
+  ];
+  for(const [newId, oldId] of map){
+    const a=document.getElementById(newId), b=document.getElementById(oldId);
+    if(a && b){
+      a.onclick = () => b.click();
+    }
+  }
+  const mb=document.getElementById('ops-dl-mobile-bin');
+  if(mb) mb.onclick = downloadMobileBins;
+}
+
+async function downloadMobileBins(){
+  try{
+    // Fetch bins if not loaded (e.g. called from Reports page directly)
+    let bins = Array.isArray(state.bins) ? state.bins : [];
+    const ws = window._reportsWeek || state.weekStart || '';
+    if(!bins.length && ws){
+      try{
+        const r = await api(`/bins/weeks/${encodeURIComponent(ws)}`);
+        bins = Array.isArray(r) ? r : (r.bins || []);
+        state.bins = bins;
+      }catch(e){ console.warn('bins fetch failed', e); }
+    }
+    const plan = Array.isArray(state.plan) ? state.plan : [];
+    // Plan-based supplier lookup as fallback (bins API now returns po_number + supplier_name directly)
+    const poToSupplier = new Map(plan.map(p => [String(p.po_number||p.po||'').trim(), String(p.supplier_name||p.supplier||p.vendor||p.vendor_name||p.factory||'').trim()]));
+    const rows = [];
+    for(const b of bins){
+      const po = String(b.po_number || b.po || b.poNumber || '').trim();
+      // Prefer supplier_name returned by the enriched API; fall back to plan lookup
+      const supplier = String(b.supplier_name || b.supplier || poToSupplier.get(po) || '').trim();
+      const mobileBin = String(b.mobile_bin || b.mobileBin || '').trim();
+      const weight = Number(b.weight_kg ?? b.weight ?? 0) || 0;
+      const units  = Number(b.total_units ?? b.units ?? 0) || 0;
+      if(!mobileBin) continue;
+      rows.push({Supplier:supplier, PO:po, Mobile_Bin_Number:mobileBin, Weight_kg:weight, Units:units});
+    }
+    rows.sort((a,b)=> (a.Supplier||'').localeCompare(b.Supplier||'') || (a.PO||'').localeCompare(b.PO||'') || (a.Mobile_Bin_Number||'').localeCompare(b.Mobile_Bin_Number||''));
+    const headers = ['Supplier','PO','Mobile_Bin_Number','Weight_kg','Units'];
+    const csv = toCSV(headers, rows);
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `mobile_bins_${state.weekStart||'week'}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 250);
+  }catch(err){
+    console.error('mobile bin export failed', err);
+    alert('Mobile bin download failed: ' + (err.message || err));
+  }
+}
+
+function renderOpsInsights(view){
+  const sub = document.getElementById('ops-insights-subtitle');
+  const root = document.getElementById('ops-insights-content');
+  if(!root) return;
+
+  // Always replace insight content on view switch (prevents stacking previous view DOM)
+  root.innerHTML = '';
+  // Track the current view for later mirroring
+  window._lastOpsView = view;
+
+  const plan = Array.isArray(state.plan) ? state.plan : [];
+  const recs = Array.isArray(state.records) ? state.records : []; // /records/summary (applied units etc)
+  const receiving = Array.isArray(state.receiving) ? state.receiving : []; // /receiving (cartons_in/out + received timestamps)
+  const bins = Array.isArray(state.bins) ? state.bins : []; // /records (mobile bins for cartons-out + mobile-bin download)
+
+  const toNum = (v)=>{ const n = Number(v); return Number.isFinite(n) ? n : 0; };
+  const norm = (s)=>String(s||'').trim();
+  const esc = (s)=>String(s??'').replace(/[&<>"']/g, ch=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[ch]));
+  const insightsBody = root; // legacy alias
+  const escapeHtml = esc; // legacy alias
+  const fmt = (v)=>{ const n = Number(v); return Number.isFinite(n) ? n.toLocaleString() : String(v||''); };
+  const plannedCartonsFromPlan = (p)=>{
+    // try common keys; fallback 0 (cannot compute approx received units)
+    return toNum(p.cartons_in || p.cartons || p.carton_qty || p.planned_cartons || p.planned_cartons_in || p.cartons_planned);
+  };
+
+  // Applied units per PO (from /records/summary by_po)
+  const poToApplied = new Map(recs.map(r => [norm(r.po||r.po_number||r.poNumber), toNum(r.units||r.total_units||0)]));
+
+  // Cartons-in per PO from bins: distinct mobile_bin per PO
+  // Cartons-in by PO comes from /receiving (same source as Flow/Receiving pages).
+  // We use this to estimate "Approx received units" at PO level.
+  const poToCartonsIn = new Map();
+  const poReceivedAt = new Map();
+  for (const r of receiving) {
+    const po = String(r.po_number ?? r.po ?? '').trim();
+    if (!po) continue;
+
+    const receivedAt = r.received_at ?? r.receivedAt ?? r.received_timestamp ?? r.receivedTimestamp ?? null;
+    if (receivedAt) poReceivedAt.set(po, receivedAt);
+
+    const ciRaw =
+      r.cartons_in ??
+      r.cartonsIn ??
+      r.cartons_received ??
+      r.cartonsReceived ??
+      r.cartons_in_qty ??
+      r.cartonsInQty ??
+      r.cartons_in_count ??
+      r.cartonsInCount ??
+      0;
+
+    const ci = Number(ciRaw);
+    if (Number.isFinite(ci) && ci > 0) {
+      poToCartonsIn.set(po, (poToCartonsIn.get(po) || 0) + ci);
+    }
+  }
+
+  // Build per-PO planned + meta (so we don’t double count applied in grouped views)
+  const poPlan = new Map(); // po -> {plannedUnits, plannedCartons, supplier, facility, freight, zendesk}
+  const pickMeta = (curVal, cand)=>{
+    const c = norm(cand||'');
+    if(!c) return curVal;
+    if(!curVal || curVal==='Unspecified') return c;
+    return curVal;
+  };
+  for(const p of plan){
+    const po = norm(p.po_number||p.po);
+    if(!po) continue;
+    const cur = poPlan.get(po) || {
+      plannedUnits:0, plannedCartons:0,
+      supplier:'', facility:'', freight:'', zendesk:''
+    };
+    // meta (first non-empty wins; 'Unspecified' is treated as empty)
+    cur.supplier = pickMeta(cur.supplier, p.supplier_name||p.supplier||p.vendor||p.vendor_name||p.factory);
+    cur.facility = pickMeta(cur.facility, p.facility_name||p.facility||p.vas_facility||p.warehouse||p.warehouse_name||p.site||p.site_name||p.location||p.facility_code||p.facility_id);
+    cur.freight  = pickMeta(cur.freight,  p.freight_type||p.freight||p.ship_mode||p.mode);
+    cur.zendesk  = pickMeta(cur.zendesk,  p.zendesk_ticket||p.zendesk||p.ticket||p.zd_ticket);
+
+    cur.plannedUnits += toNum(p.target_qty||p.planned_units||0);
+    cur.plannedCartons += plannedCartonsFromPlan(p);
+
+    // final fallbacks
+    cur.supplier = cur.supplier || 'Unspecified';
+    cur.facility = cur.facility || 'Unspecified';
+    cur.freight  = cur.freight  || 'Unspecified';
+    cur.zendesk  = cur.zendesk  || 'Unspecified';
+
+    poPlan.set(po, cur);
+  }
+
+  // Derive per-PO received units (approx) from cartons-in, per your definition:
+  // approxReceivedUnits = plannedUnits * (receivedCartonsIn / plannedCartonsIn) capped to 1
+  const poDerived = new Map(); // po -> {planned, received, applied, ...meta}
+  for(const [po, p] of poPlan.entries()){
+    const planned = p.plannedUnits;
+    const plannedCartons = p.plannedCartons;
+    const cartonsIn = poToCartonsIn.get(po) || 0;
+    let received = 0;
+    if(planned>0){
+      if(poReceivedAt.has(po)) { received = planned; }
+      else if(plannedCartons>0 && cartonsIn>0){ received = planned * Math.min(1, cartonsIn/plannedCartons); }
+      else if(cartonsIn>0){ received = planned; }
+    }
+    received = Math.round(received);
+    const applied = poToApplied.get(po) || 0;
+    poDerived.set(po, {planned, received, applied, cartonsIn, plannedCartons, ...p});
+  }
+
+  // Special carton view (kept)
+  if(view==='carton'){
+    const ci = Number(state.weekCartonsIn||0)||0;   // cartons (bins) IN
+    const co = Number(state.weekCartonsOut||0)||0;  // cartons (bins) OUT
+    const maxTotal = Math.max(ci, co, 1);
+
+    // Waffle scaling
+    const rows = 10;
+    const cols = 12;
+    const squares = rows * cols; // 120 squares
+    const base = 10; // prefer 1 square = 10 cartons
+    const perSquare = Math.max(base, Math.ceil((maxTotal / squares) / base) * base);
+
+    const calcFill = (v)=>{
+      if(v<=0) return 0;
+      const f = Math.ceil(v / perSquare);
+      return Math.min(squares, Math.max(1, f));
+    };
+
+    const fillIn = calcFill(ci);
+    const fillOut = calcFill(co);
+
+    const squareGrid = (filled, color) =>
+      `<div class="grid gap-[4px]" style="grid-template-columns: repeat(${cols}, 16px);">
+        ${Array.from({length:squares}).map((_,i)=>
+          `<div class="w-[16px] h-[16px] rounded-[4px]" style="background:${i<filled?color:'#f3f4f6'};"></div>`
+        ).join('')}
+      </div>`;
+
+    const delta = ci - co;
+    const deltaLabel = delta===0 ? 'Δ 0' : (delta>0 ? `Δ +${fmtInt(delta)} (Net In)` : `Δ ${fmtInt(delta)} (Net Out)`);
+
+    const inShown = Math.min(ci, fillIn * perSquare);
+    const outShown = Math.min(co, fillOut * perSquare);
+
+    root.innerHTML = `
+      <div class="bg-gray-50 rounded-xl border p-4">
+        <div class="flex items-center justify-between">
+          <div class="text-sm font-semibold">Cartons in vs cartons out</div>
+          <div class="text-xs text-gray-600">${deltaLabel}</div>
+        </div>
+        <div class="flex items-center justify-between mt-1">
+          <div class="text-xs text-gray-500">1 square = ${fmtInt(perSquare)} cartons</div>
+          <div class="text-xs text-gray-500 tabular-nums">Grid: ${rows}×${cols} (${squares} squares)</div>
+        </div>
+
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="bg-white rounded-xl border p-4">
+            <div class="flex items-center justify-between mb-2">
+              <div class="text-xs font-semibold text-gray-700">IN</div>
+              <div class="text-sm font-semibold tabular-nums">${fmtInt(ci)}</div>
+            </div>
+            ${squareGrid(fillIn, 'var(--ops-green)')}
+            <div class="mt-2 text-[11px] text-gray-500">
+              Filled: <span class="tabular-nums">${fillIn}</span>/<span class="tabular-nums">${squares}</span> • Showing ~<span class="tabular-nums">${fmtInt(inShown)}</span> cartons
+            </div>
+          </div>
+
+          <div class="bg-white rounded-xl border p-4">
+            <div class="flex items-center justify-between mb-2">
+              <div class="text-xs font-semibold text-gray-700">OUT</div>
+              <div class="text-sm font-semibold tabular-nums">${fmtInt(co)}</div>
+            </div>
+            ${squareGrid(fillOut, 'var(--ops-yellow)')}
+            <div class="mt-2 text-[11px] text-gray-500">
+              Filled: <span class="tabular-nums">${fillOut}</span>/<span class="tabular-nums">${squares}</span> • Showing ~<span class="tabular-nums">${fmtInt(outShown)}</span> cartons
+            </div>
+          </div>
+        </div>
+
+        <div class="text-xs text-gray-500 mt-3">
+          “Cartons out” is the mobile-bin count (summary). Colors: IN = #D1E231, OUT = #F0D731.
+        </div>
+      </div>
+    `;
+    if(sub) sub.textContent = 'Carton view';
+    return;
+  }
+  // Overview (default): meaningful week insights (NOT duplicating Week totals)
+  if(view==='overview'){
+    if(sub) sub.textContent = 'Week overview';
+
+    const totalPlanned = Array.from(poDerived.values()).reduce((a,x)=>a+(x.planned||0),0);
+    const totalReceived = Array.from(poDerived.values()).reduce((a,x)=>a+(x.received||0),0);
+    const totalApplied = Array.from(poDerived.values()).reduce((a,x)=>a+(x.applied||0),0);
+    const remaining = Math.max(0, totalPlanned - totalApplied);
+    const pct = totalPlanned>0 ? Math.round(100*totalApplied/totalPlanned) : 0;
+
+    const wsStr = (typeof state !== 'undefined' && state.weekStart) ? state.weekStart : '';
+    const todayStr = (typeof todayISO==='function') ? todayISO() : new Date().toISOString().slice(0,10);
+    const weekIsFutureFlag = wsStr > todayStr;
+    const bandOf = (p, applied=null)=>{
+      if(!(totalPlanned>0)) return 'No plan';
+      if(p>=90) return 'On track';
+      if(p>=75) return 'At risk';
+      if(weekIsFutureFlag && (applied===null || applied===0)) return 'Upcoming';
+      return 'Delayed';
+    };
+    const bandColor = (b)=>{
+      if(b==='On track') return 'var(--ops-green)';
+      if(b==='At risk') return 'var(--ops-yellow)';
+      if(b==='Delayed') return '#ef4444';
+      if(b==='Upcoming') return '#6b7280';
+      return '#6b7280';
+    };
+    const overallBand = bandOf(pct);
+
+    const mkAgg = (keyFn)=>{
+      const m = new Map();
+      for(const x of poDerived.values()){
+        const k = norm(keyFn(x)) || '—';
+        if(k==='—') continue;
+        const v = m.get(k) || {planned:0, received:0, applied:0, remaining:0, airPlanned:0, seaPlanned:0, otherPlanned:0};
+        v.planned += x.planned||0;
+        v.received += x.received||0;
+        v.applied += x.applied||0;
+        m.set(k, v);
+      }
+      for(const [k,v] of m){
+        v.remaining = Math.max(0, v.planned - v.applied);
+        v.pct = v.planned>0 ? Math.round(100*v.applied/v.planned) : 0;
+        v.band = v.planned>0 ? (v.pct>=90?'On track':(v.pct>=75?'At risk':(weekIsFutureFlag&&v.applied===0?'Upcoming':'Delayed'))) : 'No plan';
+      }
+      return m;
+    };
+
+    const bySupplier = mkAgg(x=>x.supplier);
+    const byFacility = mkAgg(x=>x.facility);
+    const byZendesk = mkAgg(x=>x.zendesk);
+
+    // Freight mix (planned units)
+    const freightMix = {Air:0, Sea:0, Other:0};
+    for(const x of poDerived.values()){
+      const f = norm(x.freight) || 'Other';
+      const planned = x.planned||0;
+      if(/air/i.test(f)) freightMix.Air += planned;
+      else if(/sea|ocean/i.test(f)) freightMix.Sea += planned;
+      else freightMix.Other += planned;
+    }
+    const mixTotal = freightMix.Air + freightMix.Sea + freightMix.Other || 1;
+    const airPct = Math.round(100*freightMix.Air/mixTotal);
+    const seaPct = Math.round(100*freightMix.Sea/mixTotal);
+
+    const topN = (m, n=3)=>Array.from(m.entries())
+      .map(([k,v])=>({k,v}))
+      .sort((a,b)=> (b.v.remaining - a.v.remaining) || (b.v.planned - a.v.planned))
+      .slice(0,n);
+
+    const topSup = topN(bySupplier, 3);
+    const topFac = topN(byFacility, 3);
+
+    const bandCounts = { 'On track':0, 'At risk':0, 'Delayed':0, 'No plan':0 };
+    for(const agg of byZendesk.values()){
+      const b = agg && agg.band ? agg.band : 'No plan';
+      bandCounts[b] = (bandCounts[b]||0) + 1;
+    }
+
+    const topTickets = Array.from(byZendesk.entries())
+      .map(([k,v])=>({k,v}))
+      .filter(x=>x.k && x.k!=='—')
+      .sort((a,b)=> (b.v.remaining - a.v.remaining))
+      .slice(0,8);
+
+    const barRow = (label, value, denom, color)=> {
+      const p = denom>0 ? Math.max(0, Math.min(100, 100*value/denom)) : 0;
+      return `
+        <div class="flex items-center gap-3">
+          <div class="w-28 text-[11px] text-gray-600 truncate">${esc(label)}</div>
+          <div class="flex-1 h-2 rounded-full bg-gray-100 overflow-hidden">
+            <div class="h-full rounded-full" style="width:${p}%;background:${color};"></div>
+          </div>
+          <div class="w-16 text-right text-[11px] tabular-nums text-gray-700">${fmt(value)}</div>
+        </div>
+      `;
+    };
+
+    root.innerHTML = `
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div class="rounded-xl border bg-white p-4">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="text-sm font-semibold">Week health</div>
+              <div class="text-xs text-gray-500">Fast signals (derived from plan + progress)</div>
+            </div>
+            <div class="px-2 py-1 rounded-full border text-[11px] font-semibold" style="border-color:${bandColor(overallBand)};color:${bandColor(overallBand)};">
+              ${overallBand}
+            </div>
+          </div>
+
+          <div class="mt-3 flex items-end justify-between">
+            <div class="text-3xl font-semibold tabular-nums">${pct}%</div>
+            <div class="text-right">
+              <div class="text-xs text-gray-500">Remaining units</div>
+              <div class="text-sm font-semibold tabular-nums">${fmt(remaining)}</div>
+            </div>
+          </div>
+
+          <div class="mt-3 space-y-2">
+            ${barRow('Applied', totalApplied, totalPlanned, 'var(--ops-green)')}
+            ${barRow('Received (approx)', totalReceived, totalPlanned, 'var(--ops-yellow)')}
+          </div>
+
+          <div class="mt-3 text-[11px] text-gray-500">
+            Use <b>Supplier/Facility</b> for details; this view focuses on the “what to look at first”.
+          </div>
+        </div>
+
+        <div class="rounded-xl border bg-white p-4">
+          <div class="text-sm font-semibold">Where the work is sitting</div>
+          <div class="text-xs text-gray-500">Top remaining (units)</div>
+
+          <div class="mt-3">
+            <div class="text-[11px] font-semibold text-gray-700 mb-2">Top suppliers</div>
+            <div class="space-y-2">
+              ${topSup.map(({k,v})=>barRow(k, v.remaining, Math.max(remaining,1), '#111827')).join('')}
+            </div>
+          </div>
+
+          <div class="mt-4">
+            <div class="text-[11px] font-semibold text-gray-700 mb-2">Top facilities</div>
+            <div class="space-y-2">
+              ${topFac.map(({k,v})=>barRow(k, v.remaining, Math.max(remaining,1), '#111827')).join('')}
+            </div>
+          </div>
+        </div>
+
+        <div class="rounded-xl border bg-white p-4">
+          <div class="flex items-start justify-between">
+            <div>
+              <div class="text-sm font-semibold">Zendesk signals</div>
+              <div class="text-xs text-gray-500">Tickets sized by planned units; remaining drives priority</div>
+            </div>
+            <div class="flex items-center gap-2 text-[11px]">
+              <span class="inline-flex items-center gap-1"><span class="w-2 h-2 rounded-full" style="background:var(--ops-green)"></span>On track</span>
+              <span class="inline-flex items-center gap-1"><span class="w-2 h-2 rounded-full" style="background:var(--ops-yellow)"></span>At risk</span>
+              <span class="inline-flex items-center gap-1"><span class="w-2 h-2 rounded-full" style="background:#ef4444"></span>Delayed</span>
+            </div>
+          </div>
+
+          <div class="mt-3 grid grid-cols-3 gap-2">
+            <div class="rounded-lg border p-2">
+              <div class="text-[11px] text-gray-500">On track</div>
+              <div class="text-sm font-semibold tabular-nums">${bandCounts['On track']||0}</div>
+            </div>
+            <div class="rounded-lg border p-2">
+              <div class="text-[11px] text-gray-500">At risk</div>
+              <div class="text-sm font-semibold tabular-nums">${bandCounts['At risk']||0}</div>
+            </div>
+            <div class="rounded-lg border p-2">
+              <div class="text-[11px] text-gray-500">Delayed</div>
+              <div class="text-sm font-semibold tabular-nums">${bandCounts['Delayed']||0}</div>
+            </div>
+          </div>
+
+          <div class="mt-3">
+            <div class="text-[11px] font-semibold text-gray-700 mb-2">Top tickets by remaining</div>
+            <div class="flex flex-wrap gap-2">
+              ${topTickets.map(({k,v})=>{
+                const c = bandColor(v.band);
+                return `<span class="px-2 py-1 rounded-full border bg-white text-[11px] font-semibold tabular-nums" style="border-color:${c};color:${c};">
+                  ${esc(k)} • ${fmt(v.remaining)}
+                </span>`;
+              }).join('')}
+            </div>
+          </div>
+        </div>
+
+        <div class="rounded-xl border bg-white p-4">
+          <div class="text-sm font-semibold">Freight mix</div>
+          <div class="text-xs text-gray-500">Planned volume split (helps anticipate handoffs)</div>
+
+          <div class="mt-3 space-y-2">
+            ${barRow('Air', freightMix.Air, mixTotal, 'var(--ops-green)')}
+            ${barRow('Sea', freightMix.Sea, mixTotal, 'var(--ops-yellow)')}
+            ${barRow('Other', freightMix.Other, mixTotal, '#9ca3af')}
+          </div>
+
+          <div class="mt-3 text-[11px] text-gray-600">
+            Air <b>${airPct}%</b> • Sea <b>${seaPct}%</b>
+          </div>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+
+
+
+  const groupKey = (x)=>{
+    if(view==='supplier') return x.supplier;
+    if(view==='facility') return x.facility;
+    if(view==='zendesk') return x.zendesk;
+    if(view==='freight') return x.freight;
+    return '—';
+  };
+
+  // Aggregate by selected dimension (planned/received/applied) + freight split for supplier
+  const agg = new Map(); // key -> {planned, received, applied, air:{...}, sea:{...}}
+  for(const x of poDerived.values()){
+    const key = groupKey(x) || 'Unspecified';
+    const cur = agg.get(key) || {planned:0, received:0, applied:0, freight:{}};
+    cur.planned += x.planned;
+    cur.received += x.received;
+    cur.applied += x.applied;
+    if(view==='supplier'){
+      const f = (x.freight||'Unspecified').toLowerCase();
+      const bucket = f.includes('air') ? 'Air' : (f.includes('sea') ? 'Sea' : 'Other');
+      cur.freight[bucket] = cur.freight[bucket] || {planned:0, received:0, applied:0};
+      cur.freight[bucket].planned += x.planned;
+      cur.freight[bucket].received += x.received;
+      cur.freight[bucket].applied += x.applied;
+    }
+    agg.set(key, cur);
+  }
+
+  const items=[...agg.entries()].map(([k,v])=>{
+    const pct = v.planned>0 ? (100*v.applied/v.planned) : 0;
+    const rem = Math.max(0, v.planned - v.applied);
+    return {k, ...v, pct, rem};
+  }).sort((a,b)=> b.rem - a.rem).slice(0, 12);
+
+  const bar = (label, val, planned, color)=>{
+    const pct = planned>0 ? Math.max(0, Math.min(100, 100*val/planned)) : 0;
+    return `
+      <div class="flex items-center gap-3">
+        <div class="w-20 shrink-0 text-xs text-gray-500">${label}</div>
+        <div class="flex-1 bg-gray-100 rounded-full h-2 overflow-hidden">
+          <div class="h-2 rounded-full" style="width:${pct}%; background:${color};"></div>
+        </div>
+        <div class="w-24 text-right text-xs tabular-nums">${fmtInt(Math.round(val))}</div>
+      </div>
+    `;
+  };
+
+  if(sub){
+    const label = view==='supplier'?'Supplier view':view==='facility'?'Facility view':view==='zendesk'?'Zendesk view':view==='freight'?'Freight view':'—';
+    sub.textContent = label;
+  }
+
+  if(items.length===0){
+    root.innerHTML = `<div class="text-sm text-gray-600">No data for this week.</div>`;
+    return;
+  }
+
+  // Normalized PO-level rows used by multiple insight views
+  // NOTE: Facility view relies on `rows`.
+  const rows = Array.from(poDerived.values());
+
+  
+  // ----- Render -----
+  if(view==='supplier'){
+    // Build PO state counts per supplier
+    const poCounts = new Map(); // supplier -> {total, complete, partial, notSent}
+    for(const [po,x] of poDerived.entries()){
+      const key = x.supplier || 'Unspecified';
+      const cur = poCounts.get(key) || {total:0, complete:0, partial:0, notSent:0};
+      cur.total += 1;
+      const planned = x.planned||0, received = x.received||0, applied = x.applied||0;
+      if(received<=0) cur.notSent += 1;
+      else if(planned>0 && applied>=planned) cur.complete += 1;
+      else cur.partial += 1;
+      poCounts.set(key, cur);
+    }
+
+    const cards = [...agg.entries()].map(([k,v])=>{
+      const planned = v.planned||0, received=v.received||0, applied=v.applied||0;
+      const pct = planned>0 ? (100*applied/planned) : 0;
+      const rem = Math.max(0, planned - applied);
+      const counts = poCounts.get(k) || {total:0, complete:0, partial:0, notSent:0};
+      // Freight split (Air/Sea/Other) completion
+      const freightChips = ['Air','Sea','Other'].map(b=>{
+        const fv=v.freight?.[b];
+        if(!fv || !(fv.planned>0)) return '';
+        const fpct = Math.round(100*(fv.applied||0)/(fv.planned||1));
+        const label = b==='Other' ? 'Other' : b;
+        return `<span class="px-2 py-0.5 rounded-full border bg-white text-[11px]">${label} ${fpct}%</span>`;
+      }).join('');
+
+      // status badge — date-aware: future weeks aren't "Delayed", they're "Upcoming"
+      const _apoToday = (typeof todayISO==='function') ? todayISO() : new Date().toISOString().slice(0,10);
+      const _apoWs    = (typeof state !== 'undefined' && state.weekStart) ? state.weekStart : '';
+      const weekIsInFuture = _apoWs > _apoToday;
+      const badge =
+        planned<=0 ? `<span class="px-2 py-0.5 rounded-full border bg-white text-[11px] text-gray-600">No plan</span>` :
+        (pct>=90 ? `<span class="px-2 py-0.5 rounded-full border bg-white text-[11px]" style="border-color:var(--ops-green);color:var(--ops-green);">On track</span>` :
+         pct>=75 ? `<span class="px-2 py-0.5 rounded-full border bg-white text-[11px]" style="border-color:var(--ops-yellow);color:#b45309;">At risk</span>` :
+         (weekIsInFuture && applied===0) ? `<span class="px-2 py-0.5 rounded-full border bg-white text-[11px] text-gray-500">Upcoming</span>` :
+                  `<span class="px-2 py-0.5 rounded-full border bg-white text-[11px]" style="border-color:#ef4444;color:#b91c1c;">Delayed</span>`);
+
+      const bar2 = (label, val, denom, color)=>{
+        const p = denom>0 ? Math.max(0, Math.min(100, 100*val/denom)) : 0;
+        return `
+          <div class="flex items-center gap-2">
+            <div class="w-16 text-[11px] text-gray-500">${label}</div>
+            <div class="flex-1 bg-gray-100 rounded-full h-2 overflow-hidden">
+              <div class="h-2 rounded-full" style="width:${p}%; background:${color};"></div>
+            </div>
+            <div class="w-20 text-right text-[11px] tabular-nums text-gray-700">${fmtInt(Math.round(val))}</div>
+          </div>
+        `;
+      };
+
+      return {k, planned, received, applied, pct, rem, counts, freightChips, badge, bar2};
+    }).sort((a,b)=> b.rem - a.rem).slice(0, 20);
+
+    root.innerHTML = `
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+        ${cards.map(it=>{
+          const planned = it.planned||0, received=it.received||0, applied=it.applied||0;
+          const pct = planned>0 ? Math.round(100*applied/planned) : 0;
+          const remaining = Math.round(Math.max(0, planned-applied));
+          const recPct = planned>0 ? Math.max(0, Math.min(100, Math.round(100*received/planned))) : 0;
+          const appPct = planned>0 ? Math.max(0, Math.min(100, Math.round(100*applied/planned))) : 0;
+          const fullName = String(it.k||'Unspecified');
+          const shortName = fullName.split(/\s+/).slice(0,2).join(' ') || fullName;
+          return `
+            <div class="rounded-2xl border bg-white p-3 shadow-sm">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="flex items-center gap-2">
+                    <div class="text-sm font-semibold truncate" title="${esc(fullName)}">${esc(shortName)}</div>
+                    ${it.badge}
+                  </div>
+                  <div class="text-[11px] text-gray-500 mt-0.5">
+                    Completion <span class="font-medium">${pct}%</span> • Remaining <span class="font-medium">${fmtInt(remaining)}</span>
+                  </div>
+                </div>
+                <div class="text-right">
+                  <div class="text-sm font-semibold tabular-nums">${fmtInt(Math.round(applied))}</div>
+                  <div class="text-[11px] text-gray-500 tabular-nums">/ ${fmtInt(Math.round(planned))}</div>
+                </div>
+              </div>
+
+              <!-- Single progress bar: received (light) + applied (solid) over planned baseline -->
+              <div class="mt-3">
+                <div class="relative h-2.5 rounded-full overflow-hidden" style="background:rgba(55,65,81,0.25);">
+                  <div class="absolute left-0 top-0 h-2.5 rounded-full" style="width:${recPct}%; background:${OPS_RECEIVED_FG};"></div>
+                  <div class="absolute left-0 top-0 h-2.5 rounded-full" style="width:${appPct}%; background:${APPLIED_COLOR};opacity:.75;"></div>
+                </div>
+                <div class="mt-2 flex items-center justify-between text-[11px] text-gray-500 tabular-nums">
+                  <div class="flex gap-3">
+                    <span><span class="inline-block w-2 h-2 rounded-full mr-1" style="background:${PLANNED_COLOR}"></span>Planned ${fmtInt(Math.round(planned))}</span>
+                    <span><span class="inline-block w-2 h-2 rounded-full mr-1" style="background:${OPS_RECEIVED_FG}"></span>Rec ${fmtInt(Math.round(received))}</span>
+                    <span><span class="inline-block w-2 h-2 rounded-full mr-1" style="background:${APPLIED_COLOR};opacity:.75"></span>App ${fmtInt(Math.round(applied))}</span>
+                  </div>
+                  <div class="text-gray-600">${pct}%</div>
+                </div>
+              </div>
+
+              <div class="mt-2 flex items-center justify-between gap-3">
+                <div class="text-[11px] text-gray-500">
+                  POs: <span class="font-medium text-gray-700">${it.counts.total}</span>
+                  &nbsp;•&nbsp; <span class="text-gray-700">✓</span> ${it.counts.complete}
+                  &nbsp;<span class="text-gray-700">⚠</span> ${it.counts.partial}
+                  &nbsp;<span class="text-gray-700">⛔</span> ${it.counts.notSent}
+                </div>
+                <div class="flex gap-2 items-center">
+                  ${it.freightChips || ''}
+                </div>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+      <div class="text-[11px] text-gray-500 mt-3">Received units are approximated from cartons-in by PO (as in Flow). POs “not sent” = cartons-in = 0. Complete = applied ≥ planned.</div>
+    `;
+    return;
+  }
+
+  // ----- Facility view (visual lanes) -----
+  if(view==='facility'){
+    // Group PO-derived rows by facility and compute totals + highlights
+    const meta = new Map();
+    for (const r of rows){
+      const fKey = (r.facility || 'Unspecified').toString().trim() || 'Unspecified';
+      let m = meta.get(fKey);
+      if(!m){
+        m = {
+          facility:fKey,
+          planned:0, received:0, applied:0,
+          posTotal:0, posNotSent:0,
+          suppliers:new Set(),
+          zendesks:new Set(),
+          bySup:new Map(),
+          byZend:new Map(),
+          airPlanned:0, seaPlanned:0, otherPlanned:0,
+          airApplied:0, seaApplied:0, otherApplied:0
+        };
+        meta.set(fKey, m);
+      }
+
+      const planned = Number(r.planned)||0;
+      const received = Number(r.received)||0;
+      const applied = Number(r.applied)||0;
+
+      m.planned += planned;
+      m.received += received;
+      m.applied += applied;
+      m.posTotal += 1;
+
+      // Freight split (for facility summary chips)
+      const fr = (r.freight || r.freight_type || '').toString().toLowerCase();
+      const bucket = fr.includes('air') ? 'air' : (fr.includes('sea') ? 'sea' : 'other');
+      if(bucket==='air'){ m.airPlanned += planned; m.airApplied += applied; }
+      else if(bucket==='sea'){ m.seaPlanned += planned; m.seaApplied += applied; }
+      else { m.otherPlanned += planned; m.otherApplied += applied; }
+
+
+      const cartonsIn = Number(r.cartonsIn ?? r.cartons_in ?? 0) || 0;
+      if(cartonsIn <= 0) m.posNotSent += 1;
+
+      const sup = (r.supplier || 'Unspecified').toString().trim() || 'Unspecified';
+      if(sup) m.suppliers.add(sup);
+
+      const zd = (r.zendesk || '').toString().trim();
+      if(zd && zd !== 'Unspecified') { m.zendesks.add(zd); }
+
+      const sr = m.bySup.get(sup) || { key:sup, planned:0, received:0, applied:0 };
+      sr.planned += planned; sr.received += received; sr.applied += applied;
+      m.bySup.set(sup, sr);
+
+      if(zd && zd !== 'Unspecified'){
+        const zr = m.byZend.get(zd) || { key:zd, planned:0, received:0, applied:0 };
+        zr.planned += planned; zr.received += received; zr.applied += applied;
+        m.byZend.set(zd, zr);
+      }
+    }
+
+    const facilities = [...meta.values()]
+      .sort((a,b)=> (b.planned-a.planned) || a.facility.localeCompare(b.facility));
+
+    const pill = (pctDone)=>{
+      if(pctDone>=98) return '<span class="inline-flex items-center rounded-full border border-emerald-200 ops-bg-planned-soft px-2 py-0.5 text-[11px] font-medium text-emerald-700">On track</span>';
+      if(pctDone>=85) return '<span class="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">At risk</span>';
+      return '<span class="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-700">Delayed</span>';
+    };
+
+    const topChips = (items, icon)=>{
+      return items.map(x=>`<span class="inline-flex items-center rounded-full border border-gray-200 bg-white px-2 py-0.5 text-[11px]">
+        <span class="mr-1">${icon}</span> ${escapeHtml(x.key)} • <b class="ml-1">${fmt(x.rem)}</b>
+      </span>`).join('');
+    };
+
+    root.innerHTML = `
+      <div class="space-y-3">
+        ${facilities.map(f=>{
+          const pctDone = f.planned>0 ? Math.round((f.applied/f.planned)*100) : 0;
+          const rem = Math.max(0, f.planned - f.applied);
+
+          const topSup = [...f.bySup.values()]
+            .map(s=>({ key:firstTwoWords(s.key), rem: Math.max(0,(s.planned||0)-(s.applied||0)), planned:s.planned||0 }))
+            .filter(x=>x.planned>0)
+            .sort((a,b)=> (b.rem-a.rem) || (b.planned-a.planned))
+            .slice(0,4);
+
+          const topZend = [...f.byZend.values()]
+            .map(z=>({ key:z.key, rem: Math.max(0,(z.planned||0)-(z.applied||0)), planned:z.planned||0 }))
+            .filter(x=>x.planned>0)
+            .sort((a,b)=> (b.rem-a.rem) || (b.planned-a.planned))
+            .slice(0,4);
+
+          return `
+            <div class="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+              <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="flex items-center gap-2">
+                    <div class="font-semibold text-sm truncate">${escapeHtml(f.facility)}</div>
+                    ${pill(pctDone)}
+                  </div>
+                  <div class="mt-1 text-[12px] text-gray-500">
+                    Completion <b class="text-gray-700">${pctDone}%</b> • Remaining <b class="text-gray-700">${fmt(rem)}</b>
+                    • PO’s not sent <b class="text-gray-700">${fmt(f.posNotSent)}</b>/<b class="text-gray-700">${fmt(f.posTotal)}</b>
+                  </div>
+                </div>
+
+                <div class="flex flex-wrap gap-2 text-[12px] text-gray-600">
+                  <span class="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5"><span class="mr-1">👥</span>Suppliers <b class="ml-1">${fmt(f.suppliers.size || 0)}</b></span>
+                  <span class="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5"><span class="mr-1">🎫</span>Zendesk <b class="ml-1">${fmt(f.zendesks.size || 0)}</b></span>
+                  ${(() => { const p = Number(f.planned)||0; const airPct = p>0 ? Math.round(100*(f.airPlanned||0)/p) : 0; const seaPct = p>0 ? Math.round(100*(f.seaPlanned||0)/p) : 0; const parts=[]; if((f.airPlanned||0)>0) parts.push(`<span class=\"inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5\"><span class=\"mr-1\">✈️</span>Air <b class=\"ml-1\">${airPct}%</b></span>`); if((f.seaPlanned||0)>0) parts.push(`<span class=\"inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5\"><span class=\"mr-1\">🚢</span>Sea <b class=\"ml-1\">${seaPct}%</b></span>`); return parts.join(''); })()}
+                  <span class="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5"><span class="mr-1">📦</span>Planned <b class="ml-1">${fmt(f.planned)}</b></span>
+                  <span class="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5"><span class="mr-1">✅</span>Applied <b class="ml-1">${fmt(f.applied)}</b></span>
+                </div>
+              </div>
+
+              <div class="mt-3">
+                ${progressBarHtml(f.planned, f.received, f.applied)}
+                <div class="mt-2 flex items-center justify-between text-[11px] text-gray-500 tabular-nums">
+                  <div class="flex gap-3 flex-wrap">
+                    <span><span class="inline-block w-2 h-2 rounded-full mr-1" style="background:${OPS_PLANNED_FG}"></span>Planned</span>
+                    <span><span class="inline-block w-2 h-2 rounded-full mr-1" style="background:${OPS_RECEIVED_FG}"></span>Rec</span>
+                    <span><span class="inline-block w-2 h-2 rounded-full mr-1" style="background:${APPLIED_COLOR}; opacity:${OPS_APPLIED_OPACITY}"></span>App</span>
+                  </div>
+                  <div class="text-gray-600">${fmt(f.applied)} / ${fmt(f.planned)}</div>
+                </div>
+              </div>
+
+              ${(topSup.length || topZend.length) ? `
+                <div class="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-3">
+                  <div>
+                    <div class="text-[11px] uppercase tracking-wide text-gray-400">Top remaining tickets</div>
+                    <div class="mt-1 flex flex-wrap gap-2">
+                      ${topZend.length ? topChips(topZend,'🎫') : '<span class="text-[12px] text-gray-400">—</span>'}
+                    </div>
+                  </div>
+                  <div>
+                    <div class="text-[11px] uppercase tracking-wide text-gray-400">Top remaining suppliers</div>
+                    <div class="mt-1 flex flex-wrap gap-2">
+                      ${topSup.length ? topChips(topSup,'🏭') : '<span class="text-[12px] text-gray-400">—</span>'}
+                    </div>
+                  </div>
+                </div>
+              `:''}
+            </div>
+          `;
+        }).join('')}
+      </div>
+
+      <div class="text-[11px] text-gray-500 mt-3">
+        Facility completion is based on applied vs planned units. “Received” is approximated from cartons-in by PO (as in Flow). POs “not sent” = cartons-in = 0.
+      </div>
+    `;
+    return;
+  }
+
+
+  // ----- Freight cards -----
+
+  if(view==='freight'){
+    // Buckets: Air / Sea / Other. Show totals + key ops metrics (no progress bars).
+    const poCartonsOut = new Map();
+    for(const o of (state.records||[])){
+      const po = norm(o?.po || o?.po_number || o?.poNumber);
+      if(!po) continue;
+      poCartonsOut.set(po, toNum(o?.cartons_out || 0));
+    }
+
+    const CBM_PER_CARTON = 0.046;
+
+    const buckets = new Map([
+      ['Air',   {k:'Air',   icon:'✈️', planned:0, applied:0, cartonsIn:0, cartonsReady:0, pos:new Set(), suppliers:new Set()}],
+      ['Sea',   {k:'Sea',   icon:'🚢', planned:0, applied:0, cartonsIn:0, cartonsReady:0, pos:new Set(), suppliers:new Set()}],
+      ['Other', {k:'Other', icon:'📦', planned:0, applied:0, cartonsIn:0, cartonsReady:0, pos:new Set(), suppliers:new Set()}],
+    ]);
+
+    for(const r of rows){
+      const f = (r.freight||'').toString().toLowerCase();
+      const key = f.includes('air') ? 'Air' : (f.includes('sea') ? 'Sea' : 'Other');
+      const b = buckets.get(key);
+
+      const po = norm(r.po_number || r.po || r.poNumber);
+      const planned = toNum(r.planned);
+      const applied = toNum(r.applied);
+      const cartonsIn = toNum(r.cartonsIn);
+
+      b.planned += planned;
+      b.applied += applied;
+      b.cartonsIn += cartonsIn;
+      b.cartonsReady += (poCartonsOut.get(po) || 0);
+
+      if(po) b.pos.add(po);
+      if(r.supplier && r.supplier!=='Unspecified') b.suppliers.add(r.supplier);
+    }
+
+    const arr = [...buckets.values()].sort((a,b)=> (b.planned-a.planned) || a.k.localeCompare(b.k));
+
+    const maxPlanned = Math.max(1, ...arr.map(x=>x.planned||0));
+    const maxApplied = Math.max(1, ...arr.map(x=>x.applied||0));
+    const maxCartons = Math.max(1, ...arr.map(x=>Math.max(x.cartonsIn||0, x.cartonsReady||0)));
+    const maxCbm = Math.max(1, ...arr.map(x=>Math.max((x.cartonsIn||0)*CBM_PER_CARTON, (x.cartonsReady||0)*CBM_PER_CARTON)));
+
+    const barPair = (title, aLabel, aVal, bLabel, bVal, maxVal, fmtFn) => {
+      const aH = Math.round(64 * (maxVal>0 ? (aVal/maxVal) : 0));
+      const bH = Math.round(64 * (maxVal>0 ? (bVal/maxVal) : 0));
+      const aH2 = (aVal>0 && aH<3) ? 3 : aH;
+      const bH2 = (bVal>0 && bH<3) ? 3 : bH;
+      return `
+        <div class="bg-white rounded-xl border p-3">
+          <div class="text-[11px] text-gray-500 mb-2">${title}</div>
+          <div class="flex items-end gap-4 h-[76px]">
+            <div class="flex-1">
+              <div class="w-full bg-gray-100 rounded-lg overflow-hidden" style="height:64px;">
+                <div style="height:${aH2}px; margin-top:${64-aH2}px; background:var(--ops-green);"></div>
+              </div>
+              <div class="mt-1 flex items-center justify-between text-[11px] text-gray-600">
+                <span>${aLabel}</span><span class="tabular-nums">${fmtFn(aVal)}</span>
+              </div>
+            </div>
+            <div class="flex-1">
+              <div class="w-full bg-gray-100 rounded-lg overflow-hidden" style="height:64px;">
+                <div style="height:${bH2}px; margin-top:${64-bH2}px; background:var(--ops-yellow);"></div>
+              </div>
+              <div class="mt-1 flex items-center justify-between text-[11px] text-gray-600">
+                <span>${bLabel}</span><span class="tabular-nums">${fmtFn(bVal)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    };
+
+    const fmt0 = (v)=> fmtInt(Math.round(v||0));
+    const fmt2 = (v)=> (Number(v||0)).toFixed(2);
+
+    root.innerHTML = `
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+        ${arr.map(b=>{
+          const cbmIn = (b.cartonsIn||0) * CBM_PER_CARTON;
+          const cbmReady = (b.cartonsReady||0) * CBM_PER_CARTON;
+          return `
+            <div class="bg-gray-50 rounded-2xl border p-3">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <div class="text-xl">${b.icon}</div>
+                  <div>
+                    <div class="text-sm font-semibold">${b.k}</div>
+                    <div class="text-[11px] text-gray-500">Suppliers ${b.suppliers.size} • POs ${b.pos.size}</div>
+                  </div>
+                </div>
+                <div class="text-right">
+                  <div class="text-[11px] text-gray-500">Units</div>
+                  <div class="text-sm font-semibold tabular-nums">${fmt0(b.planned)}</div>
+                </div>
+              </div>
+
+              <div class="mt-3 grid grid-cols-1 gap-2">
+                ${barPair('Units', 'Planned', b.planned, 'Applied', b.applied, Math.max(maxPlanned, maxApplied), fmt0)}
+                ${barPair('Cartons', 'In', b.cartonsIn, 'Ready', b.cartonsReady, maxCartons, fmt0)}
+                ${barPair('CBM', 'In', cbmIn, 'Ready', cbmReady, maxCbm, fmt2)}
+              </div>
+
+              <div class="text-[11px] text-gray-500 mt-2">
+                CBM = 0.046 × cartons. “Ready” uses cartons_out from records summary when available.
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+    return;
+  }
+
+
+  // ----- Zendesk bubble matrix (risk vs volume) -----
+  if(view==='zendesk'){
+    // Build per-ticket aggregates including freight mix
+    const ticketAgg = new Map(); // ticket -> {planned, received, applied, air, sea, other}
+    for(const r of rows){
+      const t = (r.zendesk || 'Unspecified').toString().trim() || 'Unspecified';
+      const cur = ticketAgg.get(t) || {k:t, planned:0, received:0, applied:0, air:0, sea:0, other:0};
+      const p = Number(r.planned||0)||0, rc=Number(r.received||0)||0, ap=Number(r.applied||0)||0;
+      cur.planned += p; cur.received += rc; cur.applied += ap;
+      const f = (r.freight||'').toString().toLowerCase();
+      if(f.includes('air')) cur.air += p;
+      else if(f.includes('sea')) cur.sea += p;
+      else cur.other += p;
+      ticketAgg.set(t, cur);
+    }
+
+    const tickets = [...ticketAgg.values()]
+      .map(t=>{
+        const planned=t.planned||0, applied=t.applied||0, received=t.received||0;
+        const pct = planned>0 ? Math.max(0, Math.min(100, 100*applied/planned)) : 0;
+        const risk = 1 - (pct/100); // higher = worse
+        const rem = Math.max(0, planned - applied);
+        const mode = (t.air>=t.sea && t.air>=t.other) ? 'air' : (t.sea>=t.other ? 'sea' : 'other');
+        return {...t, planned, received, applied, pct, risk, rem, mode};
+      })
+      .filter(t=>t.planned>0 || t.applied>0 || t.received>0)
+      .sort((a,b)=> (b.planned||0) - (a.planned||0))
+      .slice(0, 36); // keep dense but non-scroll
+
+    if(tickets.length===0){
+      root.innerHTML = `<div class="text-sm text-gray-600">No data for this week.</div>`;
+      return;
+    }
+
+    const maxPlanned = Math.max(...tickets.map(t=>t.planned||0), 1);
+    const minPlanned = Math.min(...tickets.map(t=>t.planned||0), maxPlanned);
+
+    // scale helpers (work in SVG viewBox coordinates)
+    // ── Zendesk bubble chart — sorted table layout ──
+    // Sort tickets by remaining units desc, show as a clean ranked list with visual bars
+    // Sort: air first, then sea, then by remaining units desc within each group
+    const sorted = [...tickets].sort((a,b)=>{
+      const modeOrder = {air:0,sea:1};
+      const ma = modeOrder[a.mode]??2, mb = modeOrder[b.mode]??2;
+      if(ma!==mb) return ma-mb;
+      return (b.planned-b.applied)-(a.planned-a.applied);
+    });
+
+    const statusColor = (pct)=>{
+      if(pct>=90) return '#97DC21';   // brand green
+      if(pct>=75) return '#F5BD25';   // brand amber
+      return '#D61A3C';               // brand red
+    };
+    const statusLabel = (pct)=>{
+      if(pct>=90) return 'On track';
+      if(pct>=75) return 'At risk';
+      return 'Delayed';
+    };
+    const modeIcon = (mode)=>{
+      if(mode==='air') return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#6E6E73" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/></svg>';
+      if(mode==='sea') return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#6E6E73" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20a2.4 2.4 0 0 0 2 1 2.4 2.4 0 0 0 2-1 2.4 2.4 0 0 1 2-1 2.4 2.4 0 0 1 2 1 2.4 2.4 0 0 0 2 1 2.4 2.4 0 0 0 2-1 2.4 2.4 0 0 1 2-1 2.4 2.4 0 0 1 2 1"/><path d="M4 9l2-2h12l3 6H4z"/><path d="M10 7V5a2 2 0 0 1 4 0v2"/></svg>';
+      return '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#AEAEB2" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>';
+    };
+
+    root.innerHTML = `
+      <div style="font-family:inherit;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+          <div style="font-size:12px;color:#6E6E73;">Tickets ranked by remaining units — hover for detail</div>
+          <div style="display:flex;gap:14px;font-size:11px;color:#6E6E73;">
+            <span style="display:flex;align-items:center;gap:4px;"><span style="width:8px;height:8px;border-radius:50%;background:#C8F902;display:inline-block;"></span>On track</span>
+            <span style="display:flex;align-items:center;gap:4px;"><span style="width:8px;height:8px;border-radius:50%;background:#FFA203;display:inline-block;"></span>At risk</span>
+            <span style="display:flex;align-items:center;gap:4px;"><span style="width:8px;height:8px;border-radius:50%;background:#D61A3C;display:inline-block;"></span>Delayed</span>
+          </div>
+        </div>
+        <div style="border:0.5px solid rgba(0,0,0,0.08);border-radius:10px;overflow:hidden;">
+          <div style="display:grid;grid-template-columns:100px 1fr 90px 80px 70px 80px;padding:7px 14px;background:#F5F5F7;border-bottom:0.5px solid rgba(0,0,0,0.06);">
+            <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;">Ticket</div>
+            <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;">Progress</div>
+            <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;text-align:right;">Planned</div>
+            <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;text-align:right;">Applied</div>
+            <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;text-align:right;">%</div>
+            <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;text-align:right;">Status</div>
+          </div>
+          ${sorted.slice(0,15).map((t,i)=>{
+            const pct = t.pct||0;
+            const remaining = Math.max(0, Math.round(t.planned - t.applied));
+            const appPct = t.planned>0 ? Math.min(100, 100*t.applied/t.planned) : 0;
+            const recPct = t.planned>0 ? Math.min(100, 100*t.received/t.planned) : 0;
+            const col = statusColor(pct);
+            const bg = i%2===0 ? '#fff' : '#FAFAFA';
+            return `<div style="display:grid;grid-template-columns:100px 1fr 90px 80px 70px 80px;padding:9px 14px;background:${bg};border-bottom:0.5px solid rgba(0,0,0,0.05);align-items:center;">
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span style="color:#6E6E73;">${modeIcon(t.mode)}</span>
+                <span style="font-size:12px;font-weight:600;color:#1C1C1E;">${esc(t.k)}</span>
+              </div>
+              <div style="padding:0 12px;">
+                <div style="height:6px;background:rgba(0,0,0,0.06);border-radius:3px;overflow:hidden;position:relative;">
+                  <div style="position:absolute;left:0;top:0;height:6px;border-radius:3px;background:rgba(200,249,2,0.4);width:${recPct.toFixed(1)}%;"></div>
+                  <div style="position:absolute;left:0;top:0;height:6px;border-radius:3px;background:${col};width:${appPct.toFixed(1)}%;opacity:0.85;"></div>
+                </div>
+              </div>
+              <div style="font-size:12px;color:#1C1C1E;text-align:right;font-variant-numeric:tabular-nums;">${fmtInt(Math.round(t.planned))}</div>
+              <div style="font-size:12px;color:#1C1C1E;text-align:right;font-variant-numeric:tabular-nums;">${fmtInt(Math.round(t.applied))}</div>
+              <div style="font-size:12px;font-weight:600;text-align:right;color:${col};">${Math.round(pct)}%</div>
+              <div style="text-align:right;">
+                <span style="font-size:10px;font-weight:500;padding:3px 7px;border-radius:20px;background:${col}18;color:${col};border:0.5px solid ${col}40;">${statusLabel(pct)}</span>
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+        <div style="font-size:11px;color:#AEAEB2;margin-top:8px;">Showing top ${Math.min(15,sorted.length)} of ${sorted.length} tickets by remaining units</div>
+      </div>
+    `;
+
+    // tooltips
+    const tip = document.getElementById('ops-zendesk-tooltip');
+    const tTitle = document.getElementById('ops-ztt-title');
+    const tBody = document.getElementById('ops-ztt-body');
+    const svg = document.getElementById('ops-zendesk-matrix');
+    if(tip && tTitle && tBody && svg){
+      const show = (e, g)=>{
+        const k=g.getAttribute('data-k')||'';
+        const planned=+g.getAttribute('data-planned')||0;
+        const received=+g.getAttribute('data-received')||0;
+        const applied=+g.getAttribute('data-applied')||0;
+        const pct=+g.getAttribute('data-pct')||0;
+        const mode=g.getAttribute('data-mode')||'';
+        tTitle.textContent = `Ticket ${k}  •  ${mode==='air'?'Air':mode==='sea'?'Sea':'Other'}`;
+        tBody.textContent = `Planned ${fmtInt(Math.round(planned))} • Received ${fmtInt(Math.round(received))} • Applied ${fmtInt(Math.round(applied))} • ${pct.toFixed(0)}% complete`;
+        tip.classList.remove('hidden');
+        const rect = root.getBoundingClientRect();
+        const x = (e.clientX - rect.left) + 12;
+        const y = (e.clientY - rect.top) + 12;
+        tip.style.left = x + 'px';
+        tip.style.top = y + 'px';
+      };
+      const hide = ()=> tip.classList.add('hidden');
+      svg.querySelectorAll('.ops-zb').forEach(g=>{
+        g.style.cursor='default';
+        g.addEventListener('mousemove', (e)=>show(e,g));
+        g.addEventListener('mouseenter', (e)=>show(e,g));
+        g.addEventListener('mouseleave', hide);
+      });
+    }
+    return;
+  }
+
+// Default list view for other dimensions (facility, zendesk, freight)
+  root.innerHTML = `
+    <div class="space-y-3">
+      ${items.map(it=>{
+        const planned = it.planned||0;
+        const received = it.received||0;
+        const applied = it.applied||0;
+        const pct = planned>0 ? Math.round(100*applied/planned) : 0;
+
+        const freightRow = (view==='supplier') ? `
+          <div class="mt-2 text-[11px] text-gray-500 flex gap-3">
+            ${['Air','Sea','Other'].map(b=>{
+              const fv = it.freight?.[b];
+              if(!fv) return '';
+              const fpct = fv.planned>0 ? Math.round(100*fv.applied/fv.planned) : 0;
+              return `<span class="px-2 py-0.5 rounded-full border bg-white">${b}: ${fpct}%</span>`;
+            }).join('')}
+          </div>
+        ` : '';
+
+        return `
+          <div class="rounded-xl border bg-gray-50 p-3">
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="text-sm font-semibold truncate">${esc(it.k)}</div>
+                <div class="text-xs text-gray-500">Completion: <span class="font-medium">${pct}%</span> &nbsp;•&nbsp; Remaining: <span class="font-medium">${fmtInt(Math.round(Math.max(0, planned-applied)))}</span></div>
+              </div>
+              <div class="text-right text-xs text-gray-500 tabular-nums">
+                <div>${fmtInt(Math.round(applied))} / ${fmtInt(Math.round(planned))}</div>
+              </div>
+            </div>
+            <div class="mt-3 space-y-2">
+              ${bar('Planned', planned, planned||1, OPS_PLANNED_FG)}
+              ${bar('Received', received, planned||1, OPS_RECEIVED_FG)}
+              ${bar('Applied', applied, planned||1, 'rgba(var(--ops-green-rgb),0.72)')}
+            </div>
+            ${freightRow}
+          </div>
+        `;
+      }).join('')}
+      <div class="text-xs text-gray-500">Received units are approximated from cartons-in by PO (as in Flow).</div>
+    </div>
+  `;
+}
+
+
+
+function wireOpsInsights(){
+  const pills = Array.from(document.querySelectorAll('.ops-pill'));
+  if(!pills.length) return;
+
+  pills.forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      pills.forEach(b=>b.classList.remove('ops-pill--active'));
+      btn.classList.add('ops-pill--active');
+      const v = (btn.getAttribute('data-opsview') || 'overview').trim();
+      state.opsView = v;
+      window._lastOpsView = v; // preserve across state:ready refreshes
+      try { (window.renderOpsInsights||renderOpsInsights)(v); } catch (e) { console.warn('[OPS] renderOpsInsights failed:', e); }
+    });
+  });
+
+  // Initial view: respect existing active pill, otherwise keep last state, otherwise default to overview.
+  const active = document.querySelector('.ops-pill--active');
+  const initial = (state.opsView || active?.getAttribute('data-opsview') || 'overview').trim();
+  state.opsView = initial;
+  try { renderOpsInsights(initial); } catch (e) { console.warn('[OPS] renderOpsInsights failed:', e); }
+}
+
+// Re-render insights on state:ready — respect user's pill selection via _lastOpsView
+window.addEventListener('state:ready', () => {
+  try {
+    // Use _lastOpsView (set by pill clicks) so user selection is preserved across refreshes
+    const v = (window._lastOpsView || state.opsView || 'overview').trim();
+    state.opsView = v;
+    window._lastOpsView = v;
+    renderOpsInsights(v);
+    // If ops overview is showing in detail tile, update it with fresh data
+    if(document.getElementById('wh-ops-content-mirror') && document.getElementById('wh-ops-overview')){
+      var src = document.getElementById('ops-insights-content');
+      var mirror = document.getElementById('wh-ops-content-mirror');
+      if(src && mirror){
+        mirror.innerHTML = src.innerHTML;
+      }
+    }
+  } catch (e) { console.warn('[OPS] state:ready render failed:', e); }
+
+  // ── Pre-warm Pulse cache silently after Week Hub loads ──
+  // Fires a background request to create the prompt cache (~31K tokens)
+  // so the user's first real message only consumes ~800 cached tokens.
+  // Runs once per session — skips if cache already warmed.
+  if (!window._pulseCacheWarmed) {
+    window._pulseCacheWarmed = true;
+    setTimeout(async function pulseCacheWarm() {
+      try {
+        // First load the 12-week context
+        await pulseLoadContext();
+        if (!window._pulseSessionContext) return; // no data yet, skip
+
+        const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
+        let token = null;
+        if (window.Clerk?.session) { try { token = await window.Clerk.session.getToken(); } catch(_){} }
+
+        const facility = ((window.state?.plan)||[]).map(p=>String(p.facility_name||p.facility||'').trim()).find(Boolean)
+          || String(window.state?.facility||'').trim() || '';
+
+        // Silent warm-up message — creates the cache, response discarded
+        await fetch(apiBase + '/pulse/chat', {
+          method: 'POST',
+          headers: Object.assign({'Content-Type':'application/json'}, token ? {'Authorization':'Bearer '+token} : {}),
+          body: JSON.stringify({
+            messages: [{ role: 'user', content: 'hello' }],
+            pulseContext: window._pulseSessionContext,
+            currentWeek: { facility, week_start: window.state?.weekStart || '' },
+          })
+        });
+        console.log('[Pulse] cache pre-warmed — first real message will be instant');
+      } catch(e) {
+        // Silent fail — pre-warm is best-effort, won't affect user experience
+        console.warn('[Pulse] cache pre-warm failed silently:', e.message);
+      }
+    }, 3000); // wait 3s after state:ready so page load completes first
+  }
+});
+
+window.addEventListener('hashchange', () => show(getRouteHash()));
+window.addEventListener('popstate', () => show(getRouteHash()));
+  // Pinpoint 3.0: re-route initial show through new routing
+  (function(){
+    const _initHash = getRouteHash();
+    const _mapped = (_initHash === '#dashboard' || _initHash === '#operations' || _initHash === '#ops' || !_initHash || _initHash === '#')
+      ? '#week-hub' : _initHash;
+    if(typeof syncPinpointNav === 'function') {
+      if(_mapped === '#exec') syncPinpointNav('#exec');
+      else if(_mapped === '#reports') syncPinpointNav('#reports');
+      else syncPinpointNav('#week-hub');
+    }
+    show(_mapped);
+  })();
+  try{ wireOpsDownloads(); }catch{}
+  try{ wireOpsInsights(); }catch{}
+
+  // Expose for additive modules (intake.js, exec/receiving/flow_live_additive.js etc.)
+  window.setWeek = setWeek;
+  window.refreshDashboardTotals = refreshDashboardTotals;
+  window.BRAND = BRAND;
+  window.apiBase = apiBase;
+  window.$ = $;
+  window.iso = iso;
+  window.fmtInt = fmtInt;
+  window.toNum = toNum;
+  window.toUI = toUI;
+  window.createHeart = createHeart;
+  window.state = state;
+  window.toISODate = toISODate;
+  window.todayISO = todayISO;
+  window.todayInTZ = todayInTZ;
+  window.renderOpsInsights = renderOpsInsights;
+  window.wireOpsInsights = wireOpsInsights;
 
 })();
+
+  </script>
+<script>
+(function () {
+  function isReady(s) {
+    return s && (
+      (Array.isArray(s.plan)    && s.plan.length) ||
+      (Array.isArray(s.records) && s.records.length) ||
+      (Array.isArray(s.bins)    && s.bins.length)
+    );
+  }
+  function fire() { window.dispatchEvent(new Event('state:ready')); }
+  var fired = false;
+
+  if (isReady(window.state)) { fired = true; fire(); }
+  var t = setInterval(function () {
+    if (isReady(window.state)) {
+      if (!fired) { fired = true; fire(); }
+      clearInterval(t);
+    }
+  }, 300);
+})();
+</script>
+<script>
+(function () {
+  // Re-fire state:ready after Ops switches weeks (or re-populates state)
+  var oldSetWeek = window.setWeek;
+  if (typeof oldSetWeek === 'function') {
+    window.setWeek = async function () {
+      var r = await oldSetWeek.apply(this, arguments);
+      // At this point Ops has updated window.state.{weekStart, plan, records, bins}
+      // Re-derive facility from plan rows if still not set
+      if (!window.state?.facility) {
+        const planFac = (window.state?.plan || [])
+          .map(function(p){ return String(p.facility_name || p.facility || '').trim(); })
+          .find(Boolean);
+        if (planFac && window.state) window.state.facility = planFac;
+      }
+      window.dispatchEvent(new Event('state:ready'));
+      return r;
+    };
+  }
+})();
+</script>
+<script src="/public/exec_live_additive.js?v=16" defer></script>
+<script>
+/*
+ * Pinpoint Exec Range Extension (exec_range_additive.js)
+ * -------------------------------------------------------
+ * Adds rolling-window filter bar + WoW throughput chart + Completion % trend
+ * to the Executive page. Fully additive — zero changes to exec_live_additive.js.
+ *
+ * Strategy:
+ *  1. Injects a sticky filter bar above #exec-live once that div exists
+ *  2. Fetches multi-week data independently (does not touch window.state)
+ *  3. Renders two new charts below the existing KPI tiles
+ *  4. Re-renders existing tiles/radar/donut with averaged range data via
+ *     window.__execRangeOverride (exec_live_additive reads this if present)
+ *  5. Compare-period toggle injects delta badges onto existing tiles
+ */
+(function ExecRangeAdditive() {
+  'use strict';
+
+  // ── Constants ────────────────────────────────────────────────────────────────
+  const BRAND       = '#990033';
+  const GREEN_VIS   = '#C8F902';
+  const GREEN_TEXT  = '#97DC21';
+  const DARK        = '#1C1C1E';
+  const MID         = '#6E6E73';
+  const LIGHT       = '#AEAEB2';
+  const BG          = '#F5F5F7';
+  const BORDER      = 'rgba(0,0,0,0.08)';
+  const BUSINESS_TZ = document.querySelector('meta[name="business-tz"]')?.content || 'Asia/Shanghai';
+
+  const _rawBase = document.querySelector('meta[name="api-base"]')?.content || location.origin;
+  const API_BASE = (() => {
+    const b = String(_rawBase || '').replace(/\/+$/, '');
+    return /\/api$/i.test(b) ? b : (b ? b + '/api' : '/api');
+  })();
+
+  // ── State ────────────────────────────────────────────────────────────────────
+  let _window   = 30;   // days — default Last 30d
+  let _compare  = false;
+  let _loading  = false;
+  let _rangeData   = null; // { weeks: [{ws, we, plan, records, bins}] }
+  let _compareData = null;
+
+  // ── Helpers ──────────────────────────────────────────────────────────────────
+  const $ = s => document.querySelector(s);
+  const fmt = n => Number(n || 0).toLocaleString();
+  const pct = (n, d) => d > 0 ? Math.round(n * 100 / d) : (n > 0 ? 100 : 0);
+
+  function toISODate(d) {
+    const x = new Date(d);
+    return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`;
+  }
+
+  function addDays(ymd, n) {
+    const d = new Date(ymd + 'T12:00:00Z');
+    d.setUTCDate(d.getUTCDate() + n);
+    return toISODate(d);
+  }
+
+  function mondayOf(ymd) {
+    if (typeof window.mondayOfInTZ === 'function') return window.mondayOfInTZ(ymd, BUSINESS_TZ);
+    const d = new Date(ymd + 'T12:00:00Z');
+    const dow = d.getUTCDay(); // 0=Sun
+    const offset = dow === 0 ? -6 : 1 - dow;
+    d.setUTCDate(d.getUTCDate() + offset);
+    return toISODate(d);
+  }
+
+  function todayYMD() {
+    if (typeof window.todayInTZ === 'function') return window.todayInTZ(BUSINESS_TZ);
+    return toISODate(new Date());
+  }
+
+  // Generate list of Monday week-starts within [fromYMD, toYMD]
+  function weeksInRange(fromYMD, toYMD) {
+    const weeks = [];
+    let cur = mondayOf(fromYMD);
+    while (cur <= toYMD) {
+      weeks.push(cur);
+      cur = addDays(cur, 7);
+    }
+    return weeks;
+  }
+
+  // Compute [from, to] for a rolling window
+  function windowDates(days) {
+    const today = todayYMD();
+    const from  = addDays(today, -days + 1);
+    return { from, to: today };
+  }
+
+  // Previous equivalent period
+  function prevWindowDates(days) {
+    const { from } = windowDates(days);
+    const prevTo   = addDays(from, -1);
+    const prevFrom = addDays(prevTo, -days + 1);
+    return { from: prevFrom, to: prevTo };
+  }
+
+  // ── Auth ─────────────────────────────────────────────────────────────────────
+  async function getToken() {
+    if (window.Clerk?.session) {
+      try { return await window.Clerk.session.getToken(); } catch (_) {}
+    }
+    return null;
+  }
+
+  async function apiFetch(path) {
+    const token = await getToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const urls = [
+      `${API_BASE}/${path}`,
+      `${API_BASE.replace(/\/api$/, '')}/${path}`
+    ];
+    for (const url of urls) {
+      try {
+        const r = await fetch(url, { headers });
+        if (r.ok) return r.json();
+      } catch (_) {}
+    }
+    throw new Error('All endpoints failed: ' + path);
+  }
+
+  // ── Data fetching ─────────────────────────────────────────────────────────────
+  async function fetchWeekData(ws) {
+    const we = addDays(ws, 6);
+    const [planRaw, recsRaw, binsRaw] = await Promise.all([
+      apiFetch(`plan/weeks/${ws}`).catch(() => []),
+      apiFetch(`records?from=${ws}&to=${we}&status=complete&limit=50000`).catch(() => ({ records: [] })),
+      apiFetch(`bins/weeks/${ws}`).catch(() => [])
+    ]);
+    const plan    = Array.isArray(planRaw) ? planRaw : [];
+    const records = Array.isArray(recsRaw) ? recsRaw : (Array.isArray(recsRaw?.records) ? recsRaw.records : []);
+    const bins    = Array.isArray(binsRaw) ? binsRaw : [];
+    return { ws, we, plan, records, bins };
+  }
+
+  async function loadRange(days) {
+    const { from, to } = windowDates(days);
+    const weekStarts   = weeksInRange(from, to);
+    // fetch all weeks in parallel (cap at 14 to avoid hammering)
+    const capped = weekStarts.slice(-14);
+    const weeks  = await Promise.all(capped.map(ws => fetchWeekData(ws)));
+    return { weeks, from, to, days };
+  }
+
+  async function loadCompare(days) {
+    const { from, to } = prevWindowDates(days);
+    const weekStarts   = weeksInRange(from, to);
+    const capped       = weekStarts.slice(-14);
+    const weeks        = await Promise.all(capped.map(ws => fetchWeekData(ws)));
+    return { weeks, from, to, days };
+  }
+
+  // ── Metrics per week ──────────────────────────────────────────────────────────
+  function computeWeekMetrics(wk) {
+    const { ws, we, plan, records, bins } = wk;
+    const plannedTotal = plan.reduce((s, p) => s + Number(p.target_qty || 0), 0);
+    const appliedTotal = records.reduce((s, r) => s + Number(r.qty ?? r.quantity ?? 1), 0);
+    const completionPct = pct(appliedTotal, plannedTotal);
+
+    // Dup UIDs
+    const uidMap = new Map();
+    for (const r of records) {
+      const key = `${r.sku_code||''}:${r.uid||''}`;
+      if (r.uid) uidMap.set(key, (uidMap.get(key) || 0) + 1);
+    }
+    const dupScanCount = [...uidMap.values()].filter(v => v > 1).length;
+
+    // SKU discrepancy
+    const planBySKU = new Map();
+    for (const p of plan) {
+      const sku = String(p.sku_code || '').trim();
+      if (sku) planBySKU.set(sku, (planBySKU.get(sku) || 0) + Number(p.target_qty || 0));
+    }
+    const recBySKU = new Map();
+    for (const r of records) {
+      const sku = String(r.sku_code || '').trim();
+      if (sku) recBySKU.set(sku, (recBySKU.get(sku) || 0) + 1);
+    }
+    let skuPctSum = 0, skuCnt = 0;
+    for (const [sku, planned] of planBySKU) {
+      if (planned > 0) { skuPctSum += Math.abs((recBySKU.get(sku)||0) - planned) / planned; skuCnt++; }
+    }
+    const avgSkuDiscPct = Math.round((skuCnt ? skuPctSum / skuCnt : 0) * 100);
+
+    // PO discrepancy
+    const planByPO = new Map();
+    for (const p of plan) {
+      const po = String(p.po_number || '').trim();
+      if (po) planByPO.set(po, (planByPO.get(po) || 0) + Number(p.target_qty || 0));
+    }
+    const recByPO = new Map();
+    for (const r of records) {
+      const po = String(r.po_number || '').trim();
+      if (po) recByPO.set(po, (recByPO.get(po) || 0) + 1);
+    }
+    let poPctSum = 0, poCnt = 0;
+    for (const [po, planned] of planByPO) {
+      if (planned > 0) { poPctSum += Math.abs((recByPO.get(po)||0) - planned) / planned; poCnt++; }
+    }
+    const avgPoDiscPct = Math.round((poCnt ? poPctSum / poCnt : 0) * 100);
+
+    // Heavy bins
+    const heavyCount = bins.filter(b => Number(b.weight_kg || 0) > 12).length;
+
+    // Late appliers (applied after earliest PO due date)
+    const poDue = new Map();
+    for (const p of plan) {
+      const po = String(p.po_number||'').trim(), d = String(p.due_date||'').trim();
+      if (po && d) { if (!poDue.has(po) || d < poDue.get(po)) poDue.set(po, d); }
+    }
+    let lateCount = 0;
+    for (const r of records) {
+      const po  = String(r.po_number||'').trim();
+      const ymd = r.date_local ? String(r.date_local).trim() : '';
+      const due = poDue.get(po);
+      if (due && ymd && ymd > due) lateCount++;
+    }
+    const lateRatePct = Math.round(pct(lateCount, records.length));
+
+    return { ws, plannedTotal, appliedTotal, completionPct, dupScanCount, avgSkuDiscPct, avgPoDiscPct, heavyCount, lateCount, lateRatePct };
+  }
+
+  // Average a set of weekly metrics
+  function averageMetrics(weeks) {
+    if (!weeks.length) return null;
+    const mArr = weeks.map(computeWeekMetrics);
+    const n    = mArr.length;
+    const avg  = k => Math.round(mArr.reduce((s, m) => s + (m[k] || 0), 0) / n);
+    return {
+      completionPct:  avg('completionPct'),
+      dupScanCount:   avg('dupScanCount'),
+      avgSkuDiscPct:  avg('avgSkuDiscPct'),
+      avgPoDiscPct:   avg('avgPoDiscPct'),
+      heavyCount:     avg('heavyCount'),
+      lateRatePct:    avg('lateRatePct'),
+      plannedTotal:   mArr.reduce((s,m) => s + m.plannedTotal,  0),
+      appliedTotal:   mArr.reduce((s,m) => s + m.appliedTotal,  0),
+      _mArr: mArr
+    };
+  }
+
+  // ── Inject filter bar ─────────────────────────────────────────────────────────
+  function injectFilterBar() {
+    if (document.getElementById('exec-range-bar')) return;
+
+    const bar = document.createElement('div');
+    bar.id = 'exec-range-bar';
+    bar.style.cssText = `
+      position:sticky;top:52px;z-index:30;
+      background:#fff;border-bottom:0.5px solid ${BORDER};
+      padding:10px 24px;display:flex;align-items:center;gap:10px;
+      font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;
+    `;
+    bar.innerHTML = `
+      <span style="font-size:11px;font-weight:500;color:${MID};white-space:nowrap;">View range</span>
+      <div style="display:flex;gap:4px;background:${BG};border:0.5px solid ${BORDER};border-radius:9px;padding:3px;">
+        ${[7,30,90].map(d => `
+          <button data-days="${d}" class="exec-range-pill" style="
+            font-size:11px;font-weight:500;padding:5px 13px;border-radius:7px;
+            border:none;cursor:pointer;font-family:inherit;transition:all .15s;
+            background:${d===30?DARK:BG};color:${d===30?'#fff':MID};
+            ${d===30?'box-shadow:0 1px 3px rgba(0,0,0,0.12)':''}
+          ">Last ${d}d</button>
+        `).join('')}
+      </div>
+      <div style="flex:1;"></div>
+      <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:11px;color:${MID};user-select:none;">
+        <span>Compare to previous period</span>
+        <div id="exec-compare-toggle" style="
+          width:32px;height:18px;border-radius:9px;background:${BORDER};
+          position:relative;cursor:pointer;transition:background .2s;flex-shrink:0;
+          border:0.5px solid ${BORDER};
+        ">
+          <div id="exec-compare-knob" style="
+            position:absolute;top:2px;left:2px;width:14px;height:14px;
+            border-radius:50%;background:#fff;transition:transform .2s;
+            box-shadow:0 1px 3px rgba(0,0,0,0.2);
+          "></div>
+        </div>
+      </label>
+      <div id="exec-range-loading" style="display:none;align-items:center;gap:6px;font-size:11px;color:${LIGHT};">
+        <svg width="14" height="14" viewBox="0 0 14 14" style="animation:execSpin 1s linear infinite">
+          <circle cx="7" cy="7" r="5.5" fill="none" stroke="${LIGHT}" stroke-width="1.5" stroke-dasharray="20 15"/>
+        </svg>
+        Loading…
+      </div>
+      <style>
+        @keyframes execSpin{to{transform:rotate(360deg)}}
+        .exec-range-pill:hover:not([data-active]){background:rgba(0,0,0,0.05)!important;color:${DARK}!important;}
+      </style>
+    `;
+
+    // Insert before #exec-live or at the top of #page-exec
+    const host  = document.getElementById('page-exec');
+    const live  = document.getElementById('exec-live');
+    if (host) {
+      if (live) host.insertBefore(bar, live);
+      else host.prepend(bar);
+    }
+
+    // Wire pills
+    bar.querySelectorAll('.exec-range-pill').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const days = Number(btn.dataset.days);
+        setWindow(days);
+      });
+    });
+
+    // Wire compare toggle
+    const toggle = document.getElementById('exec-compare-toggle');
+    const knob   = document.getElementById('exec-compare-knob');
+    if (toggle) {
+      toggle.addEventListener('click', () => {
+        _compare = !_compare;
+        toggle.style.background = _compare ? BRAND : BORDER;
+        knob.style.transform    = _compare ? 'translateX(14px)' : '';
+        if (_compare && _rangeData) loadAndRenderCompare();
+        else { _compareData = null; removeDeltaBadges(); }
+      });
+    }
+  }
+
+  function setActivePill(days) {
+    document.querySelectorAll('.exec-range-pill').forEach(btn => {
+      const active = Number(btn.dataset.days) === days;
+      btn.style.background   = active ? DARK  : BG;
+      btn.style.color        = active ? '#fff' : MID;
+      btn.style.boxShadow    = active ? '0 1px 3px rgba(0,0,0,0.12)' : '';
+      if (active) btn.setAttribute('data-active','1');
+      else btn.removeAttribute('data-active');
+    });
+  }
+
+  function setLoading(on) {
+    _loading = on;
+    const el = document.getElementById('exec-range-loading');
+    if (el) el.style.display = on ? 'flex' : 'none';
+  }
+
+  // ── Inject chart containers ───────────────────────────────────────────────────
+  function injectRangeCharts() {
+    if (document.getElementById('exec-range-charts')) return;
+    const wrap = document.createElement('div');
+    wrap.id = 'exec-range-charts';
+    wrap.style.cssText = `display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;`;
+    wrap.innerHTML = `
+      <!-- WoW Throughput -->
+      <div style="background:#fff;border:0.5px solid ${BORDER};border-radius:12px;padding:16px 18px;">
+        <div style="font-size:13px;font-weight:500;color:${DARK};margin-bottom:2px;">Week-over-Week Throughput</div>
+        <div style="font-size:10px;color:${LIGHT};margin-bottom:14px;">Planned vs Applied per week</div>
+        <div id="exec-wow-chart" style="height:160px;position:relative;"></div>
+        <div id="exec-wow-legend" style="display:flex;gap:14px;margin-top:10px;"></div>
+      </div>
+      <!-- Completion Trend -->
+      <div style="background:#fff;border:0.5px solid ${BORDER};border-radius:12px;padding:16px 18px;">
+        <div style="font-size:13px;font-weight:500;color:${DARK};margin-bottom:2px;">Completion % Trend</div>
+        <div style="font-size:10px;color:${LIGHT};margin-bottom:14px;">Weekly completion rate across range</div>
+        <div id="exec-trend-chart" style="height:160px;position:relative;"></div>
+      </div>
+    `;
+
+    // Insert after filter bar, before exec-live
+    const bar  = document.getElementById('exec-range-bar');
+    const live = document.getElementById('exec-live');
+    const host = document.getElementById('page-exec');
+    if (bar && bar.nextSibling) host.insertBefore(wrap, bar.nextSibling);
+    else if (live) host.insertBefore(wrap, live);
+    else if (host) host.appendChild(wrap);
+  }
+
+  // ── SVG bar chart (WoW throughput) ────────────────────────────────────────────
+  function renderWoWChart(mArr) {
+    const el = document.getElementById('exec-wow-chart');
+    if (!el) return;
+
+    const W = el.offsetWidth || 400, H = 160;
+    const pad = { t: 10, r: 10, b: 32, l: 44 };
+    const innerW = W - pad.l - pad.r;
+    const innerH = H - pad.t - pad.b;
+
+    const maxVal = Math.max(1, ...mArr.map(m => Math.max(m.plannedTotal, m.appliedTotal)));
+    const scaleY = v => innerH - (v / maxVal) * innerH;
+
+    const n = mArr.length;
+    const groupW = innerW / n;
+    const barW   = Math.min(groupW * 0.35, 22);
+    const gap    = barW * 0.4;
+
+    let svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="overflow:visible;font-family:-apple-system,sans-serif;">`;
+
+    // Y grid lines
+    for (let i = 0; i <= 4; i++) {
+      const y = pad.t + (i / 4) * innerH;
+      const val = Math.round(maxVal * (1 - i/4));
+      svg += `<line x1="${pad.l}" y1="${y}" x2="${pad.l+innerW}" y2="${y}" stroke="${BORDER}" stroke-width="0.5"/>`;
+      svg += `<text x="${pad.l - 5}" y="${y + 3}" text-anchor="end" font-size="9" fill="${LIGHT}">${val >= 1000 ? Math.round(val/1000)+'k' : val}</text>`;
+    }
+
+    mArr.forEach((m, i) => {
+      const cx      = pad.l + (i + 0.5) * groupW;
+      const px      = cx - gap/2 - barW;
+      const ax      = cx + gap/2;
+      const planH   = (m.plannedTotal / maxVal) * innerH;
+      const appH    = (m.appliedTotal / maxVal) * innerH;
+      const planY   = pad.t + innerH - planH;
+      const appY    = pad.t + innerH - appH;
+
+      // Planned bar (dark)
+      svg += `<rect x="${px}" y="${planY}" width="${barW}" height="${planH}" rx="2" fill="${DARK}" opacity="0.15"/>`;
+      // Applied bar (green)
+      svg += `<rect x="${ax}" y="${appY}" width="${barW}" height="${appH}" rx="2" fill="${GREEN_VIS}"/>`;
+
+      // Week label
+      const label = m.ws ? m.ws.slice(5) : `W${i+1}`;
+      svg += `<text x="${cx}" y="${H - pad.b + 14}" text-anchor="middle" font-size="9" fill="${LIGHT}">${label}</text>`;
+    });
+
+    // Axes
+    svg += `<line x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${pad.t+innerH}" stroke="${BORDER}" stroke-width="0.5"/>`;
+    svg += `<line x1="${pad.l}" y1="${pad.t+innerH}" x2="${pad.l+innerW}" y2="${pad.t+innerH}" stroke="${BORDER}" stroke-width="0.5"/>`;
+
+    svg += `</svg>`;
+    el.innerHTML = svg;
+
+    // Legend
+    const leg = document.getElementById('exec-wow-legend');
+    if (leg) leg.innerHTML = `
+      <div style="display:flex;align-items:center;gap:5px;font-size:10px;color:${MID};">
+        <div style="width:10px;height:10px;border-radius:2px;background:${DARK};opacity:.15;"></div>Planned
+      </div>
+      <div style="display:flex;align-items:center;gap:5px;font-size:10px;color:${MID};">
+        <div style="width:10px;height:10px;border-radius:2px;background:${GREEN_VIS};"></div>Applied
+      </div>
+    `;
+  }
+
+  // ── SVG line chart (Completion % trend) ──────────────────────────────────────
+  function renderTrendChart(mArr, compareArr) {
+    const el = document.getElementById('exec-trend-chart');
+    if (!el) return;
+
+    const W = el.offsetWidth || 400, H = 160;
+    const pad = { t: 10, r: 14, b: 32, l: 36 };
+    const innerW = W - pad.l - pad.r;
+    const innerH = H - pad.t - pad.b;
+
+    const n    = mArr.length;
+    const maxV = 110; // allow headroom above 100%
+    const scaleX = i  => pad.l + (n > 1 ? (i / (n-1)) * innerW : innerW/2);
+    const scaleY = v  => pad.t + innerH - Math.min(1, v / maxV) * innerH;
+
+    let svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="overflow:visible;font-family:-apple-system,sans-serif;">`;
+
+    // Y grid + labels
+    [0, 25, 50, 75, 100].forEach(v => {
+      const y = scaleY(v);
+      svg += `<line x1="${pad.l}" y1="${y}" x2="${pad.l+innerW}" y2="${y}" stroke="${v===100?BRAND:BORDER}" stroke-width="${v===100?0.8:0.5}" stroke-dasharray="${v===100?'3,3':''}"/>`;
+      svg += `<text x="${pad.l-4}" y="${y+3}" text-anchor="end" font-size="9" fill="${v===100?BRAND:LIGHT}">${v}%</text>`;
+    });
+
+    // Area fill (primary)
+    if (mArr.length > 1) {
+      const areaPoints = mArr.map((m, i) => `${scaleX(i)},${scaleY(m.completionPct)}`).join(' ');
+      const areaPath   = `M${scaleX(0)},${scaleY(mArr[0].completionPct)} ` +
+                         mArr.slice(1).map((m,i) => `L${scaleX(i+1)},${scaleY(m.completionPct)}`).join(' ') +
+                         ` L${scaleX(n-1)},${pad.t+innerH} L${pad.l},${pad.t+innerH} Z`;
+      svg += `<path d="${areaPath}" fill="${GREEN_VIS}" opacity="0.08"/>`;
+    }
+
+    // Compare line (dashed, lighter)
+    if (compareArr && compareArr.length > 1) {
+      const pts = compareArr.map((m, i) => `${scaleX(i)},${scaleY(m.completionPct)}`);
+      svg += `<polyline points="${pts.join(' ')}" fill="none" stroke="${LIGHT}" stroke-width="1.2" stroke-dasharray="4,3"/>`;
+    }
+
+    // Primary line
+    if (mArr.length > 1) {
+      const pts = mArr.map((m, i) => `${scaleX(i)},${scaleY(m.completionPct)}`);
+      svg += `<polyline points="${pts.join(' ')}" fill="none" stroke="${GREEN_TEXT}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+    }
+
+    // Dots + tooltips
+    mArr.forEach((m, i) => {
+      const x = scaleX(i), y = scaleY(m.completionPct);
+      svg += `<circle cx="${x}" cy="${y}" r="3.5" fill="${GREEN_TEXT}" stroke="#fff" stroke-width="1.5"/>`;
+      svg += `<title>${m.ws}: ${m.completionPct}%</title>`;
+    });
+
+    // X labels
+    const step = n > 8 ? Math.ceil(n / 6) : 1;
+    mArr.forEach((m, i) => {
+      if (i % step === 0 || i === n-1) {
+        const label = m.ws ? m.ws.slice(5) : `W${i+1}`;
+        svg += `<text x="${scaleX(i)}" y="${H - pad.b + 14}" text-anchor="middle" font-size="9" fill="${LIGHT}">${label}</text>`;
+      }
+    });
+
+    svg += `</svg>`;
+    el.innerHTML = svg;
+  }
+
+  // ── Update existing tiles with averaged data ──────────────────────────────────
+  function updateExecTiles(avg, compareAvg) {
+    const tilesWrap = document.getElementById('exec-tiles');
+    if (!tilesWrap) return;
+
+    const tileData = [
+      { label: 'Completion %',  value: `${avg.completionPct}%`,  cKey: 'completionPct',  higher: true },
+      { label: 'Duplicate UIDs',value: fmt(avg.dupScanCount),     cKey: 'dupScanCount',   higher: false },
+      { label: 'Avg SKU %Δ',    value: `${avg.avgSkuDiscPct}%`,   cKey: 'avgSkuDiscPct',  higher: false },
+      { label: 'Avg PO %Δ',     value: `${avg.avgPoDiscPct}%`,    cKey: 'avgPoDiscPct',   higher: false },
+      { label: 'Heavy bins >12kg', value: fmt(avg.heavyCount),    cKey: 'heavyCount',     higher: false },
+      { label: 'Late appliers', value: `${avg.lateRatePct}%`,     cKey: 'lateRatePct',    higher: false },
+    ];
+
+    tilesWrap.innerHTML = tileData.map(t => {
+      let delta = '';
+      if (compareAvg && t.cKey) {
+        const curr  = avg[t.cKey] || 0;
+        const prev  = compareAvg[t.cKey] || 0;
+        if (prev > 0) {
+          const diff  = curr - prev;
+          const diffP = Math.round((diff / prev) * 100);
+          const up    = diff > 0;
+          const good  = t.higher ? up : !up;
+          const arrow = up ? '↑' : '↓';
+          const color = good ? GREEN_TEXT : '#D61A3C';
+          delta = `<div style="font-size:10px;color:${color};font-weight:500;margin-top:2px;">${arrow} ${Math.abs(diffP)}% vs prev</div>`;
+        }
+      }
+      return `
+        <div style="background:#fff;border:0.5px solid ${BORDER};border-radius:10px;padding:14px 16px;">
+          <div style="font-size:10px;color:${MID};margin-bottom:4px;">${t.label}</div>
+          <div style="font-size:20px;font-weight:600;color:${DARK};line-height:1;font-variant-numeric:tabular-nums;">${t.value}</div>
+          ${delta}
+        </div>`;
+    }).join('');
+
+    // Label update
+    const rangeLabel = document.getElementById('exec-range-label');
+    if (rangeLabel) rangeLabel.textContent = `Avg across Last ${_window}d (${avg._mArr?.length || '?'} weeks)`;
+  }
+
+  function removeDeltaBadges() {
+    // Re-render tiles without deltas
+    if (_rangeData) {
+      const avg = averageMetrics(_rangeData.weeks);
+      if (avg) updateExecTiles(avg, null);
+    }
+  }
+
+  // ── Range label below tiles ───────────────────────────────────────────────────
+  function injectRangeLabel() {
+    if (document.getElementById('exec-range-label')) return;
+    const tilesWrap = document.getElementById('exec-tiles');
+    if (!tilesWrap) return;
+    const label = document.createElement('div');
+    label.id = 'exec-range-label';
+    label.style.cssText = `font-size:10px;color:${LIGHT};margin-bottom:8px;margin-top:-4px;`;
+    tilesWrap.after(label);
+  }
+
+  // ── Main render ───────────────────────────────────────────────────────────────
+  async function renderRange(days) {
+    setLoading(true);
+    setActivePill(days);
+
+    try {
+      _rangeData = await loadRange(days);
+
+      if (_compare) {
+        _compareData = await loadCompare(days);
+      }
+
+      const avg        = averageMetrics(_rangeData.weeks);
+      const compareAvg = (_compare && _compareData) ? averageMetrics(_compareData.weeks) : null;
+
+      if (!avg) return;
+
+      injectRangeLabel();
+      updateExecTiles(avg, compareAvg);
+      renderWoWChart(avg._mArr);
+      renderTrendChart(avg._mArr, compareAvg?._mArr);
+
+    } catch (e) {
+      console.error('[ExecRange] render failed:', e);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadAndRenderCompare() {
+    setLoading(true);
+    try {
+      _compareData = await loadCompare(_window);
+      const avg        = averageMetrics(_rangeData.weeks);
+      const compareAvg = averageMetrics(_compareData.weeks);
+      if (avg) {
+        updateExecTiles(avg, compareAvg);
+        renderTrendChart(avg._mArr, compareAvg._mArr);
+      }
+    } catch (e) {
+      console.error('[ExecRange] compare load failed:', e);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function setWindow(days) {
+    _window = days;
+    renderRange(days);
+  }
+
+  // ── Mount point — wait for #exec-live to exist ────────────────────────────────
+  function tryMount() {
+    if (location.hash !== '#exec') return;
+    const live = document.getElementById('exec-live');
+    if (!live) {
+      setTimeout(tryMount, 120);
+      return;
+    }
+    injectFilterBar();
+    injectRangeCharts();
+    renderRange(_window);
+  }
+
+  // Re-mount on resize (chart widths depend on container)
+  let _resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(_resizeTimer);
+    _resizeTimer = setTimeout(() => {
+      if (_rangeData) {
+        const avg = averageMetrics(_rangeData.weeks);
+        if (avg) {
+          renderWoWChart(avg._mArr);
+          renderTrendChart(avg._mArr, _compareData ? averageMetrics(_compareData.weeks)._mArr : null);
+        }
+      }
+    }, 200);
+  });
+
+  // ── Event hooks ───────────────────────────────────────────────────────────────
+  window.addEventListener('hashchange', () => {
+    if (location.hash === '#exec') setTimeout(tryMount, 80);
+  });
+
+  // Fire immediately if already on exec
+  if (location.hash === '#exec') setTimeout(tryMount, 80);
+
+  // Also hook into state:ready in case exec loads after state is available
+  window.addEventListener('state:ready', () => {
+    if (location.hash === '#exec') setTimeout(tryMount, 120);
+  });
+
+})();
+
+</script>
+<script>
+// ── Pre-booked containers modal opener ──
+window.__openPrebookModal = function(){
+  var m = document.getElementById('prebook-modal');
+  if(!m) return;
+  m.classList.remove('hidden');
+  m.style.display = 'flex';
+};
+
+// ── Week Hub: Ops Insights in detail tile ──
+// On first render and whenever no node is selected, we mirror ops insights
+// into #flow-detail. When user clicks a node the flow module overwrites it.
+// When user clicks "Week Hub" nav again we restore the ops overview.
+(function whDetailOverlay(){
+
+  // Mirror ops insights into flow-detail
+  function syncOpsToDetail(overrideView){
+    var detail = document.getElementById('flow-detail');
+    if(!detail) return;
+    // Pause observer during rebuild to prevent re-trigger
+    var view = overrideView || window._lastOpsView || 'overview';
+    if(_detailObserver){ _detailObserver.disconnect(); _detailObserver = null; }
+    window._lastOpsView = view;
+    if(typeof window.renderOpsInsights === 'function'){
+      try{ window.renderOpsInsights(view); }catch(e){ console.error('[syncOps]',e); }
+    }
+    // Now pull the rendered content
+    var src = document.getElementById('ops-insights-content');
+    if(!src || !src.innerHTML || src.innerHTML.trim().length < 20){
+      // Restart observer and bail
+      startDetailWatcher();
+      return;
+    }
+    // Build the detail panel with the ops pills bar + content
+    var pillsBar = document.getElementById('ops-insights-subtitle')
+      ? ('<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
+        + '<div style="font-size:13px;font-weight:500;color:#1C1C1E;">Insights</div>'
+        + '<button id="wh-insights-fullscreen" style="font-size:10px;color:#fff;background:#990033;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;letter-spacing:.02em;">Full screen</button>'
+        + '</div>'
+        + '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:14px;" id="wh-ops-pills-clone">'
+        + [
+            {v:'overview', l:'Overview'},
+            {v:'supplier', l:'Supplier'},
+            {v:'facility', l:'Facility'},
+            {v:'zendesk',  l:'Zendesk'},
+            {v:'freight',  l:'Freight'},
+            {v:'carton',   l:'Carton'}
+          ].map(function(p){
+            var cur = window._lastOpsView || 'overview';
+            var active = (p.v === cur) ? ' ops-pill--active' : '';
+            return '<button class="ops-pill wh-detail-pill' + active + '" data-opsview="' + p.v + '" onclick="window.__whPillClick(this.dataset.opsview)" style="min-width:0;height:26px;font-size:11px;cursor:pointer;">' + p.l + '</button>';
+          }).join('')
+        + '</div>')
+      : '';
+    var wrap = document.createElement('div');
+    wrap.id = 'wh-ops-overview';
+    wrap.style.cssText = 'padding:4px 0;';
+    wrap.innerHTML = pillsBar + '<div id="wh-ops-content-mirror">' + src.innerHTML + '</div>';
+    detail.innerHTML = '';
+    detail.appendChild(wrap);
+    // Restart the observer after rebuild
+    setTimeout(startDetailWatcher, 100);
+  }
+  // Expose globally — flow module calls this directly to avoid blink
+  window.__whInjectOps = syncOpsToDetail;
+  window.whDetailOverlay_sync = syncOpsToDetail;
+
+  // Global pill click handler — called directly from onclick on cloned pills
+  window.__whPillClick = function(view){
+    if(!view) return;
+    window._lastOpsView = view;
+    syncOpsToDetail(view);
+  };
+
+  // Wire fullscreen button for ops insights
+  document.addEventListener('click', function(e){
+    if(e.target && e.target.id === 'wh-insights-fullscreen'){
+      // Build modal
+      var src = document.getElementById('ops-insights-content');
+      if(!src) return;
+      var modal = document.createElement('div');
+      modal.id = 'wh-insights-modal';
+      modal.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.5);display:flex;align-items:flex-start;justify-content:center;padding:20px 16px;overflow-y:auto;';
+      var card = document.createElement('div');
+      card.style.cssText = 'background:#fff;border-radius:14px;width:100%;max-width:1400px;padding:28px 32px;position:relative;min-height:600px;';
+      // Pills row
+      var pillsHTML = '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:16px;" id="wh-modal-pills">'
+        + [{v:'overview',l:'Overview'},{v:'supplier',l:'Supplier'},{v:'facility',l:'Facility'},{v:'zendesk',l:'Zendesk'},{v:'freight',l:'Freight'},{v:'carton',l:'Carton'}].map(function(p){
+            var cur = window._lastOpsView||'overview';
+            var active = (p.v===cur) ? ' ops-pill--active' : '';
+            return '<button class="ops-pill wh-modal-pill' + active + '" data-opsview="' + p.v + '" style="height:28px;font-size:11px;">' + p.l + '</button>';
+          }).join('') + '</div>';
+      card.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">'
+        + '<div style="font-size:16px;font-weight:600;color:#1C1C1E;">Insights</div>'
+        + '<button id="wh-modal-close" style="font-size:12px;color:#6E6E73;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:7px;padding:5px 12px;cursor:pointer;font-family:inherit;">Close</button>'
+        + '</div>'
+        + pillsHTML
+        + '<div id="wh-modal-content">' + src.innerHTML + '</div>';
+      modal.appendChild(card);
+      document.body.appendChild(modal);
+      // Close on backdrop click
+      modal.addEventListener('click', function(ev){
+        if(ev.target === modal || ev.target.id === 'wh-modal-close'){
+          modal.remove();
+        }
+      });
+    }
+  });
+
+  // Wire modal pill clicks
+  document.addEventListener('click', function(e){
+    var pill = e.target.closest('.wh-modal-pill');
+    if(!pill) return;
+    var view = pill.getAttribute('data-opsview');
+    if(!view) return;
+    document.querySelectorAll('.wh-modal-pill').forEach(function(p){ p.classList.remove('ops-pill--active'); });
+    pill.classList.add('ops-pill--active');
+    document.querySelectorAll('.ops-pill').forEach(function(p){
+      if(p.getAttribute('data-opsview') === view) p.classList.add('ops-pill--active');
+      else p.classList.remove('ops-pill--active');
+    });
+    window._lastOpsView = view;
+    if(typeof renderOpsInsights === 'function'){ try{ renderOpsInsights(view); }catch(e){} }
+    var src = document.getElementById('ops-insights-content');
+    var mc = document.getElementById('wh-modal-content');
+    if(src && mc) mc.innerHTML = src.innerHTML;
+  });
+
+  // Pill clicks handled via onclick="window.__whPillClick(this.dataset.opsview)" on each button
+
+  // Watch for flow module replacing detail content (node click)
+  // When wh-ops-overview disappears the user has clicked a node — that's fine
+  function observeDetail(){
+    var detail = document.getElementById('flow-detail');
+    if(!detail) return;
+    var obs = new MutationObserver(function(){
+      // nothing — user interaction drives content from here
+    });
+    obs.observe(detail, {childList:true});
+  }
+
+  // ── Main strategy: watch for the sentinel placeholder ──
+  // flow_live_additive.js now writes <div id="wh-detail-placeholder"></div>
+  // as its default. We watch for this element and replace with ops overview.
+  var _userSelectedNode = false;
+  var _detailObserver = null;
+
+  function isShowingPlaceholder(){
+    return !!document.getElementById('wh-detail-placeholder');
+  }
+
+  function startDetailWatcher(){
+    var detail = document.getElementById('flow-detail');
+    if(!detail || _detailObserver) return;
+    _detailObserver = new MutationObserver(function(){
+      // If user selected a node, stop — flow module content takes over
+      if(_userSelectedNode) return;
+      // If ops overview is already showing, re-inject silently (no visible blink)
+      // by replacing innerHTML in-place rather than clearing the whole detail
+      if(isShowingPlaceholder()){
+        clearTimeout(window._whDetailTimer);
+        window._whDetailTimer = setTimeout(function(){
+          if(!_userSelectedNode && isShowingPlaceholder()) syncOpsToDetail();
+        }, 0); // 0ms — inject synchronously on next tick
+      }
+    });
+    _detailObserver.observe(detail, {childList:true});
+  }
+
+  // Detect user node clicks — any journey node click = user chose a node
+  document.addEventListener('click', function(e){
+    var node = e.target.closest('[data-journey-node],[data-flow-node]');
+    if(node) _userSelectedNode = true;
+  });
+
+  // Reset when navigating back to Week Hub
+  window.addEventListener('hashchange', function(){
+    if(location.hash === '#flow'){
+      _userSelectedNode = false;
+      _detailObserver = null; // restart fresh
+      setTimeout(function(){
+        startDetailWatcher();
+        if(isShowingPlaceholder()) syncOpsToDetail();
+      }, 200);
+    }
+  });
+
+  // On state:ready — only start watcher, don't re-inject if already showing
+  window.addEventListener('state:ready', function(){
+    startDetailWatcher();
+    // Only inject if placeholder is currently showing (not if ops overview is already there)
+    if(!_userSelectedNode && isShowingPlaceholder()){
+      syncOpsToDetail();
+    }
+  });
+})();
+
+// ── Week Hub: Inject nav buttons into Receiving and VAS detail tiles ──
+(function whNavButtons(){
+  function injectButtons(){
+    // Receiving detail tile — add "Open Receiving page →" button
+    var recBtn = document.getElementById('wh-nav-to-receiving');
+    if(!recBtn){
+      var detail = document.getElementById('flow-detail');
+      if(detail){
+        var titleEl = detail.querySelector('.text-lg.font-semibold');
+        if(titleEl && (titleEl.textContent||'').toLowerCase().includes('receiving')){
+          var wrap = document.createElement('div');
+          wrap.style.cssText = 'margin-top:12px;padding-top:12px;border-top:0.5px solid rgba(0,0,0,0.08);display:flex;gap:8px;';
+          wrap.innerHTML = '<button id="wh-nav-to-receiving" style="font-size:11px;font-weight:500;background:#1C1C1E;color:#fff;border:none;border-radius:7px;padding:7px 14px;cursor:pointer;display:flex;align-items:center;gap:5px;">Open Receiving page <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>';
+          detail.appendChild(wrap);
+          document.getElementById('wh-nav-to-receiving').addEventListener('click', function(){
+            if(typeof window.show === 'function') window.show('#receiving');
+            else location.hash = '#receiving';
+          });
+        }
+        // VAS Processing detail tile — add "Open VAS Processing page →" button
+        if(titleEl && (titleEl.textContent||'').toLowerCase().includes('vas')){
+          var wrap2 = document.createElement('div');
+          wrap2.style.cssText = 'margin-top:12px;padding-top:12px;border-top:0.5px solid rgba(0,0,0,0.08);display:flex;gap:8px;';
+          wrap2.innerHTML = '<button id="wh-nav-to-vas" style="font-size:11px;font-weight:500;background:#1C1C1E;color:#fff;border:none;border-radius:7px;padding:7px 14px;cursor:pointer;display:flex;align-items:center;gap:5px;">Open VAS Processing page <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>';
+          detail.appendChild(wrap2);
+          document.getElementById('wh-nav-to-vas').addEventListener('click', function(){
+            if(typeof window.show === 'function') window.show('#intake');
+            else location.hash = '#intake';
+          });
+        }
+      }
+    }
+  }
+  // Watch flow-detail for changes and inject buttons
+  document.addEventListener('DOMContentLoaded', function(){
+    var det = document.getElementById('flow-detail');
+    if(det){
+      var obs = new MutationObserver(function(){ setTimeout(injectButtons, 50); });
+      obs.observe(det, {childList:true, subtree:false});
+    }
+    // Also try immediately
+    setTimeout(injectButtons, 500);
+  });
+  window.addEventListener('state:ready', function(){ setTimeout(injectButtons, 400); });
+})();
+
+// ── Week Hub: sync capsules and week display from hidden ops elements ──
+(function whSync(){
+  function syncWhHeader(){
+    var src=document.getElementById('week-start');
+    var dst=document.getElementById('wh-week-display');
+    if(src&&dst&&src.value&&dst.value!==src.value) dst.value=src.value;
+    var srcC=document.getElementById('capsules');
+    var dstC=document.getElementById('wh-capsules-display');
+    if(srcC&&dstC&&srcC.innerHTML!==dstC.innerHTML) dstC.innerHTML=srcC.innerHTML;
+  }
+  function setupObserver(){
+    var capEl=document.getElementById('capsules');
+    if(capEl){
+      var obs=new MutationObserver(syncWhHeader);
+      obs.observe(capEl,{childList:true,subtree:true,characterData:true,attributes:true});
+    }
+    var wkIn=document.getElementById('week-start');
+    if(wkIn) wkIn.addEventListener('change',function(){
+      var dst=document.getElementById('wh-week-display');
+      if(dst) dst.value=this.value;
+    });
+    var wkDp=document.getElementById('wh-week-display');
+    if(wkDp) wkDp.addEventListener('change',function(){
+      var wkIn=document.getElementById('week-start');
+      if(wkIn) wkIn.value=this.value;
+      if(typeof window.setWeek==='function') window.setWeek(this.value);
+    });
+  }
+  window.addEventListener('state:ready',syncWhHeader);
+
+  // Wire clicks on mirrored capsules in wh-capsules-display
+  document.addEventListener('click', function(e){
+    var cap = e.target.closest('#wh-capsules-display .wkcap');
+    if(!cap) return;
+    var weekId = cap.getAttribute('data-week-id');
+    if(!weekId) return;
+    // Update week-start input and call setWeek
+    var wkIn = document.getElementById('week-start');
+    if(wkIn) wkIn.value = weekId;
+    if(typeof window.setWeek === 'function') window.setWeek(weekId);
+  });
+
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',setupObserver);
+  else setupObserver();
+})();
+</script>
+<script src="/public/receiving_live_additive.js?v=27" defer></script>
+<script src="/public/flow_live_additive.js?v=117" defer></script>
+<script src="/public/intake.js?v=1" defer></script>
+<script src="/public/map_live_additive.js?v=1" defer></script>
+  <script src="/public/finance_additive.js?v=11" defer></script>
+
+
+<!-- ── Week Hub Split-Flap Insight Flipper ── -->
+<script>
+(function(){
+  'use strict';
+
+  // ── State ──
+  var _flipperInsights = [];
+  var _flipperIdx = 0;
+  var _flipperTimer = null;
+  var _flipperLoading = false;
+  var _flipperWeek = null;
+
+  // Icons per category (inline SVG strings, 16x16)
+  var ICONS = {
+    warning: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#F5BD25" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+    check:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#639922" stroke-width="2" stroke-linecap="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
+    clock:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6E6E73" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+    truck:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#990033" stroke-width="2" stroke-linecap="round"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>',
+    box:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6E6E73" stroke-width="2" stroke-linecap="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>',
+    hold:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#E24B4A" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>',
+  };
+
+  // ── Render a single insight into the flipper with flip animation ──
+  function _showInsight(idx) {
+    var textEl = document.getElementById('wh-flipper-text');
+    var iconEl = document.getElementById('wh-flipper-icon');
+    if (!textEl || !iconEl) return;
+    var ins = _flipperInsights[idx];
+    if (!ins) return;
+
+    // Flip out current
+    textEl.classList.remove('wh-flip-in');
+    textEl.classList.add('wh-flip-out');
+
+    setTimeout(function() {
+      // Swap content
+      iconEl.innerHTML = ICONS[ins.icon] || ICONS.clock;
+      textEl.textContent = ins.text;
+      textEl.title = 'Ask Pulse: ' + ins.pulse_question;
+      textEl.onclick = function() { _fireIntoPulse(ins.pulse_question); };
+
+      // Flip in
+      textEl.classList.remove('wh-flip-out');
+      textEl.classList.add('wh-flip-in');
+    }, 280);
+  }
+
+  // ── Auto-rotate timer ──
+  function _startRotation() {
+    if (_flipperTimer) clearInterval(_flipperTimer);
+    if (_flipperInsights.length < 2) return;
+    _flipperTimer = setInterval(function() {
+      _flipperIdx = (_flipperIdx + 1) % _flipperInsights.length;
+      _showInsight(_flipperIdx);
+    }, 4000);
+  }
+
+  // ── Fire question into PULSE chat ──
+  function _fireIntoPulse(question) {
+    var input = document.getElementById('pulse-input-display');
+    if (input) { input.value = question; }
+    if (typeof togglePulse === 'function') togglePulse(true);
+    if (typeof pulseSend === 'function') pulseSend();
+  }
+
+  // ── Show loading shimmer while waiting for Claude ──
+  function _showLoading() {
+    var textEl = document.getElementById('wh-flipper-text');
+    var iconEl = document.getElementById('wh-flipper-icon');
+    if (!textEl || !iconEl) return;
+    iconEl.innerHTML = ICONS.clock;
+    textEl.textContent = 'Loading week insights…';
+    textEl.style.color = '#AEAEB2';
+    textEl.onclick = null;
+  }
+
+  // ── Fallback computed insights if Claude call fails ──
+  function _computeFallback(ws) {
+    var ins = [];
+    var plan = Array.isArray(window.state && window.state.plan) ? window.state.plan : [];
+    var recs = Array.isArray(window.state && window.state.records) ? window.state.records : [];
+    var receiving = Array.isArray(window.state && window.state.receiving) ? window.state.receiving : [];
+
+    var planned = plan.reduce(function(s,p){ return s + (Number(p.target_qty)||0); }, 0);
+    var applied = recs.reduce(function(s,r){ return s + (Number(r.units||r.total_units)||0); }, 0);
+    var pct = planned > 0 ? Math.round(applied/planned*100) : 0;
+    var poPlanned = new Set(plan.map(function(p){ return String(p.po_number||'').trim(); }).filter(Boolean)).size;
+    var poReceived = new Set(receiving.map(function(r){ return String(r.po_number||'').trim(); }).filter(Boolean)).size;
+    var remaining = Math.max(0, planned - applied);
+
+    if (planned > 0) ins.push({ icon: pct >= 80 ? 'check' : pct >= 50 ? 'clock' : 'warning', text: pct + '% complete · ' + applied.toLocaleString() + ' of ' + planned.toLocaleString() + ' units applied', pulse_question: 'What is the current completion status for week ' + ws + '?' });
+    if (poPlanned > 0) ins.push({ icon: poReceived >= poPlanned ? 'check' : 'warning', text: poReceived + ' of ' + poPlanned + ' POs received this week', pulse_question: 'Which POs have not been received yet for week ' + ws + '?' });
+    if (remaining > 0) ins.push({ icon: 'clock', text: remaining.toLocaleString() + ' units remaining · ' + Math.round(remaining/Math.max(1,7)) + '/day needed to finish', pulse_question: 'Are we on pace to complete the plan for week ' + ws + '?' });
+
+    // Transit from __FLOW_INTL_CTX__ if available
+    var ctx = window.__FLOW_INTL_CTX__;
+    if (ctx && Array.isArray(ctx.lanes)) {
+      var holds = ctx.lanes.filter(function(l){ return l.manual && l.manual.customs_hold; }).length;
+      var departed = ctx.lanes.filter(function(l){ return l.actuals && l.actuals.departedAt; }).length;
+      if (holds > 0) ins.push({ icon: 'hold', text: holds + ' lane' + (holds>1?'s':'') + ' on customs hold', pulse_question: 'Which lanes have a customs hold for week ' + ws + '?' });
+      else if (departed > 0) ins.push({ icon: 'truck', text: departed + ' of ' + ctx.lanes.length + ' lanes departed · transit in progress', pulse_question: 'What is the transit status for week ' + ws + '?' });
+    }
+
+    return ins.length ? ins : [{ icon: 'clock', text: 'Week ' + ws + ' · loading operational data…', pulse_question: 'Give me a summary of week ' + ws + ' operations.' }];
+  }
+
+  // ── Main: fetch insights from /pulse/chat ──
+  window.refreshFlipperInsights = async function(ws) {
+    if (_flipperLoading) return;
+    if (_flipperWeek === ws && _flipperInsights.length) return; // already loaded for this week
+    _flipperLoading = true;
+    _flipperWeek = ws;
+
+    if (_flipperTimer) { clearInterval(_flipperTimer); _flipperTimer = null; }
+    _showLoading();
+
+    // Ensure pulse context is loaded first (it's cached after first call)
+    try { if (typeof pulseLoadContext === 'function') await pulseLoadContext(); } catch(_) {}
+
+    try {
+      var apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
+      var token = null;
+      if (window.Clerk?.session) { try { token = await window.Clerk.session.getToken(); } catch(_) {} }
+
+      var facility = ((window.state?.plan)||[]).map(function(p){ return String(p.facility_name||p.facility||'').trim(); }).find(Boolean) || String(window.state?.facility||'').trim() || '';
+
+      var prompt = 'Generate exactly 5 short operational insight lines for the Week Hub header display for week ' + ws + '. '
+        + 'Cover VAS processing, Receiving, Transit & Clearing, Last Mile, and one overall risk or highlight. '
+        + 'Each insight must be under 12 words. Be specific — use real numbers from the data. '
+        + 'Return ONLY a JSON array of 5 objects, no markdown, no explanation. '
+        + 'Each object must have exactly these fields: '
+        + '"text" (the short insight string, under 12 words), '
+        + '"icon" (one of: warning, check, clock, truck, box, hold), '
+        + '"pulse_question" (a full natural question a user would ask about this insight, under 20 words). '
+        + 'Example: [{"text":"74% VAS complete · 1,161 units remaining","icon":"clock","pulse_question":"What is the current VAS completion status and which POs are behind?"}]';
+
+      var resp = await fetch(apiBase + '/pulse/chat', {
+        method: 'POST',
+        headers: Object.assign({'Content-Type':'application/json'}, token ? {'Authorization':'Bearer '+token} : {}),
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: prompt }],
+          pulseContext: window._pulseSessionContext || null,
+          currentWeek: { facility: facility, week_start: ws },
+        })
+      });
+
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      var data = await resp.json();
+      var raw = data.reply || '';
+      var clean = raw.replace(/^```json\s*/,'').replace(/```\s*$/,'').trim();
+      var parsed = JSON.parse(clean);
+
+      if (!Array.isArray(parsed) || !parsed.length) throw new Error('empty array');
+
+      _flipperInsights = parsed;
+      _flipperIdx = 0;
+
+      // Reset text color
+      var textEl = document.getElementById('wh-flipper-text');
+      if (textEl) textEl.style.color = '';
+
+      _showInsight(0);
+      _startRotation();
+      console.log('[Flipper] loaded', _flipperInsights.length, 'insights for week', ws);
+
+    } catch(e) {
+      console.warn('[Flipper] Claude call failed, using fallback:', e.message);
+      _flipperInsights = _computeFallback(ws);
+      _flipperIdx = 0;
+      var textEl = document.getElementById('wh-flipper-text');
+      if (textEl) textEl.style.color = '';
+      _showInsight(0);
+      _startRotation();
+    } finally {
+      _flipperLoading = false;
+    }
+  };
+
+})();
+</script>
+
+<!-- Pulse Bar -->
+<div class="pulse-panel" id="pulse-panel">
+  <div class="pulse-chat" id="pulse-chat"></div>
+  <div class="pulse-suggestions" id="pulse-suggestions">
+    <button class="pulse-sug" onclick="pulseSuggest(this)">What's at risk this week?</button>
+    <button class="pulse-sug" onclick="pulseSuggest(this)">Which suppliers are behind?</button>
+    <button class="pulse-sug" onclick="pulseSuggest(this)">Show week vs last week</button>
+  </div>
+</div>
+<div class="pulse-bar" id="pulse-bar">
+  <svg viewBox="0 0 28 28" width="28" height="28" overflow="visible" style="flex-shrink:0;">
+    <circle class="pulse-ring pulse-ring-1" cx="14" cy="14" r="4"/>
+    <circle class="pulse-ring pulse-ring-2" cx="14" cy="14" r="4"/>
+    <circle class="pulse-ring pulse-ring-3" cx="14" cy="14" r="4"/>
+    <circle class="pulse-orb" cx="14" cy="14" r="3" fill="#990033"/>
+  </svg>
+  <span class="pulse-name">Pulse</span>
+  <div class="pulse-divider"></div>
+  <input type="text" class="pulse-input-wrap" id="pulse-input-display" placeholder="Ask anything about this week's ops…" onclick="togglePulse(true)" style="outline:none;border:0.5px solid rgba(0,0,0,0.08);" onfocus="this.style.borderColor='rgba(153,0,51,0.35)'" onblur="this.style.borderColor='rgba(0,0,0,0.08)'"/>
+  <button id="pulse-minimize" onclick="togglePulse(false)" aria-label="Minimize Pulse" style="display:none;width:32px;height:32px;border-radius:8px;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);cursor:pointer;flex-shrink:0;align-items:center;justify-content:center;">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 5l5 5 5-5" stroke="#6E6E73" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+  <button class="pulse-send" id="pulse-open-btn" onclick="pulseSendOrOpen()" aria-label="Send or Open Pulse">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10M8 3l4 4-4 4" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+</div>
+
+<script>
+// ── Pulse panel toggle ──
+function togglePulse(open){
+  const panel=document.getElementById('pulse-panel');
+  const minBtn=document.getElementById('pulse-minimize');
+  if(!panel) return;
+  if(open){
+    panel.classList.add('open');
+    if(minBtn) minBtn.style.display='flex';
+    // Pre-load context in background
+    if(typeof pulseLoadContext==='function') pulseLoadContext();
+    // Focus input
+    setTimeout(function(){ var inp=document.getElementById('pulse-input-display'); if(inp) inp.focus(); },50);
+  } else {
+    panel.classList.remove('open');
+    if(minBtn) minBtn.style.display='none';
+  }
+}
+
+function pulseSendOrOpen(){
+  const panel=document.getElementById('pulse-panel');
+  const inp=document.getElementById('pulse-input-display');
+  if(panel && panel.classList.contains('open') && inp && inp.value.trim()){
+    pulseSend();
+  } else {
+    togglePulse(true);
+  }
+}
+
+// Escape key to minimize
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'){
+    const panel=document.getElementById('pulse-panel');
+    if(panel && panel.classList.contains('open')) togglePulse(false);
+  }
+});
+
+// ── Pulse: add message to chat ──
+function pulseAddMessage(text, role){
+  const chat = document.getElementById('pulse-chat');
+  if(!chat) return;
+  const from = role==='user' ? 'You' : 'Pulse';
+  const div = document.createElement('div');
+  div.className = 'pulse-msg ' + role;
+  div.innerHTML = '<div class="pulse-msg-from">'+from+'</div>'+text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+// ── Pulse: loading indicator ──
+function pulseShowLoading(){
+  const chat = document.getElementById('pulse-chat');
+  if(!chat) return null;
+  const div = document.createElement('div');
+  div.className = 'pulse-msg ai';
+  div.id = 'pulse-loading-msg';
+  div.innerHTML = '<div class="pulse-msg-from">Pulse</div><span style="display:flex;gap:3px;align-items:center;"><span style="width:5px;height:5px;border-radius:50%;background:#AEAEB2;animation:pulseDot 1.2s infinite 0s"></span><span style="width:5px;height:5px;border-radius:50%;background:#AEAEB2;animation:pulseDot 1.2s infinite .2s"></span><span style="width:5px;height:5px;border-radius:50%;background:#AEAEB2;animation:pulseDot 1.2s infinite .4s"></span></span>';
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+// ── Pulse: conversation history + session context ──
+if(!window._pulseHistory) window._pulseHistory = [];
+if(!window._pulseSessionContext) window._pulseSessionContext = null;
+if(!window._pulseContextLoading) window._pulseContextLoading = false;
+
+// Fetch full 12-week context once per session
+async function pulseLoadContext() {
+  if (window._pulseSessionContext || window._pulseContextLoading) return;
+  window._pulseContextLoading = true;
+  try {
+    const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
+    let token = null;
+    if(window.Clerk?.session){ try{ token = await window.Clerk.session.getToken(); }catch(_){} }
+    const facility = ((window.state?.plan)||[]).map(p=>String(p.facility_name||p.facility||'').trim()).find(Boolean)
+      || String(window.state?.facility||'').trim() || '';
+    const url = apiBase + '/pulse/context' + (facility ? '?facility='+encodeURIComponent(facility) : '');
+    const resp = await fetch(url, {
+      headers: Object.assign({'Content-Type':'application/json'}, token?{'Authorization':'Bearer '+token}:{})
+    });
+    if (resp.ok) {
+      window._pulseSessionContext = await resp.json();
+      console.log('[Pulse] context loaded:', window._pulseSessionContext.facility, window._pulseSessionContext.weeks?.length, 'weeks');
+    }
+  } catch(e) {
+    console.warn('[Pulse] context load failed:', e);
+  } finally {
+    window._pulseContextLoading = false;
+  }
+}
+
+// ── Pulse: send message ──
+async function pulseSend(){
+  const input = document.getElementById('pulse-input-display');
+  if(!input) return;
+  const text = input.value.trim();
+  if(!text) return;
+  input.value = '';
+  togglePulse(true);
+  pulseAddMessage(text, 'user');
+  const loading = pulseShowLoading();
+
+  // Add to history (keep last 20 turns)
+  window._pulseHistory.push({role:'user', content: text});
+  if(window._pulseHistory.length > 20) window._pulseHistory = window._pulseHistory.slice(-20);
+
+  // Ensure 12-week context is loaded (cached after first call)
+  await pulseLoadContext();
+
+  // Current week snapshot
+  const currentWeek = {
+    facility: ((window.state?.plan)||[]).map(p=>String(p.facility_name||p.facility||'').trim()).find(Boolean) || String(window.state?.facility||'').trim() || '',
+    week_start: window.state?.weekStart || '',
+  };
+
+  try {
+    const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
+    let token = null;
+    if(window.Clerk?.session){ try{ token = await window.Clerk.session.getToken(); }catch(_){} }
+
+    const resp = await fetch(apiBase + '/pulse/chat', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', ...(token?{'Authorization':'Bearer '+token}:{})},
+      body: JSON.stringify({
+        messages: window._pulseHistory,
+        pulseContext: window._pulseSessionContext || null,
+        currentWeek,
+      })
+    });
+
+    if(loading) loading.remove();
+
+    if(!resp.ok){
+      const err = await resp.text();
+      pulseAddMessage('Sorry, I ran into an issue connecting. Please try again.', 'ai');
+      console.error('[Pulse] API error:', err);
+      return;
+    }
+
+    const data = await resp.json();
+    const reply = data.reply || data.content?.find(b=>b.type==='text')?.text || 'No response.';
+    pulseAddMessage(reply, 'ai');
+    // Add AI reply to history
+    window._pulseHistory.push({role:'assistant', content: reply});
+
+  } catch(e){
+    if(loading) loading.remove();
+    pulseAddMessage('Sorry, something went wrong. Please try again.', 'ai');
+    console.error('[Pulse] error:', e);
+  }
+}
+
+// ── Pulse suggestion click ──
+function pulseSuggest(btn){
+  const text = btn.textContent.trim();
+  const input = document.getElementById('pulse-input-display');
+  if(input){ input.value = text; }
+  togglePulse(true);
+  pulseSend();
+}
+
+// ── Pulse: wire Enter key and send button ──
+document.addEventListener('DOMContentLoaded', function(){
+  const input = document.getElementById('pulse-input-display');
+  if(input){
+    input.addEventListener('keydown', function(e){
+      if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); pulseSend(); }
+    });
+    input.addEventListener('focus', function(){ togglePulse(true); });
+  }
+  const sendBtn = document.querySelector('.pulse-send');
+  if(sendBtn) sendBtn.addEventListener('click', pulseSend);
+});
+
+// Pulse dot animation style
+(function(){
+  const s=document.createElement('style');
+  s.textContent='@keyframes pulseDot{0%,80%,100%{transform:scale(0.6);opacity:.4}40%{transform:scale(1);opacity:1}}';
+  document.head.appendChild(s);
+})();
+
+// ── Nav routing: add week-hub and reports ──
+(function patchRouting(){
+  const origShow = window.show;
+
+  // Helper: hide all pages
+  function _pnHideAll(){
+    // page-flow lives inside page-dashboard — hiding page-dashboard hides page-flow too
+    ['page-dashboard','page-intake','page-exec','page-receiving','page-reports','page-map','page-finance'].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el){el.classList.add('hidden');el.style.display='none';}
+    });
+  }
+
+  // Helper: silently set hash without triggering our own hashchange listener
+  function _pnSetHash(h){
+    const clean = h.startsWith('#') ? h : '#'+h;
+    if(location.hash !== clean){
+      history.replaceState(null,'',clean);
+    }
+  }
+
+  window.show = function(hash){
+    let h = (hash||'#').trim();
+    if(h==='#'||!h) h='#week-hub';
+    if(h.startsWith('#/')) h='#'+h.slice(2);
+
+    // ── Week Hub ──
+    if(h==='#week-hub'||h==='#dashboard'||h==='#operations'||h==='#ops'||h==='#flow'){
+      _pnHideAll();
+      // Set hash to #flow — flow_live_additive.js checks location.hash === '#flow'
+      // to decide whether to render. page-flow lives INSIDE page-dashboard so
+      // showing page-dashboard automatically shows the flow module content.
+      history.replaceState(null,'','#flow');
+      const dash=document.getElementById('page-dashboard');
+      if(dash){dash.classList.remove('hidden');dash.style.display='block';}
+      // Also ensure page-flow inside is visible
+      const pf=document.getElementById('page-flow');
+      if(pf){pf.style.display='block';}
+      // Flow module listens to hashchange — we set hash to #flow above, no extra dispatch needed
+      if(typeof window.renderDashboard==='function'){try{window.renderDashboard();}catch(e){}}
+      syncPinpointNav('#week-hub');
+      // Sync wh-week-display with current week
+      var wkIn=document.getElementById('week-start');
+      var wkDp=document.getElementById('wh-week-display');
+      if(wkIn&&wkDp&&wkIn.value) wkDp.value=wkIn.value;
+      return;
+    }
+
+    // ── Reports ──
+    if(h==='#reports'){
+      _pnHideAll();
+      _pnSetHash('#reports');
+      // Sync reports week to current Week Hub selection on every visit
+      window._reportsWeek = state.weekStart || window._reportsWeek || '';
+      let rp=document.getElementById('page-reports');
+      if(!rp){
+        rp=document.createElement('section');
+        rp.id='page-reports';
+        const main=document.querySelector('main.vo-wrap')||document.querySelector('main');
+        if(main) main.appendChild(rp);
+        renderReportsPage(rp);
+      } else {
+        // Re-render capsules with updated week
+        renderReportsPage(rp);
+      }
+      rp.classList.remove('hidden');
+      rp.style.display='block';
+      syncPinpointNav('#reports');
+      return;
+    }
+
+    // ── Live Map ──
+    if(h==='#map'){
+      _pnHideAll();
+      _pnSetHash('#map');
+      if(typeof window.showMapPage==='function'){
+        window.showMapPage();
+      } else {
+        var _mapInterval = setInterval(function(){
+          if(typeof window.showMapPage==='function'){
+            clearInterval(_mapInterval);
+            window.showMapPage();
+          }
+        }, 50);
+        setTimeout(function(){ clearInterval(_mapInterval); }, 3000);
+      }
+      syncPinpointNav('#map');
+      return;
+    }
+
+    // ── Executive ──
+    if(h==='#exec'){
+      _pnHideAll();
+      // Set hash so exec module location.hash checks pass
+      history.replaceState(null,'','#exec');
+      // Show the exec container
+      let ep=document.getElementById('page-exec');
+      if(!ep){
+        ep=document.createElement('section');
+        ep.id='page-exec';
+        const main=document.querySelector('main.vo-wrap')||document.querySelector('main');
+        if(main) main.appendChild(ep);
+      }
+      ep.classList.remove('hidden');
+      ep.style.display='block';
+      // Trigger exec module directly — do NOT dispatch hashchange (causes infinite loop)
+      // exec_live_additive exposes _execTryRender via state:ready listener
+      setTimeout(function(){
+        window.dispatchEvent(new Event('state:ready'));
+      }, 50);
+      syncPinpointNav('#exec');
+      return;
+    }
+
+    // ── Receiving Ops ──
+    if(h==='#receiving'){
+      _pnHideAll();
+      _pnSetHash('#receiving');
+      if(typeof window.showReceivingPage==='function'){
+        window.showReceivingPage();
+      } else {
+        // Module not loaded yet — wait for it
+        var _recInterval = setInterval(function(){
+          if(typeof window.showReceivingPage==='function'){
+            clearInterval(_recInterval);
+            window.showReceivingPage();
+          }
+        }, 50);
+        setTimeout(function(){ clearInterval(_recInterval); }, 3000);
+      }
+      syncPinpointNav('#receiving');
+      return;
+    }
+
+    // ── Intake / VAS Processing ──
+    if(h==='#intake'){
+      _pnHideAll();
+      _pnSetHash('#intake');
+      const ip=document.getElementById('page-intake');
+      if(ip){ip.classList.remove('hidden');ip.style.display='block';}
+      if(window.IntakePage&&typeof window.IntakePage.show==='function'){
+        try{window.IntakePage.show();}catch(e){}
+      } else if(typeof window.renderIntake==='function'){
+        try{window.renderIntake();}catch(e){}
+      }
+      syncPinpointNav('#intake');
+      return;
+    }
+
+    // ── Finance ──
+    if(h==='#finance'){
+      _pnHideAll();
+      _pnSetHash('#finance');
+      if(typeof window.showFinancePage==='function'){
+        window.showFinancePage();
+      }
+      syncPinpointNav('#finance');
+      return;
+    }
+
+    // ── Everything else — delegate to original ──
+    _pnSetHash(h);
+    if(typeof origShow==='function') origShow(h);
+  };
+
+  // Override hashchange to use patched show
+  window.removeEventListener('hashchange', window.__pnHashChange);
+  var _pnShowBusy = false;
+  window.__pnHashChange = function(){
+    if(_pnShowBusy) return; // guard re-entrancy
+    const h = typeof getRouteHash==='function' ? getRouteHash() : location.hash;
+    // Only handle hashes our router owns — let exec/flow/receiving handle their own
+    if(h==='#exec'||h==='#reports'||h==='#week-hub'||h==='#dashboard'||h==='#operations'||h==='#flow'||h==='#receiving'||h==='#intake'){
+      _pnShowBusy=true;
+      try{ window.show(h); }finally{ setTimeout(function(){_pnShowBusy=false;},100); }
+    }
+  };
+  window.addEventListener('hashchange', window.__pnHashChange);
+
+  // Initial route on load
+  document.addEventListener('DOMContentLoaded', function(){
+    const h = (location.hash||'#week-hub');
+    setTimeout(()=>window.show(h||'#week-hub'), 50);
+  });
+})();
+
+// ── Sync new nav active state ──
+function syncPinpointNav(hash){
+  const items = document.querySelectorAll('.pn-nav-item');
+  items.forEach(el=>el.classList.remove('active'));
+  if(hash==='#exec'){ const e=document.getElementById('nav-exec'); if(e) e.classList.add('active'); }
+  if(hash==='#finance'){ const e=document.getElementById('nav-finance'); if(e) e.classList.add('active'); }
+  else if(hash==='#map'){ const m=document.getElementById('nav-map'); if(m) m.classList.add('active'); }
+  else if(hash==='#reports'){ const r=document.getElementById('nav-reports'); if(r) r.classList.add('active'); }
+  else if(hash==='#receiving'){ const rec=document.getElementById('nav-receiving'); if(rec) rec.classList.add('active'); }
+  else if(hash==='#intake'){ const vas=document.getElementById('nav-intake-pn'); if(vas) vas.classList.add('active'); }
+  else { const w=document.getElementById('nav-weekhub'); if(w) w.classList.add('active'); }
+}
+
+// ── Reports page renderer ──
+
+async function downloadConsolidatedReport() {
+  const ws = window._reportsWeek || state.weekStart || '';
+  const we = (() => { try { const d=new Date(ws); d.setDate(d.getDate()+6); return d.toISOString().slice(0,10); } catch{ return ws; } })();
+  if(!ws){ alert('No week selected. Please navigate to Week Hub first.'); return; }
+
+  const btn = document.getElementById('btn-consolidated-download');
+  if(btn){ btn.textContent = 'Preparing...'; btn.disabled = true; }
+
+  try {
+    const wb = XLSX.utils.book_new();
+    const plan = Array.isArray(state.plan) ? state.plan : [];
+
+    // ── Sheet 1: Applied UIDs — same as individual download ──
+    try {
+      const token = window.Clerk?.session ? await window.Clerk.session.getToken() : null;
+      const url = `${apiBase}/export/applied?from=${encodeURIComponent(ws)}&to=${encodeURIComponent(we)}&status=complete`;
+      const res = await fetch(url, { headers: Object.assign({'Content-Type':'application/json'}, token ? {'Authorization':'Bearer '+token} : {}) });
+      if(res.ok){
+        const text = await res.text();
+        const lines = text.trim().split('\n');
+        const headers = (lines[0]||'').split(',').map(c=>c.replace(/^"|"$/g,''));
+        const data = lines.slice(1).map(r => {
+          const cols = r.split(',').map(c=>c.replace(/^"|"$/g,''));
+          const o={}; headers.forEach((h,i)=>o[h]=cols[i]||''); return o;
+        });
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(data, {header:headers}), 'Applied UIDs');
+      }
+    } catch(e){ console.warn('Applied UIDs sheet failed', e); }
+
+    // ── Sheet 2: PO × SKU Summary — same API as individual download ──
+    try {
+      const p = new URLSearchParams({ from: ws, to: we, status: 'complete' });
+      const resp = await api(`/summary/po_sku?${p.toString()}`).catch(()=>({}));
+      const rows = buildDiscrepancyPOSKU(plan, resp?.rows || []);
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'PO x SKU Summary');
+    } catch(e){ console.warn('PO×SKU sheet failed', e); }
+
+    // ── Sheet 3: SKU Summary — same as individual download ──
+    try {
+      const p = new URLSearchParams({ from: ws, to: we, status: 'complete' });
+      const resp = await api(`/summary/po_sku?${p.toString()}`).catch(()=>({}));
+      // joinPOProgress expects Map<po, number> — aggregate units by PO
+      const byPO = new Map();
+      for(const r of resp?.rows||[]){
+        const po = String(r.po||'').trim();
+        if(!po) continue;
+        byPO.set(po, (byPO.get(po)||0) + (Number(r.units)||0));
+      }
+      const poRows = joinPOProgress(plan, byPO);
+      const rows = buildDiscrepancyPO(poRows, plan);
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'SKU Summary');
+    } catch(e){ console.warn('SKU sheet failed', e); }
+
+    // ── Sheet 4: Mobile Bins — unique bins from records (all scanned bins) ──
+    try {
+      // Fetch raw records to get all unique mobile_bin values with po_number
+      const from = `${ws}T00:00:00.000Z`;
+      const weD = new Date(ws); weD.setDate(weD.getDate()+6);
+      const to = `${weD.toISOString().slice(0,10)}T23:59:59.999Z`;
+      let rawRecs = [];
+      try {
+        const r = await api(`/records?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&status=complete&limit=65000`);
+        rawRecs = Array.isArray(r) ? r : (r.records || r.data || r.rows || []);
+      } catch(e){ console.warn('records fetch failed', e); }
+
+      // Also get bin manifest for weight data
+      let binManifest = Array.isArray(state.bins) ? state.bins : [];
+      if(!binManifest.length){
+        try{ const r = await api(`/bins/weeks/${encodeURIComponent(ws)}`); binManifest = Array.isArray(r)?r:(r.bins||[]); }catch{}
+      }
+      const weightByBin = new Map(binManifest.map(b=>[String(b.mobile_bin||'').trim(), Number(b.weight_kg||0)]));
+      const unitsByBin = new Map(binManifest.map(b=>[String(b.mobile_bin||'').trim(), Number(b.total_units||0)]));
+
+      const poToSup = new Map(plan.map(p=>[String(p.po_number||'').trim(), String(p.supplier_name||'').trim()]));
+
+      // Deduplicate by mobile_bin — one row per unique bin
+      const seen = new Map(); // mobile_bin -> {po, supplier}
+      for(const r of rawRecs){
+        const mb = String(r.mobile_bin||r.bin||'').trim();
+        const po = String(r.po_number||r.po||'').trim();
+        if(!mb) continue;
+        if(!seen.has(mb)) seen.set(mb, { po, supplier: poToSup.get(po)||'' });
+      }
+
+      const binRows = Array.from(seen.entries()).map(([mb, meta]) => ({
+        Supplier: meta.supplier,
+        PO: meta.po,
+        Mobile_Bin: mb,
+        Weight_kg: weightByBin.get(mb) || 0,
+        Units: unitsByBin.get(mb) || 0
+      }));
+      binRows.sort((a,b)=>(a.Supplier||'').localeCompare(b.Supplier||'')||(a.PO||'').localeCompare(b.PO||''));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(binRows), 'Mobile Bins');
+    } catch(e){ console.warn('Mobile bins sheet failed', e); }
+
+    // ── Sheet 5: Shipment Summary — same API as individual download ──
+    try {
+      const resp = await api(`/summary/shipment_summary?weekStart=${encodeURIComponent(ws)}`).catch(()=>({}));
+      const rows = (resp && resp.rows) ? resp.rows : [];
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Shipment Summary');
+    } catch(e){ console.warn('Shipment summary sheet failed', e); }
+
+    // ── Sheet 6: Shipment Details — same API as individual download ──
+    try {
+      const resp = await api(`/summary/shipment_detail?weekStart=${encodeURIComponent(ws)}`).catch(()=>({}));
+      const rows = (resp && resp.rows) ? resp.rows : [];
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Shipment Details');
+    } catch(e){ console.warn('Shipment details sheet failed', e); }
+
+    // ── Write file ──
+    XLSX.writeFile(wb, `Pinpoint_Report_${ws}.xlsx`);
+
+  } catch(err){
+    console.error('Consolidated download failed', err);
+    alert('Consolidated download failed: ' + (err.message || err));
+  } finally {
+    if(btn){ btn.textContent = 'Download All (Excel)'; btn.disabled = false; }
+  }
+}
+
+
+// ── Shared: fetch and merge flow_week data (lanes + containers) for a given week ──
+async function _fetchFlowData(ws) {
+  const ctx = window.__FLOW_INTL_CTX__;
+  if (ctx && ctx.ws === ws && Array.isArray(ctx.lanes)) {
+    return { lanes: ctx.lanes, containers: Array.isArray(ctx.weekContainers) ? ctx.weekContainers : [] };
+  }
+  // Fallback: fetch from backend
+  const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
+  let token = null;
+  if(window.Clerk?.session){ try{ token = await window.Clerk.session.getToken(); }catch(_){} }
+  const resp = await fetch(`${apiBase}/flow/week/${encodeURIComponent(ws)}/all`, {
+    headers: Object.assign({}, token ? {'Authorization':'Bearer '+token} : {})
+  });
+  if(!resp.ok) throw new Error('flow/week fetch failed: HTTP ' + resp.status);
+  const d = await resp.json();
+  const flowData = {};
+  for (const facVal of Object.values(d.facilities || {})) {
+    const fd = (facVal && typeof facVal.data === 'object') ? facVal.data : {};
+    for (const [k, v] of Object.entries(fd)) {
+      if (k === 'intl_lanes' && v && typeof v === 'object' && !Array.isArray(v)) {
+        flowData.intl_lanes = Object.assign({}, flowData.intl_lanes || {}, v);
+      } else { flowData[k] = v; }
+    }
+  }
+  const intl = (flowData.intl_lanes && typeof flowData.intl_lanes === 'object') ? flowData.intl_lanes : {};
+  const lanes = Object.entries(intl).map(([lk, manual]) => {
+    const parts = lk.split('||');
+    return { key: lk, supplier: parts[0]||'', zendesk: parts[1]||'', freight: parts[2]||'', manual: manual||{} };
+  });
+  const wc = flowData.intl_weekcontainers;
+  const containers = Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []);
+  return { lanes, containers };
+}
+
+// ── Shared: fetch applied units per PO×SKU from backend ──
+async function _fetchAppliedPOSKU(ws) {
+  const we = (() => { try { const d=new Date(ws); d.setDate(d.getDate()+6); return d.toISOString().slice(0,10); } catch{ return ws; } })();
+  const p = new URLSearchParams({ from: ws, to: we, status: 'complete' });
+  const resp = await api(`/summary/po_sku?${p.toString()}`).catch(()=>({ rows: [] }));
+  // returns { rows: [{po, sku, units}] }
+  return Array.isArray(resp?.rows) ? resp.rows : [];
+}
+
+// ── Shared: fetch bins enriched with PO from backend ──
+async function _fetchBinsForWeek(ws) {
+  try {
+    const r = await api(`/bins/weeks/${encodeURIComponent(ws)}`);
+    return Array.isArray(r) ? r : (r?.bins || []);
+  } catch(e) { console.warn('[download] bins fetch failed', e); return []; }
+}
+
+async function downloadPOContainer() {
+  const ws = window._reportsWeek || state.weekStart || '';
+  if(!ws){ alert('No week selected.'); return; }
+  try {
+    // If reporting week differs from loaded week, fetch the correct plan
+    let plan;
+    if(ws === state.weekStart && Array.isArray(state.plan) && state.plan.length){
+      plan = state.plan;
+    } else {
+      try {
+        const planResp = await api(`/plan/weeks/${encodeURIComponent(ws)}`);
+        plan = Array.isArray(planResp) ? planResp : [];
+      } catch(e){ plan = []; console.warn('[POContainer] plan fetch failed', e); }
+    }
+
+    // Fetch all three data sources in parallel
+    const [{ lanes, containers }, appliedRows, bins] = await Promise.all([
+      _fetchFlowData(ws),
+      _fetchAppliedPOSKU(ws),
+      _fetchBinsForWeek(ws),
+    ]);
+
+    if(!containers.length && !lanes.length){
+      alert('No container/lane data found for week ' + ws + '. Please ensure containers are configured in Transit & Clearing.');
+      return;
+    }
+
+    // ── Build lookup maps ──
+
+    // PO×SKU → applied units
+    const appliedMap = new Map(); // key: "PO||SKU" → units
+    const appliedByPO = new Map(); // key: "PO" → total units
+    for(const r of appliedRows){
+      const k = `${r.po}||${r.sku}`;
+      appliedMap.set(k, (appliedMap.get(k)||0) + Number(r.units||0));
+      appliedByPO.set(r.po, (appliedByPO.get(r.po)||0) + Number(r.units||0));
+    }
+
+    // PO → bins (Set of mobile_bin values)
+    const binsByPO = new Map();
+    for(const b of bins){
+      const po = String(b.po_number||'').trim();
+      if(!po) continue;
+      if(!binsByPO.has(po)) binsByPO.set(po, new Set());
+      binsByPO.get(po).add(String(b.mobile_bin||'').trim());
+    }
+
+    // Plan: PO → { supplier, zendesk, freight, skus[] }
+    // Also build: zendesk → Set of POs (for container→PO resolution)
+    const planByPO = new Map();
+    const posByZendesk = new Map(); // zendesk → Set of POs
+    for(const p of plan){
+      const po      = String(p.po_number||'').trim();
+      const zendesk = String(p.zendesk_ticket||'').trim();
+      const supplier= String(p.supplier_name||'').trim();
+      const freight = String(p.freight_type||'').trim();
+      const sku     = String(p.sku_code||'').trim();
+      if(!po) continue;
+
+      // Build or update planByPO — allow later rows to fill in missing fields
+      if(!planByPO.has(po)){
+        planByPO.set(po, { supplier, zendesk, freight, skus: new Set() });
+      } else {
+        const entry = planByPO.get(po);
+        if(!entry.zendesk  && zendesk)  entry.zendesk  = zendesk;
+        if(!entry.supplier && supplier) entry.supplier = supplier;
+        if(!entry.freight  && freight)  entry.freight  = freight;
+      }
+      if(sku) planByPO.get(po).skus.add(sku);
+
+      // Build zendesk → POs index
+      if(zendesk){
+        if(!posByZendesk.has(zendesk)) posByZendesk.set(zendesk, new Set());
+        posByZendesk.get(zendesk).add(po);
+      }
+    }
+
+    // Lane key → { supplier, zendesk, freight, manual }
+    const laneByKey = new Map();
+    for(const l of lanes) laneByKey.set(l.key, l);
+
+    // Container → { cid, vessel, size, lane_keys, pos[] }
+    // Also build: zendesk → [container_ids]
+    const contList = containers.map(c => ({
+      cid:      String(c.container_id||c.container||'').trim(),
+      vessel:   String(c.vessel||'').trim(),
+      size:     String(c.size_ft||'').trim() ? String(c.size_ft)+'ft' : '',
+      laneKeys: Array.isArray(c.lane_keys) ? c.lane_keys : [],
+      pos:      String(c.pos||'').split(',').map(p=>p.trim()).filter(Boolean),
+    }));
+
+    const fmtDate = v => { if(!v) return ''; try{ return new Date(v).toISOString().slice(0,10); }catch{ return String(v); } };
+
+    // ── Sheet 1: By PO × SKU ──
+    const sheet1 = [];
+    for(const c of contList){
+      // Resolve POs for this container via lane_keys → zendesk → posByZendesk
+      const containerPOs = new Set();
+
+      // Direct POs listed on container
+      for(const po of c.pos) containerPOs.add(po);
+
+      // POs via lane keys → zendesk → plan index
+      for(const lk of c.laneKeys){
+        const lane = laneByKey.get(lk);
+        if(!lane) continue;
+        // Use zendesk from lane key directly
+        const zd = lane.zendesk || lk.split('||')[1] || '';
+        if(zd){
+          for(const po of (posByZendesk.get(zd) || new Set())) containerPOs.add(po);
+        }
+      }
+
+      if(!containerPOs.size && !c.laneKeys.length){
+        sheet1.push({
+          'Container / AWB': c.cid, 'Vessel': c.vessel||'—', 'Size': c.size||'—',
+          'Zendesk': '', 'Supplier': '', 'Freight': '',
+          'PO': '', 'SKU': '', 'Mobile Bins': '', 'Applied Units': 0
+        });
+        continue;
+      }
+
+      for(const po of containerPOs){
+        const meta = planByPO.get(po) || { supplier:'', zendesk:'', freight:'', skus: new Set() };
+        const skus = meta.skus.size ? Array.from(meta.skus) : [''];
+        const poBins = Array.from(binsByPO.get(po) || new Set()).join(', ');
+        for(const sku of skus){
+          const applied = sku ? (appliedMap.get(`${po}||${sku}`) || 0) : (appliedByPO.get(po) || 0);
+          sheet1.push({
+            'Container / AWB': c.cid,
+            'Vessel':          c.vessel||'—',
+            'Size':            c.size||'—',
+            'Zendesk':         meta.zendesk,
+            'Supplier':        meta.supplier,
+            'Freight':         meta.freight,
+            'PO':              po,
+            'SKU':             sku,
+            'Mobile Bins':     poBins,
+            'Applied Units':   applied,
+          });
+        }
+      }
+    }
+
+    // ── Sheet 2: By PO (SKUs aggregated) ──
+    // Collapse sheet1 rows to PO level per container
+    const sheet2Map = new Map(); // key: "CID||PO"
+    for(const row of sheet1){
+      const k = `${row['Container / AWB']}||${row['PO']}`;
+      if(!sheet2Map.has(k)){
+        sheet2Map.set(k, {
+          'Container / AWB': row['Container / AWB'],
+          'Vessel':          row['Vessel'],
+          'Size':            row['Size'],
+          'Zendesk':         row['Zendesk'],
+          'Supplier':        row['Supplier'],
+          'Freight':         row['Freight'],
+          'PO':              row['PO'],
+          'SKUs':            new Set(),
+          'Mobile Bins':     row['Mobile Bins'],
+          'Applied Units':   0,
+        });
+      }
+      const entry = sheet2Map.get(k);
+      if(row['SKU']) entry['SKUs'].add(row['SKU']);
+      entry['Applied Units'] += Number(row['Applied Units']||0);
+    }
+    const sheet2 = Array.from(sheet2Map.values()).map(r => ({
+      ...r,
+      'SKUs': Array.from(r['SKUs']).join(', '),
+    }));
+
+    if(!sheet1.length){ alert('No data found for week ' + ws + '. Check containers are assigned to lanes in Transit & Clearing.'); return; }
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet1), 'By PO × SKU');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet2), 'By PO');
+    XLSX.writeFile(wb, `PO_Container_AWB_${ws}.xlsx`);
+  } catch(e){ console.error('PO Container download failed', e); alert('Download failed: '+(e.message||e)); }
+}
+
+async function downloadTransitClearing() {
+  const ws = window._reportsWeek || state.weekStart || '';
+  if(!ws){ alert('No week selected.'); return; }
+  try {
+    // If reporting week differs from loaded week, fetch the correct plan
+    let plan;
+    if(ws === state.weekStart && Array.isArray(state.plan) && state.plan.length){
+      plan = state.plan;
+    } else {
+      try {
+        const planResp = await api(`/plan/weeks/${encodeURIComponent(ws)}`);
+        plan = Array.isArray(planResp) ? planResp : [];
+      } catch(e){ plan = []; console.warn('[TransitClearing] plan fetch failed', e); }
+    }
+
+    // Fetch all data sources in parallel
+    const [{ lanes, containers }, appliedRows, bins] = await Promise.all([
+      _fetchFlowData(ws),
+      _fetchAppliedPOSKU(ws),
+      _fetchBinsForWeek(ws),
+    ]);
+
+    if(!containers.length){
+      alert('No container data found for week ' + ws + '. Please ensure containers are configured in Transit & Clearing.');
+      return;
+    }
+
+    // ── Build lookup maps ──
+
+    // PO×SKU → applied units
+    const appliedByPO = new Map();
+    const skusByPO = new Map();
+    for(const r of appliedRows){
+      appliedByPO.set(r.po, (appliedByPO.get(r.po)||0) + Number(r.units||0));
+      if(!skusByPO.has(r.po)) skusByPO.set(r.po, new Set());
+      skusByPO.get(r.po).add(r.sku);
+    }
+
+    // PO → bins
+    const binsByPO = new Map();
+    for(const b of bins){
+      const po = String(b.po_number||'').trim();
+      if(!po) continue;
+      if(!binsByPO.has(po)) binsByPO.set(po, new Set());
+      binsByPO.get(po).add(String(b.mobile_bin||'').trim());
+    }
+
+    // Plan: PO → { supplier, zendesk, freight }
+    const planByPO = new Map();
+    for(const p of plan){
+      const po = String(p.po_number||'').trim();
+      if(!po || planByPO.has(po)) continue;
+      planByPO.set(po, {
+        supplier: String(p.supplier_name||'').trim(),
+        zendesk:  String(p.zendesk_ticket||'').trim(),
+        freight:  String(p.freight_type||'').trim(),
+      });
+    }
+
+    // Lane key → manual dates
+    const laneByKey = new Map();
+    for(const l of lanes) laneByKey.set(l.key, l);
+
+    const fmtDate = v => { if(!v) return ''; try{ return new Date(v).toISOString().slice(0,10); }catch{ return String(v); } };
+
+    // ── Build one row per Container ──
+    const rows = [];
+    for(const c of containers){
+      const cid    = String(c.container_id||c.container||'').trim() || '—';
+      const vessel = String(c.vessel||'').trim() || '—';
+      const size   = String(c.size_ft||'').trim() ? String(c.size_ft)+'ft' : '—';
+      const laneKeys = Array.isArray(c.lane_keys) ? c.lane_keys : [];
+      const directPOs = String(c.pos||'').split(',').map(p=>p.trim()).filter(Boolean);
+
+      // Collect all zendesks, suppliers, freights for this container's lanes
+      const zendesks  = new Set();
+      const suppliers = new Set();
+      const freights  = new Set();
+      const shipments = new Set();
+      const hbls      = new Set();
+      const mbls      = new Set();
+
+      // Merge manual dates across lanes — take earliest departure, latest arrival etc.
+      let packingListReady    = '';
+      let originCustomsClr    = '';
+      let departedOrigin      = '';
+      let arrivedDest         = '';
+      let destCustomsClr      = '';
+      let etaFC               = '';
+      let latestArrivalDate   = '';
+      let customsHold         = false;
+      let notes               = [];
+
+      for(const lk of laneKeys){
+        const lane = laneByKey.get(lk);
+        if(!lane) continue;
+        if(lane.zendesk)  zendesks.add(lane.zendesk);
+        if(lane.supplier) suppliers.add(lane.supplier);
+        if(lane.freight)  freights.add(lane.freight);
+        const m = (lane.manual && typeof lane.manual === 'object') ? lane.manual : {};
+        if(m.shipmentNumber || m.shipment) shipments.add(String(m.shipmentNumber||m.shipment||'').trim());
+        if(m.hbl) hbls.add(String(m.hbl).trim());
+        if(m.mbl) mbls.add(String(m.mbl).trim());
+        if(m.customs_hold) customsHold = true;
+        if(m.note) notes.push(String(m.note).trim());
+        // Actual dates — take earliest non-empty for completed milestones
+        const pick = (curr, next) => {
+          if(!next) return curr;
+          if(!curr) return fmtDate(next);
+          return fmtDate(next) < curr ? fmtDate(next) : curr;
+        };
+        const pickLatest = (curr, next) => {
+          if(!next) return curr;
+          if(!curr) return fmtDate(next);
+          return fmtDate(next) > curr ? fmtDate(next) : curr;
+        };
+        packingListReady  = pick(packingListReady,  m.packing_list_ready_at);
+        originCustomsClr  = pick(originCustomsClr,  m.origin_customs_cleared_at);
+        departedOrigin    = pick(departedOrigin,     m.departed_at);
+        arrivedDest       = pick(arrivedDest,        m.arrived_at);
+        destCustomsClr    = pick(destCustomsClr,     m.dest_customs_cleared_at);
+        etaFC             = pickLatest(etaFC,        m.eta_fc);
+        latestArrivalDate = pickLatest(latestArrivalDate, m.latest_arrival_date);
+      }
+
+      // Collect all POs for this container
+      const containerPOs = new Set(directPOs);
+      for(const zd of zendesks){
+        for(const [po, meta] of planByPO.entries()){
+          if(meta.zendesk === zd) containerPOs.add(po);
+        }
+      }
+      // Fill suppliers/freights from plan if not already set from lane keys
+      for(const po of containerPOs){
+        const meta = planByPO.get(po);
+        if(meta){
+          if(meta.supplier) suppliers.add(meta.supplier);
+          if(meta.freight)  freights.add(meta.freight);
+          if(meta.zendesk)  zendesks.add(meta.zendesk);
+        }
+      }
+
+      // Aggregate applied units, SKUs, bins across all POs on this container
+      let totalApplied = 0;
+      const allSKUs = new Set();
+      const allBins = new Set();
+      for(const po of containerPOs){
+        totalApplied += appliedByPO.get(po) || 0;
+        for(const sku of (skusByPO.get(po) || new Set())) allSKUs.add(sku);
+        for(const bin of (binsByPO.get(po) || new Set())) allBins.add(bin);
+      }
+
+      rows.push({
+        'Container / AWB':        cid,
+        'Vessel':                 vessel,
+        'Size':                   size,
+        'Zendesk(s)':             Array.from(zendesks).join(', ')  || '—',
+        'Supplier(s)':            Array.from(suppliers).join(', ') || '—',
+        'Freight':                Array.from(freights).join(', ')  || '—',
+        'POs':                    Array.from(containerPOs).join(', ') || '—',
+        'SKUs':                   Array.from(allSKUs).join(', ')   || '—',
+        'Mobile Bins':            Array.from(allBins).join(', ')   || '—',
+        'Applied Units':          totalApplied,
+        'Shipment #':             Array.from(shipments).join(', ') || '',
+        'HBL':                    Array.from(hbls).join(', ')      || '',
+        'MBL':                    Array.from(mbls).join(', ')      || '',
+        'Packing List Ready':     packingListReady,
+        'Origin Customs Cleared': originCustomsClr,
+        'Departed Origin':        departedOrigin,
+        'Arrived Destination':    arrivedDest,
+        'Dest Customs Cleared':   destCustomsClr,
+        'ETA FC':                 etaFC,
+        'Latest Arrival Date':    latestArrivalDate,
+        'Customs Hold':           customsHold ? 'Yes' : 'No',
+        'Notes':                  notes.filter(Boolean).join(' | '),
+      });
+    }
+
+    if(!rows.length){ alert('No container data found for week ' + ws + '.'); return; }
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Transit Clearing Status');
+    XLSX.writeFile(wb, `Transit_Clearing_${ws}.xlsx`);
+  } catch(e){ console.error('Transit Clearing download failed', e); alert('Download failed: '+(e.message||e)); }
+}
+
+function renderReportsPage(container){
+  // Reports page has its own week selection — defaults to state.weekStart, never mutates it
+  if (!window._reportsWeek) window._reportsWeek = state.weekStart || '';
+
+  container.innerHTML = `
+  <div style="padding:4px 0 20px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <div style="font-size:22px;font-weight:600;color:#1C1C1E;letter-spacing:-0.02em;">Reports &amp; Downloads</div>
+      <button id="btn-consolidated-download" onclick="downloadConsolidatedReport()" style="display:flex;align-items:center;gap:8px;background:#1C1C1E;color:#fff;border:none;border-radius:9px;padding:10px 18px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;">
+        <svg width="13" height="13" viewBox="0 0 12 12" fill="none"><path d="M6 1v7M3 5l3 3 3-3M1 10h10" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Download All (Excel)
+      </button>
+    </div>
+
+    <!-- Week selector — same position and style as Week Hub header tile -->
+    <div id="rp-week-header" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:8px 16px;display:flex;align-items:center;gap:12px;margin-bottom:14px;">
+      <div style="flex-shrink:0;">
+        <div style="font-size:13px;font-weight:500;color:#1C1C1E;letter-spacing:-0.01em;">Reporting week</div>
+        <div id="rp-week-label" style="font-size:10px;color:#AEAEB2;margin-top:1px;"></div>
+      </div>
+      <div style="width:0.5px;height:28px;background:rgba(0,0,0,0.07);flex-shrink:0;"></div>
+      <!-- Prev arrow -->
+      <button id="rp-prev" style="flex-shrink:0;width:26px;height:26px;border-radius:7px;border:0.5px solid rgba(0,0,0,0.1);background:#F5F5F7;cursor:pointer;display:flex;align-items:center;justify-content:center;font-family:inherit;" title="Earlier week">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6E6E73" stroke-width="2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <!-- Capsules -->
+      <div id="rp-capsules" style="display:flex;gap:4px;flex-wrap:nowrap;align-items:center;"></div>
+      <!-- Next arrow -->
+      <button id="rp-next" style="flex-shrink:0;width:26px;height:26px;border-radius:7px;border:0.5px solid rgba(0,0,0,0.1);background:#F5F5F7;cursor:pointer;display:flex;align-items:center;justify-content:center;font-family:inherit;" title="Later week">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6E6E73" stroke-width="2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg>
+      </button>
+    </div>
+
+    <!-- VAS Processing — 4 reports -->
+    <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;overflow:hidden;margin-bottom:14px;">
+      <div style="padding:12px 18px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:space-between;">
+        <div style="font-size:12px;font-weight:500;color:#1C1C1E;display:flex;align-items:center;gap:8px;">
+          <span>VAS Processing</span>
+          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">4 reports</span>
+        </div>
+        <span style="font-size:10px;color:#AEAEB2;">UID scanning &amp; labelling</span>
+      </div>
+      <div style="padding:8px 12px;display:flex;flex-direction:column;gap:0;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;">
+          <div style="padding:6px;">${reportCard('Applied UIDs Export','All applied UID records for the selected week, filterable by PO and SKU.','XLSX','Admin · Supplier','btn-dl-week-applied')}</div>
+          <div style="padding:6px;background:rgba(0,0,0,0.015);border-radius:8px;">${reportCard('PO × SKU Summary','Unit counts grouped by PO and SKU with completion status.','XLSX','Admin · Supplier','btn-dl-posku')}</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;background:rgba(0,0,0,0.015);border-radius:8px;margin-top:2px;">
+          <div style="padding:6px;">${reportCard('PO Summary','Aggregated unit totals by PO across all SKUs for the week.','XLSX','Admin · Supplier','btn-dl-po')}</div>
+          <div style="padding:6px;">${reportCard('Mobile Bin Export','All unique scanned bins with supplier, PO, weight and unit counts.','XLSX','Admin · Supplier','__mobile-bin-direct__')}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Shipment — 4 reports -->
+    <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;overflow:hidden;margin-bottom:14px;">
+      <div style="padding:12px 18px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:space-between;">
+        <div style="font-size:12px;font-weight:500;color:#1C1C1E;display:flex;align-items:center;gap:8px;">
+          <span>Shipment</span>
+          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">4 reports</span>
+        </div>
+        <span style="font-size:10px;color:#AEAEB2;">Transit &amp; delivery tracking</span>
+      </div>
+      <div style="padding:8px 12px;display:flex;flex-direction:column;gap:0;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;">
+          <div style="padding:6px;">${reportCard('Shipment Summary','High-level view of all shipments — status, units, PO count per shipment.','XLSX','Admin · Client','btn-ship-summary')}</div>
+          <div style="padding:6px;background:rgba(0,0,0,0.015);border-radius:8px;">${reportCard('Shipment Details','Line-by-line shipment detail including container, routing and delivery dates.','XLSX','Admin · Client','btn-ship-detail')}</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;background:rgba(0,0,0,0.015);border-radius:8px;margin-top:2px;">
+          <div style="padding:6px;">${reportCard('PO Container / AWB','By container — all Zendesk tickets, POs, SKUs and units assigned to each container.','XLSX','Admin · Client','__po-container-direct__')}</div>
+          <div style="padding:6px;">${reportCard('Transit & Clearing Status','Full transit detail — container info plus all milestone dates for each lane.','XLSX','Admin · Client','__transit-clearing-direct__')}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Operations -->
+    <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;overflow:hidden;margin-bottom:14px;">
+      <div style="padding:12px 18px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:space-between;">
+        <div style="font-size:12px;font-weight:500;color:#1C1C1E;display:flex;align-items:center;gap:8px;">
+          <span>Operations</span>
+          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">1 report</span>
+        </div>
+        <span style="font-size:10px;color:#AEAEB2;">Weekly ops overview</span>
+      </div>
+      <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(2,1fr);gap:10px;">
+        ${reportCard('Ops Summary Report','Full week summary — throughput, completion rate, at-risk POs, receiving status.','PDF','Admin only','__pdf-direct__')}
+      </div>
+    </div>
+
+    <!-- Advanced PO Generator -->
+    <div id="apo-section" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;overflow:hidden;margin-bottom:14px;">
+      <div style="padding:12px 18px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:space-between;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <div style="width:28px;height:28px;border-radius:8px;background:linear-gradient(180deg,#990033,#7a0029);display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;font-weight:800;flex-shrink:0;">AP</div>
+          <div style="font-size:12px;font-weight:500;color:#1C1C1E;">Advanced PO Generator</div>
+          <span style="font-size:9px;background:rgba(153,0,51,0.08);color:#990033;padding:2px 8px;border-radius:10px;font-weight:500;">CSV</span>
+        </div>
+        <span style="font-size:10px;color:#AEAEB2;">Plan + UIDs → grouped PO rows for TIC import</span>
+      </div>
+      <div style="padding:16px 18px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+          <!-- LEFT: Defaults + actions -->
+          <div>
+            <div style="font-size:11px;font-weight:600;color:#6E6E73;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px;">Defaults &amp; Overrides</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">shipping_type</div><input id="apo_shipping_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Warehouse"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">logistic_type</div><input id="apo_logistic_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Delivered to Warehouse"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">import_type</div><input id="apo_import_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="China Import"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">po_currency</div><input id="apo_po_currency" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="AUD"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">payment_term</div><input id="apo_payment_term" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="30"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">note</div><input id="apo_note" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="China_3PL"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">po_type</div><input id="apo_po_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Supply"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">contract_type</div><input id="apo_contract_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Outright"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">payment_type</div><input id="apo_payment_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Relabel"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">qty_tolerance</div><input id="apo_qty_tolerance" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="5"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">item_tax_rate (%)</div><input id="apo_tax_rate" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="10"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">product</div><input id="apo_product" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="0"/></div>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:14px;">
+              <button id="apo-generate-btn" onclick="apoGenerate()" style="flex:1;background:#990033;color:#fff;border:none;border-radius:8px;padding:9px 0;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Generate Output</button>
+              <button id="apo-download-btn" onclick="apoDownload()" disabled style="flex:1;background:#F5F5F7;color:#AEAEB2;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:9px 0;font-size:12px;font-weight:600;cursor:not-allowed;font-family:inherit;">Download CSV</button>
+            </div>
+            <div style="font-size:10px;color:#AEAEB2;margin-top:6px;">Output grain: PO + SKU + Mobile Bin &nbsp;•&nbsp; UIDs deduped and joined by ";"</div>
+            <div id="apo-status" style="margin-top:8px;font-size:11px;min-height:16px;"></div>
+          </div>
+          <!-- RIGHT: Exception summary -->
+          <div>
+            <div style="font-size:11px;font-weight:600;color:#6E6E73;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:10px;">Exception Summary</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
+              <div style="background:#F5F5F7;border-radius:8px;padding:10px 12px;"><div style="font-size:10px;color:#AEAEB2;margin-bottom:4px;">Mapped UIDs</div><div id="apo-m-uids" style="font-size:18px;font-weight:700;color:#1C1C1E;">—</div></div>
+              <div style="background:#F5F5F7;border-radius:8px;padding:10px 12px;"><div style="font-size:10px;color:#AEAEB2;margin-bottom:4px;">Output Rows</div><div id="apo-m-rows" style="font-size:18px;font-weight:700;color:#1C1C1E;">—</div></div>
+              <div style="background:#F5F5F7;border-radius:8px;padding:10px 12px;"><div style="font-size:10px;color:#AEAEB2;margin-bottom:4px;">Unmatched Rows</div><div id="apo-m-unmatched" style="font-size:18px;font-weight:700;color:#1C1C1E;">—</div></div>
+              <div style="background:#F5F5F7;border-radius:8px;padding:10px 12px;"><div style="font-size:10px;color:#AEAEB2;margin-bottom:4px;">Dupes Removed</div><div id="apo-m-dupes" style="font-size:18px;font-weight:700;color:#1C1C1E;">—</div></div>
+            </div>
+            <div style="background:#F5F5F7;border-radius:8px;overflow:hidden;">
+              <table style="width:100%;border-collapse:collapse;font-size:10px;">
+                <thead><tr style="border-bottom:0.5px solid rgba(0,0,0,0.07);"><th style="padding:7px 10px;text-align:left;font-weight:600;color:#6E6E73;">Metric</th><th style="padding:7px 10px;text-align:right;font-weight:600;color:#6E6E73;">Value</th></tr></thead>
+                <tbody id="apo-metrics-body"><tr><td style="padding:6px 10px;color:#AEAEB2;" colspan="2">No run yet</td></tr></tbody>
+              </table>
+            </div>
+            <div style="margin-top:10px;">
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:#6E6E73;">
+                <input type="checkbox" id="apo-preview-toggle" onchange="apoTogglePreview()" style="accent-color:#990033;"/>
+                Show preview (first 10 rows)
+              </label>
+              <div id="apo-preview-wrap" style="display:none;margin-top:8px;overflow-x:auto;max-height:200px;overflow-y:auto;border-radius:8px;border:0.5px solid rgba(0,0,0,0.08);">
+                <table id="apo-preview-table" style="border-collapse:collapse;font-size:10px;white-space:nowrap;min-width:100%;"></table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>`;
+
+  // Wire buttons — proxy clicks to existing hidden buttons or direct functions
+  container.querySelectorAll('[data-proxy]').forEach(btn=>{
+    btn.addEventListener('click',function(){
+      const proxyId = this.dataset.proxy;
+      // Direct function calls for buttons not in main DOM
+      if(proxyId === '__mobile-bin-direct__'){
+        if(typeof downloadMobileBins === 'function') downloadMobileBins();
+        else console.warn('[Reports] downloadMobileBins not found');
+        return;
+      }
+      if(proxyId === '__po-container-direct__'){
+        if(typeof downloadPOContainer === 'function') downloadPOContainer();
+        return;
+      }
+      if(proxyId === '__transit-clearing-direct__'){
+        if(typeof downloadTransitClearing === 'function') downloadTransitClearing();
+        return;
+      }
+      if(proxyId === '__pdf-direct__'){
+        // flow-download-pdf lives inside the flow module DOM
+        const pdfBtn = document.getElementById('flow-download-pdf');
+        if(pdfBtn){ pdfBtn.click(); return; }
+        // Fallback: trigger window.print() on the flow page
+        if(typeof window.print === 'function'){ window.print(); return; }
+        console.warn('[Reports] PDF download not available — navigate to Week Hub first');
+        alert('Please navigate to the Week Hub page first, then use the PDF download from there.');
+        return;
+      }
+      const target = document.getElementById(proxyId);
+      if(target) target.click();
+      else console.warn('[Reports] proxy target not found:', proxyId);
+    });
+  });
+
+  // ── Reports week capsule selector ──
+  function rpRenderCapsules() {
+    const capContainer = container.querySelector('#rp-capsules');
+    const label = container.querySelector('#rp-week-label');
+    if (!capContainer) return;
+    capContainer.innerHTML = '';
+
+    const base = window._reportsWeek || state.weekStart || '';
+    if (label) label.textContent = 'Downloading data for week of ' + base;
+
+    const offsets = [-14, -7, 0, 7, 14];
+    const weekIds = offsets.map(n => addDaysISO(base, n));
+
+    // Render capsules immediately with what we know, then update async
+    function buildCap(id, stats) {
+      const d = new Date(id + 'T00:00:00');
+      const day = String(d.getDate()).padStart(2, '0');
+      const mon = d.toLocaleString('en-US', { month: 'short' }).toUpperCase().slice(0, 3);
+      const isActive = id === base;
+      const p = stats.planned > 0 ? Math.min(100, Math.round(stats.applied*100/stats.planned)) : 0;
+      const R = 26, CX = 29, CY = 29;
+      const circ = 2 * Math.PI * R;
+      const offset = circ * (1 - p / 100);
+      const btn = document.createElement('button');
+      btn.className = 'wkcap' + (isActive ? ' active' : '');
+      btn.setAttribute('data-rp-week', id);
+      btn.innerHTML = `
+        <svg class="cap-ring" viewBox="0 0 58 58">
+          <circle class="cap-ring-track" cx="${CX}" cy="${CY}" r="${R}"/>
+          <circle class="cap-ring-prog" cx="${CX}" cy="${CY}" r="${R}"
+            stroke-dasharray="${circ.toFixed(1)}"
+            stroke-dashoffset="${offset.toFixed(1)}"
+            style="transform:rotate(-90deg);transform-origin:${CX}px ${CY}px;${p===0?'opacity:0.3':''}"/>
+        </svg>
+        <div class="cap-inner">
+          <span class="m">${mon}</span>
+          <span class="d">${day}</span>
+          <span class="t" id="rp-cap-t-${id}">${stats.planned ? fmtInt(stats.planned)+'u' : '—'}</span>
+        </div>`;
+      btn.onclick = () => { window._reportsWeek = id; rpRenderCapsules(); };
+      return btn;
+    }
+
+    // Initial render — use state data for current week, blanks for others
+    weekIds.forEach(id => {
+      const stats = (id === state.weekStart)
+        ? { planned: (state.plan||[]).reduce((s,p)=>s+(Number(p.target_qty)||0),0),
+            applied: (state.records||[]).reduce((s,r)=>s+(Number(r.units||r.total_units)||0),0) }
+        : { planned: 0, applied: 0 };
+      capContainer.appendChild(buildCap(id, stats));
+    });
+
+    // Async: fetch planned totals for each week from /plan/weeks endpoint
+    (async () => {
+      try {
+        const planLists = await Promise.all(weekIds.map(id =>
+          typeof fetchPlan === 'function' ? fetchPlan(id).catch(()=>[]) : Promise.resolve([])
+        ));
+        const summaries = await Promise.all(weekIds.map((id, i) => {
+          const end = addDaysISO(id, 6);
+          return typeof fetchSummary === 'function' ? fetchSummary(id, end, 'complete').catch(()=>null) : Promise.resolve(null);
+        }));
+        weekIds.forEach((id, i) => {
+          const planned = (planLists[i]||[]).reduce((s,p)=>s+(Number(p.target_qty)||0),0);
+          const applied = Number(summaries[i]?.total_units || 0);
+          const tEl = capContainer.querySelector(`#rp-cap-t-${id}`);
+          if (tEl && planned > 0) tEl.textContent = fmtInt(planned) + 'u';
+          // Update ring progress
+          const btn = capContainer.querySelector(`[data-rp-week="${id}"]`);
+          if (btn && planned > 0) {
+            const p = Math.min(100, Math.round(applied*100/planned));
+            const R = 26, circ = 2 * Math.PI * R;
+            const prog = btn.querySelector('.cap-ring-prog');
+            if (prog) {
+              prog.setAttribute('stroke-dashoffset', (circ*(1-p/100)).toFixed(1));
+              if (p > 0) prog.style.opacity = '1';
+            }
+          }
+        });
+      } catch(e) { console.warn('[RP capsules] async fetch failed', e); }
+    })();
+  }
+
+  // Prev / next shift the window by 7 days
+  const prevBtn = container.querySelector('#rp-prev');
+  const nextBtn = container.querySelector('#rp-next');
+  if (prevBtn) prevBtn.onclick = () => {
+    window._reportsWeek = addDaysISO(window._reportsWeek || state.weekStart, -7);
+    rpRenderCapsules();
+  };
+  if (nextBtn) nextBtn.onclick = () => {
+    window._reportsWeek = addDaysISO(window._reportsWeek || state.weekStart, 7);
+    rpRenderCapsules();
+  };
+
+  rpRenderCapsules();
+}
+
+// ═══════════════════════════════════════════════════════
+// ── ADVANCED PO GENERATOR ──────────────────────────────
+// ═══════════════════════════════════════════════════════
+
+(function(){
+  'use strict';
+
+  const APO_OUTPUT_COLUMNS = [
+    'supplier','shipping_type','agreement','po_number','grand_total','tax_amount',
+    'shipping_cost','note','reverse','logistic_type','logistic_method','logistic_date',
+    'logistic_eta','inbound_tracking','supplier_contact_name','supplier_contact_phone',
+    'supplier_contact_email','payment_type','payment_term','contract_type','po_type',
+    'vendor_order_number','sku','measurement','initiator','production','qty_tolerance',
+    'id_excess','country_quantity','quantity','import_type','po_currency',
+    'estimated_landed_cost','item_tax_amount','product','volumes_to_collect',
+    'pickup_info','source_supplier_cost','source_supplier_currency','uid',
+    'invoice_nr','master_carton_number'
+  ];
+
+  let _apoCsv = null;
+  let _apoWeek = null;
+
+  function apoEl(id){ return document.getElementById(id); }
+
+  function apoNorm(v){ return String(v ?? '').trim(); }
+
+  function apoSkuCore(val){
+    const s = apoNorm(val);
+    if (!s) return '';
+    const parts = s.split('-');
+    return parts[parts.length - 1].trim();
+  }
+
+  function apoParseUid(cell){
+    // UID cell format: "STYLE-SKUNUM;UIDTOKEN"
+    const s = apoNorm(cell);
+    if (!s) return { skuFull: '', uidToken: '' };
+    const parts = s.split(';');
+    if (parts.length >= 2) return { skuFull: parts[0].trim(), uidToken: parts[1].trim() };
+    return { skuFull: '', uidToken: s };
+  }
+
+  function apoToCsv(rows, columns){
+    const esc = (x) => {
+      const s = (x === null || x === undefined) ? '' : String(x);
+      if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+      return s;
+    };
+    const header = columns.map(esc).join(',');
+    const body = rows.map(r => columns.map(c => esc(r[c])).join(',')).join('\n');
+    return header + '\n' + body + '\n';
+  }
+
+  function apoSetStatus(msg, color){
+    const el = apoEl('apo-status');
+    if (el){ el.textContent = msg; el.style.color = color || '#6E6E73'; }
+  }
+
+  function apoSetMetrics(metrics){
+    // Summary tiles
+    const mu = apoEl('apo-m-uids');     if(mu) mu.textContent = metrics['Total mapped UIDs in output'] ?? '—';
+    const mr = apoEl('apo-m-rows');     if(mr) mr.textContent = metrics['Grouped output rows'] ?? '—';
+    const mm = apoEl('apo-m-unmatched');if(mm) mm.textContent = metrics['Unmatched UID rows (no Plan match)'] ?? '—';
+    const md = apoEl('apo-m-dupes');    if(md) md.textContent = metrics['Duplicate UID occurrences removed'] ?? '—';
+
+    // Metrics table
+    const tbody = apoEl('apo-metrics-body');
+    if (tbody){
+      tbody.innerHTML = '';
+      for (const [k, v] of Object.entries(metrics)){
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '0.5px solid rgba(0,0,0,0.05)';
+        const td1 = document.createElement('td');
+        td1.textContent = k;
+        td1.style.cssText = 'padding:5px 10px;color:#6E6E73;';
+        const td2 = document.createElement('td');
+        td2.textContent = String(v);
+        td2.style.cssText = 'padding:5px 10px;text-align:right;font-weight:600;color:#1C1C1E;font-variant-numeric:tabular-nums;';
+        const unmatched = Number(metrics['Unmatched UID rows (no Plan match)'] ?? 0);
+        if (k === 'Unmatched UID rows (no Plan match)' && unmatched > 0) td2.style.color = '#990033';
+        tr.appendChild(td1); tr.appendChild(td2);
+        tbody.appendChild(tr);
+      }
+    }
+
+    // Unmatched warning on status
+    const unmatched = Number(metrics['Unmatched UID rows (no Plan match)'] ?? 0);
+    if (unmatched > 0){
+      apoSetStatus('⚠ ' + unmatched + ' UID rows had no plan match — supplier/cost fields may be blank', '#C8860A');
+    }
+  }
+
+  function apoSetPreview(rows){
+    const tbl = apoEl('apo-preview-table');
+    if (!tbl) return;
+    tbl.innerHTML = '';
+    // Header
+    const thead = document.createElement('thead');
+    const trh = document.createElement('tr');
+    trh.style.cssText = 'background:#F5F5F7;position:sticky;top:0;';
+    for (const c of APO_OUTPUT_COLUMNS){
+      const th = document.createElement('th');
+      th.textContent = c;
+      th.style.cssText = 'padding:5px 8px;font-size:9px;font-weight:600;color:#6E6E73;text-align:left;border-bottom:0.5px solid rgba(0,0,0,0.08);white-space:nowrap;';
+      trh.appendChild(th);
+    }
+    thead.appendChild(trh);
+    tbl.appendChild(thead);
+    // Body
+    const tbody = document.createElement('tbody');
+    for (const r of rows.slice(0, 10)){
+      const tr = document.createElement('tr');
+      tr.style.borderBottom = '0.5px solid rgba(0,0,0,0.05)';
+      for (const c of APO_OUTPUT_COLUMNS){
+        const td = document.createElement('td');
+        const val = String(r[c] ?? '');
+        td.textContent = c === 'uid' ? val.slice(0, 40) + (val.length > 40 ? '…' : '') : val;
+        td.style.cssText = 'padding:5px 8px;color:#1C1C1E;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis;';
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    tbl.appendChild(tbody);
+  }
+
+  window.apoTogglePreview = function(){
+    const wrap = apoEl('apo-preview-wrap');
+    const tog  = apoEl('apo-preview-toggle');
+    if (wrap) wrap.style.display = (tog && tog.checked) ? '' : 'none';
+  };
+
+  window.apoDownload = function(){
+    if (!_apoCsv) return;
+    const ws = _apoWeek || window._reportsWeek || state.weekStart || 'week';
+    const filename = 'TIC_VOZ_' + ws + '_AdvancedPO.csv';
+    const blob = new Blob([_apoCsv], { type: 'text/csv;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  window.apoGenerate = async function(){
+    const genBtn = apoEl('apo-generate-btn');
+    const dlBtn  = apoEl('apo-download-btn');
+    if (genBtn) genBtn.disabled = true;
+    if (dlBtn)  { dlBtn.disabled = true; dlBtn.style.color = '#AEAEB2'; dlBtn.style.cursor = 'not-allowed'; }
+    _apoCsv = null;
+    apoSetStatus('Loading data…', '#6E6E73');
+
+    try {
+      const ws = window._reportsWeek || state.weekStart || '';
+      if (!ws) throw new Error('No week selected — pick a week in the Reports page header first.');
+      _apoWeek = ws;
+
+      // Week end date (Sunday)
+      const weDate = new Date(ws + 'T00:00:00Z');
+      weDate.setUTCDate(weDate.getUTCDate() + 6);
+      const we = weDate.toISOString().slice(0, 10);
+
+      apoSetStatus('Fetching plan for ' + ws + '…', '#6E6E73');
+
+      // Fetch plan rows for this week
+      const planRows = (typeof fetchPlan === 'function') ? await fetchPlan(ws) : [];
+      if (!planRows.length) throw new Error('No plan data found for week ' + ws + '. Upload the plan first.');
+
+      apoSetStatus('Fetching UID records…', '#6E6E73');
+
+      // Fetch UID records for this week
+      let records = [];
+      if (typeof fetchRecordsRange === 'function'){
+        records = await fetchRecordsRange(ws + 'T00:00:00.000Z', we + 'T23:59:59.999Z', 'complete', 200000);
+      }
+      if (!records.length) throw new Error('No applied UID records found for week ' + ws + '.');
+
+      apoSetStatus('Generating…', '#6E6E73');
+
+      // ── Defaults ──
+      const dflt = {
+        shipping_type:  apoNorm(apoEl('apo_shipping_type')?.value  || 'Warehouse'),
+        logistic_type:  apoNorm(apoEl('apo_logistic_type')?.value  || 'Delivered to Warehouse'),
+        import_type:    apoNorm(apoEl('apo_import_type')?.value    || 'China Import'),
+        po_currency:    apoNorm(apoEl('apo_po_currency')?.value    || 'AUD'),
+        payment_term:   Number(apoEl('apo_payment_term')?.value    || 30),
+        note:           apoNorm(apoEl('apo_note')?.value           || 'China_3PL'),
+        po_type:        apoNorm(apoEl('apo_po_type')?.value        || 'Supply'),
+        contract_type:  apoNorm(apoEl('apo_contract_type')?.value  || 'Outright'),
+        payment_type:   apoNorm(apoEl('apo_payment_type')?.value   || 'Relabel'),
+        qty_tolerance:  Number(apoEl('apo_qty_tolerance')?.value   || 5),
+        tax_rate:       Number(apoEl('apo_tax_rate')?.value        || 10) / 100,
+        product:        Number(apoEl('apo_product')?.value         || 0),
+      };
+
+      // ── Build plan map: key = PO||sku_code_numeric ──
+      // Pinpoint plan stores: po_number, sku_code (numeric), style, vendor_item_no,
+      //   supplier_name, supplier_contact, supplier_contact_email, supplier_contact_phone,
+      //   brand_name, cost, vendor_sku
+      const planMap = new Map();
+      let planSkipped = 0;
+
+      for (const p of planRows){
+        const po      = apoNorm(p.po_number || p.po || '');
+        const core    = apoNorm(p.sku_code || '');   // numeric — e.g. "11989208"
+        const style   = apoNorm(p.style || '');       // e.g. "AE897AA02XO"
+        if (!po || !core){ planSkipped++; continue; }
+
+        const key = po + '||' + core;
+        if (!planMap.has(key)){
+          planMap.set(key, {
+            supplier:               apoNorm(p.supplier_name  || ''),
+            supplier_contact_name:  apoNorm(p.supplier_contact || p.supplier_name || ''),
+            supplier_contact_email: apoNorm(p.supplier_contact_email || ''),
+            supplier_contact_phone: apoNorm(p.supplier_contact_phone || ''),
+            vendor_order_number:    apoNorm(p.vendor_item_no  || ''),
+            initiator:              apoNorm(p.brand_name      || ''),
+            cost:                   p.cost,
+            sku_full:               style ? (style + '-' + core) : core,
+          });
+        }
+      }
+
+      // ── Normalize UID records ──
+      // Pinpoint records: po_number, sku_code (numeric), mobile_bin, uid ("STYLE-SKUNUM;TOKEN")
+      let rawCount = records.length;
+      let droppedMissingUID = 0;
+      let droppedMissingBin = 0;
+      const normalized = [];
+
+      for (const r of records){
+        const po  = apoNorm(r.po_number || r.po || '');
+        const bin = apoNorm(r.mobile_bin || r.mobileBin || r.bin || '');
+        const parsed = apoParseUid(r.uid || '');
+        const uidToken = apoNorm(parsed.uidToken);
+        // sku_core: prefer sku_code field, fallback to parsing uid
+        const core = apoNorm(r.sku_code || '') || apoSkuCore(parsed.skuFull);
+
+        if (!uidToken){ droppedMissingUID++; continue; }
+        if (!bin)     { droppedMissingBin++; continue; }
+
+        normalized.push({
+          po_key:              po,
+          sku_core:            core,
+          sku_full:            parsed.skuFull,
+          uid_token:           uidToken,
+          master_carton_number: bin,
+        });
+      }
+
+      const inputUidUnique = new Set(normalized.map(x => x.uid_token)).size;
+      const inputBinUnique = new Set(normalized.map(x => x.master_carton_number)).size;
+
+      // ── Group by PO + SKU + Mobile Bin, dedup UIDs ──
+      const groups = new Map();
+      let unmatched = 0;
+      let dupRemoved = 0;
+
+      for (const s of normalized){
+        const planKey  = s.po_key + '||' + s.sku_core;
+        const pl       = planMap.get(planKey);
+        if (!pl) unmatched++;
+
+        const groupKey = s.po_key + '||' + s.sku_core + '||' + s.master_carton_number;
+        if (!groups.has(groupKey)){
+          groups.set(groupKey, {
+            po_number:             s.po_key,
+            sku_core:              s.sku_core,
+            master_carton_number:  s.master_carton_number,
+            uidSet:  new Set(),
+            uidList: [],
+            supplier:               pl?.supplier              ?? '',
+            supplier_contact_name:  pl?.supplier_contact_name ?? '',
+            supplier_contact_email: pl?.supplier_contact_email ?? '',
+            supplier_contact_phone: pl?.supplier_contact_phone ?? '',
+            vendor_order_number:    pl?.vendor_order_number    ?? '',
+            initiator:              pl?.initiator              ?? '',
+            cost:                   pl?.cost                   ?? '',
+            sku_full_plan:          pl?.sku_full               ?? '',
+            sku_full_ship:          s.sku_full                 ?? '',
+          });
+        }
+
+        const g = groups.get(groupKey);
+        if (g.uidSet.has(s.uid_token)) dupRemoved++;
+        else { g.uidSet.add(s.uid_token); g.uidList.push(s.uid_token); }
+      }
+
+      // Global UID uniqueness check
+      const outputUidSet = new Set();
+      for (const g of groups.values()) for (const u of g.uidList) outputUidSet.add(u);
+
+      // ── Build output rows ──
+      const rowsOut = [];
+      let mappedUidTotal = 0;
+
+      for (const g of groups.values()){
+        const costNum = Number.isFinite(Number(g.cost)) ? Number(g.cost) : NaN;
+        const qty     = g.uidList.length;
+        mappedUidTotal += qty;
+        const skuOut  = g.sku_full_plan || g.sku_full_ship || g.sku_core;
+
+        const row = {};
+        for (const c of APO_OUTPUT_COLUMNS) row[c] = '';
+
+        row['supplier']               = g.supplier;
+        row['shipping_type']          = dflt.shipping_type;
+        row['po_number']              = g.po_number;
+        row['note']                   = dflt.note;
+        row['logistic_type']          = dflt.logistic_type;
+        row['supplier_contact_name']  = g.supplier_contact_name;
+        row['supplier_contact_phone'] = g.supplier_contact_phone;
+        row['supplier_contact_email'] = g.supplier_contact_email;
+        row['payment_type']           = dflt.payment_type;
+        row['payment_term']           = dflt.payment_term;
+        row['contract_type']          = dflt.contract_type;
+        row['po_type']                = dflt.po_type;
+        row['vendor_order_number']    = g.vendor_order_number;
+        row['sku']                    = skuOut;
+        row['initiator']              = g.initiator;
+        row['qty_tolerance']          = dflt.qty_tolerance;
+        row['country_quantity']       = qty;
+        row['quantity']               = qty;
+        row['import_type']            = dflt.import_type;
+        row['po_currency']            = dflt.po_currency;
+        row['item_tax_amount']        = Number.isFinite(costNum) ? (costNum * dflt.tax_rate) : '';
+        row['product']                = dflt.product;
+        row['source_supplier_cost']   = Number.isFinite(costNum) ? costNum : '';
+        row['source_supplier_currency'] = dflt.po_currency;
+        row['uid']                    = g.uidList.join(';');
+        row['master_carton_number']   = g.master_carton_number;
+
+        rowsOut.push(row);
+      }
+
+      // Sort: PO → SKU → Bin
+      rowsOut.sort((a, b) =>
+        (a.po_number + '||' + a.sku + '||' + a.master_carton_number)
+          .localeCompare(b.po_number + '||' + b.sku + '||' + b.master_carton_number)
+      );
+
+      const outputBinUnique = new Set(rowsOut.map(r => r.master_carton_number)).size;
+
+      const metrics = {
+        'Plan rows loaded':                     planRows.length,
+        'Plan rows skipped (missing PO/SKU)':   planSkipped,
+        'UID records (raw)':                    rawCount,
+        'UID records (used)':                   normalized.length,
+        'Unique UIDs in input':                 inputUidUnique,
+        'Unique Mobile Bins in input':          inputBinUnique,
+        'Dropped missing UID':                  droppedMissingUID,
+        'Dropped missing Mobile Bin':           droppedMissingBin,
+        'Unmatched UID rows (no Plan match)':   unmatched,
+        'Duplicate UID occurrences removed':    dupRemoved,
+        'Grouped output rows':                  rowsOut.length,
+        'Total mapped UIDs in output':          mappedUidTotal,
+        'Unique UIDs in output':                outputUidSet.size,
+        'Unique Mobile Bins in output':         outputBinUnique,
+      };
+
+      apoSetMetrics(metrics);
+      apoSetPreview(rowsOut);
+
+      _apoCsv = apoToCsv(rowsOut, APO_OUTPUT_COLUMNS);
+
+      // Enable download
+      if (dlBtn){
+        dlBtn.disabled = false;
+        dlBtn.style.color = '#1C1C1E';
+        dlBtn.style.background = '#F5F5F7';
+        dlBtn.style.cursor = 'pointer';
+      }
+
+      if (!unmatched){
+        apoSetStatus('✓ Generated ' + rowsOut.length + ' rows · ' + mappedUidTotal + ' UIDs · week ' + ws, '#16a34a');
+      }
+
+    } catch(err){
+      console.error('[APO]', err);
+      apoSetStatus('Error: ' + err.message, '#990033');
+      const tbody = apoEl('apo-metrics-body');
+      if (tbody) tbody.innerHTML = '<tr><td style="padding:6px 10px;color:#990033;" colspan="2">' + err.message + '</td></tr>';
+    } finally {
+      if (genBtn) genBtn.disabled = false;
+    }
+  };
+
+})();
+
+
+function reportCard(name, desc, fmt, role, proxyId){
+  const fmtColor = fmt==='PDF' ? 'rgba(153,0,51,0.1);color:#990033' : fmt==='CSV' ? 'rgba(91,140,255,0.1);color:#5B8CFF' : 'rgba(58,125,68,0.1);color:#2E7D52';
+  // Icon per report type
+  const icons = {
+    'Applied UIDs Export':        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8B5CF6" stroke-width="1.6" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M7 8h10M7 12h7M7 16h5"/></svg>',
+    'PO × SKU Summary':           '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0EA5E9" stroke-width="1.6" stroke-linecap="round"><path d="M9 17H7a5 5 0 0 1 0-10h10"/><path d="M13 7h4a5 5 0 0 1 0 10h-2"/><line x1="12" y1="12" x2="12" y2="12.01"/></svg>',
+    'PO Summary':                 '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="1.6" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 9h6M9 13h4"/><path d="M16 17l2 2 4-4" stroke="#059669"/></svg>',
+    'Mobile Bin Export':          '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" stroke-width="1.6" stroke-linecap="round"><rect x="2" y="7" width="20" height="15" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/><line x1="12" y1="12" x2="12" y2="17"/><line x1="9.5" y1="14.5" x2="14.5" y2="14.5"/></svg>',
+    'Shipment Summary':           '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0EA5E9" stroke-width="1.6" stroke-linecap="round"><path d="M1 3h15v13H1z"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>',
+    'Shipment Details':           '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6366F1" stroke-width="1.6" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>',
+    'PO Container / AWB':         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#990033" stroke-width="1.6" stroke-linecap="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>',
+    'Transit & Clearing Status':  '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0369A1" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+    'Ops Summary Report':         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#990033" stroke-width="1.6" stroke-linecap="round"><path d="M3 3v18h18"/><polyline points="18 9 12 15 8 11 3 16"/></svg>',
+  };
+  const icon = icons[name] || '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#AEAEB2" stroke-width="1.6" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16h16V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+
+  return `<div style="background:#fff;border-radius:10px;border:0.5px solid rgba(0,0,0,0.07);padding:14px 16px;display:flex;align-items:flex-start;gap:12px;">
+    <div style="flex-shrink:0;width:36px;height:36px;border-radius:9px;background:#F5F5F7;display:flex;align-items:center;justify-content:center;">${icon}</div>
+    <div style="flex:1;min-width:0;">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:4px;">
+        <div style="font-size:12px;font-weight:500;color:#1C1C1E;line-height:1.3;">${name}</div>
+        <button data-proxy="${proxyId}" style="flex-shrink:0;width:28px;height:28px;border-radius:7px;background:#1C1C1E;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;" title="Download ${name}">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 1v7M3 5l3 3 3-3M1 10h10" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+      <div style="font-size:10px;color:#6E6E73;line-height:1.4;margin-bottom:8px;">${desc}</div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span style="font-size:9px;font-weight:600;padding:2px 7px;border-radius:6px;font-family:monospace;background:${fmtColor}">${fmt}</span>
+        <span style="font-size:9px;color:#AEAEB2;">${role}</span>
+      </div>
+    </div>
+  </div>`;
+}
+</script>
+</div><!-- end app-content -->
+
+<script>
+// 🔐 Clerk Authentication Initialization
+let clerkInitialized = false;
+
+async function initializeClerkAuth() {
+  if (clerkInitialized) return;
+  
+  try {
+    console.log('[Auth] Initializing Clerk...');
+    
+    // Load Clerk
+    await window.Clerk.load();
+    
+    console.log('[Auth] Clerk loaded, user:', window.Clerk.user ? 'signed in' : 'signed out');
+    
+    // Set up auth state listener
+    window.Clerk.addListener(({ user, session }) => {
+      console.log('[Auth] State changed:', user ? 'signed in' : 'signed out');
+      updateUI(user, session);
+    });
+    
+    // Initial UI update
+    updateUI(window.Clerk.user, window.Clerk.session);
+    
+    // Mount sign-in component if user is not signed in
+    if (!window.Clerk.user) {
+      const signInEl = document.getElementById('clerk-signin-mount');
+      if (signInEl) {
+        window.Clerk.mountSignIn(signInEl, {
+          appearance: {
+            elements: {
+              formButtonPrimary: 'bg-[#990033] hover:bg-[#770022]',
+              card: 'shadow-none'
+            }
+          }
+        });
+        console.log('[Auth] Sign-in component mounted');
+      }
+    }
+    
+    clerkInitialized = true;
+  } catch (error) {
+    console.error('[Auth] Initialization failed:', error);
+  }
+}
+
+// ── Pinpoint 3.0 Role System ──
+// Frontend display names — org:supplier_auth is always shown as "Facility"
+const PN_ROLE_LABELS = {
+  'org:admin_auth':    'Admin',
+  'org:supplier_auth': 'Facility',
+  'org:client_auth':   'Client',
+  'org:member':        'Member',
+  'org:api_auth':      'API'
+};
+
+// Resolve role key from Clerk membership
+function getPNRole(user) {
+  return user?.organizationMemberships?.[0]?.role || '';
+}
+
+// Apply role-based UI gating — called once on sign-in, safe to re-call
+function applyPNRoleGating(roleKey) {
+  const isAdmin = roleKey === 'org:admin_auth';
+  // All roles: Admin, Member, Client, Supplier, API see everything except Finance.
+  // Finance is admin-only. No other restrictions.
+  const isKnown = ['org:admin_auth','org:member','org:client_auth','org:supplier_auth','org:api_auth'].includes(roleKey);
+
+  // ── 1. Nav items — all visible to everyone except Finance ──
+  const navExec    = document.getElementById('nav-exec');
+  const navMap     = document.getElementById('nav-map');
+  const navRecv    = document.getElementById('nav-receiving');
+  const navIntake  = document.getElementById('nav-intake-pn');
+  const navReports = document.getElementById('nav-reports');
+  if (navExec)    navExec.style.display    = isKnown ? '' : 'none';
+  if (navMap)     navMap.style.display     = isKnown ? '' : 'none';
+  if (navRecv)    navRecv.style.display    = isKnown ? '' : 'none';
+  if (navIntake)  navIntake.style.display  = isKnown ? '' : 'none';
+  if (navReports) navReports.style.display = isKnown ? '' : 'none';
+  // Finance: admin only
+  const navFinance = document.getElementById('nav-finance');
+  if (navFinance) navFinance.style.display = isAdmin ? '' : 'none';
+
+  // ── 2. Upload Plan / Zero Plan buttons ──
+  // Admin only — hidden for Facility and Client
+  ['btn-upload-plan','btn-zero-plan','file-plan'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = isAdmin ? '' : 'none';
+  });
+
+  // ── 3. Week Hub — Receiving & VAS CTAs ──
+  // No role restrictions on Receiving/VAS — all roles can navigate there.
+  document.body.setAttribute('data-pn-role', roleKey);
+
+  // ── 4. Reports page — role stored for use when page renders ──
+  window._pnRoleKey = roleKey;
+
+  // ── 5. Pulse system prompt context (stored for API calls) ──
+  window._pnPulseRole = PN_ROLE_LABELS[roleKey] || 'User';
+
+  console.log('[PNRole] Gating applied for:', PN_ROLE_LABELS[roleKey] || roleKey);
+}
+
+// Hide Receiving/VAS CTAs for Client role
+function hideCTAsForClient() {
+  // Selectors target the CTA buttons flow_live_additive.js renders
+  const ctaTexts = ['receive inventory', 'vas processing', 'receiving →', 'vas processing →'];
+  document.querySelectorAll('button, a').forEach(el => {
+    const txt = (el.textContent || '').trim().toLowerCase();
+    if (ctaTexts.some(t => txt.includes(t))) {
+      el.style.display = 'none';
+    }
+  });
+}
+
+// Watch for CTA buttons injected later by flow module
+function observeCTAsForClient() {
+  if (window._pnCtaObserver) return;
+  window._pnCtaObserver = new MutationObserver(() => hideCTAsForClient());
+  window._pnCtaObserver.observe(document.body, { childList: true, subtree: true });
+}
+
+// Block navigation to unauthorised pages
+function guardRoute(hash) {
+  const roleKey = window._pnRoleKey || '';
+  // Only Finance is restricted — admin only
+  const isAdminRole = roleKey === 'org:admin_auth';
+  if (!isAdminRole && hash === '#finance') {
+    window.location.hash = '#week-hub';
+    return false;
+  }
+  return true;
+}
+
+// Patch window.show to enforce route guards
+(function patchShowForRoles(){
+  const _origShow = window.show;
+  window.show = function(hash) {
+    if (!guardRoute(hash || location.hash)) return;
+    if (typeof _origShow === 'function') _origShow(hash);
+  };
+})();
+
+function updateUI(user, session) {
+  const loginScreen = document.getElementById('auth-login-screen');
+  const appContent  = document.getElementById('app-content');
+  const userNameEl  = document.getElementById('user-name-display');
+  const userRoleEl  = document.getElementById('user-role-display');
+  const userOrgEl   = document.getElementById('user-org-display');
+
+  if (user && session) {
+    if (loginScreen) loginScreen.style.display = 'none';
+    if (appContent)  appContent.style.display  = 'block';
+
+    if (userNameEl) {
+      userNameEl.textContent = user.fullName || user.firstName || 'User';
+    }
+
+    const roleKey = getPNRole(user);
+
+    if (userRoleEl) {
+      userRoleEl.textContent = PN_ROLE_LABELS[roleKey] || 'User';
+    }
+
+    if (userOrgEl) {
+      const org = user.organizationMemberships?.[0]?.organization;
+      userOrgEl.textContent = org?.name || '';
+    }
+
+
+
+    // Apply role gating after a short tick so DOM is settled
+    setTimeout(() => applyPNRoleGating(roleKey), 0);
+    // Show Pulse bar now that user is signed in
+    const pulseBar = document.getElementById('pulse-bar');
+    if (pulseBar) pulseBar.classList.add('visible');
+
+    // Fire deferred data load
+    if (window._pendingWeekStart && typeof window.setWeek === 'function') {
+      const ws = window._pendingWeekStart;
+      window._pendingWeekStart = null;
+      window.setWeek(ws);
+    }
+
+    console.log('[Auth] UI updated - showing app for role:', PN_ROLE_LABELS[roleKey] || roleKey);
+  } else {
+    if (loginScreen) loginScreen.style.display = 'flex';
+    if (appContent)  appContent.style.display  = 'none';
+    // Hide Pulse bar on sign-out
+    const _pb = document.getElementById('pulse-bar');
+    if (_pb) _pb.classList.remove('visible');
+    const _pp = document.getElementById('pulse-panel');
+    if (_pp) _pp.classList.remove('open');
+    // Clear role state on sign-out
+    window._pnRoleKey   = '';
+    window._pnPulseRole = '';
+    if (window._pnCtaObserver) { window._pnCtaObserver.disconnect(); window._pnCtaObserver = null; }
+    console.log('[Auth] UI updated - showing login');
+  }
+}
+
+async function handleSignOut() {
+  try {
+    console.log('[Auth] Signing out...');
+    await window.Clerk.signOut();
+  } catch (error) {
+    console.error('[Auth] Sign out failed:', error);
+  }
+}
+</script>
+
+</body>
+</html>
+
+
+
+
+
+
+
+
