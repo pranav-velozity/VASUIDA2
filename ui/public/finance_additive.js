@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Finance Module v7 ── */
+/* ── VelOzity Pinpoint — Finance Module v8 ── */
 ;(function(){
 'use strict';
 
@@ -289,6 +289,8 @@ window._finTab=function(tab){
     if(content)content.style.display=t===tab?'':'none';
   });
   const wk=el('fin-sidebar-week');if(wk)wk.style.display=tab==='invoices'?'':'none';
+  // P&L renders its own KPI row — hide the shared top tiles to avoid duplication
+  const kpiGrid=el('fin-kpis');if(kpiGrid)kpiGrid.style.display=tab==='pl'?'none':'';
   if(tab==='invoices')renderInvoicesTab();
   if(tab==='pl')renderPLTab();
   if(tab==='expenses')renderExpensesTab();
@@ -546,67 +548,86 @@ async function renderPLTab(){
     _finState.pl=pl;
     const ytd=pl.ytd||{},months=pl.months||[];
 
-    // ── Main layout: left content + right insights panel ──
+    // ── Main layout ──
     cont.innerHTML=`
-      <div style="display:flex;gap:16px;align-items:flex-start;">
+      <div style="display:flex;gap:20px;align-items:flex-start;">
 
         <!-- LEFT MAIN CONTENT -->
         <div style="flex:1;min-width:0;">
 
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-            <div style="display:flex;align-items:center;gap:12px;">
+          <!-- ── Page header: title + period + action ── -->
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;">
+            <div style="display:flex;align-items:center;gap:14px;">
               <div>
-                <div style="font-size:20px;font-weight:700;color:#1C1C1E;letter-spacing:-0.03em;">Profit &amp; Loss</div>
-                <div style="font-size:11px;color:#8e8e93;margin-top:1px;">${year} · Accrual basis incl. draft invoices</div>
+                <div style="font-size:22px;font-weight:800;color:#1C1C1E;letter-spacing:-0.04em;">Profit &amp; Loss</div>
+                <div style="font-size:11px;color:#8e8e93;margin-top:2px;letter-spacing:0.01em;">${year} &nbsp;·&nbsp; Accrual basis incl. draft</div>
               </div>
-              <!-- Period toggle -->
-              <div style="display:flex;gap:2px;background:rgba(0,0,0,0.05);border-radius:9px;padding:3px;">
-                <button id="fin-period-ytd" onclick="window._finSetPeriod('ytd')" style="font-size:10px;padding:4px 12px;border-radius:7px;border:none;background:#990033;color:#fff;cursor:pointer;font-family:inherit;font-weight:600;letter-spacing:0.02em;">YTD</button>
-                <button id="fin-period-4w"  onclick="window._finSetPeriod('4w')"  style="font-size:10px;padding:4px 12px;border-radius:7px;border:none;background:transparent;color:#6E6E73;cursor:pointer;font-family:inherit;font-weight:500;">4W</button>
-                <button id="fin-period-8w"  onclick="window._finSetPeriod('8w')"  style="font-size:10px;padding:4px 12px;border-radius:7px;border:none;background:transparent;color:#6E6E73;cursor:pointer;font-family:inherit;font-weight:500;">8W</button>
+              <div style="display:flex;gap:2px;background:rgba(0,0,0,0.05);border-radius:10px;padding:3px;">
+                <button id="fin-period-ytd" onclick="window._finSetPeriod('ytd')" style="font-size:10px;padding:5px 14px;border-radius:8px;border:none;background:#990033;color:#fff;cursor:pointer;font-family:inherit;font-weight:700;letter-spacing:0.03em;">YTD</button>
+                <button id="fin-period-4w"  onclick="window._finSetPeriod('4w')"  style="font-size:10px;padding:5px 14px;border-radius:8px;border:none;background:transparent;color:#6E6E73;cursor:pointer;font-family:inherit;font-weight:500;">4W</button>
+                <button id="fin-period-8w"  onclick="window._finSetPeriod('8w')"  style="font-size:10px;padding:5px 14px;border-radius:8px;border:none;background:transparent;color:#6E6E73;cursor:pointer;font-family:inherit;font-weight:500;">8W</button>
               </div>
             </div>
-            <button class="fin-btn fin-btn-primary" onclick="window._finAddExpense()">+ Add Expense</button>
+            <button class="fin-btn fin-btn-primary" onclick="window._finAddExpense()" style="display:flex;align-items:center;gap:6px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add Expense
+            </button>
           </div>
 
-          <!-- YTD KPIs -->
-          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;">
-            <div class="fin-card"><div class="fin-label">Revenue YTD <span style="font-size:9px;color:${LIGHT};">(incl. draft)</span></div><div id="fin-kpi-rev" style="font-size:20px;font-weight:700;color:${GREEN};">${fmtUSD(ytd.revenue)}</div><div id="fin-kpi-rev-sub" style="font-size:10px;color:${MID};">VAS ${fmtUSD(ytd.rev_vas)} · Sea ${fmtUSD(ytd.rev_sea)} · Air ${fmtUSD(ytd.rev_air)}</div></div>
-            <div class="fin-card"><div class="fin-label">Expenses YTD</div><div id="fin-kpi-exp" style="font-size:20px;font-weight:700;color:${AMBER};">${fmtUSD(ytd.expenses)}</div><div id="fin-kpi-exp-sub" style="font-size:10px;color:${MID};">Direct Labour ${fmtUSD(ytd.exp_labour)} · Freight ${fmtUSD(ytd.exp_freight)} · Overhead ${fmtUSD(ytd.exp_overhead||0)}</div></div>
-            <div class="fin-card"><div class="fin-label">Net YTD</div><div id="fin-kpi-net" style="font-size:20px;font-weight:700;color:${ytd.net>0?GREEN:BRAND};">${fmtUSD(ytd.net)}</div><div id="fin-kpi-net-sub" style="font-size:10px;color:${MID};">${ytd.margin_pct}% margin</div></div>
-            <div class="fin-card"><div class="fin-label">Units Processed</div><div id="fin-kpi-units" style="font-size:20px;font-weight:700;color:${DARK};">${(ytd.units_vas||0).toLocaleString()}</div><div id="fin-kpi-units-sub" style="font-size:10px;color:${MID};">Sea ${(ytd.units_sea||0).toLocaleString()} · Air ${(ytd.units_air||0).toLocaleString()}</div></div>
+          <!-- ── KPI row: 4 metric cards ── -->
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">
+            <div style="background:#fff;border-radius:14px;padding:16px 18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);border-top:3px solid #166534;">
+              <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;">Revenue</div>
+              <div id="fin-kpi-rev" style="font-size:22px;font-weight:800;color:#1C1C1E;letter-spacing:-0.03em;">${fmtUSD(ytd.revenue)}</div>
+              <div id="fin-kpi-rev-sub" style="font-size:10px;color:#8e8e93;margin-top:4px;">VAS ${fmtUSD(ytd.rev_vas)} · Sea ${fmtUSD(ytd.rev_sea)} · Air ${fmtUSD(ytd.rev_air)}</div>
+            </div>
+            <div style="background:#fff;border-radius:14px;padding:16px 18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);border-top:3px solid #606a9f;">
+              <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;">Expenses</div>
+              <div id="fin-kpi-exp" style="font-size:22px;font-weight:800;color:#1C1C1E;letter-spacing:-0.03em;">${fmtUSD(ytd.expenses)}</div>
+              <div id="fin-kpi-exp-sub" style="font-size:10px;color:#8e8e93;margin-top:4px;">Labour ${fmtUSD(ytd.exp_labour)} · Freight ${fmtUSD(ytd.exp_freight)} · Other ${fmtUSD(ytd.exp_overhead||0)}</div>
+            </div>
+            <div style="background:#fff;border-radius:14px;padding:16px 18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);border-top:3px solid ${ytd.net>0?'#166534':'#990033'};">
+              <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;">Net &amp; Margin</div>
+              <div id="fin-kpi-net" style="font-size:22px;font-weight:800;color:${ytd.net>0?'#166534':'#990033'};letter-spacing:-0.03em;">${fmtUSD(ytd.net)}</div>
+              <div id="fin-kpi-net-sub" style="font-size:10px;color:#8e8e93;margin-top:4px;">${ytd.margin_pct}% margin on revenue</div>
+            </div>
+            <div style="background:#fff;border-radius:14px;padding:16px 18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);border-top:3px solid #b8960c;">
+              <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;">Units Processed</div>
+              <div id="fin-kpi-units" style="font-size:22px;font-weight:800;color:#1C1C1E;letter-spacing:-0.03em;">${(ytd.units_vas||0).toLocaleString()}</div>
+              <div id="fin-kpi-units-sub" style="font-size:10px;color:#8e8e93;margin-top:4px;">Sea ${(ytd.units_sea||0).toLocaleString()} · Air ${(ytd.units_air||0).toLocaleString()}</div>
+            </div>
           </div>
 
-          <!-- Unit Economics strip — 4 cards with totals + per unit -->
-          <div style="border:1px solid rgba(0,0,0,0.06);border-radius:16px;padding:18px 20px;margin-bottom:16px;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,0.04);">
-            <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:14px;">
-              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.01em;">Unit Economics</div>
-              <div style="font-size:10px;color:#8e8e93;">VAS = Direct Labour cost · Sea/Air = Freight+Duties · Overhead excluded</div>
+          <!-- ── Unit Economics: 4-channel cards in one row ── -->
+          <div style="background:#fff;border-radius:14px;padding:18px 20px;margin-bottom:18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.02em;">Unit Economics</div>
+              <div style="font-size:10px;color:#8e8e93;">Revenue · Cost · Margin per unit processed</div>
             </div>
             <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;" id="fin-ue-strip">
-              ${apoUnitCard('⚙️ VAS', ytd.vas_rev_pu, ytd.vas_cost_pu, ytd.rev_vas, ytd.exp_labour, ytd.units_vas)}
-              ${apoUnitCard('🚢 Sea', ytd.sea_rev_pu, ytd.sea_cost_pu, ytd.rev_sea, ytd.exp_freight_sea||0, ytd.units_sea)}
-              ${apoUnitCard('✈️ Air', ytd.air_rev_pu, ytd.air_cost_pu, ytd.rev_air, ytd.exp_freight_air||0, ytd.units_air)}
-              ${apoUnitCard('◈ Blended', ytd.blended_rev_pu, ytd.blended_cost_pu, ytd.revenue, ytd.expenses, ytd.units_vas)}
+              ${apoUnitCard('VAS', ytd.vas_rev_pu, ytd.vas_cost_pu, ytd.rev_vas, ytd.exp_labour, ytd.units_vas)}
+              ${apoUnitCard('Sea', ytd.sea_rev_pu, ytd.sea_cost_pu, ytd.rev_sea, ytd.exp_freight_sea||0, ytd.units_sea)}
+              ${apoUnitCard('Air', ytd.air_rev_pu, ytd.air_cost_pu, ytd.rev_air, ytd.exp_freight_air||0, ytd.units_air)}
+              ${apoUnitCard('Blended', ytd.blended_rev_pu, ytd.blended_cost_pu, ytd.revenue, ytd.expenses, ytd.units_vas)}
             </div>
           </div>
 
-          <!-- Heatmap: Revenue & Expenses by month/channel -->
-          <div class="fin-card" style="margin-bottom:16px;">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.01em;">Monthly Performance Heatmap</div>
-              <div style="display:flex;gap:4px;">
-                <button id="plc-rev" onclick="window._finPlChart('rev')" style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BRAND};color:#fff;cursor:pointer;font-family:inherit;">Revenue</button>
-                <button id="plc-pu"  onclick="window._finPlChart('pu')"  style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};color:${MID};cursor:pointer;font-family:inherit;">Per Unit</button>
+          <!-- ── Heatmap ── -->
+          <div style="background:#fff;border-radius:14px;padding:18px 20px;margin-bottom:18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.02em;">Monthly Heatmap</div>
+              <div style="display:flex;gap:3px;background:rgba(0,0,0,0.04);border-radius:8px;padding:2px;">
+                <button id="plc-rev" onclick="window._finPlChart('rev')" style="font-size:10px;padding:4px 12px;border-radius:6px;border:none;background:#990033;color:#fff;cursor:pointer;font-family:inherit;font-weight:600;">Revenue</button>
+                <button id="plc-pu"  onclick="window._finPlChart('pu')"  style="font-size:10px;padding:4px 12px;border-radius:6px;border:none;background:transparent;color:#6E6E73;cursor:pointer;font-family:inherit;font-weight:500;">Per Unit</button>
               </div>
             </div>
             <div id="fin-heatmap" style="overflow-x:auto;"></div>
           </div>
 
-          <!-- Monthly breakdown table -->
-          <div class="fin-card">
+          <!-- ── Monthly Breakdown ── -->
+          <div style="background:#fff;border-radius:14px;padding:18px 20px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.01em;">Monthly Breakdown</div>
+              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.02em;">Monthly Detail</div>
               <div style="display:flex;align-items:center;gap:6px;">
                 <span style="font-size:10px;color:#8e8e93;">/u = per unit</span>
                 <button onclick="window._finExpandAll(true)"  style="font-size:10px;padding:4px 12px;border-radius:7px;border:1px solid rgba(0,0,0,0.09);background:#f5f5f7;color:#1C1C1E;cursor:pointer;font-family:inherit;font-weight:500;">Expand All</button>
@@ -629,27 +650,26 @@ async function renderPLTab(){
 
         </div>
 
-        <!-- RIGHT: AI Insights panel (sticky) -->
-        <div style="width:288px;flex-shrink:0;">
-          <div style="position:sticky;top:16px;background:#fff;border:1px solid rgba(0,0,0,0.06);border-radius:16px;padding:18px 18px;box-shadow:0 1px 4px rgba(0,0,0,0.04),0 4px 16px rgba(0,0,0,0.03);">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
-              <div style="width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,#990033,#7a0029);display:flex;align-items:center;justify-content:center;box-shadow:0 3px 8px rgba(153,0,51,0.3);">
+        <!-- ── RIGHT: Insights panel ── -->
+        <div style="width:280px;flex-shrink:0;">
+          <div style="position:sticky;top:16px;background:#fff;border-radius:14px;padding:18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04),0 4px 16px rgba(0,0,0,0.03);">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;">
+              <div style="width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,#990033,#7a0029);display:flex;align-items:center;justify-content:center;box-shadow:0 3px 8px rgba(153,0,51,0.3);flex-shrink:0;">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
               </div>
-              <div>
-                <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.01em;">Insights</div>
-                <div style="font-size:9px;color:#8e8e93;">AI-powered · auto-refreshes</div>
+              <div style="flex:1;min-width:0;">
+                <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.01em;">AI Insights</div>
+                <div style="font-size:9px;color:#8e8e93;">Auto-loads on open</div>
               </div>
-              <span style="margin-left:auto;font-size:9px;background:rgba(153,0,51,0.08);color:#990033;padding:2px 7px;border-radius:8px;font-weight:600;letter-spacing:0.02em;">AI</span>
+              <span style="font-size:9px;background:rgba(153,0,51,0.08);color:#990033;padding:2px 7px;border-radius:6px;font-weight:700;letter-spacing:0.03em;">AI</span>
             </div>
-            <button id="fin-insights-btn" onclick="window._finLoadInsights()" style="width:100%;font-size:11px;padding:8px 0;border-radius:8px;border:none;background:linear-gradient(135deg,#990033,#7a0029);color:#fff;cursor:pointer;font-family:inherit;font-weight:600;margin-bottom:14px;box-shadow:0 2px 8px rgba(153,0,51,0.25);letter-spacing:0.01em;">Refresh Insights</button>
-            <div id="fin-insights-content" style="color:#8e8e93;font-size:11px;line-height:1.5;">Analysing your P&L data…</div>
+            <button id="fin-insights-btn" onclick="window._finLoadInsights()" style="width:100%;font-size:11px;padding:8px 0;border-radius:8px;border:none;background:linear-gradient(135deg,#990033,#7a0029);color:#fff;cursor:pointer;font-family:inherit;font-weight:600;margin-bottom:16px;box-shadow:0 2px 8px rgba(153,0,51,0.2);letter-spacing:0.02em;">↻ Refresh</button>
+            <div id="fin-insights-content" style="color:#8e8e93;font-size:11px;line-height:1.5;"></div>
           </div>
         </div>
 
       </div>
     `;
-
     // ── Period filter logic ──
     window._finPeriod = 'ytd';
     window._finSetPeriod = function(p){
@@ -838,19 +858,20 @@ async function renderPLTab(){
         let insights=d.insights||[];
         if(!Array.isArray(insights)||!insights.length)throw new Error('No insights returned');
         const impColors={'High':'#990033','Medium':'#606a9f','Low':'#a76e6e'};
-        const chColors={'VAS':'#990033','Sea':'#a76e6e','Air':'#b8860b','Overall':'#606a9f'};
+        const chColors={'VAS':'#990033','Sea':'#a76e6e','Air':'#b8960c','Overall':'#606a9f'};
         cont2.innerHTML=insights.slice(0,5).map(ins=>{
-          const impColor=impColors[ins.impact]||BRAND;
-          const chColor=chColors[ins.channel]||MID;
-          const bgMap={'High':'rgba(153,0,51,0.04)','Medium':'rgba(96,106,159,0.04)','Low':'rgba(167,110,110,0.04)'};
-          return`<div style="background:${bgMap[ins.impact]||BG};border-radius:8px;padding:10px 12px;margin-bottom:8px;border-left:3px solid ${impColor};">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
-              <div style="font-size:11px;font-weight:600;color:${DARK};">${esc(ins.title||'')}</div>
-              <span style="font-size:9px;padding:1px 5px;border-radius:6px;background:rgba(0,0,0,0.06);color:${chColor};font-weight:600;">${esc(ins.channel||'')}</span>
+          const impColor=impColors[ins.impact]||'#606a9f';
+          const chColor=chColors[ins.channel]||'#8e8e93';
+          return`<div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:8px;border:1px solid rgba(0,0,0,0.07);border-left:3px solid ${impColor};box-shadow:0 1px 3px rgba(0,0,0,0.04);">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px;margin-bottom:5px;">
+              <div style="font-size:11px;font-weight:700;color:#1C1C1E;line-height:1.3;">${esc(ins.title||'')}</div>
+              <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex-shrink:0;">
+                <span style="font-size:8px;padding:1px 6px;border-radius:5px;background:rgba(0,0,0,0.05);color:${chColor};font-weight:700;white-space:nowrap;">${esc(ins.channel||'')}</span>
+                <span style="font-size:8px;color:${impColor};font-weight:700;text-transform:uppercase;letter-spacing:0.04em;">${ins.impact||''}</span>
+              </div>
             </div>
-            <div style="font-size:10px;color:${MID};margin-bottom:6px;line-height:1.5;">${esc(ins.insight||'')}</div>
-            <div style="font-size:10px;color:${DARK};background:rgba(153,0,51,0.06);padding:5px 7px;border-radius:5px;border-left:2px solid ${impColor};">→ ${esc(ins.action||'')}</div>
-            <div style="font-size:9px;color:${impColor};margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">${ins.impact} impact</div>
+            <div style="font-size:10px;color:#6E6E73;margin-bottom:8px;line-height:1.55;">${esc(ins.insight||'')}</div>
+            <div style="font-size:10px;color:#1C1C1E;background:#fafafa;padding:6px 8px;border-radius:6px;border:1px solid rgba(0,0,0,0.06);">→ ${esc(ins.action||'')}</div>
           </div>`;
         }).join('');
         if(genBtn){genBtn.disabled=false;genBtn.textContent='Refresh Insights';}
