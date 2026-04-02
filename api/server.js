@@ -3479,11 +3479,11 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
     }
 
     // ── 7. Allocate expenses to channel pools by category ──
-    // Labour → VAS direct cost pool (scanning/labelling ops)
+    // Direct Labour → VAS cost pool (scanning/labelling/processing ops only)
+    // Labour → overhead/blended (admin, management, non-VAS staff)
     // Freight Cost + Duties → split between Sea and Air by revenue ratio
     // Everything else → overhead (blended)
-    // NOTE: if a Labour expense is an admin/salary cost it should use category 'Other'
-    const LABOUR_CATS   = new Set(['Labour']);
+    const LABOUR_CATS   = new Set(['Direct Labour']);   // VAS-specific processing labour
     const FREIGHT_CATS  = new Set(['Freight Cost', 'Duties & Customs']);
     for (const exp of expRows) {
       const mk = exp.month_key;
