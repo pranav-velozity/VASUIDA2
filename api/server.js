@@ -3479,6 +3479,10 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
     }
 
     // ── 7. Allocate expenses to channel pools by category ──
+    // Labour → VAS direct cost pool (scanning/labelling ops)
+    // Freight Cost + Duties → split between Sea and Air by revenue ratio
+    // Everything else → overhead (blended)
+    // NOTE: if a Labour expense is an admin/salary cost it should use category 'Other'
     const LABOUR_CATS   = new Set(['Labour']);
     const FREIGHT_CATS  = new Set(['Freight Cost', 'Duties & Customs']);
     for (const exp of expRows) {
@@ -3592,6 +3596,30 @@ app.get('/finance/summary', authenticateRequest, requireRole(['admin']), (req, r
     const by_type = db.prepare(`SELECT type, COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE status='paid' GROUP BY type`).all();
     res.json({ outstanding, paid_ytd, expenses_ytd, last_invoice, by_type });
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── POST /finance/insights — AI-powered P&L analysis ──
+app.post('/finance/insights', authenticateRequest, requireRole(['admin']), aiLimiter, async (req, res) => {
+  try {
+    const { pl_data } = req.body || {};
+    if (!pl_data) return res.status(400).json({ error: 'pl_data required' });
+    const anthropic = getAnthropic();
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1200,
+      system: 'You are a financial analyst for VelOzity, a 3PL/VAS company. Revenue channels: VAS (warehouse labelling/processing, billed per unit, Labour=direct VAS cost), Sea Freight, Air Freight, Overhead (Software/Office/Storage/Marketing/Other). Analyse P&L and return exactly 5 specific actionable insights. Use real numbers. Return ONLY a valid JSON array, no markdown. Each object: title (3-5 words), insight (1-2 sentences with numbers), action (one concrete next step), impact (High/Medium/Low), channel (VAS/Sea/Air/Overall).',
+      messages: [{ role: 'user', content: 'Analyse this P&L and return 5 insights as JSON array:\n' + JSON.stringify(pl_data) }]
+    });
+    const text = response.content.find(b => b.type === 'text')?.text || '[]';
+    const clean = text.replace(/^```json\s*/, '').replace(/```\s*$/, '').trim();
+    let insights;
+    try { insights = JSON.parse(clean); }
+    catch { insights = [{ title: 'Analysis complete', insight: text.slice(0,300), action: 'Review data', impact: 'Medium', channel: 'Overall' }]; }
+    res.json({ insights });
+  } catch(e) {
+    console.error('[/finance/insights]', e);
+    res.status(500).json({ error: String(e.message||e) });
+  }
 });
 
 // ── END FINANCE MODULE ──────────────────────────────────────────
