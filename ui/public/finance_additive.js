@@ -915,6 +915,49 @@ function renderPLCharts(months, mode='rev'){
 
 
 
+async function renderExpensesTab(){
+  const cont=el('fin-tab-expenses');if(!cont)return;
+  cont.innerHTML=`<div style="color:${LIGHT};font-size:12px;">Loading expenses…</div>`;
+  try{
+    const expenses=await api('/finance/expenses');_finState.expenses=expenses;
+    // Group by category for summary tiles
+    const catTotals={};
+    for(const e of expenses)catTotals[e.category]=(catTotals[e.category]||0)+parseFloat(e.amount||0);
+    const grandTotal=expenses.reduce((s,e)=>s+parseFloat(e.amount||0),0);
+    cont.innerHTML=`
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+        <div style="font-size:16px;font-weight:700;color:${DARK};">Expenses</div>
+        <button class="fin-btn fin-btn-primary" onclick="window._finAddExpense()">+ Add Expense</button>
+      </div>
+      <!-- Category summary tiles -->
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:20px;">
+        <div class="fin-card"><div class="fin-label">Total YTD</div><div style="font-size:20px;font-weight:700;color:${DARK};">${fmtUSD(grandTotal)}</div><div style="font-size:10px;color:${LIGHT};">All categories</div></div>
+        ${EXPENSE_CATS.filter(cat=>catTotals[cat]>0).slice(0,3).map(cat=>`
+          <div class="fin-card" style="cursor:pointer;" onclick="window._finFilterExp('${cat}')">
+            <div class="fin-label">${cat}</div>
+            <div style="font-size:18px;font-weight:700;color:${DARK};">${fmtUSD(catTotals[cat])}</div>
+            <div style="font-size:10px;color:${LIGHT};">${Math.round(catTotals[cat]/grandTotal*100)}% of total</div>
+          </div>`).join('')}
+      </div>
+      <!-- Filter row -->
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;">
+        <button onclick="window._finFilterExp(null)" style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BRAND};color:#fff;cursor:pointer;font-family:inherit;">All</button>
+        ${EXPENSE_CATS.filter(cat=>catTotals[cat]>0).map(cat=>`<button onclick="window._finFilterExp('${cat}')" style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};color:${MID};cursor:pointer;font-family:inherit;">${cat}</button>`).join('')}
+      </div>
+      <!-- Expense list -->
+      <div class="fin-card">
+        <div id="fin-exp-list"></div>
+      </div>
+    `;
+    renderExpList(expenses);
+    window._finFilterExp=async function(cat){
+      const filtered=cat?await api(`/finance/expenses?category=${encodeURIComponent(cat)}`):expenses;
+      renderExpList(filtered);
+    };
+  }catch(e){cont.innerHTML=`<div style="color:${BRAND};padding:20px;">Failed to load expenses: ${esc(e.message)}</div>`;}
+}
+
+
 function renderExpList(exps){
   const c=el('fin-exp-list');if(!c)return;
   if(!exps.length){c.innerHTML=`<div style="font-size:11px;color:${LIGHT};padding:12px 0;">No expenses yet.</div>`;return;}
