@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Finance Module v2 ── */
+/* ── VelOzity Pinpoint — Finance Module v7 ── */
 ;(function(){
 'use strict';
 
@@ -88,30 +88,134 @@ function injectStyles(){
   if(document.getElementById('fin-styles'))return;
   const s=document.createElement('style');s.id='fin-styles';
   s.textContent=`
-  #page-finance{background:#F5F5F7;min-height:100vh;}
-  .fin-sidebar{width:200px;flex-shrink:0;background:#fff;border-right:0.5px solid rgba(0,0,0,0.08);min-height:calc(100vh - 56px);padding:20px 0;}
-  .fin-content{flex:1;padding:24px 28px;overflow-y:auto;}
-  .fin-nav-item{display:flex;align-items:center;gap:10px;padding:10px 20px;font-size:13px;font-weight:500;color:${MID};cursor:pointer;transition:all .15s;border-left:3px solid transparent;width:100%;box-sizing:border-box;background:none;border-top:none;border-right:none;border-bottom:none;text-align:left;font-family:inherit;}
-  .fin-nav-item:hover{background:${BG};color:${DARK};}
-  .fin-nav-item.active{color:${BRAND};background:rgba(153,0,51,0.06);border-left-color:${BRAND};}
-  .fin-card{background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:20px;}
-  .fin-input{border:1px solid rgba(0,0,0,0.12);border-radius:8px;padding:7px 10px;font-size:12px;font-family:inherit;color:${DARK};outline:none;width:100%;box-sizing:border-box;transition:border-color .15s;background:#fff;}
-  .fin-input:focus{border-color:${BRAND};}
-  .fin-btn{border:none;border-radius:8px;padding:8px 16px;font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;transition:all .15s;}
-  .fin-btn-primary{background:${BRAND};color:#fff;}
-  .fin-btn-primary:hover{background:#7a0029;}
-  .fin-btn-ghost{background:${BG};color:${DARK};border:0.5px solid rgba(0,0,0,0.08);}
+  /* ── Finance page — modern design system ── */
+  #page-finance{
+    background: linear-gradient(135deg,#fafafa 0%,#f4f4f6 100%);
+    min-height:100vh;
+  }
+
+  /* Sidebar */
+  .fin-sidebar{
+    width:196px;flex-shrink:0;
+    background:linear-gradient(180deg,#1a0010 0%,#2d0018 100%);
+    min-height:calc(100vh - 56px);
+    padding:24px 0 20px;
+  }
+  .fin-sidebar-title{
+    padding:0 20px 20px;
+    border-bottom:1px solid rgba(255,255,255,0.08);
+    margin-bottom:8px;
+  }
+  .fin-nav-item{
+    display:flex;align-items:center;gap:10px;
+    padding:10px 20px;font-size:12px;font-weight:500;
+    color:rgba(255,255,255,0.55);cursor:pointer;
+    transition:all .18s;border:none;
+    width:100%;box-sizing:border-box;background:none;
+    text-align:left;font-family:inherit;border-radius:0;
+    letter-spacing:0.01em;
+  }
+  .fin-nav-item .nav-icon{
+    width:28px;height:28px;border-radius:7px;
+    display:flex;align-items:center;justify-content:center;
+    background:rgba(255,255,255,0.08);flex-shrink:0;
+    transition:all .18s;
+  }
+  .fin-nav-item:hover{color:rgba(255,255,255,0.85);}
+  .fin-nav-item:hover .nav-icon{background:rgba(255,255,255,0.14);}
+  .fin-nav-item.active{color:#fff;}
+  .fin-nav-item.active .nav-icon{background:#990033;box-shadow:0 4px 12px rgba(153,0,51,0.4);}
+
+  /* Content area */
+  .fin-content{flex:1;padding:28px 32px;overflow-y:auto;min-width:0;}
+
+  /* Cards */
+  .fin-card{
+    background:#fff;
+    border:1px solid rgba(0,0,0,0.06);
+    border-radius:16px;
+    padding:20px 22px;
+    box-shadow:0 1px 4px rgba(0,0,0,0.04),0 4px 16px rgba(0,0,0,0.03);
+    transition:box-shadow .2s;
+  }
+  .fin-card:hover{box-shadow:0 2px 8px rgba(0,0,0,0.07),0 8px 24px rgba(0,0,0,0.05);}
+
+  /* KPI cards — first row gets accent top borders */
+  .fin-kpi-card{
+    background:#fff;border-radius:16px;padding:20px 22px;
+    border:1px solid rgba(0,0,0,0.06);
+    box-shadow:0 1px 4px rgba(0,0,0,0.04);
+    position:relative;overflow:hidden;
+  }
+  .fin-kpi-card::before{
+    content:'';position:absolute;top:0;left:0;right:0;height:3px;
+    background:var(--kpi-accent,#e5e7eb);
+  }
+
+  /* Inputs */
+  .fin-input{
+    border:1px solid rgba(0,0,0,0.10);border-radius:9px;
+    padding:8px 11px;font-size:12px;font-family:inherit;
+    color:#1C1C1E;outline:none;width:100%;box-sizing:border-box;
+    transition:border-color .15s,box-shadow .15s;background:#fff;
+  }
+  .fin-input:focus{border-color:#990033;box-shadow:0 0 0 3px rgba(153,0,51,0.08);}
+
+  /* Buttons */
+  .fin-btn{
+    border:none;border-radius:9px;padding:8px 16px;
+    font-size:12px;font-weight:600;font-family:inherit;
+    cursor:pointer;transition:all .15s;letter-spacing:0.01em;
+  }
+  .fin-btn-primary{background:#990033;color:#fff;box-shadow:0 2px 8px rgba(153,0,51,0.25);}
+  .fin-btn-primary:hover{background:#7a0029;box-shadow:0 4px 14px rgba(153,0,51,0.35);transform:translateY(-1px);}
+  .fin-btn-ghost{background:#f5f5f7;color:#1C1C1E;border:1px solid rgba(0,0,0,0.08);}
   .fin-btn-ghost:hover{background:rgba(0,0,0,0.06);}
+
+  /* Table */
   .fin-tbl{width:100%;border-collapse:collapse;font-size:12px;}
-  .fin-tbl th{font-size:10px;font-weight:600;color:${LIGHT};text-transform:uppercase;letter-spacing:0.04em;padding:8px 12px;text-align:left;border-bottom:0.5px solid rgba(0,0,0,0.07);}
-  .fin-tbl td{padding:10px 12px;border-bottom:0.5px solid rgba(0,0,0,0.05);color:${DARK};vertical-align:middle;}
+  .fin-tbl th{
+    font-size:10px;font-weight:600;color:#8e8e93;
+    text-transform:uppercase;letter-spacing:0.05em;
+    padding:9px 14px;text-align:left;
+    background:#fafafa;
+  }
+  .fin-tbl th:first-child{border-radius:8px 0 0 8px;}
+  .fin-tbl th:last-child{border-radius:0 8px 8px 0;}
+  .fin-tbl td{padding:11px 14px;border-bottom:1px solid rgba(0,0,0,0.04);color:#1C1C1E;vertical-align:middle;}
   .fin-tbl tr:last-child td{border-bottom:none;}
-  .fin-tbl tr:hover td{background:${BG};}
-  .fin-label{font-size:10px;font-weight:600;color:${MID};text-transform:uppercase;letter-spacing:0.05em;margin-bottom:5px;display:block;}
-  .fin-section-title{font-size:13px;font-weight:600;color:${DARK};margin-bottom:14px;}
-  .fin-kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px;}
-  .fin-panel{position:fixed;top:0;right:0;width:500px;height:100vh;background:#fff;border-left:0.5px solid rgba(0,0,0,0.1);box-shadow:-8px 0 40px rgba(0,0,0,0.1);transform:translateX(100%);transition:transform .3s cubic-bezier(0.4,0,0.2,1);z-index:300;overflow-y:auto;padding:24px 22px 60px;}
-  .fin-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.2);z-index:299;display:none;}
+  .fin-tbl tr:hover td{background:rgba(0,0,0,0.015);}
+
+  /* Labels & titles */
+  .fin-label{font-size:10px;font-weight:600;color:#8e8e93;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;display:block;}
+  .fin-section-title{font-size:13px;font-weight:700;color:#1C1C1E;margin-bottom:14px;letter-spacing:-0.01em;}
+
+  .fin-kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px;}
+
+  /* Slide-in panel */
+  .fin-panel{
+    position:fixed;top:0;right:0;width:520px;height:100vh;
+    background:#fff;
+    border-left:1px solid rgba(0,0,0,0.08);
+    box-shadow:-20px 0 60px rgba(0,0,0,0.12);
+    transform:translateX(100%);
+    transition:transform .3s cubic-bezier(0.4,0,0.2,1);
+    z-index:300;overflow-y:auto;padding:28px 26px 60px;
+  }
+  .fin-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.25);backdrop-filter:blur(2px);z-index:299;display:none;}
+
+  /* Sidebar week/currency section */
+  .fin-sidebar-controls{padding:12px 14px;}
+  .fin-sidebar-label{font-size:9px;font-weight:600;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:5px;display:block;padding:0 4px;}
+  .fin-sidebar-select{
+    width:100%;border:1px solid rgba(255,255,255,0.12);border-radius:8px;
+    padding:7px 10px;font-size:11px;font-family:inherit;
+    color:rgba(255,255,255,0.8);outline:none;
+    background:rgba(255,255,255,0.07);
+    transition:border-color .15s;
+  }
+  .fin-sidebar-select:focus{border-color:rgba(255,255,255,0.3);}
+  .fin-sidebar-select option{background:#2d0018;color:#fff;}
   `;
   document.head.appendChild(s);
 }
@@ -119,31 +223,52 @@ function injectStyles(){
 function injectSkeleton(host){
   injectStyles();
   const weeks=getWeeks();
+  // SVG icons for nav
+  const icons={
+    invoices:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10,9 9,9 8,9"/></svg>`,
+    pl:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`,
+    expenses:`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>`,
+  };
   host.innerHTML=`
-  <div style="display:flex;align-items:stretch;">
+  <div style="display:flex;align-items:stretch;min-height:calc(100vh - 56px);">
+
+    <!-- Dark sidebar -->
     <div class="fin-sidebar">
-      <div style="padding:0 20px 16px;border-bottom:0.5px solid rgba(0,0,0,0.06);margin-bottom:12px;">
-        <div style="font-size:14px;font-weight:700;color:${DARK};">Finance</div>
-        <div style="font-size:10px;color:${LIGHT};margin-top:2px;">Admin only</div>
+      <div class="fin-sidebar-title">
+        <div style="font-size:13px;font-weight:700;color:#fff;letter-spacing:-0.01em;">Finance</div>
+        <div style="font-size:10px;color:rgba(255,255,255,0.35);margin-top:2px;">Admin only</div>
       </div>
-      <button class="fin-nav-item active" id="fin-nav-invoices" onclick="window._finTab('invoices')"><span style="font-size:16px;">🧾</span>Invoices</button>
-      <button class="fin-nav-item" id="fin-nav-pl" onclick="window._finTab('pl')"><span style="font-size:16px;">📊</span>P&amp;L</button>
-      <button class="fin-nav-item" id="fin-nav-expenses" onclick="window._finTab('expenses')"><span style="font-size:16px;">💳</span>Expenses</button>
-      <div style="margin:16px 20px;height:0.5px;background:rgba(0,0,0,0.06);"></div>
-      <div id="fin-sidebar-week" style="padding:0 14px 12px;">
-        <div class="fin-label" style="padding:0 4px;">Week</div>
-        <select id="fin-week-sel" class="fin-input" onchange="window._finSelectWeek(this.value)">
+
+      <div style="padding:8px 10px;margin-bottom:4px;">
+        <button class="fin-nav-item active" id="fin-nav-invoices" onclick="window._finTab('invoices')">
+          <span class="nav-icon">${icons.invoices}</span>Invoices
+        </button>
+        <button class="fin-nav-item" id="fin-nav-pl" onclick="window._finTab('pl')">
+          <span class="nav-icon">${icons.pl}</span>P&amp;L
+        </button>
+        <button class="fin-nav-item" id="fin-nav-expenses" onclick="window._finTab('expenses')">
+          <span class="nav-icon">${icons.expenses}</span>Expenses
+        </button>
+      </div>
+
+      <div style="margin:8px 16px;height:1px;background:rgba(255,255,255,0.07);"></div>
+
+      <div class="fin-sidebar-controls" style="margin-top:4px;">
+        <span class="fin-sidebar-label">Week</span>
+        <select id="fin-week-sel" class="fin-sidebar-select" onchange="window._finSelectWeek(this.value)">
           ${weeks.map(w=>`<option value="${w}">${weekLabel(w)}</option>`).join('')}
         </select>
       </div>
-      <div style="padding:0 14px 12px;">
-        <div class="fin-label" style="padding:0 4px;">Currency</div>
-        <select id="fin-currency" class="fin-input" onchange="window._finCurrencyChange(this.value)">
+      <div class="fin-sidebar-controls" style="margin-top:8px;">
+        <span class="fin-sidebar-label">Currency</span>
+        <select id="fin-currency" class="fin-sidebar-select" onchange="window._finCurrencyChange(this.value)">
           <option value="USD">USD</option><option value="AUD">AUD</option><option value="EUR">EUR</option><option value="GBP">GBP</option>
         </select>
-        <div id="fin-fx-label" style="font-size:9px;color:${LIGHT};margin-top:4px;padding:0 4px;"></div>
+        <div id="fin-fx-label" style="font-size:9px;color:rgba(255,255,255,0.30);margin-top:5px;padding:0 4px;"></div>
       </div>
     </div>
+
+    <!-- Main content -->
     <div class="fin-content">
       <div class="fin-kpi-grid" id="fin-kpis"></div>
       <div id="fin-tab-invoices"></div>
@@ -197,10 +322,11 @@ async function renderKPIs(){
       {label:'Outstanding',value:fmtUSD(out.total||0),sub:(out.n||0)+' invoice'+(out.n!==1?'s':''),color:BRAND},
     ];
     const cont=el('fin-kpis');if(!cont)return;
-    cont.innerHTML=tiles.map(t=>`<div class="fin-card">
-      <div class="fin-label">${t.label}</div>
-      <div style="font-size:22px;font-weight:700;color:${DARK};letter-spacing:-0.02em;margin-bottom:4px;">${t.value}</div>
-      <div style="font-size:10px;color:${t.color};font-weight:500;">${t.sub}</div>
+    const kpiAccents=['#166534','#606a9f','#990033','#b8960c'];
+    cont.innerHTML=tiles.map((t,i)=>`<div class="fin-kpi-card" style="--kpi-accent:${kpiAccents[i]};">
+      <div style="font-size:10px;font-weight:600;color:#8e8e93;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">${t.label}</div>
+      <div style="font-size:24px;font-weight:700;color:#1C1C1E;letter-spacing:-0.03em;margin-bottom:5px;">${t.value}</div>
+      <div style="font-size:11px;color:${t.color};font-weight:500;">${t.sub}</div>
     </div>`).join('');
   }catch(e){console.warn('[Finance] KPI',e);}
 }
@@ -427,14 +553,17 @@ async function renderPLTab(){
         <!-- LEFT MAIN CONTENT -->
         <div style="flex:1;min-width:0;">
 
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-            <div style="display:flex;align-items:center;gap:10px;">
-              <div style="font-size:16px;font-weight:700;color:${DARK};">Profit &amp; Loss ${year}</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+            <div style="display:flex;align-items:center;gap:12px;">
+              <div>
+                <div style="font-size:20px;font-weight:700;color:#1C1C1E;letter-spacing:-0.03em;">Profit &amp; Loss</div>
+                <div style="font-size:11px;color:#8e8e93;margin-top:1px;">${year} · Accrual basis incl. draft invoices</div>
+              </div>
               <!-- Period toggle -->
-              <div style="display:flex;gap:3px;background:rgba(0,0,0,0.04);border-radius:8px;padding:3px;">
-                <button id="fin-period-ytd" onclick="window._finSetPeriod('ytd')" style="font-size:10px;padding:3px 10px;border-radius:6px;border:none;background:${BRAND};color:#fff;cursor:pointer;font-family:inherit;font-weight:600;">YTD</button>
-                <button id="fin-period-4w"  onclick="window._finSetPeriod('4w')"  style="font-size:10px;padding:3px 10px;border-radius:6px;border:none;background:transparent;color:${MID};cursor:pointer;font-family:inherit;">4W</button>
-                <button id="fin-period-8w"  onclick="window._finSetPeriod('8w')"  style="font-size:10px;padding:3px 10px;border-radius:6px;border:none;background:transparent;color:${MID};cursor:pointer;font-family:inherit;">8W</button>
+              <div style="display:flex;gap:2px;background:rgba(0,0,0,0.05);border-radius:9px;padding:3px;">
+                <button id="fin-period-ytd" onclick="window._finSetPeriod('ytd')" style="font-size:10px;padding:4px 12px;border-radius:7px;border:none;background:#990033;color:#fff;cursor:pointer;font-family:inherit;font-weight:600;letter-spacing:0.02em;">YTD</button>
+                <button id="fin-period-4w"  onclick="window._finSetPeriod('4w')"  style="font-size:10px;padding:4px 12px;border-radius:7px;border:none;background:transparent;color:#6E6E73;cursor:pointer;font-family:inherit;font-weight:500;">4W</button>
+                <button id="fin-period-8w"  onclick="window._finSetPeriod('8w')"  style="font-size:10px;padding:4px 12px;border-radius:7px;border:none;background:transparent;color:#6E6E73;cursor:pointer;font-family:inherit;font-weight:500;">8W</button>
               </div>
             </div>
             <button class="fin-btn fin-btn-primary" onclick="window._finAddExpense()">+ Add Expense</button>
@@ -449,8 +578,11 @@ async function renderPLTab(){
           </div>
 
           <!-- Unit Economics strip — 4 cards with totals + per unit -->
-          <div style="border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;margin-bottom:16px;background:transparent;">
-            <div style="font-size:11px;font-weight:600;color:${DARK};margin-bottom:12px;">Unit Economics YTD — Revenue · Cost · Margin per unit <span style="font-size:9px;color:${LIGHT};font-weight:400;">VAS cost = Direct Labour · Sea/Air cost = Freight+Duties · Overhead = all other expenses</span></div>
+          <div style="border:1px solid rgba(0,0,0,0.06);border-radius:16px;padding:18px 20px;margin-bottom:16px;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,0.04);">
+            <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:14px;">
+              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.01em;">Unit Economics</div>
+              <div style="font-size:10px;color:#8e8e93;">VAS = Direct Labour cost · Sea/Air = Freight+Duties · Overhead excluded</div>
+            </div>
             <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;" id="fin-ue-strip">
               ${apoUnitCard('⚙️ VAS', ytd.vas_rev_pu, ytd.vas_cost_pu, ytd.rev_vas, ytd.exp_labour, ytd.units_vas)}
               ${apoUnitCard('🚢 Sea', ytd.sea_rev_pu, ytd.sea_cost_pu, ytd.rev_sea, ytd.exp_freight_sea||0, ytd.units_sea)}
@@ -461,8 +593,8 @@ async function renderPLTab(){
 
           <!-- Heatmap: Revenue & Expenses by month/channel -->
           <div class="fin-card" style="margin-bottom:16px;">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-              <div class="fin-section-title" style="margin-bottom:0;">Monthly Performance Heatmap</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.01em;">Monthly Performance Heatmap</div>
               <div style="display:flex;gap:4px;">
                 <button id="plc-rev" onclick="window._finPlChart('rev')" style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BRAND};color:#fff;cursor:pointer;font-family:inherit;">Revenue</button>
                 <button id="plc-pu"  onclick="window._finPlChart('pu')"  style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};color:${MID};cursor:pointer;font-family:inherit;">Per Unit</button>
@@ -473,21 +605,21 @@ async function renderPLTab(){
 
           <!-- Monthly breakdown table -->
           <div class="fin-card">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
-              <div class="fin-section-title" style="margin-bottom:0;">Monthly Breakdown</div>
-              <div style="display:flex;align-items:center;gap:8px;">
-                <span style="font-size:10px;color:${LIGHT};">/u = per unit</span>
-                <button onclick="window._finExpandAll(true)"  style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};color:${DARK};cursor:pointer;font-family:inherit;">Expand All</button>
-                <button onclick="window._finExpandAll(false)" style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};color:${DARK};cursor:pointer;font-family:inherit;">Collapse All</button>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.01em;">Monthly Breakdown</div>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span style="font-size:10px;color:#8e8e93;">/u = per unit</span>
+                <button onclick="window._finExpandAll(true)"  style="font-size:10px;padding:4px 12px;border-radius:7px;border:1px solid rgba(0,0,0,0.09);background:#f5f5f7;color:#1C1C1E;cursor:pointer;font-family:inherit;font-weight:500;">Expand All</button>
+                <button onclick="window._finExpandAll(false)" style="font-size:10px;padding:4px 12px;border-radius:7px;border:1px solid rgba(0,0,0,0.09);background:#f5f5f7;color:#1C1C1E;cursor:pointer;font-family:inherit;font-weight:500;">Collapse All</button>
               </div>
             </div>
             <div style="overflow-x:auto;">
             <table class="fin-tbl" style="min-width:860px;">
               <thead><tr>
                 <th>Month</th>
-                <th>VAS Rev</th><th style="color:#D97706;">/u</th>
-                <th>Sea Rev</th><th style="color:#D97706;">/u</th>
-                <th>Air Rev</th><th style="color:#D97706;">/u</th>
+                <th>VAS Revenue</th><th>/unit</th>
+                <th>Sea Revenue</th><th>/unit</th>
+                <th>Air Revenue</th><th>/unit</th>
                 <th>Expenses</th><th>Net</th><th>Margin</th><th>Cash Flow</th><th></th>
               </tr></thead>
               <tbody id="fin-pl-tbody"></tbody>
@@ -498,19 +630,20 @@ async function renderPLTab(){
         </div>
 
         <!-- RIGHT: AI Insights panel (sticky) -->
-        <div style="width:280px;flex-shrink:0;">
-          <div class="fin-card" style="position:sticky;top:16px;">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
-              <div style="display:flex;align-items:center;gap:6px;">
-                <div style="width:22px;height:22px;border-radius:6px;background:${BRAND};display:flex;align-items:center;justify-content:center;">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-                </div>
-                <div style="font-size:12px;font-weight:600;color:${DARK};">Financial Insights</div>
-                <span style="font-size:9px;background:rgba(153,0,51,0.08);color:${BRAND};padding:1px 6px;border-radius:8px;font-weight:500;">AI</span>
+        <div style="width:288px;flex-shrink:0;">
+          <div style="position:sticky;top:16px;background:#fff;border:1px solid rgba(0,0,0,0.06);border-radius:16px;padding:18px 18px;box-shadow:0 1px 4px rgba(0,0,0,0.04),0 4px 16px rgba(0,0,0,0.03);">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+              <div style="width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,#990033,#7a0029);display:flex;align-items:center;justify-content:center;box-shadow:0 3px 8px rgba(153,0,51,0.3);">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
               </div>
+              <div>
+                <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.01em;">Insights</div>
+                <div style="font-size:9px;color:#8e8e93;">AI-powered · auto-refreshes</div>
+              </div>
+              <span style="margin-left:auto;font-size:9px;background:rgba(153,0,51,0.08);color:#990033;padding:2px 7px;border-radius:8px;font-weight:600;letter-spacing:0.02em;">AI</span>
             </div>
-            <button id="fin-insights-btn" onclick="window._finLoadInsights()" style="width:100%;font-size:11px;padding:7px 0;border-radius:7px;border:none;background:${BRAND};color:#fff;cursor:pointer;font-family:inherit;font-weight:600;margin-bottom:12px;">Generate Insights</button>
-            <div id="fin-insights-content" style="color:${LIGHT};font-size:11px;line-height:1.5;">Click above to analyse your P&L data and surface actionable recommendations.</div>
+            <button id="fin-insights-btn" onclick="window._finLoadInsights()" style="width:100%;font-size:11px;padding:8px 0;border-radius:8px;border:none;background:linear-gradient(135deg,#990033,#7a0029);color:#fff;cursor:pointer;font-family:inherit;font-weight:600;margin-bottom:14px;box-shadow:0 2px 8px rgba(153,0,51,0.25);letter-spacing:0.01em;">Refresh Insights</button>
+            <div id="fin-insights-content" style="color:#8e8e93;font-size:11px;line-height:1.5;">Analysing your P&L data…</div>
           </div>
         </div>
 
