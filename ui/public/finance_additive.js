@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Finance Module v3 ── */
+/* ── VelOzity Pinpoint — Finance Module v4 ── */
 ;(function(){
 'use strict';
 
@@ -685,16 +685,12 @@ async function renderPLTab(){
           sea_rev_pu:m.sea_rev_pu, sea_cost_pu:m.sea_cost_pu, air_rev_pu:m.air_rev_pu, air_cost_pu:m.air_cost_pu,
         }))};
         const prompt=`You are a financial analyst for VelOzity, a 3PL/VAS company. Revenue channels: VAS (value added services - labelling/processing units), Sea Freight, Air Freight. Labour expenses = direct VAS processing cost. Freight expenses split between Sea and Air. Analyse this P&L and give exactly 5 specific actionable insights to improve profitability. Be direct with numbers. Return ONLY a JSON array, no markdown, each object has: title (short 3-5 words), insight (1-2 sentences with specific numbers from data), action (one concrete next step), impact (High/Medium/Low), channel (VAS/Sea/Air/Overall). P&L data: ${JSON.stringify(summary)}`;
-        const resp=await fetch(apiBase+'/pulse/chat',{method:'POST',
+        const resp=await fetch(apiBase+'/finance/insights',{method:'POST',
           headers:Object.assign({'Content-Type':'application/json'},token?{'Authorization':'Bearer '+token}:{}),
-          body:JSON.stringify({messages:[{role:'user',content:prompt}]})});
+          body:JSON.stringify({pl_data:summary})});
         if(!resp.ok)throw new Error('Server error '+resp.status);
         const d=await resp.json();
-        const raw=d.reply||'';
-        const clean=raw.replace(/^```json\s*/,'').replace(/```\s*$/,'').trim();
-        let insights;
-        try{insights=JSON.parse(clean);}
-        catch{insights=[{title:'Analysis complete',insight:raw.slice(0,200),action:'Review the data above',impact:'Medium',channel:'Overall'}];}
+        let insights=d.insights||[];
         if(!Array.isArray(insights)||!insights.length)throw new Error('No insights returned');
         const impColors={'High':BRAND,'Medium':'#92400E','Low':'#166534'};
         const chColors={'VAS':'#166534','Sea':'#1e3a5f','Air':'#4c1d95','Overall':BRAND};
