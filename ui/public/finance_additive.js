@@ -1,10 +1,10 @@
-/* ── VelOzity Pinpoint — Finance Module v4 ── */
+/* ── VelOzity Pinpoint — Finance Module v2 ── */
 ;(function(){
 'use strict';
 
 const BRAND='#990033',DARK='#1C1C1E',MID='#6E6E73',LIGHT='#AEAEB2';
 const BG='#F5F5F7',GREEN='#34C759',AMBER='#C8860A',BLUE='#3B82F6';
-const EXPENSE_CATS=['Freight Cost','Labour','Software','Office','Duties & Customs','Storage','Marketing','Other'];
+const EXPENSE_CATS=['Freight Cost','Direct Labour','Labour','Software','Office','Duties & Customs','Storage','Marketing','Other'];
 
 let _apiBase='',_finState={tab:'invoices',week:'',invoices:[],expenses:[],pl:null,fxRates:{USD:1},fxLabel:'',currency:'USD'};
 
@@ -443,14 +443,14 @@ async function renderPLTab(){
           <!-- YTD KPIs -->
           <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;">
             <div class="fin-card"><div class="fin-label">Revenue YTD <span style="font-size:9px;color:${LIGHT};">(incl. draft)</span></div><div id="fin-kpi-rev" style="font-size:20px;font-weight:700;color:${GREEN};">${fmtUSD(ytd.revenue)}</div><div id="fin-kpi-rev-sub" style="font-size:10px;color:${MID};">VAS ${fmtUSD(ytd.rev_vas)} · Sea ${fmtUSD(ytd.rev_sea)} · Air ${fmtUSD(ytd.rev_air)}</div></div>
-            <div class="fin-card"><div class="fin-label">Expenses YTD</div><div id="fin-kpi-exp" style="font-size:20px;font-weight:700;color:${AMBER};">${fmtUSD(ytd.expenses)}</div><div id="fin-kpi-exp-sub" style="font-size:10px;color:${MID};">Labour ${fmtUSD(ytd.exp_labour)} · Freight ${fmtUSD(ytd.exp_freight)}</div></div>
+            <div class="fin-card"><div class="fin-label">Expenses YTD</div><div id="fin-kpi-exp" style="font-size:20px;font-weight:700;color:${AMBER};">${fmtUSD(ytd.expenses)}</div><div id="fin-kpi-exp-sub" style="font-size:10px;color:${MID};">Direct Labour ${fmtUSD(ytd.exp_labour)} · Freight ${fmtUSD(ytd.exp_freight)} · Overhead ${fmtUSD(ytd.exp_overhead||0)}</div></div>
             <div class="fin-card"><div class="fin-label">Net YTD</div><div id="fin-kpi-net" style="font-size:20px;font-weight:700;color:${ytd.net>0?GREEN:BRAND};">${fmtUSD(ytd.net)}</div><div id="fin-kpi-net-sub" style="font-size:10px;color:${MID};">${ytd.margin_pct}% margin</div></div>
             <div class="fin-card"><div class="fin-label">Units Processed</div><div id="fin-kpi-units" style="font-size:20px;font-weight:700;color:${DARK};">${(ytd.units_vas||0).toLocaleString()}</div><div id="fin-kpi-units-sub" style="font-size:10px;color:${MID};">Sea ${(ytd.units_sea||0).toLocaleString()} · Air ${(ytd.units_air||0).toLocaleString()}</div></div>
           </div>
 
           <!-- Unit Economics strip — 4 cards with totals + per unit -->
           <div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:14px 16px;margin-bottom:16px;">
-            <div style="font-size:11px;font-weight:600;color:${DARK};margin-bottom:12px;">Unit Economics YTD — Revenue · Cost · Margin per unit</div>
+            <div style="font-size:11px;font-weight:600;color:${DARK};margin-bottom:12px;">Unit Economics YTD — Revenue · Cost · Margin per unit <span style="font-size:9px;color:${LIGHT};font-weight:400;">VAS cost = Direct Labour · Sea/Air cost = Freight+Duties · Overhead = all other expenses</span></div>
             <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;" id="fin-ue-strip">
               ${apoUnitCard('⚙️ VAS', ytd.vas_rev_pu, ytd.vas_cost_pu, ytd.rev_vas, ytd.exp_labour, ytd.units_vas)}
               ${apoUnitCard('🚢 Sea', ytd.sea_rev_pu, ytd.sea_cost_pu, ytd.rev_sea, ytd.exp_freight_sea||0, ytd.units_sea)}
@@ -692,12 +692,12 @@ async function renderPLTab(){
         const d=await resp.json();
         let insights=d.insights||[];
         if(!Array.isArray(insights)||!insights.length)throw new Error('No insights returned');
-        const impColors={'High':BRAND,'Medium':'#92400E','Low':'#166534'};
-        const chColors={'VAS':'#166534','Sea':'#1e3a5f','Air':'#4c1d95','Overall':BRAND};
+        const impColors={'High':'#990033','Medium':'#606a9f','Low':'#a76e6e'};
+        const chColors={'VAS':'#990033','Sea':'#a76e6e','Air':'#b8860b','Overall':'#606a9f'};
         cont2.innerHTML=insights.slice(0,5).map(ins=>{
           const impColor=impColors[ins.impact]||BRAND;
           const chColor=chColors[ins.channel]||MID;
-          const bgMap={'High':'rgba(153,0,51,0.04)','Medium':'rgba(146,64,14,0.04)','Low':'rgba(22,101,52,0.04)'};
+          const bgMap={'High':'rgba(153,0,51,0.04)','Medium':'rgba(96,106,159,0.04)','Low':'rgba(167,110,110,0.04)'};
           return`<div style="background:${bgMap[ins.impact]||BG};border-radius:8px;padding:10px 12px;margin-bottom:8px;border-left:3px solid ${impColor};">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
               <div style="font-size:11px;font-weight:600;color:${DARK};">${esc(ins.title||'')}</div>
@@ -724,7 +724,7 @@ function apoUnitCard(label, revPu, costPu, totalRev, totalCost, totalUnits){
   const marginPu = revPu!==null&&costPu!==null ? Math.round((revPu-costPu)*100)/100 : null;
   const mColor = marginPu===null ? LIGHT : marginPu>0 ? GREEN : BRAND;
   const unitsStr = totalUnits ? Number(totalUnits).toLocaleString()+'u' : '—';
-  const channelColor = label.includes('VAS')?'rgba(22,101,52,0.9)':label.includes('Sea')?'rgba(30,58,95,0.9)':label.includes('Air')?'rgba(76,29,149,0.85)':'#990033';
+  const channelColor = label.includes('VAS')?'#990033':label.includes('Sea')?'#a76e6e':label.includes('Air')?'#FED000':'#606a9f';
   return`<div style="background:${BG};border-radius:10px;padding:12px 14px;border-top:3px solid ${channelColor};">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
       <div style="font-size:11px;font-weight:600;color:${DARK};">${label}</div>
@@ -769,11 +769,11 @@ function renderPLCharts(months, mode='rev'){
     let cf=0;
     const cfData=months.map(m=>{if(m.revenue>0||m.expenses>0)cf+=m.net;return cf||null;});
     window._fcR=new Chart(rE,{type:'bar',data:{labels,datasets:[
-      {label:'VAS Revenue',  data:months.map(m=>m.rev_vas||0), backgroundColor:'rgba(22,101,52,0.80)',borderRadius:4,stack:'rev'},
-      {label:'Sea Revenue',  data:months.map(m=>m.rev_sea||0), backgroundColor:'rgba(30,58,95,0.80)',borderRadius:4,stack:'rev'},
-      {label:'Air Revenue',  data:months.map(m=>m.rev_air||0), backgroundColor:'rgba(76,29,149,0.75)',borderRadius:4,stack:'rev'},
-      {label:'Expenses',     data:months.map(m=>m.expenses||0),backgroundColor:'rgba(153,0,51,0.35)',borderRadius:4,stack:'exp'},
-      {label:'Cash Flow',    data:cfData,type:'line',borderColor:'#4A9B8E',backgroundColor:'rgba(74,155,142,0.05)',borderWidth:2,pointRadius:3,fill:true,tension:0.35,yAxisID:'y',spanGaps:false},
+      {label:'VAS Revenue',  data:months.map(m=>m.rev_vas||0), backgroundColor:'#990033',borderRadius:4,stack:'rev'},
+      {label:'Sea Revenue',  data:months.map(m=>m.rev_sea||0), backgroundColor:'#a76e6e',borderRadius:4,stack:'rev'},
+      {label:'Air Revenue',  data:months.map(m=>m.rev_air||0), backgroundColor:'#FED000',borderRadius:4,stack:'rev'},
+      {label:'Expenses',     data:months.map(m=>m.expenses||0),backgroundColor:'rgba(96,106,159,0.45)',borderRadius:4,stack:'exp'},
+      {label:'Cash Flow',    data:cfData,type:'line',borderColor:'#606a9f',backgroundColor:'rgba(96,106,159,0.06)',borderWidth:2,pointRadius:3,fill:true,tension:0.35,yAxisID:'y',spanGaps:false},
     ]},options:{responsive:true,maintainAspectRatio:false,
       plugins:{legend:{position:'top',align:'end',labels:{font:{size:9},boxWidth:8}}},
       scales:{x:{ticks:{font:{size:9}},grid:{display:false}},
@@ -781,10 +781,10 @@ function renderPLCharts(months, mode='rev'){
   } else {
     // Per-unit economics chart
     window._fcR=new Chart(rE,{type:'bar',data:{labels,datasets:[
-      {label:'VAS Rev/u',  data:months.map(m=>m.vas_rev_pu),  backgroundColor:'rgba(22,101,52,0.80)', borderRadius:4},
-      {label:'VAS Cost/u', data:months.map(m=>m.vas_cost_pu), backgroundColor:'rgba(22,101,52,0.30)', borderRadius:4},
-      {label:'Sea Rev/u',  data:months.map(m=>m.sea_rev_pu),  backgroundColor:'rgba(30,58,95,0.80)', borderRadius:4},
-      {label:'Air Rev/u',  data:months.map(m=>m.air_rev_pu),  backgroundColor:'rgba(76,29,149,0.75)', borderRadius:4},
+      {label:'VAS Rev/u',  data:months.map(m=>m.vas_rev_pu),  backgroundColor:'#990033', borderRadius:4},
+      {label:'VAS Cost/u', data:months.map(m=>m.vas_cost_pu), backgroundColor:'rgba(153,0,51,0.30)', borderRadius:4},
+      {label:'Sea Rev/u',  data:months.map(m=>m.sea_rev_pu),  backgroundColor:'#a76e6e', borderRadius:4},
+      {label:'Air Rev/u',  data:months.map(m=>m.air_rev_pu),  backgroundColor:'#FED000', borderRadius:4},
     ]},options:{responsive:true,maintainAspectRatio:false,
       plugins:{legend:{position:'top',align:'end',labels:{font:{size:9},boxWidth:8}}},
       scales:{x:{ticks:{font:{size:9}},grid:{display:false}},
@@ -792,8 +792,8 @@ function renderPLCharts(months, mode='rev'){
   }
 
   // Expense Mix donut — by CATEGORY (fixed — was incorrectly showing by month)
-  const EXPENSE_CATS_DISPLAY=['Labour','Freight Cost','Duties & Customs','Software','Office','Storage','Marketing','Other'];
-  const CAT_COLORS=['rgba(22,101,52,0.85)','rgba(30,58,95,0.85)','rgba(76,29,149,0.85)','#C8860A','#990033','#4A9B8E','#6E6E73','#AEAEB2'];
+  const EXPENSE_CATS_DISPLAY=['Direct Labour','Labour','Freight Cost','Duties & Customs','Software','Office','Storage','Marketing','Other'];
+  const CAT_COLORS=['#990033','#606a9f','#FED000','#a76e6e','#4A9B8E','#C8860A','#6E6E73','#AEAEB2'];
   const catTotals={};
   for(const m of months){
     for(const exp of(m.expense_rows||[])){
