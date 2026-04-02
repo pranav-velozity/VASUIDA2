@@ -459,29 +459,27 @@ async function renderPLTab(){
             </div>
           </div>
 
-          <!-- Charts row -->
-          <div style="display:grid;grid-template-columns:3fr 1fr;gap:12px;margin-bottom:16px;">
-            <div class="fin-card">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
-                <div class="fin-section-title" style="margin-bottom:0;">Revenue by Channel vs Expenses</div>
-                <div style="display:flex;gap:4px;">
-                  <button id="plc-rev" onclick="window._finPlChart('rev')" style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BRAND};color:#fff;cursor:pointer;font-family:inherit;">Revenue</button>
-                  <button id="plc-pu"  onclick="window._finPlChart('pu')"  style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};color:${MID};cursor:pointer;font-family:inherit;">Per Unit</button>
-                </div>
+          <!-- Heatmap: Revenue & Expenses by month/channel -->
+          <div class="fin-card" style="margin-bottom:16px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+              <div class="fin-section-title" style="margin-bottom:0;">Monthly Performance Heatmap</div>
+              <div style="display:flex;gap:4px;">
+                <button id="plc-rev" onclick="window._finPlChart('rev')" style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BRAND};color:#fff;cursor:pointer;font-family:inherit;">Revenue</button>
+                <button id="plc-pu"  onclick="window._finPlChart('pu')"  style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};color:${MID};cursor:pointer;font-family:inherit;">Per Unit</button>
               </div>
-              <div style="height:180px;"><canvas id="fin-chart-rev"></canvas></div>
             </div>
-            <div class="fin-card">
-              <div class="fin-section-title">Expense Mix</div>
-              <div style="height:180px;"><canvas id="fin-chart-exp"></canvas></div>
-            </div>
+            <div id="fin-heatmap" style="overflow-x:auto;"></div>
           </div>
 
           <!-- Monthly breakdown table -->
           <div class="fin-card">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
               <div class="fin-section-title" style="margin-bottom:0;">Monthly Breakdown</div>
-              <div style="font-size:10px;color:${LIGHT};">Click row to expand · /u = per unit</div>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <span style="font-size:10px;color:${LIGHT};">/u = per unit</span>
+                <button onclick="window._finExpandAll(true)"  style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};color:${DARK};cursor:pointer;font-family:inherit;">Expand All</button>
+                <button onclick="window._finExpandAll(false)" style="font-size:10px;padding:3px 10px;border-radius:6px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};color:${DARK};cursor:pointer;font-family:inherit;">Collapse All</button>
+              </div>
             </div>
             <div style="overflow-x:auto;">
             <table class="fin-tbl" style="min-width:860px;">
@@ -575,8 +573,13 @@ async function renderPLTab(){
       if(hasData)runningCF+=m.net;
       const cfColor=runningCF>0?GREEN:BRAND;
       const fpu=(v)=>v!==null&&v!==undefined?`<span style="color:#D97706;font-size:10px;font-weight:600;">$${Number(v).toFixed(2)}</span>`:'<span style="color:#AEAEB2;font-size:10px;">—</span>';
-      return`<tr style="cursor:pointer;" onclick="window._finToggleMonth('${m.month_key}')">
-        <td style="font-weight:500;">${mn}</td>
+      return`<tr>
+        <td style="font-weight:500;white-space:nowrap;">
+          <span style="display:inline-flex;align-items:center;gap:6px;">
+            <button onclick="window._finToggleMonth('${m.month_key}')" style="width:22px;height:22px;border-radius:5px;border:0.5px solid rgba(0,0,0,0.1);background:${BG};cursor:pointer;font-size:10px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-family:inherit;" id="fin-exp-icon-${m.month_key}">▶</button>
+            ${mn}
+          </span>
+        </td>
         <td style="color:${m.rev_vas>0?GREEN:LIGHT};">${m.rev_vas>0?fmtUSD(m.rev_vas):'—'}</td>
         <td>${fpu(m.vas_rev_pu)}</td>
         <td style="color:${m.rev_sea>0?GREEN:LIGHT};">${m.rev_sea>0?fmtUSD(m.rev_sea):'—'}</td>
@@ -610,14 +613,23 @@ async function renderPLTab(){
       renderPLCharts(filtered,mode);
     };
 
-    loadChartJS(()=>renderPLCharts(months,'rev'));
+    renderPLCharts(months,'rev');
 
     // ── Expand month row ──
+    window._finExpandAll=function(expand){
+      const months2=document.querySelectorAll('[id^="fin-pl-expand-"]');
+      months2.forEach(row=>{
+        const mk=row.id.replace('fin-pl-expand-','');
+        const icon=el('fin-exp-icon-'+mk);
+        if(expand&&row.style.display==='none'){window._finToggleMonth(mk);}
+        else if(!expand&&row.style.display!=='none'){row.style.display='none';if(icon){icon.textContent='▶';icon.style.color='';icon.style.background='';icon.style.borderColor='rgba(0,0,0,0.1)';}}
+      });
+    };
     window._finToggleMonth=async function(mk){
       const row=el('fin-pl-expand-'+mk);if(!row)return;
       const icon=el('fin-exp-icon-'+mk);
       if(row.style.display==='none'){
-        if(icon){icon.textContent='▼';icon.style.color=BRAND;}
+        if(icon){icon.textContent='▼';icon.style.color='#fff';icon.style.background=BRAND;icon.style.borderColor=BRAND;}
         row.style.display='';
         const c=el('fin-pl-ec-'+mk);if(!c)return;
         c.innerHTML=`<div style="color:${LIGHT};font-size:11px;">Loading…</div>`;
@@ -663,7 +675,7 @@ async function renderPLTab(){
             </div>
           </div>`;
         }catch(e){c.innerHTML=`<div style="color:${BRAND};font-size:11px;">${e.message}</div>`;}
-      }else{row.style.display='none';if(icon){icon.textContent='▶';icon.style.color=LIGHT;}}
+      }else{row.style.display='none';if(icon){icon.textContent='▶';icon.style.color='';icon.style.background='';icon.style.borderColor='rgba(0,0,0,0.1)';}}
     };
 
     // ── Claude insights — routes through /pulse/chat backend (avoids CORS) ──
@@ -758,85 +770,150 @@ function apoUnitCard(label, revPu, costPu, totalRev, totalCost, totalUnits){
 
 
 function loadChartJS(cb){if(window.Chart){cb();return;}const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js';s.onload=cb;document.head.appendChild(s);}
-function renderPLCharts(months, mode='rev'){
-  const rE=el('fin-chart-rev'),eE=el('fin-chart-exp');
-  if(!rE||!eE||!window.Chart)return;
-  if(window._fcR)window._fcR.destroy();
-  if(window._fcE)window._fcE.destroy();
 
-  const labels=months.map(m=>new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short'}));
+// ── Heatmap renderer — replaces bar/line chart ──
+function renderPLCharts(months, mode='rev'){
+  const wrap=el('fin-heatmap');
+  if(!wrap)return;
+
+  // Destroy old Chart.js instances if any
+  if(window._fcR){try{window._fcR.destroy();}catch(_){}window._fcR=null;}
+  if(window._fcE){try{window._fcE.destroy();}catch(_){}window._fcE=null;}
+
+  const activeMonths=months.filter(m=>m.revenue>0||m.expenses>0||m.units_vas>0);
+  if(!activeMonths.length){wrap.innerHTML='<div style="color:#AEAEB2;font-size:11px;padding:20px 0;text-align:center;">No data for this period</div>';return;}
+
+  // ── Color scale helpers ──
+  function revScale(v,max){
+    if(!v||!max)return'rgba(0,0,0,0.04)';
+    const t=Math.min(v/max,1);
+    // light pink → deep brand red
+    const r=Math.round(255-(255-153)*t);
+    const g=Math.round(255-(255-0)*t);
+    const b=Math.round(255-(255-51)*t);
+    return`rgb(${r},${g},${b})`;
+  }
+  function expScale(v,max){
+    if(!v||!max)return'rgba(0,0,0,0.04)';
+    const t=Math.min(v/max,1);
+    // light lavender → deep slate
+    const r=Math.round(240-(240-96)*t);
+    const g=Math.round(240-(240-106)*t);
+    const b=Math.round(255-(255-159)*t);
+    return`rgb(${r},${g},${b})`;
+  }
+  function unitScale(v,max){
+    if(!v||!max)return'rgba(0,0,0,0.04)';
+    const t=Math.min(v/max,1);
+    // light sage → deep forest
+    const r=Math.round(240-(240-22)*t);
+    const g=Math.round(255-(255-101)*t);
+    const b=Math.round(240-(240-52)*t);
+    return`rgb(${r},${g},${b})`;
+  }
+  function textColor(bg,t){return t>0.55?'#fff':'#1C1C1E';}
+  function cell(val,bg,t,sub){
+    const tc=textColor(bg,t);
+    return`<td style="padding:8px 10px;background:${bg};border-radius:6px;text-align:right;min-width:90px;position:relative;">
+      <div style="font-size:11px;font-weight:600;color:${tc};">${val}</div>
+      ${sub?`<div style="font-size:9px;color:${tc};opacity:0.75;margin-top:1px;">${sub}</div>`:''}
+    </td>`;
+  }
+  function emptyCell(){return`<td style="padding:8px 10px;text-align:right;min-width:90px;"><span style="color:#AEAEB2;font-size:10px;">—</span></td>`;}
 
   if(mode==='rev'){
-    // Line chart per channel — cleaner for sparse/trend data
-    let cf=0;
-    const cfData=months.map(m=>{if(m.revenue>0||m.expenses>0)cf+=m.net;return cf||null;});
-    const nullZero=arr=>arr.map(v=>v>0?v:null); // show gaps where no data
-    window._fcR=new Chart(rE,{type:'line',data:{labels,datasets:[
-      {label:'VAS',    data:nullZero(months.map(m=>m.rev_vas)), borderColor:'#990033',backgroundColor:'rgba(153,0,51,0.06)',borderWidth:2,pointRadius:4,pointBackgroundColor:'#fff',pointBorderColor:'#990033',pointBorderWidth:2,fill:true,tension:0.35,spanGaps:false},
-      {label:'Sea',    data:nullZero(months.map(m=>m.rev_sea)), borderColor:'#a76e6e',backgroundColor:'rgba(167,110,110,0.04)',borderWidth:2,pointRadius:4,pointBackgroundColor:'#fff',pointBorderColor:'#a76e6e',pointBorderWidth:2,fill:false,tension:0.35,spanGaps:false},
-      {label:'Air',    data:nullZero(months.map(m=>m.rev_air)), borderColor:'#b8960c',backgroundColor:'rgba(184,150,12,0.04)',borderWidth:2,pointRadius:4,pointBackgroundColor:'#fff',pointBorderColor:'#b8960c',pointBorderWidth:2,fill:false,tension:0.35,spanGaps:false},
-      {label:'Expenses',data:months.map(m=>m.expenses||null),  borderColor:'#606a9f',backgroundColor:'rgba(96,106,159,0.05)',borderWidth:1.5,borderDash:[4,3],pointRadius:3,pointBackgroundColor:'#fff',pointBorderColor:'#606a9f',pointBorderWidth:1.5,fill:false,tension:0.2,spanGaps:false},
-      {label:'Net Cash',data:cfData,                           borderColor:'rgba(0,0,0,0.20)',backgroundColor:'rgba(0,0,0,0.02)',borderWidth:1,borderDash:[2,4],pointRadius:2,fill:false,tension:0.35,spanGaps:false},
-    ]},options:{responsive:true,maintainAspectRatio:false,
-      plugins:{legend:{position:'top',align:'end',labels:{font:{size:9},boxWidth:10,usePointStyle:true,pointStyleWidth:10}}},
-      scales:{x:{ticks:{font:{size:9}},grid:{display:false}},
-              y:{ticks:{font:{size:9},callback:v=>'$'+v.toLocaleString()},grid:{color:'rgba(0,0,0,0.04)'},beginAtZero:true}}}});
+    const maxVas=Math.max(...activeMonths.map(m=>m.rev_vas||0),1);
+    const maxSea=Math.max(...activeMonths.map(m=>m.rev_sea||0),1);
+    const maxAir=Math.max(...activeMonths.map(m=>m.rev_air||0),1);
+    const maxExp=Math.max(...activeMonths.map(m=>m.expenses||0),1);
+    const maxNet=Math.max(...activeMonths.map(m=>Math.abs(m.net)||0),1);
+
+    wrap.innerHTML=`
+      <table style="border-collapse:separate;border-spacing:3px;width:100%;font-size:10px;">
+        <thead>
+          <tr>
+            <th style="text-align:left;padding:4px 8px;font-size:10px;font-weight:600;color:#6E6E73;white-space:nowrap;">Month</th>
+            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#990033;">VAS Revenue</th>
+            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#a76e6e;">Sea Revenue</th>
+            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#b8960c;">Air Revenue</th>
+            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#606a9f;">Expenses</th>
+            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#1C1C1E;">Net</th>
+            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#1C1C1E;">Margin</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${activeMonths.map(m=>{
+            const mn=new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'2-digit'});
+            const vasT=(m.rev_vas||0)/maxVas, seaT=(m.rev_sea||0)/maxSea, airT=(m.rev_air||0)/maxAir;
+            const expT=(m.expenses||0)/maxExp, netT=Math.abs(m.net||0)/maxNet;
+            const netBg=m.net>0?`rgb(${Math.round(240-(240-22)*netT)},${Math.round(255-(255-101)*netT)},${Math.round(240-(240-52)*netT)})`:m.net<0?`rgb(${Math.round(255-(255-153)*netT)},${Math.round(240-(240-0)*netT)},${Math.round(240-(240-51)*netT)})`:'rgba(0,0,0,0.04)';
+            return`<tr>
+              <td style="padding:4px 8px;font-size:11px;font-weight:500;color:#1C1C1E;white-space:nowrap;">${mn}</td>
+              ${m.rev_vas>0  ? cell(fmtUSD(m.rev_vas),  revScale(m.rev_vas,maxVas),  vasT) : emptyCell()}
+              ${m.rev_sea>0  ? cell(fmtUSD(m.rev_sea),  revScale(m.rev_sea,maxSea),  seaT) : emptyCell()}
+              ${m.rev_air>0  ? cell(fmtUSD(m.rev_air),  revScale(m.rev_air,maxAir),  airT) : emptyCell()}
+              ${m.expenses>0 ? cell(fmtUSD(m.expenses), expScale(m.expenses,maxExp), expT) : emptyCell()}
+              ${cell(fmtUSD(m.net), netBg, netT, m.margin_pct+'%')}
+              <td style="padding:4px 8px;text-align:right;">
+                <span style="font-size:11px;font-weight:600;color:${m.margin_pct>20?'#166534':m.margin_pct>0?'#606a9f':'#990033'};">${m.margin_pct}%</span>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      <div style="display:flex;align-items:center;gap:14px;margin-top:10px;flex-wrap:wrap;">
+        <span style="font-size:9px;color:#AEAEB2;">Colour intensity = relative size within column</span>
+        ${['VAS','Sea','Air'].map((ch,i)=>{
+          const cs=['#990033','#a76e6e','#b8960c'];
+          return`<span style="display:inline-flex;align-items:center;gap:4px;font-size:9px;color:#6E6E73;">
+            <span style="width:10px;height:10px;border-radius:2px;background:${cs[i]};display:inline-block;opacity:0.7;"></span>${ch}
+          </span>`;
+        }).join('')}
+        <span style="display:inline-flex;align-items:center;gap:4px;font-size:9px;color:#6E6E73;"><span style="width:10px;height:10px;border-radius:2px;background:#606a9f;display:inline-block;opacity:0.7;"></span>Expenses</span>
+        <span style="display:inline-flex;align-items:center;gap:4px;font-size:9px;color:#6E6E73;"><span style="width:10px;height:10px;border-radius:2px;background:#166534;display:inline-block;opacity:0.7;"></span>+Net</span>
+        <span style="display:inline-flex;align-items:center;gap:4px;font-size:9px;color:#6E6E73;"><span style="width:10px;height:10px;border-radius:2px;background:#990033;display:inline-block;opacity:0.7;"></span>-Net</span>
+      </div>`;
   } else {
-    // Per-unit economics chart
-    window._fcR=new Chart(rE,{type:'bar',data:{labels,datasets:[
-      {label:'VAS Rev/u',  data:months.map(m=>m.vas_rev_pu),  backgroundColor:'#990033', borderRadius:4},
-      {label:'VAS Cost/u', data:months.map(m=>m.vas_cost_pu), backgroundColor:'rgba(153,0,51,0.30)', borderRadius:4},
-      {label:'Sea Rev/u',  data:months.map(m=>m.sea_rev_pu),  backgroundColor:'#a76e6e', borderRadius:4},
-      {label:'Air Rev/u',  data:months.map(m=>m.air_rev_pu),  backgroundColor:'#FED000', borderRadius:4},
-    ]},options:{responsive:true,maintainAspectRatio:false,
-      plugins:{legend:{position:'top',align:'end',labels:{font:{size:9},boxWidth:8}}},
-      scales:{x:{ticks:{font:{size:9}},grid:{display:false}},
-              y:{ticks:{font:{size:9},callback:v=>'$'+v.toFixed(2)+'/u'},grid:{color:'rgba(0,0,0,0.04)'},beginAtZero:true}}}});
-  }
+    // Per-unit heatmap
+    const maxVRev=Math.max(...activeMonths.map(m=>m.vas_rev_pu||0),0.01);
+    const maxVCost=Math.max(...activeMonths.map(m=>m.vas_cost_pu||0),0.01);
+    const maxSRev=Math.max(...activeMonths.map(m=>m.sea_rev_pu||0),0.01);
+    const maxARev=Math.max(...activeMonths.map(m=>m.air_rev_pu||0),0.01);
+    const toFixed3=(v)=>v!==null&&v!==undefined?'$'+Number(v).toFixed(3):'—';
 
-  // Expense Mix donut — by CATEGORY (fixed — was incorrectly showing by month)
-  const EXPENSE_CATS_DISPLAY=['Direct Labour','Labour','Freight Cost','Duties & Customs','Software','Office','Storage','Marketing','Other'];
-  const CAT_COLORS=['#990033','#606a9f','#FED000','#a76e6e','#4A9B8E','#C8860A','#6E6E73','#AEAEB2'];
-  const catTotals={};
-  for(const m of months){
-    for(const exp of(m.expense_rows||[])){
-      catTotals[exp.category]=(catTotals[exp.category]||0)+parseFloat(exp.amount||0);
-    }
-  }
-  const catLabels=EXPENSE_CATS_DISPLAY.filter(c=>catTotals[c]>0);
-  const catData=catLabels.map(c=>catTotals[c]);
-  const catColors=catLabels.map(c=>CAT_COLORS[EXPENSE_CATS_DISPLAY.indexOf(c)]||'#6B7280');
-  if(catLabels.length){
-    window._fcE=new Chart(eE,{type:'doughnut',
-      data:{labels:catLabels,datasets:[{data:catData,backgroundColor:catColors,borderWidth:2,borderColor:'#fff'}]},
-      options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{position:'bottom',labels:{font:{size:9},boxWidth:8,padding:5}},
-        tooltip:{callbacks:{label:ctx=>{const v=ctx.parsed;const t=catData.reduce((a,b)=>a+b,0);return ` ${ctx.label}: $${v.toLocaleString()} (${Math.round(v/t*100)}%)`;}}}}}});
+    wrap.innerHTML=`
+      <table style="border-collapse:separate;border-spacing:3px;width:100%;font-size:10px;">
+        <thead>
+          <tr>
+            <th style="text-align:left;padding:4px 8px;font-size:10px;font-weight:600;color:#6E6E73;">Month</th>
+            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#990033;">VAS Rev/u</th>
+            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#606a9f;">VAS Cost/u</th>
+            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#a76e6e;">Sea Rev/u</th>
+            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#b8960c;">Air Rev/u</th>
+            <th style="text-align:right;padding:4px 8px;font-size:10px;font-weight:600;color:#1C1C1E;">VAS Margin/u</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${activeMonths.map(m=>{
+            const mn=new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'2-digit'});
+            const mpu=m.vas_rev_pu!==null&&m.vas_cost_pu!==null?Math.round((m.vas_rev_pu-m.vas_cost_pu)*1000)/1000:null;
+            const mpuBg=mpu!==null?(mpu>0?unitScale(mpu,maxVRev):revScale(Math.abs(mpu),maxVCost)):'rgba(0,0,0,0.04)';
+            return`<tr>
+              <td style="padding:4px 8px;font-size:11px;font-weight:500;color:#1C1C1E;white-space:nowrap;">${mn}</td>
+              ${m.vas_rev_pu!==null ? cell(toFixed3(m.vas_rev_pu), revScale(m.vas_rev_pu,maxVRev),   m.vas_rev_pu/maxVRev)   : emptyCell()}
+              ${m.vas_cost_pu!==null? cell(toFixed3(m.vas_cost_pu),expScale(m.vas_cost_pu,maxVCost), m.vas_cost_pu/maxVCost) : emptyCell()}
+              ${m.sea_rev_pu!==null ? cell(toFixed3(m.sea_rev_pu), revScale(m.sea_rev_pu,maxSRev),   m.sea_rev_pu/maxSRev)   : emptyCell()}
+              ${m.air_rev_pu!==null ? cell(toFixed3(m.air_rev_pu), revScale(m.air_rev_pu,maxARev),   m.air_rev_pu/maxARev)   : emptyCell()}
+              ${mpu!==null ? cell(toFixed3(mpu), mpuBg, Math.abs(mpu)/maxVRev) : emptyCell()}
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      <div style="font-size:9px;color:#AEAEB2;margin-top:10px;">Colour intensity = relative size within column · Red = high/negative · Green = high/positive · Slate = cost</div>`;
   }
 }
 
-async function renderExpensesTab(){
-  const cont=el('fin-tab-expenses');if(!cont)return;
-  cont.innerHTML=`<div style="color:${LIGHT};font-size:12px;">Loading…</div>`;
-  try{
-    const expenses=await api('/finance/expenses');_finState.expenses=expenses;
-    const catTotals={};for(const e of expenses)catTotals[e.category]=(catTotals[e.category]||0)+parseFloat(e.amount||0);
-    cont.innerHTML=`
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-        <div style="font-size:16px;font-weight:700;color:${DARK};">Expenses</div>
-        <button class="fin-btn fin-btn-primary" onclick="window._finAddExpense()">+ Add Expense</button>
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:20px;">
-        ${EXPENSE_CATS.map(cat=>`<div class="fin-card" style="padding:14px;cursor:pointer;" onclick="window._finFilterExp('${cat}')">
-          <div class="fin-label">${cat}</div>
-          <div style="font-size:16px;font-weight:700;color:${(catTotals[cat]||0)>0?DARK:LIGHT};">${(catTotals[cat]||0)>0?fmtUSD(catTotals[cat]):'—'}</div>
-        </div>`).join('')}
-      </div>
-      <div class="fin-card"><div id="fin-exp-list"></div></div>`;
-    renderExpList(expenses);
-    window._finFilterExp=async function(cat){renderExpList(await api(`/finance/expenses?category=${encodeURIComponent(cat)}`));};
-  }catch(e){cont.innerHTML=`<div style="color:${BRAND};padding:20px;">${esc(e.message)}</div>`;}
-}
+
 
 function renderExpList(exps){
   const c=el('fin-exp-list');if(!c)return;
