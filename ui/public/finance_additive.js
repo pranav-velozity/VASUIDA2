@@ -1,10 +1,11 @@
-/* ── VelOzity Pinpoint — Finance Module v2 ── */
+/* ── VelOzity Pinpoint — Finance Module v13 ── */
 ;(function(){
 'use strict';
 
 const BRAND='#990033',DARK='#1C1C1E',MID='#6E6E73',LIGHT='#AEAEB2';
 const BG='#F5F5F7',GREEN='#34C759',AMBER='#C8860A',BLUE='#3B82F6';
-const EXPENSE_CATS=['Freight Cost','Direct Labour','Labour','Software','Office','Duties & Customs','Storage','Marketing','Other'];
+const EXPENSE_CATS=['VAS Cost','Sea Freight Cost','Air Freight Cost','Internal Overhead – Salaries','Internal Overhead – Software','Internal Overhead – Office','Internal Overhead – Other','Direct Labour','Duties & Customs','Storage','Marketing','Other'];
+const EXPENSE_CAT_GROUPS={'Operations':['VAS Cost','Sea Freight Cost','Air Freight Cost','Direct Labour'],'Internal Overhead':['Internal Overhead – Salaries','Internal Overhead – Software','Internal Overhead – Office','Internal Overhead – Other'],'Other':['Duties & Customs','Storage','Marketing','Other']};
 
 let _apiBase='',_finState={tab:'invoices',week:'',invoices:[],expenses:[],pl:null,fxRates:{USD:1},fxLabel:'',currency:'USD'};
 
@@ -1227,6 +1228,131 @@ function renderPLCharts(months, mode='rev'){
 
 
 
+async function renderExpensesTab(){
+  const root=el('fin-tab-expenses');if(!root)return;
+  root.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+    <div>
+      <div style="font-size:17px;font-weight:700;color:${DARK};">Expenses</div>
+      <div style="font-size:12px;color:${MID};margin-top:2px;">Direct costs by period · Internal overhead</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <select id="exp-filter-cat" class="fin-input" style="width:200px;" onchange="window._finExpFilter()">
+        <option value="">All categories</option>
+        ${Object.entries(EXPENSE_CAT_GROUPS).map(([g,cats])=>`<optgroup label="${g}">${cats.map(c=>`<option value="${c}">${c}</option>`).join('')}</optgroup>`).join('')}
+      </select>
+      <select id="exp-filter-period" class="fin-input" style="width:160px;" onchange="window._finExpFilter()">
+        <option value="">All periods</option>
+        ${(()=>{const opts=[];const now=new Date();for(let i=0;i<12;i++){const d=new Date(now.getUTCFullYear(),now.getUTCMonth()-i,1);const mk=d.toISOString().slice(0,7);const label=d.toLocaleDateString('en-AU',{month:'short',year:'numeric'});opts.push(`<option value="${mk}">${label}</option>`);}return opts.join('');})()}
+      </select>
+      <button class="fin-btn fin-btn-primary" onclick="window._finAddExpense()">+ Add Expense</button>
+    </div>
+  </div>
+  <div id="exp-summary-row" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;"></div>
+  <div id="exp-table-wrap"></div>`;
+
+  await window._finExpFilter();
+}
+
+window._finExpFilter=async function(){
+  const cat=el('exp-filter-cat')?.value||'';
+  const mk=el('exp-filter-period')?.value||'';
+  let url='/finance/expenses?';
+  if(cat) url+=`category=${encodeURIComponent(cat)}&`;
+  if(mk)  url+=`month_key=${encodeURIComponent(mk)}&`;
+  try{
+    const exps=await api(url);
+    _finState.expenses=exps;
+    renderExpSummary(exps);
+    renderExpTable(exps);
+  }catch(e){
+    const w=el('exp-table-wrap');
+    if(w)w.innerHTML=`<div style="color:#c00;font-size:12px;padding:16px;">Failed to load expenses: ${esc(e.message)}</div>`;
+  }
+};
+
+function renderExpSummary(exps){
+  const root=el('exp-summary-row');if(!root)return;
+  const total=exps.reduce((s,e)=>s+parseFloat(e.amount||0),0);
+  // Group by top-level category type
+  const vas=exps.filter(e=>e.category==='VAS Cost').reduce((s,e)=>s+parseFloat(e.amount||0),0);
+  const freight=exps.filter(e=>e.category==='Sea Freight Cost'||e.category==='Air Freight Cost').reduce((s,e)=>s+parseFloat(e.amount||0),0);
+  const overhead=exps.filter(e=>String(e.category).startsWith('Internal Overhead')).reduce((s,e)=>s+parseFloat(e.amount||0),0);
+  const other=total-vas-freight-overhead;
+  const card=(label,val,color,sub)=>`
+    <div style="background:#fff;border-radius:12px;border:1px solid #e5e7eb;padding:16px;">
+      <div style="font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;">${label}</div>
+      <div style="font-size:20px;font-weight:800;color:${color};letter-spacing:-0.03em;">${fmtUSD(val)}</div>
+      ${sub?`<div style="font-size:10px;color:${MID};margin-top:3px;">${sub}</div>`:''}
+    </div>`;
+  root.innerHTML=
+    card('Total Expenses',total,DARK,`${exps.length} entries`)+
+    card('VAS Cost',vas,'#7c3aed','Direct processing')+
+    card('Freight Cost',freight,BLUE,'Sea + Air')+
+    card('Internal Overhead',overhead,AMBER,'All sub-categories');
+}
+
+function renderExpTable(exps){
+  const root=el('exp-table-wrap');if(!root)return;
+  if(!exps.length){
+    root.innerHTML=`<div style="background:#fff;border-radius:12px;border:1px solid #e5e7eb;padding:40px;text-align:center;color:${MID};font-size:13px;">No expenses found. <button class="fin-btn fin-btn-primary" style="margin-left:12px;" onclick="window._finAddExpense()">+ Add Expense</button></div>`;
+    return;
+  }
+  // Group by month_key for display
+  const byMonth=new Map();
+  for(const e of exps){
+    const mk=e.month_key||e.expense_date?.slice(0,7)||'Unknown';
+    if(!byMonth.has(mk))byMonth.set(mk,[]);
+    byMonth.get(mk).push(e);
+  }
+  const sorted=[...byMonth.entries()].sort((a,b)=>b[0].localeCompare(a[0]));
+  root.innerHTML=sorted.map(([mk,rows])=>{
+    const monthTotal=rows.reduce((s,e)=>s+parseFloat(e.amount||0),0);
+    const d=new Date(mk+'-01T00:00:00Z');
+    const label=d.toLocaleDateString('en-AU',{month:'long',year:'numeric'});
+    return`<div style="margin-bottom:16px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <div style="font-size:12px;font-weight:700;color:${DARK};">${label}</div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="font-size:12px;font-weight:700;color:${AMBER};">${fmtUSD(monthTotal)}</div>
+          <button class="fin-btn fin-btn-ghost" style="font-size:10px;padding:3px 10px;" onclick="window._finAddExpense('${mk}')">+ Add</button>
+        </div>
+      </div>
+      <div style="background:#fff;border-radius:12px;border:1px solid #e5e7eb;overflow:hidden;">
+        <table class="fin-tbl" style="margin:0;">
+          <thead><tr>
+            <th style="width:30%;">Description</th>
+            <th>Category</th>
+            <th>Date</th>
+            <th style="text-align:right;">Amount</th>
+            <th>Recurring</th>
+            <th style="width:80px;"></th>
+          </tr></thead>
+          <tbody>${rows.map(e=>`<tr>
+            <td style="font-weight:500;">${esc(e.description)}</td>
+            <td><span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:600;background:${catColor(e.category,0.12)};color:${catColor(e.category,1)};">${esc(e.category)}</span></td>
+            <td style="color:${MID};font-size:11px;">${fmtDate(e.expense_date)}</td>
+            <td style="text-align:right;font-weight:600;color:${AMBER};">${fmtUSD(e.amount)}</td>
+            <td>${e.is_recurring?`<span style="color:${BLUE};font-size:10px;font-weight:600;">↻ ${e.recur_freq||'monthly'}</span>`:'—'}</td>
+            <td>
+              <button class="fin-btn fin-btn-ghost" style="font-size:10px;padding:2px 8px;margin-right:4px;" onclick="window._finEditExpense('${e.id}')">Edit</button>
+              <button style="background:none;border:none;color:${LIGHT};cursor:pointer;font-size:13px;" onclick="window._finDeleteExpense('${e.id}')">✕</button>
+            </td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function catColor(cat,alpha){
+  if(cat==='VAS Cost')return alpha<1?`rgba(124,58,237,${alpha})`:'#7c3aed';
+  if(cat==='Sea Freight Cost')return alpha<1?`rgba(59,130,246,${alpha})`:'#3b82f6';
+  if(cat==='Air Freight Cost')return alpha<1?`rgba(14,165,233,${alpha})`:'#0ea5e9';
+  if(String(cat).startsWith('Internal Overhead'))return alpha<1?`rgba(200,134,10,${alpha})`:'#c8860a';
+  if(cat==='Direct Labour')return alpha<1?`rgba(34,197,94,${alpha})`:'#22c55e';
+  return alpha<1?`rgba(174,174,178,${alpha})`:'#6E6E73';
+}
+
 function renderExpList(exps){
   const c=el('fin-exp-list');if(!c)return;
   if(!exps.length){c.innerHTML=`<div style="font-size:11px;color:${LIGHT};padding:12px 0;">No expenses yet.</div>`;return;}
@@ -1242,7 +1368,7 @@ function renderExpList(exps){
 }
 
 window._finAddExpense=function(defaultMonth){
-  renderExpEditor({id:null,category:'Other',description:'',amount:0,currency:'USD',expense_date:defaultMonth?defaultMonth+'-01':isoToday(),is_recurring:0,recur_freq:'monthly',recur_end:''});
+  renderExpEditor({id:null,category:'VAS Cost',description:'',amount:0,currency:'USD',expense_date:defaultMonth?defaultMonth+'-01':isoToday(),is_recurring:0,recur_freq:'monthly',recur_end:''});
 };
 window._finEditExpense=async function(id){
   const exp=_finState.expenses.find(e=>e.id===id);
@@ -1255,7 +1381,7 @@ function renderExpEditor(exp){
       <div style="font-size:15px;font-weight:700;color:${DARK};">${isNew?'New Expense':'Edit Expense'}</div>
       <button onclick="window._finClosePanel()" style="width:28px;height:28px;border-radius:8px;border:none;background:${BG};color:${MID};font-size:14px;cursor:pointer;">✕</button>
     </div>
-    <div style="margin-bottom:12px;"><span class="fin-label">Category</span><select id="exp-cat" class="fin-input">${EXPENSE_CATS.map(c=>`<option value="${c}" ${c===exp.category?'selected':''}>${c}</option>`).join('')}</select></div>
+    <div style="margin-bottom:12px;"><span class="fin-label">Category</span><select id="exp-cat" class="fin-input">${Object.entries(EXPENSE_CAT_GROUPS).map(([g,cats])=>`<optgroup label="${g}">${cats.map(c=>`<option value="${c}" ${c===exp.category?'selected':''}>${c}</option>`).join('')}</optgroup>`).join('')}</select></div>
     <div style="margin-bottom:12px;"><span class="fin-label">Description</span><input id="exp-desc" class="fin-input" value="${esc(exp.description)}" placeholder="e.g. COSCO sea freight"/></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
       <div><span class="fin-label">Amount</span><input id="exp-amount" type="number" step="0.01" class="fin-input" value="${exp.amount||0}"/></div>
