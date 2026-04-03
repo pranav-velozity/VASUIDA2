@@ -3543,7 +3543,12 @@ function renderOpsInsights(view){
   };
 
   // Applied units per PO (from /records/summary by_po)
-  const poToApplied = new Map(recs.map(r => [norm(r.po||r.po_number||r.poNumber), toNum(r.units||r.total_units||0)]));
+  const poToApplied = new Map();
+  for (const r of recs) {
+    const po = norm(r.po || r.po_number || r.poNumber);
+    const u  = toNum(r.units || r.total_units || 0);
+    if (po) poToApplied.set(po, (poToApplied.get(po) || 0) + u);
+  }
 
   // Cartons-in per PO from bins: distinct mobile_bin per PO
   // Cartons-in by PO comes from /receiving (same source as Flow/Receiving pages).
