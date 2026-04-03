@@ -3486,8 +3486,10 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
     // Labour → overhead/blended (admin, management, non-VAS staff)
     // Freight Cost + Duties → split between Sea and Air by revenue ratio
     // Everything else → overhead (blended)
-    const LABOUR_CATS   = new Set(['Direct Labour']);   // VAS-specific processing labour
-    const FREIGHT_CATS  = new Set(['Freight Cost', 'Duties & Customs']);
+    const LABOUR_CATS   = new Set(['Direct Labour', 'VAS Cost']);
+    const FREIGHT_CATS  = new Set(['Freight Cost', 'Sea Freight Cost', 'Air Freight Cost', 'Duties & Customs']);
+    const SEA_CATS      = new Set(['Sea Freight Cost']);
+    const AIR_CATS      = new Set(['Air Freight Cost']);
     for (const exp of expRows) {
       const mk = exp.month_key;
       if (!months[mk]) continue;
@@ -3495,6 +3497,8 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
       months[mk].expenses += amt;
       months[mk].expense_rows.push(exp);
       if (LABOUR_CATS.has(exp.category))        months[mk].exp_labour   += amt;
+      else if (SEA_CATS.has(exp.category))      { months[mk].exp_freight += amt; months[mk].exp_freight_sea_direct = (months[mk].exp_freight_sea_direct||0) + amt; }
+      else if (AIR_CATS.has(exp.category))      { months[mk].exp_freight += amt; months[mk].exp_freight_air_direct = (months[mk].exp_freight_air_direct||0) + amt; }
       else if (FREIGHT_CATS.has(exp.category))  months[mk].exp_freight  += amt;
       else                                       months[mk].exp_overhead += amt;
     }
@@ -3515,12 +3519,17 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
       m.vas_margin_pu  = (m.vas_rev_pu !== null && m.vas_cost_pu !== null)
         ? Math.round((m.vas_rev_pu - m.vas_cost_pu) * 100) / 100 : null;
 
-      // Freight cost split by sea/air revenue ratio
+      // Freight cost split — use direct Sea/Air category amounts when available,
+      // fall back to revenue-ratio split for generic 'Freight Cost' entries
+      const directSea = m.exp_freight_sea_direct || 0;
+      const directAir = m.exp_freight_air_direct || 0;
+      const directTotal = directSea + directAir;
+      const undirected = Math.max(0, m.exp_freight - directTotal);
       const freightTotal = m.rev_sea + m.rev_air;
       const seaFrac = freightTotal > 0 ? m.rev_sea / freightTotal : 0.5;
       const airFrac = freightTotal > 0 ? m.rev_air / freightTotal : 0.5;
-      m.exp_freight_sea = Math.round(m.exp_freight * seaFrac * 100) / 100;
-      m.exp_freight_air = Math.round(m.exp_freight * airFrac * 100) / 100;
+      m.exp_freight_sea = Math.round((directSea + undirected * seaFrac) * 100) / 100;
+      m.exp_freight_air = Math.round((directAir + undirected * airFrac) * 100) / 100;
 
       // SEA unit economics
       m.sea_rev_pu    = m.units_sea > 0 ? Math.round(m.rev_sea / m.units_sea * 100) / 100 : null;
