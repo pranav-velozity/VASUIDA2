@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Finance Module v14 ── */
+/* ── VelOzity Pinpoint — Finance Module v15 ── */
 ;(function(){
 'use strict';
 
@@ -634,11 +634,17 @@ function finKpiHtml(ytd, months){
 
 
 async function renderPLTab(){
+  // Guard: cancel any in-flight render and start fresh
+  _finState._plRenderSeq = (_finState._plRenderSeq || 0) + 1;
+  const mySeq = _finState._plRenderSeq;
+
   const cont=el('fin-tab-pl');if(!cont)return;
   cont.innerHTML=`<div style="color:${LIGHT};font-size:12px;">Loading P&L…</div>`;
   try{
     const year=new Date().getUTCFullYear();
     const pl=await api(`/finance/pl?year=${year}`);
+    // If a newer render started while we were fetching, abandon this one
+    if(mySeq !== _finState._plRenderSeq) return;
     _finState.pl=pl;
     const ytd=pl.ytd||{},months=pl.months||[];
 
@@ -791,6 +797,8 @@ async function renderPLTab(){
     // ── Monthly rows ──
     // ── Modern accordion months ──
     const tbody=el('fin-pl-tbody');
+    // Final stale-render check before writing rows
+    if(mySeq !== _finState._plRenderSeq) return;
     let runningCF=0;
     const maxRev=Math.max(...months.map(m=>m.revenue||0),1);
     const maxExp=Math.max(...months.map(m=>m.expenses||0),1);
@@ -899,7 +907,7 @@ async function renderPLTab(){
         c.innerHTML=`<div style="color:${LIGHT};font-size:11px;">Loading…</div>`;
         try{
           const exps=await api(`/finance/expenses?month_key=${mk}`);
-          const m=months.find(m=>m.month_key===mk);
+          const m=(_finState.pl?.months||months).find(m=>m.month_key===mk);
           const invs=m?.invoices||[];
           c.innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
             <div>
