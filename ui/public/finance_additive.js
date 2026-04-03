@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Finance Module v15 ── */
+/* ── VelOzity Pinpoint — Finance Module v16 ── */
 ;(function(){
 'use strict';
 
@@ -30,7 +30,7 @@ function fmtUSD(v){
 }
 function fmtDate(s){
   if(!s)return'—';
-  try{return new Date(s.slice(0,10)+'T00:00:00Z').toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'});}catch{return s;}
+  try{return new Date(s.slice(0,10)+'T12:00:00Z').toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'});}catch{return s;}
 }
 function isoToday(){return new Date().toISOString().slice(0,10);}
 function addDays(iso,n){const d=new Date(iso.slice(0,10)+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);}
@@ -805,7 +805,7 @@ async function renderPLTab(){
     const monthsSorted=[...months].sort((a,b)=>a.month_key.localeCompare(b.month_key));
     if(tbody)tbody.innerHTML=monthsSorted.map(m=>{
       const hasData=m.revenue>0||m.expenses>0;
-      const mn=new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'numeric'});
+      const mn=new Date(m.month_key+'-01T12:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'numeric'});
       if(hasData)runningCF+=m.net;
       const cfColor=runningCF>=0?'#166534':'#990033';
       const mColor=m.margin_pct>20?'#166534':m.margin_pct>0?'#606a9f':'#990033';
@@ -1054,7 +1054,7 @@ function renderPLCharts(months, mode='rev'){
   const active=months.filter(m=>m.revenue>0||m.expenses>0||m.units_vas>0);
   if(!active.length){wrap.innerHTML='<div style="color:#AEAEB2;font-size:12px;padding:30px;text-align:center;">No data for this period</div>';return;}
 
-  const labels=active.map(m=>new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'2-digit'}));
+  const labels=active.map(m=>new Date(m.month_key+'-01T12:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'2-digit'}));
   const nullZ=arr=>arr.map(v=>(v&&v>0)?v:null);
 
   if(mode==='rev'){
@@ -1176,7 +1176,7 @@ function renderPLCharts(months, mode='rev'){
     // Render charts inside modal using same data
     if(!window.Chart) return;
     setTimeout(() => {
-      const mLabels = active.map(m=>new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'2-digit'}));
+      const mLabels = active.map(m=>new Date(m.month_key+'-01T12:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'2-digit'}));
       const ctxMN = document.getElementById('fin-modal-net');
       if(ctxMN) new window.Chart(ctxMN,{type:'bar',data:{labels:mLabels,datasets:[
         {label:'Net',data:active.map(m=>m.net||0),backgroundColor:active.map(m=>m.net>0?'rgba(22,101,52,0.7)':'rgba(153,0,51,0.55)'),borderRadius:4,order:2},
