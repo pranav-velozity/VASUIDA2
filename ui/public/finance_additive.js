@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Finance Module v2 ── */
+/* ── VelOzity Pinpoint — Finance Module v14 ── */
 ;(function(){
 'use strict';
 
