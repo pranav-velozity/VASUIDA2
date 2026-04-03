@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Finance Module v13 ── */
+/* ── VelOzity Pinpoint — Finance Module v2 ── */
 ;(function(){
 'use strict';
 
@@ -794,7 +794,8 @@ async function renderPLTab(){
     let runningCF=0;
     const maxRev=Math.max(...months.map(m=>m.revenue||0),1);
     const maxExp=Math.max(...months.map(m=>m.expenses||0),1);
-    if(tbody)tbody.innerHTML=months.map(m=>{
+    const monthsSorted=[...months].sort((a,b)=>a.month_key.localeCompare(b.month_key));
+    if(tbody)tbody.innerHTML=monthsSorted.map(m=>{
       const hasData=m.revenue>0||m.expenses>0;
       const mn=new Date(m.month_key+'-01T00:00:00Z').toLocaleDateString('en-AU',{month:'short',year:'numeric'});
       if(hasData)runningCF+=m.net;
@@ -1304,7 +1305,7 @@ function renderExpTable(exps){
     if(!byMonth.has(mk))byMonth.set(mk,[]);
     byMonth.get(mk).push(e);
   }
-  const sorted=[...byMonth.entries()].sort((a,b)=>b[0].localeCompare(a[0]));
+  const sorted=[...byMonth.entries()].sort((a,b)=>a[0].localeCompare(b[0]));
   root.innerHTML=sorted.map(([mk,rows])=>{
     const monthTotal=rows.reduce((s,e)=>s+parseFloat(e.amount||0),0);
     const d=new Date(mk+'-01T00:00:00Z');
