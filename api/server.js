@@ -3393,7 +3393,7 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
 
     // ── 1. Invoices by month and type — include draft so P&L shows accrual view ──
     const invRows = db.prepare(`
-      SELECT type, week_start, total, ref_number, status
+      SELECT type, week_start, invoice_date, total, ref_number, status
       FROM fin_invoices
       WHERE status IN ('draft','sent','paid') AND week_start >= ? AND week_start <= ?
       ORDER BY week_start
@@ -3468,8 +3468,11 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
     }
 
     // ── 6. Allocate invoice revenue by type ──
+    // Use invoice_date for month bucketing when set (avoids week-boundary cross-month issues).
+    // Fall back to week_start if invoice_date is absent.
     for (const inv of invRows) {
-      const mk = inv.week_start.slice(0, 7);
+      const dateForBucket = (inv.invoice_date && inv.invoice_date.length >= 7) ? inv.invoice_date : inv.week_start;
+      const mk = dateForBucket.slice(0, 7);
       if (!months[mk]) continue;
       months[mk].revenue += inv.total;
       months[mk].invoices.push({ ref: inv.ref_number||inv.id, type: inv.type, amount: inv.total, status: inv.status });
