@@ -2899,7 +2899,9 @@ app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), (req,
     const gst = Math.round(subtotal * 0.10 * 100) / 100;
     const customsAmt = parseFloat(customs) || 0;
     const miscAmt = parseFloat(misc_total) || 0;
-    const total = Math.round((subtotal + gst + customsAmt + miscAmt) * 100) / 100;
+    // misc lines are already included in subtotal (taxableLines includes is_misc lines)
+    // so total = subtotal + gst + customs only — miscAmt is stored for reference but not added again
+    const total = Math.round((subtotal + gst + customsAmt) * 100) / 100;
     const invStatus = status || 'draft';
     db.prepare(`INSERT INTO fin_invoices (id,type,week_start,ref_number,status,invoice_date,due_date,subtotal,gst,customs,misc_total,total,notes)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, type, week_start, ref, invStatus, invoice_date||null, due_date||null, subtotal, gst, customsAmt, miscAmt, total, notes||null);
@@ -2935,7 +2937,8 @@ app.patch('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), 
       const gst = Math.round(subtotal * 0.10 * 100) / 100;
       const customsAmt = customs !== undefined ? parseFloat(customs)||0 : inv.customs;
       const miscAmt = misc_total !== undefined ? parseFloat(misc_total)||0 : inv.misc_total;
-      const total = Math.round((subtotal + gst + customsAmt + miscAmt) * 100) / 100;
+      // misc lines already in subtotal — don't add miscAmt to total again
+      const total = Math.round((subtotal + gst + customsAmt) * 100) / 100;
       db.prepare(`UPDATE fin_invoices SET subtotal=?,gst=?,customs=?,misc_total=?,total=?,updated_at=datetime('now') WHERE id=?`).run(subtotal, gst, customsAmt, miscAmt, total, inv.id);
     }
     // Always update these fields if provided — use explicit !== undefined check so 'draft' isn't falsy-skipped
