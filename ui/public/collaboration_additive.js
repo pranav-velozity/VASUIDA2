@@ -282,6 +282,7 @@ window._colOpenThread = async function(threadId) {
     <div style="padding:14px 18px;border-bottom:0.5px solid rgba(0,0,0,0.08);display:flex;align-items:center;gap:10px;flex-shrink:0;">
       <button onclick="window._colBackToInbox()" style="width:28px;height:28px;border-radius:8px;border:none;background:${BG};color:${MID};cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px;">←</button>
       <div style="flex:1;min-width:0;" id="col-thread-header-info"></div>
+      <button id="col-delete-btn" onclick="window._colDeleteThread('${threadId}')" title="Delete thread" style="width:28px;height:28px;border-radius:8px;border:none;background:${BG};color:${LIGHT};font-size:13px;cursor:pointer;display:none;align-items:center;justify-content:center;">🗑</button>
       <button onclick="window._colClosePanel()" style="width:28px;height:28px;border-radius:8px;border:none;background:${BG};color:${MID};font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;">✕</button>
     </div>
     <div id="col-messages" style="flex:1;overflow-y:auto;padding:14px 18px;display:flex;flex-direction:column;gap:12px;"></div>
@@ -295,6 +296,14 @@ async function _colLoadThread(threadId) {
   try {
     const thread = await colApi('/threads/' + threadId);
     _colState.activeThread = threadId;
+
+    // Show delete button for admins
+    const deleteBtn = document.getElementById('col-delete-btn');
+    if (deleteBtn) {
+      const role = window.Clerk?.user?.organizationMemberships?.[0]?.role || '';
+      const isAdmin = role === 'org:admin_auth';
+      deleteBtn.style.display = isAdmin ? 'flex' : 'none';
+    }
 
     // Header
     const hdr = document.getElementById('col-thread-header-info');
@@ -322,6 +331,17 @@ async function _colLoadThread(threadId) {
     if (msgEl) msgEl.innerHTML = `<div style="color:#c00;font-size:12px;">Failed to load: ${esc(e.message)}</div>`;
   }
 }
+
+window._colDeleteThread = async function(threadId) {
+  if (!confirm('Delete this thread and all its messages? This cannot be undone.')) return;
+  try {
+    await colApi('/threads/' + threadId, { method: 'DELETE' });
+    _colRefreshBadge();
+    window._colBackToInbox();
+  } catch(e) {
+    alert('Delete failed: ' + e.message);
+  }
+};
 
 function _colRenderMessages(messages) {
   const el = document.getElementById('col-messages');
