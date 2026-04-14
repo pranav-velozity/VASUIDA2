@@ -2893,8 +2893,9 @@ app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), (req,
     const existing = db.prepare('SELECT COUNT(*) as n FROM fin_invoices WHERE type = ? AND week_start = ?').get(type, week_start);
     const id = uuidv4();
     const ref = (ref_override && ref_override.trim()) ? ref_override.trim() : genInvoiceRef(type, week_start, existing.n);
-    // Calculate totals
-    const subtotal = lines.reduce((s, l) => s + (parseFloat(l.total)||0), 0);
+    // Calculate totals — exclude gst_free lines from taxable subtotal
+    const taxableLines = lines.filter(l => !l.gst_free);
+    const subtotal = taxableLines.reduce((s, l) => s + (parseFloat(l.total)||0), 0);
     const gst = Math.round(subtotal * 0.10 * 100) / 100;
     const customsAmt = parseFloat(customs) || 0;
     const miscAmt = parseFloat(misc_total) || 0;
@@ -2930,7 +2931,7 @@ app.patch('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), 
         db.prepare(`INSERT INTO fin_invoice_lines (id,invoice_id,sort_order,description,unit_label,rate,quantity,total,gst_free,is_misc)
           VALUES (?,?,?,?,?,?,?,?,?,?)`).run(uuidv4(), inv.id, i, l.description||'', l.unit_label||'', parseFloat(l.rate)||0, parseFloat(l.quantity)||0, parseFloat(l.total)||0, l.gst_free?1:0, l.is_misc?1:0);
       });
-      const subtotal = lines.reduce((s, l) => s + (parseFloat(l.total)||0), 0);
+      const subtotal = lines.filter(l=>!l.gst_free).reduce((s, l) => s + (parseFloat(l.total)||0), 0);
       const gst = Math.round(subtotal * 0.10 * 100) / 100;
       const customsAmt = customs !== undefined ? parseFloat(customs)||0 : inv.customs;
       const miscAmt = misc_total !== undefined ? parseFloat(misc_total)||0 : inv.misc_total;
