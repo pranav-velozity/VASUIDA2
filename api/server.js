@@ -3834,6 +3834,260 @@ app.post('/finance/insights', authenticateRequest, requireRole(['admin']), aiLim
 
 // ── END FINANCE MODULE ──────────────────────────────────────────
 
+// ════════════════════════════════════════════════════════════════
+// COLLABORATION MODULE
+// Threads + Messages + R2 file storage + PULSE integration
+// ════════════════════════════════════════════════════════════════
+
+const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const multer = require('multer');
+const crypto = require('crypto');
+
+// ── R2 client ──
+const r2Client = new S3Client({
+  region: 'auto',
+  endpoint: process.env.R2_ENDPOINT,
+  credentials: {
+    accessKeyId:     process.env.R2_ACCESS_KEY_ID     || '',
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
+  },
+});
+const R2_BUCKET   = process.env.R2_BUCKET_NAME || 'pinpoint-collaboration';
+const R2_PUBLIC   = (process.env.R2_PUBLIC_URL || '').replace(/\/+$/, '');
+
+// ── Multer — memory storage, 20MB limit ──
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits:  { fileSize: 20 * 1024 * 1024 },
+});
+
+// ── DB schema ──
+db.exec(`
+CREATE TABLE IF NOT EXISTS collab_threads (
+  id           TEXT PRIMARY KEY,
+  context_type TEXT NOT NULL,
+  context_key  TEXT NOT NULL,
+  context_label TEXT DEFAULT '',
+  title        TEXT NOT NULL,
+  created_by_id   TEXT NOT NULL,
+  created_by_name TEXT NOT NULL,
+  created_by_role TEXT NOT NULL,
+  status       TEXT DEFAULT 'open',
+  created_at   TEXT DEFAULT (datetime('now')),
+  updated_at   TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_collab_threads_ctx ON collab_threads(context_type, context_key);
+CREATE INDEX IF NOT EXISTS idx_collab_threads_status ON collab_threads(status);
+
+CREATE TABLE IF NOT EXISTS collab_messages (
+  id           TEXT PRIMARY KEY,
+  thread_id    TEXT NOT NULL REFERENCES collab_threads(id) ON DELETE CASCADE,
+  author_id    TEXT NOT NULL,
+  author_name  TEXT NOT NULL,
+  author_role  TEXT NOT NULL,
+  body         TEXT NOT NULL DEFAULT '',
+  attachments  TEXT DEFAULT '[]',
+  is_pulse     INTEGER DEFAULT 0,
+  created_at   TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_collab_msgs_thread ON collab_messages(thread_id, created_at);
+`);
+
+// ── Helpers ──
+function collabUserFromReq(req) {
+  const roleMap = {
+    'org:admin_auth':    'Admin',
+    'org:supplier_auth': 'Facility',
+    'org:client_auth':   'Client',
+    'org:member':        'Member',
+    'org:api_auth':      'API',
+  };
+  const role = roleMap[req.auth?.orgRole] || 'User';
+  const u = req.user;
+  const name = u ? `${u.firstName||''} ${u.lastName||''}`.trim() || u.emailAddresses?.[0]?.emailAddress || req.auth.userId : req.auth.userId;
+  return { id: req.auth.userId, name, role };
+}
+
+async function pulseReplyToThread(threadId, contextSnippet, question) {
+  try {
+    const systemPrompt = `You are Pulse, the AI operations assistant for VelOzity Pinpoint. You are participating in a collaboration thread. Be concise, helpful and specific. Use the context provided to answer questions accurately. If you don't have enough data, say so clearly.`;
+    const userMsg = question
+      ? `Thread context:\n${contextSnippet}\n\nQuestion: ${question}`
+      : `A new collaboration thread has been started. Here is the context:\n${contextSnippet}\n\nProvide a brief, helpful summary of what you can see and any immediate observations.`;
+
+    const resp = await anthropic.messages.create({
+      model:      'claude-sonnet-4-20250514',
+      max_tokens: 600,
+      system:     systemPrompt,
+      messages:   [{ role: 'user', content: userMsg }],
+    });
+
+    const body = resp.content?.[0]?.text || '';
+    if (!body) return;
+
+    const msgId = uuidv4();
+    db.prepare(`INSERT INTO collab_messages (id,thread_id,author_id,author_name,author_role,body,attachments,is_pulse)
+      VALUES (?,?,?,?,?,?,?,?)`).run(msgId, threadId, 'pulse', 'Pulse', 'AI', body, '[]', 1);
+    db.prepare(`UPDATE collab_threads SET updated_at=datetime('now') WHERE id=?`).run(threadId);
+  } catch(e) {
+    console.error('[collab/pulse]', e.message);
+  }
+}
+
+// ── GET /threads — list all threads, newest first ──
+app.get('/threads',
+  authenticateRequest,
+  async (req, res) => {
+  try {
+    const { context_type, context_key, status } = req.query;
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (context_type) { where += ' AND context_type=?'; params.push(context_type); }
+    if (context_key)  { where += ' AND context_key=?';  params.push(context_key); }
+    if (status)       { where += ' AND status=?';       params.push(status); }
+    const threads = db.prepare(`
+      SELECT t.*,
+        (SELECT COUNT(*) FROM collab_messages m WHERE m.thread_id=t.id) as message_count
+      FROM collab_threads t ${where}
+      ORDER BY t.updated_at DESC
+      LIMIT 100
+    `).all(...params);
+    res.json(threads);
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── GET /threads/count — unread/open count for badge ──
+app.get('/threads/count',
+  authenticateRequest,
+  (req, res) => {
+  try {
+    const row = db.prepare(`SELECT COUNT(*) as n FROM collab_threads WHERE status='open'`).get();
+    res.json({ open: row?.n || 0 });
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── POST /threads — create thread ──
+app.post('/threads',
+  authenticateRequest,
+  async (req, res) => {
+  try {
+    const { context_type, context_key, context_label, title, initial_message, context_snapshot } = req.body || {};
+    if (!context_type || !context_key || !title) return res.status(400).json({ error: 'context_type, context_key, title required' });
+    const user = collabUserFromReq(req);
+    const id = uuidv4();
+    db.prepare(`INSERT INTO collab_threads (id,context_type,context_key,context_label,title,created_by_id,created_by_name,created_by_role)
+      VALUES (?,?,?,?,?,?,?,?)`).run(id, context_type, context_key, context_label||'', title, user.id, user.name, user.role);
+
+    // Post opening message if provided
+    if (initial_message?.trim()) {
+      const msgId = uuidv4();
+      db.prepare(`INSERT INTO collab_messages (id,thread_id,author_id,author_name,author_role,body,attachments,is_pulse)
+        VALUES (?,?,?,?,?,?,?,?)`).run(msgId, id, user.id, user.name, user.role, initial_message.trim(), '[]', 0);
+    }
+
+    // PULSE auto-joins with context summary (async, non-blocking)
+    const snippet = context_snapshot ? JSON.stringify(context_snapshot).slice(0, 1500) : `Context: ${context_type} — ${context_key} — ${context_label||title}`;
+    pulseReplyToThread(id, snippet, null);
+
+    const thread = db.prepare('SELECT * FROM collab_threads WHERE id=?').get(id);
+    res.json(thread);
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── GET /threads/:id — get single thread with messages ──
+app.get('/threads/:id',
+  authenticateRequest,
+  (req, res) => {
+  try {
+    const thread = db.prepare('SELECT * FROM collab_threads WHERE id=?').get(req.params.id);
+    if (!thread) return res.status(404).json({ error: 'Thread not found' });
+    const messages = db.prepare('SELECT * FROM collab_messages WHERE thread_id=? ORDER BY created_at ASC').all(req.params.id);
+    res.json({ ...thread, messages: messages.map(m => ({ ...m, attachments: safeJsonParse(m.attachments, []) })) });
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── POST /threads/:id/messages — post a message ──
+app.post('/threads/:id/messages',
+  authenticateRequest,
+  async (req, res) => {
+  try {
+    const thread = db.prepare('SELECT * FROM collab_threads WHERE id=?').get(req.params.id);
+    if (!thread) return res.status(404).json({ error: 'Thread not found' });
+    const user = collabUserFromReq(req);
+    const { body, attachments = [] } = req.body || {};
+    if (!body?.trim() && !attachments.length) return res.status(400).json({ error: 'body or attachments required' });
+
+    const msgId = uuidv4();
+    db.prepare(`INSERT INTO collab_messages (id,thread_id,author_id,author_name,author_role,body,attachments,is_pulse)
+      VALUES (?,?,?,?,?,?,?,?)`).run(msgId, req.params.id, user.id, user.name, user.role, body?.trim()||'', JSON.stringify(attachments), 0);
+    db.prepare(`UPDATE collab_threads SET updated_at=datetime('now') WHERE id=?`).run(req.params.id);
+
+    const msg = db.prepare('SELECT * FROM collab_messages WHERE id=?').get(msgId);
+
+    // Check if message @mentions pulse
+    if (body && /@pulse/i.test(body)) {
+      const recentMsgs = db.prepare('SELECT body,author_name FROM collab_messages WHERE thread_id=? ORDER BY created_at DESC LIMIT 10').all(req.params.id);
+      const snippet = `Thread: "${thread.title}" (${thread.context_type}: ${thread.context_key})\n\nRecent messages:\n${recentMsgs.reverse().map(m=>`${m.author_name}: ${m.body}`).join('\n')}`;
+      const question = body.replace(/@pulse/gi, '').trim();
+      pulseReplyToThread(req.params.id, snippet, question || null);
+    }
+
+    res.json({ ...msg, attachments: safeJsonParse(msg.attachments, []) });
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── PATCH /threads/:id — resolve or reopen ──
+app.patch('/threads/:id',
+  authenticateRequest,
+  (req, res) => {
+  try {
+    const { status } = req.body || {};
+    if (!['open','resolved'].includes(status)) return res.status(400).json({ error: 'status must be open or resolved' });
+    const thread = db.prepare('SELECT * FROM collab_threads WHERE id=?').get(req.params.id);
+    if (!thread) return res.status(404).json({ error: 'Thread not found' });
+    db.prepare(`UPDATE collab_threads SET status=?,updated_at=datetime('now') WHERE id=?`).run(status, req.params.id);
+    res.json(db.prepare('SELECT * FROM collab_threads WHERE id=?').get(req.params.id));
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── POST /threads/upload — upload file to R2 ──
+app.post('/threads/upload',
+  authenticateRequest,
+  upload.single('file'),
+  async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+    const ext  = path.extname(req.file.originalname) || '';
+    const key  = `threads/${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
+    await r2Client.send(new PutObjectCommand({
+      Bucket:      R2_BUCKET,
+      Key:         key,
+      Body:        req.file.buffer,
+      ContentType: req.file.mimetype,
+    }));
+    const url = `${R2_PUBLIC}/${key}`;
+    res.json({ url, name: req.file.originalname, type: req.file.mimetype, size: req.file.size, key });
+  } catch(e) {
+    console.error('[threads/upload]', e);
+    res.status(500).json({ error: String(e.message||e) });
+  }
+});
+
+// ── DELETE /threads/:id — delete thread and its messages ──
+app.delete('/threads/:id',
+  authenticateRequest,
+  requireRole(['admin']),
+  (req, res) => {
+  try {
+    db.prepare('DELETE FROM collab_messages WHERE thread_id=?').run(req.params.id);
+    db.prepare('DELETE FROM collab_threads WHERE id=?').run(req.params.id);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── END COLLABORATION MODULE ─────────────────────────────────────
+
 // ---- Start ----
 app.listen(PORT, () => {
   console.log(`UID Ops backend listening on http://localhost:${PORT}`);
