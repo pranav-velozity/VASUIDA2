@@ -3916,7 +3916,7 @@ async function pulseReplyToThread(threadId, contextSnippet, question) {
       ? `Thread context:\n${contextSnippet}\n\nQuestion: ${question}`
       : `A new collaboration thread has been started. Here is the context:\n${contextSnippet}\n\nProvide a brief, helpful summary of what you can see and any immediate observations.`;
 
-    const resp = await anthropic.messages.create({
+    const resp = await getAnthropic().messages.create({
       model:      'claude-sonnet-4-20250514',
       max_tokens: 600,
       system:     systemPrompt,
