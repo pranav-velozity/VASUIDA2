@@ -3911,15 +3911,115 @@ function collabUserFromReq(req) {
 
 async function pulseReplyToThread(threadId, contextSnippet, question) {
   try {
-    const systemPrompt = `You are Pulse, the AI operations assistant for VelOzity Pinpoint. You are participating in a collaboration thread. Be concise, helpful and specific. Use the context provided to answer questions accurately. If you don't have enough data, say so clearly.`;
+    // ── Build real ops context from DB (same as /pulse/chat) ──
+    const opsLines = [];
+    opsLines.push('You are Pulse, the AI operations assistant for VelOzity Pinpoint.');
+    opsLines.push('You are participating in a collaboration thread. Be concise, helpful and specific.');
+    opsLines.push('You have access to the last 4 weeks of live operations data below — use it to answer questions accurately with real numbers.');
+    opsLines.push('');
+
+    try {
+      // Fetch last 4 weeks of plan data
+      const allPlans = db.prepare('SELECT week_start, data FROM plans ORDER BY week_start DESC LIMIT 4').all();
+      if (allPlans.length > 0) {
+        opsLines.push('## Live Operations Data');
+        for (const pw of allPlans) {
+          const planRows = safeJsonParse(pw.data, []) || [];
+          const ws = pw.week_start;
+          const we = (() => { const d = new Date(ws+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+6); return d.toISOString().slice(0,10); })();
+          const plannedTotal = planRows.reduce((s,p)=>s+(Number(p.target_qty)||0),0);
+
+          // Applied units
+          const appliedRow = db.prepare(`SELECT COUNT(*) as n FROM records WHERE status='complete' AND date_local >= ? AND date_local <= ?`).get(ws, we);
+          const appliedTotal = appliedRow?.n || 0;
+
+          // Received POs
+          const recvRows = db.prepare(`SELECT po_number, received_at_local FROM receiving WHERE week_start=?`).all(ws);
+
+          opsLines.push(`### Week ${ws}`);
+          opsLines.push(`Planned: ${plannedTotal.toLocaleString()} units | Applied: ${appliedTotal.toLocaleString()} (${plannedTotal>0?Math.round(appliedTotal/plannedTotal*100):0}%) | Received POs: ${recvRows.length}`);
+
+          // POs
+          if (planRows.length > 0) {
+            const appliedByPO = new Map();
+            const appPORows = db.prepare(`SELECT po_number, COUNT(*) as n FROM records WHERE status='complete' AND date_local >= ? AND date_local <= ? GROUP BY po_number`).all(ws, we);
+            for (const r of appPORows) appliedByPO.set(String(r.po_number||'').trim(), r.n);
+            const poPlan = new Map();
+            for (const p of planRows) {
+              const po = String(p.po_number||'').trim();
+              if (!po) continue;
+              const cur = poPlan.get(po) || { planned:0, supplier:p.supplier_name||'', zendesk:p.zendesk_ticket||'', freight:p.freight_type||'', due:p.due_date||'' };
+              cur.planned += Number(p.target_qty||0);
+              poPlan.set(po, cur);
+            }
+            opsLines.push('POs:');
+            for (const [po, p] of poPlan.entries()) {
+              const applied = appliedByPO.get(po) || 0;
+              const recv = recvRows.find(r=>r.po_number===po);
+              opsLines.push(`  PO ${po} | ${p.supplier} | ${p.freight} | Zendesk: ${p.zendesk||'—'} | Due: ${p.due||'—'} | Planned: ${p.planned} | Applied: ${applied} | ${recv?'Received '+recv.received_at_local?.slice(0,10):'NOT received'}`);
+            }
+          }
+
+          // Lane/transit data
+          const allFlowRows = db.prepare('SELECT data FROM flow_week WHERE week_start=?').all(ws);
+          const flowData = {};
+          for (const row of allFlowRows) {
+            const d = safeJsonParse(row.data, {}) || {};
+            for (const [k,v] of Object.entries(d)) {
+              if (k==='intl_lanes' && v && typeof v==='object' && !Array.isArray(v)) {
+                flowData.intl_lanes = Object.assign({}, flowData.intl_lanes||{}, v);
+              } else { flowData[k] = v; }
+            }
+          }
+          const intl = flowData.intl_lanes || {};
+          const laneEntries = Object.entries(intl);
+          if (laneEntries.length > 0) {
+            opsLines.push('Lanes:');
+            for (const [lk, m] of laneEntries) {
+              if (!m || typeof m !== 'object') continue;
+              const parts = lk.split('||');
+              const dates = [
+                m.departed_at ? 'departed '+m.departed_at.slice(0,10) : null,
+                m.eta_fc      ? 'ETA FC '+m.eta_fc.slice(0,10)       : null,
+                m.dest_customs_cleared_at ? 'customs cleared '+m.dest_customs_cleared_at.slice(0,10) : null,
+              ].filter(Boolean).join(' | ');
+              opsLines.push(`  ${parts[0]||'?'} | Zendesk: ${parts[1]||'—'} | ${parts[2]||''} ${dates ? '| '+dates : '| no transit dates'}`);
+            }
+          }
+          opsLines.push('');
+        }
+      }
+
+      // Finance summary (admin context)
+      const finSum = db.prepare(`
+        SELECT
+          (SELECT COUNT(*) FROM fin_invoices WHERE status IN ('draft','sent','overdue')) as outstanding_n,
+          (SELECT COALESCE(SUM(total),0) FROM fin_invoices WHERE status IN ('draft','sent','overdue')) as outstanding_total,
+          (SELECT COALESCE(SUM(total),0) FROM fin_invoices WHERE status='paid' AND week_start >= ?) as revenue_ytd,
+          (SELECT COALESCE(SUM(amount),0) FROM fin_expenses WHERE month_key >= ?) as expenses_ytd
+      `).get(`${new Date().getUTCFullYear()}-01-01`, `${new Date().getUTCFullYear()}-01`);
+      if (finSum) {
+        const net = finSum.revenue_ytd - finSum.expenses_ytd;
+        opsLines.push('## Finance (YTD)');
+        opsLines.push(`Revenue: USD ${finSum.revenue_ytd.toLocaleString()} | Expenses: USD ${finSum.expenses_ytd.toLocaleString()} | Net: USD ${net.toLocaleString()} | Outstanding: ${finSum.outstanding_n} invoices (USD ${finSum.outstanding_total.toLocaleString()})`);
+        opsLines.push('');
+      }
+    } catch(dbErr) {
+      opsLines.push('(Could not load full ops data: ' + dbErr.message + ')');
+    }
+
+    // Thread context
+    opsLines.push('## Thread Context');
+    opsLines.push(contextSnippet);
+
     const userMsg = question
-      ? `Thread context:\n${contextSnippet}\n\nQuestion: ${question}`
-      : `A new collaboration thread has been started. Here is the context:\n${contextSnippet}\n\nProvide a brief, helpful summary of what you can see and any immediate observations.`;
+      ? `Question from thread participant: ${question}`
+      : `A new collaboration thread has just been started. Provide a brief, specific summary of the relevant operational data you can see above, and highlight anything noteworthy.`;
 
     const resp = await getAnthropic().messages.create({
       model:      'claude-sonnet-4-20250514',
       max_tokens: 600,
-      system:     systemPrompt,
+      system:     opsLines.join('\n'),
       messages:   [{ role: 'user', content: userMsg }],
     });
 
