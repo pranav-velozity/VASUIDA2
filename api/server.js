@@ -2066,6 +2066,200 @@ app.get('/summary/shipment_summary',
   }
 });
 
+// ── GET /report/stock-status — Stock Status report ──
+// Returns PO × SKU rows with planned, actual_received, status derived from lane data.
+// Supports single week (week_start) or range (from + to as week_start values).
+app.get('/report/stock-status',
+  authenticateRequest,
+  autoFilterResponse,
+  auditLog('view_stock_status'),
+  (req, res) => {
+  try {
+    const { from, to } = req.query;
+    if (!from) return res.status(400).json({ error: 'from (week_start) is required' });
+    const fromWS = String(from).slice(0, 10);
+    const toWS   = to ? String(to).slice(0, 10) : fromWS;
+
+    // ── 1. Collect all plan weeks in range ──
+    const allPlanWeeks = db.prepare(
+      `SELECT week_start, data FROM plans WHERE week_start >= ? AND week_start <= ? ORDER BY week_start`
+    ).all(fromWS, toWS);
+
+    // Build PO × SKU map from plan — aggregate across weeks, one row per PO+SKU
+    // poSku: key=`${po}||${sku}` → { po, sku, supplier, zendesk, freight, facility, planned, week_start (earliest) }
+    const poSkuMap = new Map();
+    for (const pw of allPlanWeeks) {
+      const rows = safeJsonParse(pw.data, []) || [];
+      for (const p of rows) {
+        const po  = String(p.po_number || '').trim();
+        const sku = String(p.sku_code  || '').trim();
+        if (!po || !sku) continue;
+        const key = `${po}||${sku}`;
+        const existing = poSkuMap.get(key);
+        if (existing) {
+          existing.planned += Number(p.target_qty || 0) || 0;
+        } else {
+          poSkuMap.set(key, {
+            po,
+            sku,
+            supplier:  String(p.supplier_name || '').trim() || '',
+            zendesk:   String(p.zendesk_ticket || '').trim() || '',
+            freight:   String(p.freight_type || '').trim() || '',
+            facility:  String(p.facility_name || '').trim() || '',
+            due_date:  String(p.due_date || '').trim() || '',
+            planned:   Number(p.target_qty || 0) || 0,
+            week_start: pw.week_start,
+          });
+        }
+      }
+    }
+
+    if (!poSkuMap.size) return res.json({ rows: [] });
+
+    // ── 2. Applied units per PO × SKU from records ──
+    // Use date_local range: from week_start to end of last week in range
+    const toWE = (() => {
+      const d = new Date(toWS + 'T00:00:00Z');
+      d.setUTCDate(d.getUTCDate() + 6);
+      return d.toISOString().slice(0, 10);
+    })();
+    const appliedRows = db.prepare(`
+      SELECT po_number AS po, sku_code AS sku, COUNT(*) AS units
+      FROM records
+      WHERE status = 'complete'
+        AND date_local >= ? AND date_local <= ?
+        AND TRIM(COALESCE(po_number,'')) <> ''
+        AND TRIM(COALESCE(sku_code,'')) <> ''
+      GROUP BY po_number, sku_code
+    `).all(fromWS, toWE);
+    const appliedMap = new Map(); // `po||sku` → units
+    for (const r of appliedRows) {
+      appliedMap.set(`${String(r.po).trim()}||${String(r.sku).trim()}`, Number(r.units || 0));
+    }
+
+    // ── 3. Receiving records per PO (across all weeks in range) ──
+    const receivingRows = db.prepare(`
+      SELECT po_number, received_at_local, cartons_received
+      FROM receiving
+      WHERE week_start >= ? AND week_start <= ?
+        AND TRIM(COALESCE(po_number,'')) <> ''
+    `).all(fromWS, toWS);
+    const receivingMap = new Map(); // po → { date, cartons }
+    for (const r of receivingRows) {
+      const po = String(r.po_number || '').trim();
+      const existing = receivingMap.get(po);
+      const cartons = Number(r.cartons_received || 0);
+      if (!existing || (r.received_at_local && (!existing.date || r.received_at_local > existing.date))) {
+        receivingMap.set(po, { date: r.received_at_local || null, cartons });
+      }
+    }
+
+    // ── 4. Flow week lane + container data for all weeks in range ──
+    // Build zendesk → lane status map
+    const allFlowRows = db.prepare(
+      `SELECT week_start, facility, data FROM flow_week WHERE week_start >= ? AND week_start <= ?`
+    ).all(fromWS, toWS);
+
+    // Merge all flow data across weeks (later weeks overwrite earlier for same zendesk)
+    const mergedLanes = {};      // zendesk → { departed_at, dest_customs_cleared, eta_fc, freight }
+    const mergedContainers = []; // all containers with delivery dates + lane_keys
+
+    for (const row of allFlowRows) {
+      const d = safeJsonParse(row.data, {}) || {};
+      // Merge intl_lanes
+      const intl = (d.intl_lanes && typeof d.intl_lanes === 'object') ? d.intl_lanes : {};
+      for (const [lk, manual] of Object.entries(intl)) {
+        if (!manual || typeof manual !== 'object') continue;
+        const parts = lk.split('||');
+        const zdKey = String(parts[1] || '').trim();
+        if (!zdKey) continue;
+        // Later weeks overwrite — more recent lane data wins
+        mergedLanes[zdKey] = {
+          departed_at:           manual.departed_at || null,
+          dest_customs_cleared:  manual.dest_customs_cleared_at || null,
+          eta_fc:                manual.eta_fc || null,
+          freight:               String(parts[2] || '').trim(),
+          supplier:              String(parts[0] || '').trim(),
+        };
+      }
+      // Collect containers
+      const wc = d.intl_weekcontainers;
+      const conts = Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []);
+      for (const c of conts) {
+        mergedContainers.push({
+          delivery_date: c.delivery_local || c.delivered_at || c.delivery_date || null,
+          lane_keys: Array.isArray(c.lane_keys) ? c.lane_keys : [],
+        });
+      }
+    }
+
+    // Build zendesk → delivered date map from containers
+    const deliveredByZendesk = new Map();
+    for (const c of mergedContainers) {
+      if (!c.delivery_date) continue;
+      for (const lk of c.lane_keys) {
+        const parts = String(lk).split('||');
+        const zdKey = String(parts[1] || '').trim();
+        if (zdKey) deliveredByZendesk.set(zdKey, c.delivery_date);
+      }
+    }
+
+    // ── 5. Build output rows ──
+    const rows = [];
+    for (const [key, item] of poSkuMap.entries()) {
+      const applied    = appliedMap.get(key) || 0;
+      const recv       = receivingMap.get(item.po);
+      const recvDate   = recv?.date || null;
+      const recvCartons = recv?.cartons || 0;
+
+      // Actual Received: applied if > 0, else cartons from receiving as proxy
+      const actualReceived = applied > 0 ? applied : recvCartons;
+
+      // Status derivation via zendesk → lane
+      const zd    = item.zendesk;
+      const lane  = zd ? mergedLanes[zd] : null;
+      const delivDate = zd ? deliveredByZendesk.get(zd) : null;
+
+      let status = 'Not Started';
+      if (delivDate)                                  status = 'Delivered';
+      else if (lane?.departed_at)                     status = 'In Transit';
+      else if (actualReceived > 0)                    status = 'In Stock';
+
+      rows.push({
+        week_start:       item.week_start,
+        supplier:         item.supplier,
+        zendesk:          item.zendesk,
+        po:               item.po,
+        sku:              item.sku,
+        freight:          item.freight,
+        facility:         item.facility,
+        due_date:         item.due_date,
+        planned:          item.planned,
+        applied:          applied,
+        actual_received:  actualReceived,
+        received_date:    recvDate,
+        departed_date:    lane?.departed_at || null,
+        eta_fc:           lane?.eta_fc || null,
+        delivered_date:   delivDate || null,
+        status,
+      });
+    }
+
+    // Sort: supplier → zendesk → PO → SKU
+    rows.sort((a, b) =>
+      (a.supplier.localeCompare(b.supplier)) ||
+      (a.zendesk.localeCompare(b.zendesk)) ||
+      (a.po.localeCompare(b.po)) ||
+      (a.sku.localeCompare(b.sku))
+    );
+
+    return res.json({ from: fromWS, to: toWS, rows });
+  } catch (e) {
+    console.error('GET /report/stock-status failed:', e);
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
 app.get('/summary/shipment_detail',
   authenticateRequest,
   autoFilterResponse,
