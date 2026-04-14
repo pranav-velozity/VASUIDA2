@@ -5678,7 +5678,7 @@ window.__openPrebookModal = function(){
 <script src="/public/flow_live_additive.js?v=117" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 <script src="/public/map_live_additive.js?v=1" defer></script>
-  <script src="/public/finance_additive.js?v=16" defer></script>
+  <script src="/public/finance_additive.js?v=15" defer></script>
 
 
 <!-- ── Week Hub Split-Flap Insight Flipper ── -->
@@ -6890,12 +6890,13 @@ function renderReportsPage(container){
       <div style="padding:12px 18px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:space-between;">
         <div style="font-size:12px;font-weight:500;color:#1C1C1E;display:flex;align-items:center;gap:8px;">
           <span>Operations</span>
-          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">1 report</span>
+          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">2 reports</span>
         </div>
         <span style="font-size:10px;color:#AEAEB2;">Weekly ops overview</span>
       </div>
       <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(2,1fr);gap:10px;">
         ${reportCard('Ops Summary Report','Full week summary — throughput, completion rate, at-risk POs, receiving status.','PDF','Admin only','__pdf-direct__')}
+        ${reportCard('Stock Status','Planned vs actual received vs in-transit status per PO × SKU across a week or date range.','XLSX','Admin · Client','__stock-status-direct__')}
       </div>
     </div>
 
@@ -6992,6 +6993,10 @@ function renderReportsPage(container){
         if(typeof window.print === 'function'){ window.print(); return; }
         console.warn('[Reports] PDF download not available — navigate to Week Hub first');
         alert('Please navigate to the Week Hub page first, then use the PDF download from there.');
+        return;
+      }
+      if(proxyId === '__stock-status-direct__'){
+        window._ssOpenPanel();
         return;
       }
       const target = document.getElementById(proxyId);
@@ -7487,6 +7492,176 @@ function renderReportsPage(container){
 })();
 
 
+// ── Stock Status Report ──────────────────────────────────────────────────────
+(function(){
+  const STATUS_COLOR = {
+    'Delivered':   { bg:'rgba(52,199,89,0.12)',  color:'#166534' },
+    'In Transit':  { bg:'rgba(59,130,246,0.12)', color:'#1d4ed8' },
+    'In Stock':    { bg:'rgba(245,158,11,0.12)', color:'#b45309' },
+    'Not Started': { bg:'rgba(174,174,178,0.12)',color:'#6E6E73' },
+  };
+
+  function fmtD(s){ if(!s)return '—'; try{ return new Date(s.slice(0,10)+'T12:00:00Z').toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'2-digit'}); }catch{ return s; } }
+  function fmtN(n){ return (Number(n)||0).toLocaleString(); }
+  function statusBadge(s){
+    const c = STATUS_COLOR[s] || STATUS_COLOR['Not Started'];
+    return `<span style="display:inline-block;padding:2px 9px;border-radius:20px;font-size:10px;font-weight:600;background:${c.bg};color:${c.color};">${s}</span>`;
+  }
+
+  let _ssData = null;
+
+  window._ssOpenPanel = function(){
+    const ws = window._reportsWeek || state.weekStart || '';
+    // Create overlay + panel if not present
+    let overlay = document.getElementById('ss-overlay');
+    let panel   = document.getElementById('ss-panel');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'ss-overlay';
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.3);z-index:1000;display:none;';
+      overlay.onclick = () => window._ssClosePanel();
+      document.body.appendChild(overlay);
+    }
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'ss-panel';
+      panel.style.cssText = 'position:fixed;top:0;right:0;width:min(96vw,1100px);height:100vh;background:#fff;z-index:1001;box-shadow:-4px 0 24px rgba(0,0,0,0.12);transform:translateX(100%);transition:transform .25s ease;display:flex;flex-direction:column;';
+      document.body.appendChild(panel);
+    }
+    panel.innerHTML = `
+      <div style="padding:18px 22px 14px;border-bottom:0.5px solid rgba(0,0,0,0.08);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
+        <div>
+          <div style="font-size:16px;font-weight:700;color:#1C1C1E;letter-spacing:-0.02em;">Stock Status</div>
+          <div style="font-size:11px;color:#8e8e93;margin-top:2px;">Planned · Actual Received · In Transit · Delivered — per PO × SKU</div>
+        </div>
+        <button onclick="window._ssClosePanel()" style="width:30px;height:30px;border-radius:8px;border:none;background:#F5F5F7;color:#6E6E73;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;">✕</button>
+      </div>
+      <div style="padding:16px 22px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:flex-end;gap:12px;flex-shrink:0;flex-wrap:wrap;">
+        <div>
+          <div style="font-size:10px;color:#AEAEB2;margin-bottom:4px;">From week</div>
+          <input id="ss-from" type="date" value="${ws}" style="border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 10px;font-size:12px;font-family:inherit;color:#1C1C1E;outline:none;"/>
+        </div>
+        <div>
+          <div style="font-size:10px;color:#AEAEB2;margin-bottom:4px;">To week</div>
+          <input id="ss-to" type="date" value="${ws}" style="border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 10px;font-size:12px;font-family:inherit;color:#1C1C1E;outline:none;"/>
+        </div>
+        <button onclick="window._ssLoad()" style="background:#1C1C1E;color:#fff;border:none;border-radius:8px;padding:8px 18px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;">Load</button>
+        <button onclick="window._ssDownload()" style="background:#fff;color:#1C1C1E;border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:8px 16px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:6px;">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 1v7M3 5l3 3 3-3M1 10h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Download XLSX
+        </button>
+        <div id="ss-status-bar" style="font-size:11px;color:#8e8e93;"></div>
+      </div>
+      <div id="ss-table-wrap" style="flex:1;overflow:auto;padding:16px 22px;"></div>
+    `;
+    overlay.style.display = 'block';
+    requestAnimationFrame(() => { panel.style.transform = 'translateX(0)'; });
+  };
+
+  window._ssClosePanel = function(){
+    const panel   = document.getElementById('ss-panel');
+    const overlay = document.getElementById('ss-overlay');
+    if (panel)   panel.style.transform = 'translateX(100%)';
+    if (overlay) overlay.style.display = 'none';
+  };
+
+  window._ssLoad = async function(){
+    const from = document.getElementById('ss-from')?.value;
+    const to   = document.getElementById('ss-to')?.value || from;
+    if (!from) return alert('Please select a From week.');
+    const bar  = document.getElementById('ss-status-bar');
+    const wrap = document.getElementById('ss-table-wrap');
+    if (bar)  bar.textContent = 'Loading…';
+    if (wrap) wrap.innerHTML = '<div style="color:#AEAEB2;font-size:12px;padding:20px 0;">Fetching data…</div>';
+    try {
+      const data = await api(`/report/stock-status?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+      _ssData = data;
+      const rows = data.rows || [];
+      if (bar) bar.textContent = `${rows.length} rows · ${from}${to !== from ? ' → '+to : ''}`;
+      _ssRender(rows, wrap);
+    } catch(e) {
+      if (bar) bar.textContent = 'Failed: ' + (e.message || e);
+      if (wrap) wrap.innerHTML = `<div style="color:#c00;font-size:12px;">Error: ${e.message||e}</div>`;
+    }
+  };
+
+  function _ssRender(rows, wrap){
+    if (!wrap) return;
+    if (!rows.length){
+      wrap.innerHTML = `<div style="font-size:12px;color:#AEAEB2;padding:20px 0;">No data found for the selected period.</div>`;
+      return;
+    }
+    const th = (t, align='left') => `<th style="padding:8px 10px;font-size:9px;font-weight:700;color:#8e8e93;text-transform:uppercase;letter-spacing:0.06em;white-space:nowrap;text-align:${align};border-bottom:0.5px solid rgba(0,0,0,0.08);background:#fafafa;">${t}</th>`;
+    const td = (v, extra='') => `<td style="padding:7px 10px;font-size:11px;color:#1C1C1E;border-bottom:0.5px solid rgba(0,0,0,0.05);white-space:nowrap;${extra}">${v}</td>`;
+    wrap.innerHTML = `
+      <table style="width:100%;border-collapse:collapse;min-width:900px;">
+        <thead><tr>
+          ${th('Supplier')}${th('Zendesk')}${th('PO')}${th('SKU')}${th('Freight')}
+          ${th('Planned','right')}${th('Actual Received','right')}${th('Applied','right')}
+          ${th('Received Date')}${th('Departed')}${th('ETA FC')}${th('Delivered')}
+          ${th('Status')}
+        </tr></thead>
+        <tbody>
+          ${rows.map(r => `<tr>
+            ${td(r.supplier||'—')}
+            ${td(r.zendesk ? `<a href="https://velozity.zendesk.com/agent/tickets/${r.zendesk}" target="_blank" style="color:#990033;text-decoration:none;font-weight:500;">#${r.zendesk}</a>` : '—')}
+            ${td(`<span style="font-weight:500;">${r.po}</span>`)}
+            ${td(r.sku)}
+            ${td(r.freight||'—')}
+            ${td(fmtN(r.planned),'text-align:right;font-weight:500;')}
+            ${td(fmtN(r.actual_received),'text-align:right;font-weight:600;color:#166534;')}
+            ${td(r.applied > 0 ? fmtN(r.applied) : '—','text-align:right;color:#6E6E73;')}
+            ${td(fmtD(r.received_date),'color:#6E6E73;')}
+            ${td(fmtD(r.departed_date),'color:#6E6E73;')}
+            ${td(fmtD(r.eta_fc),'color:#6E6E73;')}
+            ${td(fmtD(r.delivered_date),'color:#6E6E73;')}
+            ${td(statusBadge(r.status))}
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+
+  window._ssDownload = async function(){
+    const from = document.getElementById('ss-from')?.value;
+    const to   = document.getElementById('ss-to')?.value || from;
+    if (!from) return alert('Please select a From week.');
+    const bar = document.getElementById('ss-status-bar');
+    let rows;
+    if (_ssData && _ssData.from === from && _ssData.to === (to||from)) {
+      rows = _ssData.rows || [];
+    } else {
+      if (bar) bar.textContent = 'Fetching for download…';
+      try {
+        const data = await api(`/report/stock-status?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+        _ssData = data; rows = data.rows || [];
+      } catch(e) { return alert('Download failed: ' + (e.message||e)); }
+    }
+    if (!rows.length) return alert('No data to download.');
+    const xlsRows = rows.map(r => ({
+      'Supplier':        r.supplier || '',
+      'Zendesk':         r.zendesk  || '',
+      'PO':              r.po,
+      'SKU':             r.sku,
+      'Freight':         r.freight  || '',
+      'Facility':        r.facility || '',
+      'Due Date':        r.due_date || '',
+      'Planned Units':   r.planned,
+      'Actual Received': r.actual_received,
+      'Applied Units':   r.applied,
+      'Received Date':   r.received_date  ? r.received_date.slice(0,10)  : '',
+      'Departed Date':   r.departed_date  ? r.departed_date.slice(0,10)  : '',
+      'ETA FC':          r.eta_fc         ? r.eta_fc.slice(0,10)         : '',
+      'Delivered Date':  r.delivered_date ? r.delivered_date.slice(0,10) : '',
+      'Status':          r.status,
+    }));
+    const wb  = XLSX.utils.book_new();
+    const ws2 = XLSX.utils.json_to_sheet(xlsRows);
+    ws2['!cols'] = [18,12,16,14,8,14,12,14,16,14,14,14,12,14,12].map(w=>({wch:w}));
+    XLSX.utils.book_append_sheet(wb, ws2, 'Stock Status');
+    XLSX.writeFile(wb, `Stock_Status_${from}${to !== from ? '_to_'+to : ''}.xlsx`);
+    if (bar) bar.textContent = `Downloaded ${rows.length} rows.`;
+  };
+})();
+
 function reportCard(name, desc, fmt, role, proxyId){
   const fmtColor = fmt==='PDF' ? 'rgba(153,0,51,0.1);color:#990033' : fmt==='CSV' ? 'rgba(91,140,255,0.1);color:#5B8CFF' : 'rgba(58,125,68,0.1);color:#2E7D52';
   // Icon per report type
@@ -7500,6 +7675,7 @@ function reportCard(name, desc, fmt, role, proxyId){
     'PO Container / AWB':         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#990033" stroke-width="1.6" stroke-linecap="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>',
     'Transit & Clearing Status':  '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0369A1" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
     'Ops Summary Report':         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#990033" stroke-width="1.6" stroke-linecap="round"><path d="M3 3v18h18"/><polyline points="18 9 12 15 8 11 3 16"/></svg>',
+    'Stock Status':               '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0891b2" stroke-width="1.6" stroke-linecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M7 8h3M7 12h5M15 8l2 2 3-3"/></svg>',
   };
   const icon = icons[name] || '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#AEAEB2" stroke-width="1.6" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16h16V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
 
