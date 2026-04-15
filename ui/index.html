@@ -2684,7 +2684,7 @@ document.getElementById('btn-exec-csv')?.addEventListener('click', () => {
   const __btnUploadPlan = $('#btn-upload-plan');
   const __filePlan = $('#file-plan');
   if(__btnUploadPlan && __filePlan) __btnUploadPlan.onclick=()=>__filePlan.click();
-$('#file-plan').addEventListener('change', async (e) => {
+$('#file-plan')?.addEventListener('change', async (e) => {
   const f = e.target.files?.[0];
   e.target.value = '';
   if (!f || !apiBase) return;
@@ -3470,10 +3470,10 @@ function wireOpsDownloads(){
     }
   }
   const mb=document.getElementById('ops-dl-mobile-bin');
-  if(mb) mb.onclick = downloadMobileBins;
+  if(mb) mb.onclick = window.downloadMobileBins;
 }
 
-async function downloadMobileBins(){
+window.downloadMobileBins = async function downloadMobileBins(){
   try{
     // Fetch bins if not loaded (e.g. called from Reports page directly)
     let bins = Array.isArray(state.bins) ? state.bins : [];
@@ -6974,7 +6974,7 @@ function renderReportsPage(container){
       const proxyId = this.dataset.proxy;
       // Direct function calls for buttons not in main DOM
       if(proxyId === '__mobile-bin-direct__'){
-        if(typeof downloadMobileBins === 'function') downloadMobileBins();
+        if(typeof window.downloadMobileBins === 'function') window.downloadMobileBins();
         else console.warn('[Reports] downloadMobileBins not found');
         return;
       }
