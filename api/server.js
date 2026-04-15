@@ -1156,10 +1156,12 @@ app.get('/exec/summary',
       return Array.isArray(wc) ? wc : (Array.isArray(wc.containers) ? wc.containers : []);
     })();
 
-    // Container utilisation: units per container by size
+    // Container utilisation: units per container by size (Air excluded — different metric)
     const cont20 = [], cont40 = [];
     for (const c of containers) {
       const size = String(c.size_ft || '40').trim();
+      // Skip Air containers — they don't have meaningful sea-container utilisation
+      if (size.toLowerCase() === 'air') continue;
       // Get POs on this container
       const cPOs = String(c.pos || '').split(',').map(p => p.trim().toUpperCase()).filter(Boolean);
       // Also check lane_keys for POs via plan
