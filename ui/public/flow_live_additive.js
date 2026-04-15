@@ -1560,7 +1560,7 @@ function computeManualNodeStatuses(ws, tz) {
           <table class="w-full text-sm">
             <thead><tr>
               <th class="th text-left py-2 pr-2">Container #</th>
-              <th class="th text-left py-2 pr-2">Size</th>
+              <th class="th text-left py-2 pr-2">Type</th>
               <th class="th text-left py-2 pr-2">Vessel</th>
             </tr></thead>
             <tbody>
@@ -1893,10 +1893,11 @@ function computeManualNodeStatuses(ws, tz) {
             '<input id="fcm-cid" value="' + escapeAttr(String(c.container_id || '')) + '" placeholder="e.g. TGHU1234567" style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:9px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;"/>' +
           '</label>' +
           '<label style="display:block;">' +
-            '<div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Size</div>' +
+            '<div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Type</div>' +
             '<select id="fcm-size" style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:9px 10px;font-size:13px;font-family:inherit;background:#fff;outline:none;">' +
               '<option value="20"' + (String(c.size_ft) === '20' ? ' selected' : '') + '>20 ft</option>' +
-              '<option value="40"' + (String(c.size_ft) !== '20' ? ' selected' : '') + '>40 ft</option>' +
+              '<option value="40"' + (String(c.size_ft) === '40' || (String(c.size_ft) !== '20' && String(c.size_ft).toLowerCase() !== 'air') ? ' selected' : '') + '>40 ft</option>' +
+              '<option value="Air"' + (String(c.size_ft).toLowerCase() === 'air' ? ' selected' : '') + '>Air</option>' +
             '</select>' +
           '</label>' +
         '</div>' +
@@ -4858,10 +4859,11 @@ detail.innerHTML = [
           </label>
 
           <label class="col-span-6 sm:col-span-1 text-xs">
-            <div class="text-[11px] text-gray-500 mb-1">Size</div>
+            <div class="text-[11px] text-gray-500 mb-1">Type</div>
             <select class="flow-wc-size w-full px-2 py-1.5 border rounded-lg bg-white">
-              <option value="20" ${size_ft === '20' ? 'selected' : ''}>20</option>
-              <option value="40" ${size_ft === '40' ? 'selected' : ''}>40</option>
+              <option value="20" ${size_ft === '20' ? 'selected' : ''}>20 ft</option>
+              <option value="40" ${size_ft === '40' ? 'selected' : ''}>40 ft</option>
+              <option value="Air" ${size_ft === 'Air' ? 'selected' : ''}>Air</option>
             </select>
           </label>
 
