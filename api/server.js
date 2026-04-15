@@ -3144,7 +3144,8 @@ app.patch('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), 
     if (notes !== undefined)         db.prepare(`UPDATE fin_invoices SET notes=?,updated_at=datetime('now') WHERE id=?`).run(notes, inv.id);
     if (customs !== undefined && !lines) {
       const cur = db.prepare('SELECT * FROM fin_invoices WHERE id=?').get(inv.id);
-      const total = Math.round((cur.subtotal + cur.gst + parseFloat(customs) + cur.misc_total) * 100) / 100;
+      // misc_total is already included in subtotal — do not add it again
+      const total = Math.round((cur.subtotal + cur.gst + parseFloat(customs)) * 100) / 100;
       db.prepare(`UPDATE fin_invoices SET customs=?,total=?,updated_at=datetime('now') WHERE id=?`).run(parseFloat(customs)||0, total, inv.id);
     }
     const updated = db.prepare('SELECT * FROM fin_invoices WHERE id = ?').get(inv.id);
