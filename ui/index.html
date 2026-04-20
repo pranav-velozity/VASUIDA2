@@ -3652,38 +3652,96 @@ async function renderOpsInsights(view){
 
   // Special carton view (kept)
   if(view==='carton'){
-    const ci = Number(state.weekCartonsIn||0)||0;   // cartons (bins) IN
-    const co = Number(state.weekCartonsOut||0)||0;  // cartons (bins) OUT
+    const ci = Number(state.weekCartonsIn||0)||0;
+    const co = Number(state.weekCartonsOut||0)||0;
     const maxTotal = Math.max(ci, co, 1);
 
     // Waffle scaling
-    const rows = 10;
-    const cols = 12;
-    const squares = rows * cols; // 120 squares
-    const base = 10; // prefer 1 square = 10 cartons
+    const rows = 10, cols = 12, squares = rows * cols;
+    const base = 10;
     const perSquare = Math.max(base, Math.ceil((maxTotal / squares) / base) * base);
+    const calcFill = (v) => v<=0 ? 0 : Math.min(squares, Math.max(1, Math.ceil(v/perSquare)));
 
-    const calcFill = (v)=>{
-      if(v<=0) return 0;
-      const f = Math.ceil(v / perSquare);
-      return Math.min(squares, Math.max(1, f));
+    // Supplier colour palette
+    const SUPPLIER_PALETTE = [
+      '#D1E231','#4ECDC4','#FF6B6B','#45B7D1','#F0D731',
+      '#96CEB4','#BB8FCE','#85C1E9','#F8C471','#82E0AA',
+      '#F1948A','#DDA0DD','#98D8C8','#F7DC6F','#FFEAA7',
+    ];
+    const supplierColors = new Map();
+    let colorIdx = 0;
+    const getSupplierColor = (s) => {
+      const key = String(s||'Unknown').trim() || 'Unknown';
+      if(!supplierColors.has(key)) supplierColors.set(key, SUPPLIER_PALETTE[colorIdx++ % SUPPLIER_PALETTE.length]);
+      return supplierColors.get(key);
     };
 
-    const fillIn = calcFill(ci);
-    const fillOut = calcFill(co);
+    // Build supplier breakdown for IN (from receiving)
+    const inBySupplier = new Map();
+    for(const r of receiving){
+      const sup = String(r.supplier_name||r.supplier||'Unknown').trim() || 'Unknown';
+      const c = Number(r.cartons_received ?? r.cartons_in ?? r.cartons ?? 0) || 0;
+      if(c > 0) inBySupplier.set(sup, (inBySupplier.get(sup)||0) + c);
+    }
+    // Fallback to poDerived if receiving has no carton data
+    if([...inBySupplier.values()].reduce((s,v)=>s+v,0) === 0){
+      for(const [,x] of poDerived.entries()){
+        const sup = String(x.supplier||'Unknown').trim() || 'Unknown';
+        if(x.cartonsIn > 0) inBySupplier.set(sup, (inBySupplier.get(sup)||0) + x.cartonsIn);
+      }
+    }
 
-    const squareGrid = (filled, color) =>
+    // Build supplier breakdown for OUT (from bins — unique mobile bin per supplier)
+    const outBySupplier = new Map();
+    const uniqueBinIds = new Set();
+    for(const b of bins){
+      const binId = String(b.mobile_bin||b.mobileBin||'').trim();
+      if(!binId || uniqueBinIds.has(binId)) continue;
+      uniqueBinIds.add(binId);
+      const sup = String(b.supplier_name||b.supplier||'Unknown').trim() || 'Unknown';
+      outBySupplier.set(sup, (outBySupplier.get(sup)||0) + 1);
+    }
+
+    // Build proportional coloured square sequence
+    const buildColoredSquares = (bySupplier, fallbackTotal, fillCount) => {
+      const sorted = [...bySupplier.entries()].sort((a,b)=>b[1]-a[1]);
+      const total = sorted.reduce((s,[,v])=>s+v, 0) || fallbackTotal || 1;
+      const squareColors = [];
+      let assigned = 0;
+      for(const [sup, cnt] of sorted){
+        const color = getSupplierColor(sup);
+        const n = Math.round((cnt / total) * fillCount);
+        for(let i=0; i<n && assigned<fillCount; i++){ squareColors.push(color); assigned++; }
+      }
+      const fallbackColor = sorted[0] ? getSupplierColor(sorted[0][0]) : '#D1E231';
+      while(squareColors.length < fillCount) squareColors.push(fallbackColor);
+      return squareColors;
+    };
+
+    const fillIn  = calcFill(ci);
+    const fillOut = calcFill(co);
+    const inColors  = buildColoredSquares(inBySupplier,  ci, fillIn);
+    const outColors = buildColoredSquares(outBySupplier, co, fillOut);
+
+    const coloredGrid = (fillCount, colors) =>
       `<div class="grid gap-[4px]" style="grid-template-columns: repeat(${cols}, 16px);">
-        ${Array.from({length:squares}).map((_,i)=>
-          `<div class="w-[16px] h-[16px] rounded-[4px]" style="background:${i<filled?color:'#f3f4f6'};"></div>`
+        ${Array.from({length:squares}).map((_,i) =>
+          `<div class="w-[16px] h-[16px] rounded-[4px]" style="background:${i<fillCount ? colors[i] : '#f3f4f6'};"></div>`
         ).join('')}
       </div>`;
 
     const delta = ci - co;
     const deltaLabel = delta===0 ? 'Δ 0' : (delta>0 ? `Δ +${fmtInt(delta)} (Net In)` : `Δ ${fmtInt(delta)} (Net Out)`);
-
-    const inShown = Math.min(ci, fillIn * perSquare);
+    const inShown  = Math.min(ci, fillIn  * perSquare);
     const outShown = Math.min(co, fillOut * perSquare);
+
+    // Legend
+    const legendItems = [...supplierColors.entries()].map(([sup, col]) =>
+      `<span style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#4A4A4A;white-space:nowrap;">
+        <span style="width:10px;height:10px;border-radius:3px;background:${col};flex-shrink:0;display:inline-block;"></span>
+        ${esc(sup)}
+      </span>`
+    ).join('');
 
     root.innerHTML = `
       <div class="bg-gray-50 rounded-xl border p-4">
@@ -3702,7 +3760,7 @@ async function renderOpsInsights(view){
               <div class="text-xs font-semibold text-gray-700">IN</div>
               <div class="text-sm font-semibold tabular-nums">${fmtInt(ci)}</div>
             </div>
-            ${squareGrid(fillIn, 'var(--ops-green)')}
+            ${coloredGrid(fillIn, inColors)}
             <div class="mt-2 text-[11px] text-gray-500">
               Filled: <span class="tabular-nums">${fillIn}</span>/<span class="tabular-nums">${squares}</span> • Showing ~<span class="tabular-nums">${fmtInt(inShown)}</span> cartons
             </div>
@@ -3713,15 +3771,17 @@ async function renderOpsInsights(view){
               <div class="text-xs font-semibold text-gray-700">OUT</div>
               <div class="text-sm font-semibold tabular-nums">${fmtInt(co)}</div>
             </div>
-            ${squareGrid(fillOut, 'var(--ops-yellow)')}
+            ${coloredGrid(fillOut, outColors)}
             <div class="mt-2 text-[11px] text-gray-500">
               Filled: <span class="tabular-nums">${fillOut}</span>/<span class="tabular-nums">${squares}</span> • Showing ~<span class="tabular-nums">${fmtInt(outShown)}</span> cartons
             </div>
           </div>
         </div>
 
+        ${legendItems ? `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;padding-top:10px;border-top:0.5px solid rgba(0,0,0,0.06);">${legendItems}</div>` : ''}
+
         <div class="text-xs text-gray-500 mt-3">
-          “Cartons out” is the mobile-bin count (summary). Colors: IN = #D1E231, OUT = #F0D731.
+          Each colour represents a supplier. IN = cartons received · OUT = mobile bins scanned.
         </div>
       </div>
     `;
