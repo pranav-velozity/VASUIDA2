@@ -5450,7 +5450,7 @@ window.__openPrebookModal = function(){
 (function whDetailOverlay(){
 
   // Mirror ops insights into flow-detail
-  function syncOpsToDetail(overrideView){
+  async function syncOpsToDetail(overrideView){
     var detail = document.getElementById('flow-detail');
     if(!detail) return;
     // Pause observer during rebuild to prevent re-trigger
@@ -5458,7 +5458,7 @@ window.__openPrebookModal = function(){
     if(_detailObserver){ _detailObserver.disconnect(); _detailObserver = null; }
     window._lastOpsView = view;
     if(typeof window.renderOpsInsights === 'function'){
-      try{ window.renderOpsInsights(view); }catch(e){ console.error('[syncOps]',e); }
+      try{ await window.renderOpsInsights(view); }catch(e){ console.error('[syncOps]',e); }
     }
     // Now pull the rendered content
     var src = document.getElementById('ops-insights-content');
@@ -5544,7 +5544,7 @@ window.__openPrebookModal = function(){
   });
 
   // Wire modal pill clicks
-  document.addEventListener('click', function(e){
+  document.addEventListener('click', async function(e){
     var pill = e.target.closest('.wh-modal-pill');
     if(!pill) return;
     var view = pill.getAttribute('data-opsview');
@@ -5556,7 +5556,7 @@ window.__openPrebookModal = function(){
       else p.classList.remove('ops-pill--active');
     });
     window._lastOpsView = view;
-    if(typeof renderOpsInsights === 'function'){ try{ renderOpsInsights(view); }catch(e){} }
+    if(typeof renderOpsInsights === 'function'){ try{ await renderOpsInsights(view); }catch(e){} }
     var src = document.getElementById('ops-insights-content');
     var mc = document.getElementById('wh-modal-content');
     if(src && mc) mc.innerHTML = src.innerHTML;
