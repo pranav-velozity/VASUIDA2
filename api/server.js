@@ -4769,7 +4769,8 @@ app.get('/report/cost-utilisation',
   @media print {
     #print-bar { display: none !important; }
     .report-pages { padding-top: 0; }
-    .page { margin: 0; box-shadow: none; page-break-after: always; }
+    .page { margin: 0; box-shadow: none; break-after: page; }
+    .page:last-child { break-after: avoid; }
     body { background: white; }
   }
 </style>
@@ -5152,8 +5153,6 @@ function buildReport(D) {
           </div>
           <table class="data-table"><thead><tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">Sea $/U</th><th class="num">Air $/U</th></tr></thead><tbody>\${months.map((mk,i)=>\`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td><td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td><td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td><td class="num">\${fmtC(D.sea[mk]?.unit_revenue)}</td><td class="num">\${fmtC(D.air[mk]?.unit_revenue)}</td></tr>\`).join('')}</tbody></table>
         </div>
-          <table class="data-table"><thead><tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">Sea $/U</th><th class="num">Air $/U</th></tr></thead><tbody>\${months.map((mk,i)=>\`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td><td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td><td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td><td class="num">\${fmtC(D.sea[mk]?.unit_revenue)}</td><td class="num">\${fmtC(D.air[mk]?.unit_revenue)}</td></tr>\`).join('')}</tbody></table>
-        </div>
       </div>
       \${pulseInsightBlock('freight_mix')}
       <div class="method-footer">
@@ -5234,7 +5233,6 @@ function buildReport(D) {
             <div><table class="data-table"><thead><tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">$/Unit</th></tr></thead><tbody>\${months.map((mk,i)=>{const d=D.sea[mk]||{};return \`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmt(d.revenue)}</td><td class="num">\${fmtU(d.applied_units)}</td><td class="num">\${fmtC(d.unit_revenue)}</td></tr>\`}).join('')}</tbody></table></div>
           </div>
         </div>
-        </div>
       </div>
       \${pulseInsightBlock('sea')}
       <div class="method-footer">
@@ -5300,7 +5298,6 @@ function buildReport(D) {
             <div><div class="chart-title">Units + Cost/Unit Trend</div><div class="chart-wrap" style="height:150px;"><canvas id="chart-air-combo"></canvas></div></div>
             <div><table class="data-table"><thead><tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">$/Unit</th></tr></thead><tbody>\${months.map((mk,i)=>{const d=D.air[mk]||{};return \`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmt(d.revenue)}</td><td class="num">\${fmtU(d.applied_units)}</td><td class="num">\${fmtC(d.unit_revenue)}</td></tr>\`}).join('')}</tbody></table></div>
           </div>
-        </div>
         </div>
 
       </div>
@@ -5374,9 +5371,6 @@ function buildReport(D) {
             <div><div class="chart-title">VAS Cost/Unit Trend</div><div class="chart-wrap" style="height:140px;"><canvas id="chart-vas-trend"></canvas></div></div>
             <div><table class="data-table"><thead><tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">$/Unit</th></tr></thead><tbody>\${vasMonthRows}</tbody></table></div>
           </div>
-          <div class="chart-title" style="margin-top:8px;">Cost/Unit by Month</div>
-          <div class="chart-wrap" style="height:100px;"><canvas id="chart-vas-radar"></canvas></div>
-        </div>
           <div class="chart-title" style="margin-top:8px;">Cost/Unit by Month</div>
           <div class="chart-wrap" style="height:100px;"><canvas id="chart-vas-radar"></canvas></div>
         </div>
@@ -5492,19 +5486,32 @@ function buildReport(D) {
   document.getElementById('loading').style.display = 'none';
 
   // ── Render charts ──
-  // Temporarily show compare-sections so Chart.js can measure canvas dimensions
+  // Show compare-sections, render charts, then re-hide
+  // Chart.js needs elements in DOM with real dimensions
   requestAnimationFrame(() => {
     const cmpSections = document.querySelectorAll('.compare-section');
-    cmpSections.forEach(el => { el.style.visibility = 'hidden'; el.style.display = 'block'; });
-    renderCharts(D, months, mLabels);
-    // Restore visibility after charts render
-    requestAnimationFrame(() => {
-      cmpSections.forEach(el => { el.style.visibility = ''; el.style.display = ''; });
+    // Force display so canvases have dimensions during render
+    cmpSections.forEach(el => {
+      el.dataset.wasHidden = el.style.display || '';
+      el.style.setProperty('display', 'block', 'important');
+      el.style.setProperty('visibility', 'hidden', 'important');
     });
+    // Give browser one frame to apply display:block before measuring
+    setTimeout(() => {
+      renderCharts(D, months, mLabels);
+      // After another frame, restore hidden state
+      requestAnimationFrame(() => {
+        cmpSections.forEach(el => {
+          el.style.removeProperty('display');
+          el.style.removeProperty('visibility');
+        });
+        window._chartsRendered = true;
+        const btn = document.getElementById('print-btn');
+        if (btn) btn.textContent = '\u1f5a8 Print / Save PDF';
+      });
+    }, 50);
   });
-  // Track when charts are done
   window._chartsRendered = false;
-  setTimeout(() => { window._chartsRendered = true; const btn = document.getElementById("print-btn"); if(btn) btn.textContent = "\u1f5a8 Print / Save PDF"; }, 2000);
 }
 
 function renderCharts(D, months, mLabels) {
@@ -5704,17 +5711,6 @@ function _printWhenReady() {
 
 // ── POST /report/cost-utilisation/insights — Pulse AI insights per section
 app.post('/report/cost-utilisation/insights',
-  (req, res, next) => {
-    _cleanReportTokens();
-    const reportToken = req.body?.token;
-    if (reportToken && _reportTokens.has(reportToken)) { return next(); }
-    // No valid report token — try Clerk auth, but if no auth header just reject cleanly
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(403).json({ error: 'No valid token. Re-generate the report to get a fresh token.' });
-    }
-    authenticateRequest(req, res, next);
-  },
   async (req, res) => {
   try {
     const { section, data } = req.body || {};
