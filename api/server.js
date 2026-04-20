@@ -5040,7 +5040,7 @@ function buildReport(D) {
 
         <!-- Monthly snapshot: always shown -->
         <div style="margin:16px 0 8px;display:flex;align-items:center;gap:10px;">
-          <div style="font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">${fmtMonth(sel)} — Selected Month</div>
+          <div style="font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">\${fmtMonth(sel)} — Selected Month</div>
           <div style="flex:1;height:0.5px;background:rgba(0,0,0,0.08);"></div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:12px;">
