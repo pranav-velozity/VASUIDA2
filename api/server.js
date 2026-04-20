@@ -4191,6 +4191,71 @@ app.delete('/threads/:id',
 
 // ── END COLLABORATION MODULE ─────────────────────────────────────
 
+// ════════════════════════════════════════════════════════════════
+// ZENDESK COMPLETIONS MODULE
+// Per-week manual completion tracking for Zendesk tickets
+// ════════════════════════════════════════════════════════════════
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS zendesk_completions (
+  week_start      TEXT NOT NULL,
+  zendesk_ticket  TEXT NOT NULL,
+  completed       INTEGER DEFAULT 1,
+  completed_at    TEXT DEFAULT (datetime('now')),
+  completed_by_id TEXT,
+  completed_by    TEXT,
+  PRIMARY KEY (week_start, zendesk_ticket)
+);
+CREATE INDEX IF NOT EXISTS idx_zd_comp_week ON zendesk_completions(week_start);
+`);
+
+// ── GET /zendesk-completions/:weekStart — get all completions for a week ──
+app.get('/zendesk-completions/:weekStart',
+  authenticateRequest,
+  (req, res) => {
+  try {
+    const rows = db.prepare(
+      `SELECT zendesk_ticket, completed, completed_at, completed_by
+       FROM zendesk_completions WHERE week_start = ? AND completed = 1`
+    ).all(req.params.weekStart);
+    // Return as a Set-friendly object: { ticket: true }
+    const result = {};
+    for (const r of rows) result[r.zendesk_ticket] = { completed_at: r.completed_at, completed_by: r.completed_by };
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── POST /zendesk-completions/:weekStart — toggle completion for a ticket ──
+app.post('/zendesk-completions/:weekStart',
+  authenticateRequest,
+  requireRole(['admin', 'supplier', 'member']),
+  (req, res) => {
+  try {
+    const { zendesk_ticket, completed } = req.body || {};
+    if (!zendesk_ticket) return res.status(400).json({ error: 'zendesk_ticket required' });
+    const ws = req.params.weekStart;
+    const roleMap = { 'org:admin_auth':'Admin','org:supplier_auth':'Facility','org:client_auth':'Client','org:member':'Member' };
+    const userName = req.user ? `${req.user.firstName||''} ${req.user.lastName||''}`.trim() || req.auth.userId : req.auth.userId;
+    const userRole = roleMap[req.auth?.orgRole] || 'User';
+    const displayName = `${userName} (${userRole})`;
+
+    if (completed) {
+      db.prepare(`
+        INSERT INTO zendesk_completions (week_start, zendesk_ticket, completed, completed_at, completed_by_id, completed_by)
+        VALUES (?, ?, 1, datetime('now'), ?, ?)
+        ON CONFLICT(week_start, zendesk_ticket) DO UPDATE SET
+          completed=1, completed_at=datetime('now'), completed_by_id=excluded.completed_by_id, completed_by=excluded.completed_by
+      `).run(ws, String(zendesk_ticket).trim(), req.auth.userId, displayName);
+    } else {
+      db.prepare(`DELETE FROM zendesk_completions WHERE week_start=? AND zendesk_ticket=?`).run(ws, String(zendesk_ticket).trim());
+    }
+
+    res.json({ ok: true, week_start: ws, zendesk_ticket, completed: !!completed });
+  } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── END ZENDESK COMPLETIONS MODULE ───────────────────────────────
+
 // ---- Start ----
 app.listen(PORT, () => {
   console.log(`UID Ops backend listening on http://localhost:${PORT}`);
