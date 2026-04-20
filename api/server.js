@@ -4787,8 +4787,7 @@ app.get('/report/cost-utilisation',
     <span style="color:rgba(255,255,255,0.5);margin-left:8px;">Cost Utilisation Report</span>
     <span id="print-month-label" style="color:rgba(255,255,255,0.5);margin-left:8px;"></span>
   </div>
-  <button onclick="window.print()">🖨 Print / Save PDF</button>
-</div>
+  <button id="print-btn" onclick="window._printWhenReady()">\u1f5a8 Print / Save PDF</button>\n</div>
 
 <div class="report-pages" id="report-pages" ${showCompare ? 'class="show-compare"' : ''}></div>
 
@@ -5494,6 +5493,9 @@ function buildReport(D) {
 
   // ── Render charts ──
   requestAnimationFrame(() => renderCharts(D, months, mLabels));
+  // Track when charts are done
+  window._chartsRendered = false;
+  setTimeout(() => { window._chartsRendered = true; const btn = document.getElementById("print-btn"); if(btn) btn.textContent = "\u1f5a8 Print / Save PDF"; }, 2000);
 }
 
 function renderCharts(D, months, mLabels) {
@@ -5652,6 +5654,15 @@ function renderCharts(D, months, mLabels) {
   });
 }
 
+function _printWhenReady() {
+  const btn = document.getElementById('print-btn');
+  if (!window._chartsRendered) {
+    if (btn) { btn.textContent = 'Preparing...'; btn.disabled = true; }
+    setTimeout(() => { window._chartsRendered = true; if(btn){btn.textContent='\u1f5a8 Print / Save PDF';btn.disabled=false;} _printWhenReady(); }, 1500);
+    return;
+  }
+  window.print();
+}
 // ── Boot ──
 (async () => {
   try {
@@ -5704,7 +5715,8 @@ app.post('/report/cost-utilisation/insights',
       executive: 'You are Pulse, AI ops analyst for VelOzity Pinpoint. Analyse this executive cost summary and provide exactly 3 high-level strategic optimization opportunities across VAS, sea, and air freight. Focus on biggest cost levers. Be direct with numbers.',
     };
 
-    const userMsg = `Data:\n${JSON.stringify(data, null, 2)}\n\nReturn ONLY a JSON array with exactly 3 objects. No markdown, no preamble.\nEach: { "title": "4-6 word headline", "finding": "1-2 sentences with specific numbers", "action": "one concrete next step", "impact": "High|Medium|Low" }`;
+    const dataStr = JSON.stringify(data || {}).slice(0, 3000);
+    const userMsg = `Analyse this supply chain cost data and return ONLY a valid JSON array with exactly 3 objects. No markdown, no preamble, no explanation.\nData: ${dataStr}\nReturn format: [{"title":"4-6 word headline","finding":"1-2 sentences with specific numbers","action":"one concrete next step","impact":"High|Medium|Low"}]`;
 
     const resp = await getAnthropic().messages.create({
       model: 'claude-sonnet-4-20250514',
