@@ -4289,7 +4289,14 @@ app.post('/report/cost-utilisation/auth',
 
 // GET /report/cost-utilisation/data — fetch all data for the report
 app.get('/report/cost-utilisation/data',
-  authenticateRequest,
+  (req, res, next) => {
+    // Accept either a report token (query param) or a Clerk Bearer token
+    _cleanReportTokens();
+    const reportToken = req.query.token;
+    if (reportToken && _reportTokens.has(reportToken)) { return next(); }
+    // Fall back to Clerk auth
+    authenticateRequest(req, res, next);
+  },
   async (req, res) => {
   try {
     const { month, currency } = req.query; // month = YYYY-MM
@@ -4494,13 +4501,15 @@ app.get('/report/cost-utilisation/data',
 
 // GET /report/cost-utilisation — serve the report HTML page
 app.get('/report/cost-utilisation',
-  authenticateRequest,
+  (req, res, next) => {
+    _cleanReportTokens();
+    const { token } = req.query;
+    if (!token || !_reportTokens.has(token)) {
+      return res.status(403).send('<html><body style="font-family:sans-serif;padding:40px;"><h2>Access denied</h2><p>Invalid or expired token. Please request a new report link.</p></body></html>');
+    }
+    next();
+  },
   (req, res) => {
-  const { token, month, currency } = req.query;
-  _cleanReportTokens();
-  if (!token || !_reportTokens.has(token)) {
-    return res.status(403).send('<html><body style="font-family:sans-serif;padding:40px;"><h2>Access denied</h2><p>Invalid or expired token. Please request a new report link.</p></body></html>');
-  }
   // Serve the report shell — data is fetched client-side
   const apiBase = process.env.API_BASE || '';
   res.send(`<!DOCTYPE html>
@@ -4807,16 +4816,9 @@ const SECTION_COLORS = {
 };
 
 async function loadData() {
-  const r = await fetch(\`\${API_BASE}/report/cost-utilisation/data?month=\${MONTH}&currency=\${CURR}\`, {
-    headers: { 'Authorization': 'Bearer ' + await getToken() }
-  });
+  const r = await fetch(\`\${API_BASE}/report/cost-utilisation/data?month=\${MONTH}&currency=\${CURR}&token=\${encodeURIComponent(TOKEN)}\`);
   if (!r.ok) throw new Error('Data load failed: ' + r.status);
   return r.json();
-}
-
-async function getToken() {
-  if (window.Clerk?.session) { try { return await window.Clerk.session.getToken(); } catch(_){} }
-  return '';
 }
 
 function sparkbars(values, color) {
