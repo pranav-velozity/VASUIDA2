@@ -4644,7 +4644,7 @@ app.get('/report/cost-utilisation',
   .contents-desc { font-size: 11px; color: var(--mid); }
 
   /* ── Section pages ── */
-  .page-section { display: flex; flex-direction: column; min-height: 210mm; }
+  .page-section { display: flex; flex-direction: column; }
   .section-header {
     padding: 28px 40px 20px;
     border-bottom: 0.5px solid rgba(0,0,0,0.06);
@@ -4764,12 +4764,11 @@ app.get('/report/cost-utilisation',
   .hbar-fill span { font-size: 9px; font-weight: 700; color: #fff; }
   .hbar-val { width: 60px; font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
 
-  .show-compare .compare-section { display: block !important; }
-  .compare-section { display: none; }
+  .compare-section { display: block; }
   @media print {
     #print-bar { display: none !important; }
     .report-pages { padding-top: 0; }
-    .page { margin: 0; box-shadow: none; break-after: page; }
+    .page { margin: 0; box-shadow: none; break-after: page; overflow: hidden; max-height: 210mm; }
     .page:last-child { break-after: avoid; }
     body { background: white; }
   }
@@ -4790,7 +4789,7 @@ app.get('/report/cost-utilisation',
   </div>
   <button id="print-btn" onclick="window._printWhenReady()">\u1f5a8 Print / Save PDF</button>\n</div>
 
-<div class="report-pages" id="report-pages" ${showCompare ? 'class="show-compare"' : ''}></div>
+<div class="report-pages show-compare" id="report-pages"></div>
 
 <script>
 const PARAMS = new URLSearchParams(location.search);
@@ -4895,8 +4894,11 @@ async function loadPulseInsights(sectionId, sectionData) {
       body: JSON.stringify({ section: sectionId, data: sectionData, token: TOKEN })
     });
     if (!r.ok) {
-      const errBody = await r.json().catch(()=>({}));
-      throw new Error('HTTP ' + r.status + (errBody.error ? ': ' + errBody.error : ''));
+      const errText = await r.text().catch(()=>'');
+      let errMsg = 'HTTP ' + r.status;
+      try { const eb = JSON.parse(errText); errMsg += eb.error ? ': ' + eb.error : ''; }
+      catch(e) { errMsg += errText ? ': ' + errText.slice(0,100) : ''; }
+      throw new Error(errMsg);
     }
     const { insights } = await r.json();
     renderInsightCards(sectionId, insights);
@@ -5486,30 +5488,12 @@ function buildReport(D) {
   document.getElementById('loading').style.display = 'none';
 
   // ── Render charts ──
-  // Show compare-sections, render charts, then re-hide
-  // Chart.js needs elements in DOM with real dimensions
+  // Render charts (compare-sections are always visible now)
   requestAnimationFrame(() => {
-    const cmpSections = document.querySelectorAll('.compare-section');
-    // Force display so canvases have dimensions during render
-    cmpSections.forEach(el => {
-      el.dataset.wasHidden = el.style.display || '';
-      el.style.setProperty('display', 'block', 'important');
-      el.style.setProperty('visibility', 'hidden', 'important');
-    });
-    // Give browser one frame to apply display:block before measuring
-    setTimeout(() => {
-      renderCharts(D, months, mLabels);
-      // After another frame, restore hidden state
-      requestAnimationFrame(() => {
-        cmpSections.forEach(el => {
-          el.style.removeProperty('display');
-          el.style.removeProperty('visibility');
-        });
-        window._chartsRendered = true;
-        const btn = document.getElementById('print-btn');
-        if (btn) btn.textContent = '\u1f5a8 Print / Save PDF';
-      });
-    }, 50);
+    renderCharts(D, months, mLabels);
+    window._chartsRendered = true;
+    const btn = document.getElementById('print-btn');
+    if (btn) btn.textContent = '\u1f5a8 Print / Save PDF';
   });
   window._chartsRendered = false;
 }
