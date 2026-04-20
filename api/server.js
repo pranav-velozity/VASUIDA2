@@ -4256,6 +4256,1284 @@ app.post('/zendesk-completions/:weekStart',
 
 // ── END ZENDESK COMPLETIONS MODULE ───────────────────────────────
 
+// ════════════════════════════════════════════════════════════════
+// COST UTILISATION REPORT MODULE
+// Password-protected monthly cost report with data API
+// ════════════════════════════════════════════════════════════════
+
+// In-memory token store (expires after 10 minutes)
+const _reportTokens = new Map();
+const _reportTokenTTL = 10 * 60 * 1000;
+
+function _cleanReportTokens() {
+  const now = Date.now();
+  for (const [k, v] of _reportTokens.entries()) {
+    if (now - v > _reportTokenTTL) _reportTokens.delete(k);
+  }
+}
+
+// POST /report/cost-utilisation/auth — validate password, return token
+app.post('/report/cost-utilisation/auth',
+  authenticateRequest,
+  (req, res) => {
+  const { password } = req.body || {};
+  const expected = process.env.COST_REPORT_PASSWORD || 'velozity2026';
+  if (!password || password !== expected) {
+    return res.status(403).json({ error: 'Invalid password' });
+  }
+  _cleanReportTokens();
+  const token = randomUUID();
+  _reportTokens.set(token, Date.now());
+  res.json({ token });
+});
+
+// GET /report/cost-utilisation/data — fetch all data for the report
+app.get('/report/cost-utilisation/data',
+  authenticateRequest,
+  async (req, res) => {
+  try {
+    const { month, currency } = req.query; // month = YYYY-MM
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ error: 'month required (YYYY-MM)' });
+    }
+
+    // Build 4-month window: selected month + 3 prior
+    const months = [];
+    const [yr, mo] = month.split('-').map(Number);
+    for (let i = 3; i >= 0; i--) {
+      let m = mo - i, y = yr;
+      if (m <= 0) { m += 12; y -= 1; }
+      months.push(`${y}-${String(m).padStart(2,'0')}`);
+    }
+
+    // FX rate for currency conversion
+    let fxRate = 1;
+    let fxNote = 'USD';
+    if (currency === 'AUD') {
+      const fx = db.prepare(`SELECT rate FROM fin_fx_rates WHERE from_curr='USD' AND to_curr='AUD'`).get();
+      if (fx) { fxRate = fx.rate; fxNote = `AUD (rate: ${fx.rate})`; }
+      else { fxNote = 'AUD (rate unavailable, showing USD)'; }
+    }
+    const applyFx = (v) => Math.round((v || 0) * fxRate * 100) / 100;
+
+    // Helper: get calendar-month key from a date string
+    const toMonthKey = (d) => d ? String(d).slice(0, 7) : null;
+
+    // ── 1. VAS invoice data (excl. carton replacement) ──
+    const vasData = {};
+    const cartonData = {};
+    for (const mk of months) {
+      // All VAS invoices for this month
+      const invs = db.prepare(`
+        SELECT i.id, i.invoice_date FROM fin_invoices i
+        WHERE i.type='VAS' AND substr(i.invoice_date,1,7)=?
+      `).all(mk);
+
+      let vasRev = 0, cartonRev = 0, cartonQty = 0;
+      for (const inv of invs) {
+        const lines = db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id=?').all(inv.id);
+        for (const l of lines) {
+          if (String(l.description||'').toLowerCase().includes('carton replacement')) {
+            cartonRev += l.total || 0;
+            cartonQty += l.quantity || 0;
+          } else {
+            vasRev += l.total || 0;
+          }
+        }
+      }
+
+      // Applied units this month
+      const recRows = db.prepare(`
+        SELECT COUNT(*) as n FROM records
+        WHERE status='complete' AND substr(date_local,1,7)=?
+      `).get(mk);
+      const appliedUnits = recRows?.n || 0;
+
+      // VAS expenses this month
+      const vasExp = db.prepare(`
+        SELECT COALESCE(SUM(amount),0) as total FROM fin_expenses
+        WHERE category='VAS Cost' AND month_key=?
+      `).get(mk)?.total || 0;
+
+      vasData[mk] = {
+        revenue: applyFx(vasRev),
+        applied_units: appliedUnits,
+        expense: applyFx(vasExp),
+        unit_cost: appliedUnits > 0 ? Math.round(applyFx(vasExp) / appliedUnits * 10000) / 10000 : null,
+        unit_revenue: appliedUnits > 0 ? Math.round(applyFx(vasRev) / appliedUnits * 10000) / 10000 : null,
+      };
+      cartonData[mk] = {
+        revenue: applyFx(cartonRev),
+        qty: cartonQty,
+        unit_rate: cartonQty > 0 ? Math.round(applyFx(cartonRev) / cartonQty * 100) / 100 : null,
+      };
+    }
+
+    // ── 2. Carton replacement by supplier (from receiving table) ──
+    const cartonBySupplier = db.prepare(`
+      SELECT supplier_name,
+             SUM(cartons_replaced) as total_replaced,
+             SUM(cartons_received) as total_received
+      FROM receiving
+      WHERE substr(week_start,1,7) IN (${months.map(()=>'?').join(',')})
+        AND cartons_replaced > 0
+      GROUP BY supplier_name
+      ORDER BY total_replaced DESC
+      LIMIT 10
+    `).all(...months);
+
+    // ── 3. Sea/Air freight data ──
+    const seaData = {}, airData = {};
+    for (const mk of months) {
+      for (const [type, store] of [['SEA', seaData], ['AIR', airData]]) {
+        const invs = db.prepare(`
+          SELECT total FROM fin_invoices
+          WHERE type=? AND substr(invoice_date,1,7)=? AND status != 'draft'
+        `).all(type, mk);
+        const invoiceTotal = invs.reduce((s, i) => s + (i.total || 0), 0);
+
+        // Applied units by freight type (from plan + records join)
+        // Get all week_starts in this month
+        const weekStarts = db.prepare(`
+          SELECT DISTINCT week_start FROM plans WHERE substr(week_start,1,7)=?
+        `).all(mk).map(r => r.week_start);
+
+        let appliedUnits = 0;
+        for (const ws of weekStarts) {
+          const planRow = db.prepare('SELECT data FROM plans WHERE week_start=?').get(ws);
+          if (!planRow) continue;
+          const planRows = safeJsonParse(planRow.data, []);
+          const freight = type === 'SEA' ? ['sea','SEA','Sea'] : ['air','AIR','Air'];
+          const pos = planRows
+            .filter(p => freight.some(f => String(p.freight_type||'').includes(f)))
+            .map(p => String(p.po_number||'').trim())
+            .filter(Boolean);
+          if (!pos.length) continue;
+          const placeholders = pos.map(() => '?').join(',');
+          const count = db.prepare(`
+            SELECT COUNT(*) as n FROM records
+            WHERE status='complete'
+              AND substr(date_local,1,7)=?
+              AND po_number IN (${placeholders})
+          `).get(mk, ...pos);
+          appliedUnits += count?.n || 0;
+        }
+
+        // Expenses
+        const expCat = type === 'SEA' ? 'Sea Freight Cost' : 'Air Freight Cost';
+        const expense = db.prepare(`
+          SELECT COALESCE(SUM(amount),0) as total FROM fin_expenses
+          WHERE category=? AND month_key=?
+        `).get(expCat, mk)?.total || 0;
+
+        store[mk] = {
+          revenue: applyFx(invoiceTotal),
+          applied_units: appliedUnits,
+          expense: applyFx(expense),
+          unit_cost: appliedUnits > 0 ? Math.round(applyFx(expense) / appliedUnits * 10000) / 10000 : null,
+          unit_revenue: appliedUnits > 0 ? Math.round(applyFx(invoiceTotal) / appliedUnits * 10000) / 10000 : null,
+        };
+      }
+    }
+
+    // ── 4. Container breakdown for Sea (current month only) ──
+    const [selYr, selMo] = month.split('-').map(Number);
+    const seaContainers = { ft20: 0, ft40: 0, air: 0 };
+    const weekStarsCurr = db.prepare(`
+      SELECT DISTINCT week_start FROM plans WHERE substr(week_start,1,7)=?
+    `).all(month).map(r => r.week_start);
+
+    for (const ws of weekStarsCurr) {
+      const allFlowRows = db.prepare('SELECT data FROM flow_week WHERE week_start=?').all(ws);
+      for (const row of allFlowRows) {
+        const d = safeJsonParse(row.data, {});
+        const containers = Array.isArray(d.containers) ? d.containers :
+          (Array.isArray(d?.containers?.containers) ? d.containers.containers : []);
+        for (const c of containers) {
+          const size = String(c.size_ft || '40').trim().toLowerCase();
+          if (size === 'air') seaContainers.air++;
+          else if (size === '20') seaContainers.ft20++;
+          else seaContainers.ft40++;
+        }
+      }
+    }
+
+    // ── 5. Freight mix over 4 months ──
+    const freightMix = {};
+    for (const mk of months) {
+      const seaUnits = seaData[mk]?.applied_units || 0;
+      const airUnits = airData[mk]?.applied_units || 0;
+      const total = seaUnits + airUnits;
+      freightMix[mk] = {
+        sea: seaUnits,
+        air: airUnits,
+        sea_pct: total > 0 ? Math.round(seaUnits / total * 100) : 0,
+        air_pct: total > 0 ? Math.round(airUnits / total * 100) : 0,
+      };
+    }
+
+    res.json({
+      months,
+      selected_month: month,
+      currency: currency || 'USD',
+      fx_note: fxNote,
+      vas: vasData,
+      carton: cartonData,
+      carton_by_supplier: cartonBySupplier,
+      sea: seaData,
+      air: airData,
+      sea_containers: seaContainers,
+      freight_mix: freightMix,
+    });
+
+  } catch(e) {
+    console.error('[cost-report/data]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// GET /report/cost-utilisation — serve the report HTML page
+app.get('/report/cost-utilisation',
+  authenticateRequest,
+  (req, res) => {
+  const { token, month, currency } = req.query;
+  _cleanReportTokens();
+  if (!token || !_reportTokens.has(token)) {
+    return res.status(403).send('<html><body style="font-family:sans-serif;padding:40px;"><h2>Access denied</h2><p>Invalid or expired token. Please request a new report link.</p></body></html>');
+  }
+  // Serve the report shell — data is fetched client-side
+  const apiBase = process.env.API_BASE || '';
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="api-base" content="${apiBase}">
+<title>VelOzity Pinpoint — Cost Utilisation Report</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,300&display=swap');
+
+  :root {
+    --brand: #990033;
+    --brand-light: #cc0044;
+    --dark: #1C1C1E;
+    --mid: #6E6E73;
+    --light: #AEAEB2;
+    --bg: #F5F5F7;
+    --white: #ffffff;
+    --sea: #0EA5E9;
+    --air: #F59E0B;
+    --vas: #990033;
+    --carton: #8B5CF6;
+    --green: #22C55E;
+    --red: #EF4444;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--bg);
+    color: var(--dark);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  /* ── Loading screen ── */
+  #loading {
+    position: fixed; inset: 0; background: var(--white);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 16px; z-index: 9999;
+  }
+  #loading .spinner {
+    width: 40px; height: 40px; border-radius: 50%;
+    border: 3px solid rgba(153,0,51,0.15);
+    border-top-color: var(--brand);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Print controls ── */
+  #print-bar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    background: var(--dark); color: #fff;
+    padding: 10px 24px; display: flex; align-items: center; justify-content: space-between;
+    font-size: 12px;
+  }
+  #print-bar button {
+    background: var(--brand); color: #fff; border: none; border-radius: 8px;
+    padding: 7px 20px; font-size: 12px; font-weight: 600; cursor: pointer;
+    font-family: inherit;
+  }
+
+  /* ── Pages ── */
+  .report-pages { padding-top: 56px; }
+
+  .page {
+    width: 297mm; min-height: 210mm;
+    background: var(--white);
+    margin: 0 auto 20px;
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+  }
+
+  /* ── Cover page ── */
+  .page-cover {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 210mm;
+    background: linear-gradient(135deg, #0d0010 0%, #1a0020 40%, #2d0035 70%, #990033 100%);
+  }
+  .cover-inner { text-align: center; padding: 60px; }
+  .cover-logo {
+    font-family: 'DM Serif Display', serif;
+    font-size: 52px; color: #fff; letter-spacing: -0.03em;
+    margin-bottom: 8px;
+  }
+  .cover-logo span { color: #ff4477; }
+  .cover-tagline { font-size: 13px; color: rgba(255,255,255,0.5); letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 48px; }
+  .cover-week {
+    font-size: 32px; font-weight: 300; color: #fff; margin-bottom: 8px;
+    font-family: 'DM Serif Display', serif; font-style: italic;
+  }
+  .cover-dates { font-size: 13px; color: rgba(255,255,255,0.5); margin-bottom: 48px; }
+  .cover-pill {
+    display: inline-block; background: rgba(255,255,255,0.1);
+    border: 0.5px solid rgba(255,255,255,0.2); border-radius: 20px;
+    padding: 6px 18px; font-size: 11px; color: rgba(255,255,255,0.7);
+    letter-spacing: 0.05em;
+  }
+  .cover-orb {
+    position: absolute; border-radius: 50%;
+    background: radial-gradient(circle, rgba(153,0,51,0.4) 0%, transparent 70%);
+    pointer-events: none;
+  }
+
+  /* ── Contents page ── */
+  .page-contents { padding: 48px 56px; }
+  .contents-header { margin-bottom: 40px; }
+  .contents-title { font-family: 'DM Serif Display', serif; font-size: 36px; color: var(--brand); margin-bottom: 6px; }
+  .contents-sub { font-size: 12px; color: var(--mid); }
+  .contents-list { display: flex; flex-direction: column; gap: 0; }
+  .contents-item {
+    display: flex; align-items: center; gap: 16px;
+    padding: 14px 0; border-bottom: 0.5px solid rgba(0,0,0,0.06);
+  }
+  .contents-num {
+    font-family: 'DM Serif Display', serif; font-size: 28px;
+    color: rgba(0,0,0,0.08); font-style: italic; width: 40px; text-align: right; flex-shrink: 0;
+  }
+  .contents-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  }
+  .contents-label { flex: 1; font-size: 14px; font-weight: 500; }
+  .contents-desc { font-size: 11px; color: var(--mid); }
+
+  /* ── Section pages ── */
+  .page-section { display: flex; flex-direction: column; min-height: 210mm; }
+  .section-header {
+    padding: 28px 40px 20px;
+    border-bottom: 0.5px solid rgba(0,0,0,0.06);
+    display: flex; align-items: flex-start; justify-content: space-between;
+  }
+  .section-title { font-family: 'DM Serif Display', serif; font-size: 28px; color: var(--brand); }
+  .section-subtitle { font-size: 11px; color: var(--mid); margin-top: 3px; }
+  .section-badge {
+    font-size: 10px; font-weight: 700; padding: 4px 12px; border-radius: 20px;
+    letter-spacing: 0.05em; text-transform: uppercase;
+  }
+  .section-body { flex: 1; padding: 24px 40px; }
+
+  /* ── Methodology footer ── */
+  .method-footer {
+    padding: 10px 40px 14px;
+    border-top: 0.5px solid rgba(0,0,0,0.06);
+    background: #FAFAFA;
+    font-size: 9px; color: var(--light); line-height: 1.6;
+  }
+  .method-footer strong { color: var(--mid); }
+
+  /* ── Page number ── */
+  .page-num {
+    position: absolute; top: 14px; right: 20px;
+    font-size: 9px; color: var(--light); font-style: italic;
+  }
+  .page-brand-strip {
+    position: absolute; top: 14px; left: 20px;
+    font-size: 9px; color: var(--light);
+  }
+
+  /* ── KPI cards ── */
+  .kpi-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  .kpi-card {
+    border-radius: 12px; padding: 20px 22px;
+    border: 0.5px solid rgba(0,0,0,0.08);
+    position: relative; overflow: hidden;
+  }
+  .kpi-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  }
+  .kpi-card.vas::before { background: var(--vas); }
+  .kpi-card.sea::before { background: var(--sea); }
+  .kpi-card.air::before { background: var(--air); }
+  .kpi-card.carton::before { background: var(--carton); }
+  .kpi-label { font-size: 10px; font-weight: 600; color: var(--mid); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+  .kpi-value { font-family: 'DM Serif Display', serif; font-size: 32px; color: var(--dark); margin-bottom: 4px; }
+  .kpi-sub { font-size: 11px; color: var(--mid); margin-bottom: 12px; }
+  .kpi-delta {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 20px;
+  }
+  .kpi-delta.up { background: rgba(239,68,68,0.1); color: #EF4444; }
+  .kpi-delta.down { background: rgba(34,197,94,0.1); color: #22C55E; }
+  .kpi-delta.flat { background: rgba(0,0,0,0.06); color: var(--mid); }
+  .kpi-desc { font-size: 10px; color: var(--mid); margin-top: 10px; line-height: 1.5; }
+
+  /* ── Charts ── */
+  .chart-wrap { position: relative; }
+  .chart-title { font-size: 11px; font-weight: 600; color: var(--dark); margin-bottom: 8px; }
+  .chart-sub { font-size: 10px; color: var(--mid); margin-bottom: 12px; }
+
+  /* ── Data tables ── */
+  .data-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .data-table th {
+    text-align: left; padding: 7px 10px; font-size: 9px; font-weight: 700;
+    color: var(--light); text-transform: uppercase; letter-spacing: 0.06em;
+    border-bottom: 1px solid rgba(0,0,0,0.08); background: #FAFAFA;
+  }
+  .data-table td { padding: 8px 10px; border-bottom: 0.5px solid rgba(0,0,0,0.05); }
+  .data-table tr:last-child td { border-bottom: none; }
+  .data-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .data-table .bold { font-weight: 600; }
+
+  /* ── Heatmap ── */
+  .heatmap-cell {
+    display: inline-block; width: 100%; height: 28px; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 600; color: #fff;
+  }
+
+  /* ── Back page ── */
+  .page-back {
+    display: flex; align-items: center; justify-content: center; min-height: 210mm;
+    background: linear-gradient(135deg, #0d0010 0%, #1a0020 60%, #990033 100%);
+  }
+  .back-inner { text-align: center; }
+  .back-title { font-family: 'DM Serif Display', serif; font-size: 48px; color: #fff; margin-bottom: 12px; }
+  .back-date { font-size: 13px; color: rgba(255,255,255,0.5); }
+
+  /* ── Two column layout ── */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+
+  /* ── Trend sparkline ── */
+  .sparkline-wrap { display: flex; align-items: flex-end; gap: 3px; height: 32px; margin-top: 8px; }
+  .spark-bar {
+    flex: 1; border-radius: 2px 2px 0 0; min-height: 4px;
+    transition: height 0.3s;
+  }
+
+  /* ── Container pill ── */
+  .ctr-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 14px; border-radius: 8px;
+    font-size: 11px; font-weight: 600;
+    border: 0.5px solid rgba(0,0,0,0.1);
+    margin-right: 8px;
+  }
+
+  /* ── Horizontal bar ── */
+  .hbar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .hbar-label { width: 140px; font-size: 10px; color: var(--mid); text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+  .hbar-track { flex: 1; height: 16px; background: rgba(0,0,0,0.04); border-radius: 4px; overflow: hidden; position: relative; }
+  .hbar-fill { height: 100%; border-radius: 4px; display: flex; align-items: center; padding-left: 6px; }
+  .hbar-fill span { font-size: 9px; font-weight: 700; color: #fff; }
+  .hbar-val { width: 60px; font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+
+  @media print {
+    #print-bar { display: none !important; }
+    .report-pages { padding-top: 0; }
+    .page { margin: 0; box-shadow: none; page-break-after: always; }
+    body { background: white; }
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <div style="font-size:12px;color:#6E6E73;">Building report…</div>
+</div>
+
+<div id="print-bar" style="display:none;">
+  <div>
+    <span style="font-weight:600;">VelOzity Pinpoint</span>
+    <span style="color:rgba(255,255,255,0.5);margin-left:8px;">Cost Utilisation Report</span>
+    <span id="print-month-label" style="color:rgba(255,255,255,0.5);margin-left:8px;"></span>
+  </div>
+  <button onclick="window.print()">🖨 Print / Save PDF</button>
+</div>
+
+<div class="report-pages" id="report-pages"></div>
+
+<script>
+const PARAMS = new URLSearchParams(location.search);
+const MONTH  = PARAMS.get('month') || '';
+const CURR   = PARAMS.get('currency') || 'USD';
+const TOKEN  = PARAMS.get('token') || '';
+const API_BASE = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\\/+$/, '');
+
+const CUR_SYM = CURR === 'AUD' ? 'A$' : 'US$';
+const fmt  = (v) => v == null ? '—' : CUR_SYM + Number(v).toLocaleString('en-AU', {minimumFractionDigits:2, maximumFractionDigits:2});
+const fmtU = (v) => v == null ? '—' : Number(v).toLocaleString('en-AU');
+const fmtP = (v) => v == null ? '—' : v.toFixed(0) + '%';
+const fmtC = (v, dp=4) => v == null ? '—' : CUR_SYM + Number(v).toFixed(dp);
+const esc  = (s) => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const fmtMonth = (mk) => { const [y,m] = mk.split('-'); return MONTH_NAMES[+m-1] + ' ' + y; };
+
+const deltaHtml = (curr, prev) => {
+  if (curr == null || prev == null || prev === 0) return '<span class="kpi-delta flat">—</span>';
+  const pct = ((curr - prev) / prev * 100);
+  const dir = pct > 0 ? 'up' : (pct < 0 ? 'down' : 'flat');
+  const arrow = pct > 0 ? '↑' : '↓';
+  return \`<span class="kpi-delta \${dir}">\${arrow} \${Math.abs(pct).toFixed(1)}% vs \${fmtMonth(Object.keys(window._D?.vas||{})[2]||'')}</span>\`;
+};
+
+const SECTION_COLORS = {
+  vas: '#990033', sea: '#0EA5E9', air: '#F59E0B', carton: '#8B5CF6'
+};
+
+async function loadData() {
+  const r = await fetch(\`\${API_BASE}/report/cost-utilisation/data?month=\${MONTH}&currency=\${CURR}\`, {
+    headers: { 'Authorization': 'Bearer ' + await getToken() }
+  });
+  if (!r.ok) throw new Error('Data load failed: ' + r.status);
+  return r.json();
+}
+
+async function getToken() {
+  if (window.Clerk?.session) { try { return await window.Clerk.session.getToken(); } catch(_){} }
+  return '';
+}
+
+function sparkbars(values, color) {
+  const max = Math.max(...values.filter(v=>v!=null), 1);
+  return \`<div class="sparkline-wrap">\${values.map(v =>
+    \`<div class="spark-bar" style="background:\${v!=null?color:'rgba(0,0,0,0.06)'};height:\${v!=null?Math.max(4,Math.round(v/max*28)):4}px;"\${v!=null?'title="'+v+'"':''}></div>\`
+  ).join('')}</div>\`;
+}
+
+function heatCell(pct) {
+  const clamped = Math.min(100, Math.max(0, pct||0));
+  const r = Math.round(153 * (1 - clamped/100) + 34 * clamped/100);
+  const g = Math.round(0   * (1 - clamped/100) + 197 * clamped/100);
+  const b = Math.round(51  * (1 - clamped/100) + 94  * clamped/100);
+  return \`rgb(\${r},\${g},\${b})\`;
+}
+
+function pageNum(n, total) {
+  return \`<div class="page-num">VelOzity Pinpoint • Page \${n} of \${total}</div>
+           <div class="page-brand-strip">VelOzity Pinpoint — Cost Utilisation Report</div>\`;
+}
+
+function buildReport(D) {
+  window._D = D;
+  const months = D.months; // [oldest, ..., newest]
+  const sel = D.selected_month;
+  const mLabels = months.map(fmtMonth);
+
+  const pages = [];
+
+  // ── PAGE 1: COVER ──────────────────────────────────────────────
+  pages.push(\`
+    <div class="page page-cover">
+      <div class="cover-orb" style="width:400px;height:400px;top:-100px;right:-100px;"></div>
+      <div class="cover-orb" style="width:200px;height:200px;bottom:50px;left:80px;opacity:0.5;"></div>
+      <div class="cover-inner">
+        <div class="cover-logo">Vel<span>Ozity</span> Pinpoint</div>
+        <div class="cover-tagline">Supply Chain Intelligence</div>
+        <div class="cover-week">Cost Utilisation Report</div>
+        <div class="cover-dates">\${fmtMonth(sel)}</div>
+        <div class="cover-pill">CONFIDENTIAL • \${CURR} • Generated \${new Date().toLocaleString('en-AU')}</div>
+      </div>
+    </div>
+  \`);
+
+  // ── PAGE 2: CONTENTS ──────────────────────────────────────────
+  const sections = [
+    { num:'01', label:'Executive Summary',        desc:'Unit cost KPIs across VAS, Sea and Air freight with MoM trends', color: '#990033' },
+    { num:'02', label:'Freight Mix',              desc:'Air vs Sea volume split and 4-month trend analysis', color: '#0EA5E9' },
+    { num:'03', label:'Sea Freight Utilisation',  desc:'Container throughput, unit cost and supplier breakdown', color: '#0EA5E9' },
+    { num:'04', label:'Air Freight Utilisation',  desc:'AWB throughput, unit cost and supplier breakdown', color: '#F59E0B' },
+    { num:'05', label:'VAS Processing',           desc:'Applied units, unit cost trend and supplier heatmap', color: '#990033' },
+    { num:'06', label:'Carton Replacement',       desc:'Replacement volumes, billed cost and top 3 suppliers', color: '#8B5CF6' },
+  ];
+  pages.push(\`
+    <div class="page page-contents">
+      \${pageNum(2, 8)}
+      <div class="contents-header">
+        <div class="contents-title">Contents</div>
+        <div class="contents-sub">\${fmtMonth(sel)} • 4-month view: \${mLabels.join(' · ')}</div>
+      </div>
+      <div class="contents-list">
+        \${sections.map(s => \`
+          <div class="contents-item">
+            <div class="contents-num">\${s.num}</div>
+            <div class="contents-dot" style="background:\${s.color};"></div>
+            <div>
+              <div class="contents-label">\${s.label}</div>
+              <div class="contents-desc">\${s.desc}</div>
+            </div>
+          </div>
+        \`).join('')}
+      </div>
+      <div style="margin-top:32px;padding:16px;background:#FAFAFA;border-radius:10px;border:0.5px solid rgba(0,0,0,0.06);">
+        <div style="font-size:10px;font-weight:600;color:var(--mid);margin-bottom:6px;">About this report</div>
+        <div style="font-size:10px;color:var(--mid);line-height:1.7;">
+          This report covers the calendar month of <strong>\${fmtMonth(sel)}</strong> and compares against the three prior months.
+          All monetary values are in <strong>\${CURR} (\${D.fx_note})</strong>.
+          Unit costs are calculated using applied records (completed units) and actual invoiced amounts by invoice date.
+          Carton replacement is reported separately and excluded from VAS unit cost calculations.
+        </div>
+      </div>
+    </div>
+  \`);
+
+  // ── PAGE 3: EXECUTIVE SUMMARY ─────────────────────────────────
+  const vasD  = D.vas[sel]  || {};
+  const seaD  = D.sea[sel]  || {};
+  const airD  = D.air[sel]  || {};
+  const ctnD  = D.carton[sel] || {};
+  const vasPrev  = D.vas[months[2]]  || {};
+  const seaPrev  = D.sea[months[2]]  || {};
+  const airPrev  = D.air[months[2]]  || {};
+
+  const delta = (curr, prev) => {
+    if (curr == null || prev == null || prev === 0) return '<span class="kpi-delta flat">—</span>';
+    const pct = (curr - prev) / prev * 100;
+    const dir = pct > 2 ? 'up' : (pct < -2 ? 'down' : 'flat');
+    const arrow = pct > 0 ? '↑' : '↓';
+    return \`<span class="kpi-delta \${dir}">\${arrow} \${Math.abs(pct).toFixed(1)}% vs \${fmtMonth(months[2])}</span>\`;
+  };
+
+  pages.push(\`
+    <div class="page page-section">
+      \${pageNum(3, 8)}
+      <div class="section-header">
+        <div>
+          <div class="section-title">Executive Summary</div>
+          <div class="section-subtitle">\${fmtMonth(sel)} — unit cost snapshot across all channels</div>
+        </div>
+        <span class="section-badge" style="background:rgba(153,0,51,0.1);color:#990033;">Overview</span>
+      </div>
+      <div class="section-body">
+        <div class="kpi-grid">
+
+          <div class="kpi-card vas">
+            <div class="kpi-label">VAS Cost / Unit</div>
+            <div class="kpi-value">\${fmtC(vasD.unit_cost)}</div>
+            <div class="kpi-sub">\${fmtU(vasD.applied_units)} units applied</div>
+            \${delta(vasD.unit_cost, vasPrev.unit_cost)}
+            <div class="kpi-desc">
+              Direct VAS processing cost per applied unit. Calculated as total VAS expense divided by completed records.
+              <strong>Excludes carton replacement.</strong>
+            </div>
+            \${sparkbars(months.map(m=>D.vas[m]?.unit_cost), 'rgba(153,0,51,0.4)')}
+          </div>
+
+          <div class="kpi-card sea">
+            <div class="kpi-label">Sea Freight Cost / Unit</div>
+            <div class="kpi-value">\${fmtC(seaD.unit_cost)}</div>
+            <div class="kpi-sub">\${fmtU(seaD.applied_units)} sea units · \${D.sea_containers.ft20} × 20ft + \${D.sea_containers.ft40} × 40ft</div>
+            \${delta(seaD.unit_cost, seaPrev.unit_cost)}
+            <div class="kpi-desc">
+              Sea freight expense per applied unit shipped by sea. Container count reflects \${fmtMonth(sel)} only.
+              Air containers are excluded from this metric.
+            </div>
+            \${sparkbars(months.map(m=>D.sea[m]?.unit_cost), 'rgba(14,165,233,0.4)')}
+          </div>
+
+          <div class="kpi-card air">
+            <div class="kpi-label">Air Freight Cost / Unit</div>
+            <div class="kpi-value">\${fmtC(airD.unit_cost)}</div>
+            <div class="kpi-sub">\${fmtU(airD.applied_units)} air units</div>
+            \${delta(airD.unit_cost, airPrev.unit_cost)}
+            <div class="kpi-desc">
+              Air freight expense per applied unit shipped by air.
+              Higher per-unit cost vs sea reflects speed premium. Monitor ratio to sea cost.
+            </div>
+            \${sparkbars(months.map(m=>D.air[m]?.unit_cost), 'rgba(245,158,11,0.4)')}
+          </div>
+
+        </div>
+
+        <!-- Summary table -->
+        <table class="data-table" style="margin-top:8px;">
+          <thead>
+            <tr>
+              <th>Channel</th>
+              \${mLabels.map(l=>\`<th class="num">\${l}</th>\`).join('')}
+              <th class="num">MoM Δ</th>
+            </tr>
+          </thead>
+          <tbody>
+            \${[
+              { label:'VAS Cost/Unit', key:'unit_cost', src:'vas', color:'#990033' },
+              { label:'VAS Revenue/Unit', key:'unit_revenue', src:'vas', color:'#990033' },
+              { label:'Sea Cost/Unit', key:'unit_cost', src:'sea', color:'#0EA5E9' },
+              { label:'Sea Revenue/Unit', key:'unit_revenue', src:'sea', color:'#0EA5E9' },
+              { label:'Air Cost/Unit', key:'unit_cost', src:'air', color:'#F59E0B' },
+              { label:'Air Revenue/Unit', key:'unit_revenue', src:'air', color:'#F59E0B' },
+            ].map(row => {
+              const vals = months.map(m => D[row.src][m]?.[row.key]);
+              const prev = vals[2], curr = vals[3];
+              const momPct = prev && curr ? ((curr-prev)/prev*100) : null;
+              const momColor = momPct == null ? 'var(--mid)' : (row.key==='unit_cost' ? (momPct>2?'#EF4444':'#22C55E') : (momPct>2?'#22C55E':'#EF4444'));
+              return \`<tr>
+                <td><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:\${row.color};margin-right:6px;"></span>\${row.label}</td>
+                \${vals.map(v=>\`<td class="num">\${fmtC(v)}</td>\`).join('')}
+                <td class="num bold" style="color:\${momColor};">\${momPct!=null?(momPct>0?'+':'')+momPct.toFixed(1)+'%':'—'}</td>
+              </tr>\`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div class="method-footer">
+        <strong>Methodology:</strong>
+        VAS Cost/Unit = fin_expenses (category: VAS Cost) ÷ completed records, by calendar month.
+        Sea/Air Cost/Unit = fin_expenses (category: Sea/Air Freight Cost) ÷ applied units filtered by freight type on plan rows.
+        Revenue/Unit = invoice line totals ÷ applied units. Carton Replacement lines excluded from VAS.
+        All values in \${D.fx_note}. MoM compares selected month to prior month.
+      </div>
+    </div>
+  \`);
+
+  // ── PAGE 4: FREIGHT MIX ───────────────────────────────────────
+  pages.push(\`
+    <div class="page page-section" id="page-freight-mix">
+      \${pageNum(4, 8)}
+      <div class="section-header">
+        <div>
+          <div class="section-title">Freight Mix</div>
+          <div class="section-subtitle">Air vs Sea split — \${mLabels.join(' · ')}</div>
+        </div>
+        <span class="section-badge" style="background:rgba(14,165,233,0.1);color:#0EA5E9;">Freight</span>
+      </div>
+      <div class="section-body">
+        <div class="two-col" style="margin-bottom:20px;">
+          <div>
+            <div class="chart-title">Monthly Mix — Units by Mode</div>
+            <div class="chart-sub">Stacked bar shows absolute Sea vs Air unit volumes</div>
+            <div class="chart-wrap" style="height:160px;"><canvas id="chart-mix-bar"></canvas></div>
+          </div>
+          <div>
+            <div class="chart-title">\${fmtMonth(sel)} — Freight Split</div>
+            <div class="chart-sub">Share of total applied units by mode</div>
+            <div class="chart-wrap" style="height:160px;"><canvas id="chart-mix-donut"></canvas></div>
+          </div>
+        </div>
+        <div class="two-col">
+          <div>
+            <div class="chart-title">Sea vs Air Cost/Unit Trend</div>
+            <div class="chart-sub">Cost efficiency comparison over 4 months</div>
+            <div class="chart-wrap" style="height:140px;"><canvas id="chart-mix-cost"></canvas></div>
+          </div>
+          <div>
+            <table class="data-table">
+              <thead>
+                <tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">Air %</th></tr>
+              </thead>
+              <tbody>
+                \${months.map((mk,i) => \`<tr\${i===3?' style="font-weight:600;"':''}>
+                  <td>\${mLabels[i]}\${i===3?' ★':''}</td>
+                  <td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td>
+                  <td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td>
+                  <td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td>
+                  <td class="num">\${fmtP(D.freight_mix[mk]?.air_pct)}</td>
+                </tr>\`).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="method-footer">
+        <strong>Methodology:</strong>
+        Units by mode derived from plan rows filtered by freight_type (Sea/Air), matched to applied records by calendar month of completion date.
+        Sea % and Air % = mode units ÷ total (sea + air) applied units. Cost/Unit = freight expense ÷ mode applied units.
+      </div>
+    </div>
+  \`);
+
+  // ── PAGE 5: SEA FREIGHT ───────────────────────────────────────
+  pages.push(\`
+    <div class="page page-section" id="page-sea">
+      \${pageNum(5, 8)}
+      <div class="section-header">
+        <div>
+          <div class="section-title">Sea Freight Utilisation</div>
+          <div class="section-subtitle">Container throughput, cost and revenue — \${fmtMonth(sel)}</div>
+        </div>
+        <span class="section-badge" style="background:rgba(14,165,233,0.1);color:#0EA5E9;">Sea</span>
+      </div>
+      <div class="section-body">
+        <div class="three-col" style="margin-bottom:20px;">
+          <div class="kpi-card sea" style="padding:14px 16px;">
+            <div class="kpi-label">Total Revenue</div>
+            <div class="kpi-value" style="font-size:22px;">\${fmt(seaD.revenue)}</div>
+            <div class="kpi-sub">Sea freight invoices</div>
+          </div>
+          <div class="kpi-card sea" style="padding:14px 16px;">
+            <div class="kpi-label">Units Shipped</div>
+            <div class="kpi-value" style="font-size:22px;">\${fmtU(seaD.applied_units)}</div>
+            <div class="kpi-sub">Applied sea units</div>
+          </div>
+          <div class="kpi-card sea" style="padding:14px 16px;">
+            <div class="kpi-label">Cost / Unit</div>
+            <div class="kpi-value" style="font-size:22px;">\${fmtC(seaD.unit_cost)}</div>
+            <div class="kpi-sub">Expense ÷ applied units</div>
+          </div>
+        </div>
+
+        <div style="margin-bottom:12px;">
+          <div style="font-size:11px;font-weight:600;margin-bottom:8px;">Container Breakdown — \${fmtMonth(sel)}</div>
+          <div>
+            <span class="ctr-pill" style="background:rgba(14,165,233,0.08);">
+              <span style="font-size:16px;font-weight:700;color:#0EA5E9;">\${D.sea_containers.ft20}</span>
+              <span style="font-size:10px;color:var(--mid);">× 20ft</span>
+            </span>
+            <span class="ctr-pill" style="background:rgba(14,165,233,0.12);">
+              <span style="font-size:16px;font-weight:700;color:#0369A1;">\${D.sea_containers.ft40}</span>
+              <span style="font-size:10px;color:var(--mid);">× 40ft</span>
+            </span>
+            <span style="font-size:10px;color:var(--light);">Air containers excluded</span>
+          </div>
+        </div>
+
+        <div class="two-col">
+          <div>
+            <div class="chart-title">Units + Cost/Unit Trend</div>
+            <div class="chart-sub">Bars = applied units (left axis) · Line = cost/unit (right axis)</div>
+            <div class="chart-wrap" style="height:150px;"><canvas id="chart-sea-combo"></canvas></div>
+          </div>
+          <div>
+            <table class="data-table">
+              <thead>
+                <tr><th>Month</th><th class="num">Revenue</th><th class="num">Expense</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr>
+              </thead>
+              <tbody>
+                \${months.map((mk,i) => { const d=D.sea[mk]||{}; return \`<tr\${i===3?' style="font-weight:600;"':''}>
+                  <td>\${mLabels[i]}\${i===3?' ★':''}</td>
+                  <td class="num">\${fmt(d.revenue)}</td>
+                  <td class="num">\${fmt(d.expense)}</td>
+                  <td class="num">\${fmtU(d.applied_units)}</td>
+                  <td class="num">\${fmtC(d.unit_cost)}</td>
+                </tr>\`; }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="method-footer">
+        <strong>Methodology:</strong>
+        Revenue = fin_invoices type=SEA, by invoice_date month, excluding drafts.
+        Expense = fin_expenses category='Sea Freight Cost', by month_key.
+        Units = applied records (status=complete) for POs with freight_type=Sea on plan rows.
+        Cost/Unit = Expense ÷ Units. Container counts from flow_week data for weeks in selected month (Air containers excluded).
+      </div>
+    </div>
+  \`);
+
+  // ── PAGE 6: AIR FREIGHT ───────────────────────────────────────
+  pages.push(\`
+    <div class="page page-section" id="page-air">
+      \${pageNum(6, 8)}
+      <div class="section-header">
+        <div>
+          <div class="section-title">Air Freight Utilisation</div>
+          <div class="section-subtitle">Airfreight throughput, cost and revenue — \${fmtMonth(sel)}</div>
+        </div>
+        <span class="section-badge" style="background:rgba(245,158,11,0.1);color:#F59E0B;">Air</span>
+      </div>
+      <div class="section-body">
+        <div class="three-col" style="margin-bottom:20px;">
+          <div class="kpi-card air" style="padding:14px 16px;">
+            <div class="kpi-label">Total Revenue</div>
+            <div class="kpi-value" style="font-size:22px;">\${fmt(airD.revenue)}</div>
+            <div class="kpi-sub">Air freight invoices</div>
+          </div>
+          <div class="kpi-card air" style="padding:14px 16px;">
+            <div class="kpi-label">Units Shipped</div>
+            <div class="kpi-value" style="font-size:22px;">\${fmtU(airD.applied_units)}</div>
+            <div class="kpi-sub">Applied air units</div>
+          </div>
+          <div class="kpi-card air" style="padding:14px 16px;">
+            <div class="kpi-label">Cost / Unit</div>
+            <div class="kpi-value" style="font-size:22px;">\${fmtC(airD.unit_cost)}</div>
+            <div class="kpi-sub">Expense ÷ applied units</div>
+          </div>
+        </div>
+        <div class="two-col">
+          <div>
+            <div class="chart-title">Units + Cost/Unit Trend</div>
+            <div class="chart-sub">Bars = applied units · Line = cost/unit</div>
+            <div class="chart-wrap" style="height:150px;"><canvas id="chart-air-combo"></canvas></div>
+          </div>
+          <div>
+            <table class="data-table">
+              <thead>
+                <tr><th>Month</th><th class="num">Revenue</th><th class="num">Expense</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr>
+              </thead>
+              <tbody>
+                \${months.map((mk,i) => { const d=D.air[mk]||{}; return \`<tr\${i===3?' style="font-weight:600;"':''}>
+                  <td>\${mLabels[i]}\${i===3?' ★':''}</td>
+                  <td class="num">\${fmt(d.revenue)}</td>
+                  <td class="num">\${fmt(d.expense)}</td>
+                  <td class="num">\${fmtU(d.applied_units)}</td>
+                  <td class="num">\${fmtC(d.unit_cost)}</td>
+                </tr>\`; }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div style="margin-top:16px;">
+          <div class="chart-title">Sea vs Air Cost Premium</div>
+          <div class="chart-wrap" style="height:100px;"><canvas id="chart-air-radar"></canvas></div>
+        </div>
+      </div>
+      <div class="method-footer">
+        <strong>Methodology:</strong>
+        Revenue = fin_invoices type=AIR, by invoice_date month, excluding drafts.
+        Expense = fin_expenses category='Air Freight Cost', by month_key.
+        Units = applied records for POs with freight_type=Air on plan rows.
+        Cost/Unit = Expense ÷ Units.
+      </div>
+    </div>
+  \`);
+
+  // ── PAGE 7: VAS PROCESSING ────────────────────────────────────
+  const vasMonthRows = months.map((mk,i) => { const d=D.vas[mk]||{}; return \`<tr\${i===3?' style="font-weight:600;"':''}>
+    <td>\${mLabels[i]}\${i===3?' ★':''}</td>
+    <td class="num">\${fmt(d.revenue)}</td><td class="num">\${fmt(d.expense)}</td>
+    <td class="num">\${fmtU(d.applied_units)}</td><td class="num">\${fmtC(d.unit_cost)}</td>
+  </tr>\`; }).join('');
+
+  pages.push(\`
+    <div class="page page-section" id="page-vas">
+      \${pageNum(7, 8)}
+      <div class="section-header">
+        <div>
+          <div class="section-title">VAS Processing</div>
+          <div class="section-subtitle">Value-added services — unit economics and supplier heatmap</div>
+        </div>
+        <span class="section-badge" style="background:rgba(153,0,51,0.1);color:#990033;">VAS</span>
+      </div>
+      <div class="section-body">
+        <div class="three-col" style="margin-bottom:16px;">
+          <div class="kpi-card vas" style="padding:14px 16px;">
+            <div class="kpi-label">VAS Revenue (excl. carton)</div>
+            <div class="kpi-value" style="font-size:22px;">\${fmt(vasD.revenue)}</div>
+            <div class="kpi-sub">\${fmtMonth(sel)}</div>
+          </div>
+          <div class="kpi-card vas" style="padding:14px 16px;">
+            <div class="kpi-label">Applied Units</div>
+            <div class="kpi-value" style="font-size:22px;">\${fmtU(vasD.applied_units)}</div>
+            <div class="kpi-sub">Completed records</div>
+          </div>
+          <div class="kpi-card vas" style="padding:14px 16px;">
+            <div class="kpi-label">Cost / Unit</div>
+            <div class="kpi-value" style="font-size:22px;">\${fmtC(vasD.unit_cost)}</div>
+            <div class="kpi-sub">VAS expense ÷ units</div>
+          </div>
+        </div>
+        <div class="two-col">
+          <div>
+            <div class="chart-title">VAS Cost/Unit Trend</div>
+            <div class="chart-wrap" style="height:140px;"><canvas id="chart-vas-trend"></canvas></div>
+          </div>
+          <div>
+            <table class="data-table">
+              <thead><tr><th>Month</th><th class="num">Revenue</th><th class="num">Expense</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr></thead>
+              <tbody>\${vasMonthRows}</tbody>
+            </table>
+          </div>
+        </div>
+        <div style="margin-top:16px;">
+          <div class="chart-title">Unit Cost vs Revenue/Unit — \${mLabels.join(' · ')}</div>
+          <div class="chart-sub">Radar chart — outer = higher value. Ideal: revenue line outside cost line on all axes.</div>
+          <div class="chart-wrap" style="height:120px;"><canvas id="chart-vas-radar"></canvas></div>
+        </div>
+      </div>
+      <div class="method-footer">
+        <strong>Methodology:</strong>
+        Revenue = VAS invoice line totals excluding lines matching 'Carton Replacement - labour only', by invoice_date month.
+        Expense = fin_expenses category='VAS Cost', by month_key.
+        Units = records table, status=complete, by date_local month.
+        Carton Replacement lines are reported separately on the following page.
+      </div>
+    </div>
+  \`);
+
+  // ── PAGE 8: CARTON REPLACEMENT ────────────────────────────────
+  const topSups = (D.carton_by_supplier || []).slice(0, 3);
+  const maxRepl = Math.max(...topSups.map(s=>s.total_replaced), 1);
+
+  pages.push(\`
+    <div class="page page-section" id="page-carton">
+      \${pageNum(8, 8)}
+      <div class="section-header">
+        <div>
+          <div class="section-title">Carton Replacement</div>
+          <div class="section-subtitle">Replacement volumes and billed cost — \${fmtMonth(sel)}</div>
+        </div>
+        <span class="section-badge" style="background:rgba(139,92,246,0.1);color:#8B5CF6;">Carton</span>
+      </div>
+      <div class="section-body">
+        <div class="two-col" style="margin-bottom:20px;">
+          <div class="kpi-card carton" style="padding:14px 16px;">
+            <div class="kpi-label">Billed Replacement Revenue</div>
+            <div class="kpi-value" style="font-size:22px;">\${fmt(ctnD.revenue)}</div>
+            <div class="kpi-sub">From VAS invoice lines — \${fmtMonth(sel)}</div>
+          </div>
+          <div class="kpi-card carton" style="padding:14px 16px;">
+            <div class="kpi-label">Cartons Replaced (billed)</div>
+            <div class="kpi-value" style="font-size:22px;">\${fmtU(ctnD.qty)}</div>
+            <div class="kpi-sub">Rate: \${fmt(ctnD.unit_rate)} / carton</div>
+          </div>
+        </div>
+
+        <div class="two-col">
+          <div>
+            <div class="chart-title">Top Suppliers — Cartons Replaced (Physical Count, last 4 months)</div>
+            <div class="chart-sub">Source: receiving records (cartons_replaced field)</div>
+            \${topSups.length ? topSups.map(s => \`
+              <div class="hbar-row">
+                <div class="hbar-label" title="\${esc(s.supplier_name)}">\${esc(s.supplier_name)}</div>
+                <div class="hbar-track">
+                  <div class="hbar-fill" style="width:\${Math.round(s.total_replaced/maxRepl*100)}%;background:var(--carton);">
+                    <span>\${s.total_replaced}</span>
+                  </div>
+                </div>
+                <div class="hbar-val">\${s.total_replaced}</div>
+              </div>
+            \`).join('') : '<div style="font-size:11px;color:var(--light);padding:12px 0;">No replacement data recorded for this period.</div>'}
+          </div>
+          <div>
+            <div class="chart-title">Replacement Revenue Trend</div>
+            <div class="chart-sub">Billed carton replacement by month</div>
+            <div class="chart-wrap" style="height:140px;"><canvas id="chart-carton-trend"></canvas></div>
+
+            <div style="margin-top:12px;padding:10px;background:#FAFAFA;border-radius:8px;border:0.5px solid rgba(139,92,246,0.2);">
+              <div style="font-size:9px;font-weight:600;color:var(--mid);margin-bottom:4px;">RECONCILIATION NOTE</div>
+              <div style="font-size:9px;color:var(--mid);line-height:1.6;">
+                Billed revenue is from invoice lines ('Carton Replacement - labour only').
+                Physical count is from receiving records (cartons_replaced field per PO).
+                These may differ: invoices are raised weekly in arrears; physical records are entered at time of receipt.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top:16px;">
+          <table class="data-table">
+            <thead><tr><th>Supplier</th><th class="num">Cartons Replaced</th><th class="num">Cartons Received</th><th class="num">Replace Rate</th></tr></thead>
+            <tbody>
+              \${(D.carton_by_supplier||[]).map(s => \`<tr>
+                <td>\${esc(s.supplier_name||'Unknown')}</td>
+                <td class="num">\${fmtU(s.total_replaced)}</td>
+                <td class="num">\${fmtU(s.total_received)}</td>
+                <td class="num">\${s.total_received>0?fmtP(s.total_replaced/s.total_received*100):'—'}</td>
+              </tr>\`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="method-footer">
+        <strong>Methodology:</strong>
+        Billed revenue = fin_invoice_lines WHERE description LIKE '%Carton Replacement%', linked to VAS invoices by invoice_date month.
+        Physical replacements = receiving.cartons_replaced grouped by supplier_name, weeks falling in 4-month window.
+        Replace Rate = cartons_replaced ÷ cartons_received. Top suppliers ranked by total physical replacements.
+      </div>
+    </div>
+  \`);
+
+  // ── BACK PAGE ─────────────────────────────────────────────────
+  pages.push(\`
+    <div class="page page-back">
+      <div class="back-inner">
+        <div class="back-title">Report created</div>
+        <div class="back-date">\${new Date().toLocaleString('en-AU', {dateStyle:'long', timeStyle:'short'})}</div>
+        <div style="margin-top:24px;font-size:11px;color:rgba(255,255,255,0.3);">VelOzity Pinpoint • Cost Utilisation Report • \${fmtMonth(sel)} • \${CURR}</div>
+      </div>
+    </div>
+  \`);
+
+  document.getElementById('report-pages').innerHTML = pages.join('');
+  document.getElementById('print-bar').style.display = 'flex';
+  document.getElementById('print-month-label').textContent = '— ' + fmtMonth(sel);
+  document.getElementById('loading').style.display = 'none';
+
+  // ── Render charts ──
+  requestAnimationFrame(() => renderCharts(D, months, mLabels));
+}
+
+function renderCharts(D, months, mLabels) {
+  const defaults = {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { labels: { font: { size: 9, family: 'DM Sans' }, boxWidth: 8, padding: 8 } } },
+    scales: {
+      x: { ticks: { font: { size: 9 } }, grid: { display: false } },
+      y: { ticks: { font: { size: 9 } }, grid: { color: 'rgba(0,0,0,0.04)' } }
+    }
+  };
+
+  // Freight mix bar
+  const mixBarEl = document.getElementById('chart-mix-bar');
+  if (mixBarEl) new Chart(mixBarEl, {
+    type: 'bar',
+    data: {
+      labels: mLabels,
+      datasets: [
+        { label: 'Sea', data: months.map(m=>D.freight_mix[m]?.sea||0), backgroundColor: 'rgba(14,165,233,0.7)', borderRadius: 3, stack: 'a' },
+        { label: 'Air', data: months.map(m=>D.freight_mix[m]?.air||0), backgroundColor: 'rgba(245,158,11,0.7)', borderRadius: 3, stack: 'a' },
+      ]
+    },
+    options: { ...defaults, scales: { x: defaults.scales.x, y: { ...defaults.scales.y, stacked: true } } }
+  });
+
+  // Mix donut
+  const mixDonutEl = document.getElementById('chart-mix-donut');
+  const selMix = D.freight_mix[D.selected_month] || {};
+  if (mixDonutEl) new Chart(mixDonutEl, {
+    type: 'doughnut',
+    data: {
+      labels: ['Sea', 'Air'],
+      datasets: [{ data: [selMix.sea||0, selMix.air||0], backgroundColor: ['rgba(14,165,233,0.8)','rgba(245,158,11,0.8)'], borderWidth: 0, hoverOffset: 4 }]
+    },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { font: {size:9}, boxWidth:8, padding:8 } } } }
+  });
+
+  // Mix cost line
+  const mixCostEl = document.getElementById('chart-mix-cost');
+  if (mixCostEl) new Chart(mixCostEl, {
+    type: 'line',
+    data: {
+      labels: mLabels,
+      datasets: [
+        { label: 'Sea Cost/Unit', data: months.map(m=>D.sea[m]?.unit_cost), borderColor: '#0EA5E9', backgroundColor: 'rgba(14,165,233,0.1)', borderWidth: 2, pointRadius: 4, tension: 0.3, fill: true },
+        { label: 'Air Cost/Unit', data: months.map(m=>D.air[m]?.unit_cost), borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.1)', borderWidth: 2, pointRadius: 4, tension: 0.3, fill: true },
+      ]
+    },
+    options: defaults
+  });
+
+  // Sea combo
+  const seaComboEl = document.getElementById('chart-sea-combo');
+  if (seaComboEl) new Chart(seaComboEl, {
+    type: 'bar',
+    data: {
+      labels: mLabels,
+      datasets: [
+        { type: 'bar', label: 'Units', data: months.map(m=>D.sea[m]?.applied_units||0), backgroundColor: 'rgba(14,165,233,0.3)', borderRadius: 3, yAxisID: 'y' },
+        { type: 'line', label: 'Cost/Unit', data: months.map(m=>D.sea[m]?.unit_cost), borderColor: '#0EA5E9', backgroundColor: 'transparent', borderWidth: 2.5, pointRadius: 4, yAxisID: 'y2', tension: 0.3 },
+      ]
+    },
+    options: { ...defaults, scales: { x: defaults.scales.x, y: { ...defaults.scales.y, position:'left' }, y2: { position:'right', ticks:{font:{size:9}}, grid:{display:false} } } }
+  });
+
+  // Air combo
+  const airComboEl = document.getElementById('chart-air-combo');
+  if (airComboEl) new Chart(airComboEl, {
+    type: 'bar',
+    data: {
+      labels: mLabels,
+      datasets: [
+        { type: 'bar', label: 'Units', data: months.map(m=>D.air[m]?.applied_units||0), backgroundColor: 'rgba(245,158,11,0.3)', borderRadius: 3, yAxisID: 'y' },
+        { type: 'line', label: 'Cost/Unit', data: months.map(m=>D.air[m]?.unit_cost), borderColor: '#F59E0B', backgroundColor: 'transparent', borderWidth: 2.5, pointRadius: 4, yAxisID: 'y2', tension: 0.3 },
+      ]
+    },
+    options: { ...defaults, scales: { x: defaults.scales.x, y: { ...defaults.scales.y, position:'left' }, y2: { position:'right', ticks:{font:{size:9}}, grid:{display:false} } } }
+  });
+
+  // Air radar (sea vs air cost comparison)
+  const airRadarEl = document.getElementById('chart-air-radar');
+  if (airRadarEl) new Chart(airRadarEl, {
+    type: 'radar',
+    data: {
+      labels: mLabels,
+      datasets: [
+        { label: 'Sea Cost/Unit', data: months.map(m=>D.sea[m]?.unit_cost||0), borderColor: '#0EA5E9', backgroundColor: 'rgba(14,165,233,0.15)', borderWidth: 2, pointRadius: 3 },
+        { label: 'Air Cost/Unit', data: months.map(m=>D.air[m]?.unit_cost||0), borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.15)', borderWidth: 2, pointRadius: 3 },
+      ]
+    },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { font:{size:9}, boxWidth:8, padding:8 } } }, scales: { r: { ticks: { font:{size:8}, backdropColor:'transparent' }, grid: { color:'rgba(0,0,0,0.06)' }, pointLabels:{font:{size:9}} } } }
+  });
+
+  // VAS trend
+  const vasTrendEl = document.getElementById('chart-vas-trend');
+  if (vasTrendEl) new Chart(vasTrendEl, {
+    type: 'line',
+    data: {
+      labels: mLabels,
+      datasets: [
+        { label: 'Cost/Unit', data: months.map(m=>D.vas[m]?.unit_cost), borderColor: '#990033', backgroundColor: 'rgba(153,0,51,0.1)', borderWidth: 2.5, pointRadius: 4, tension: 0.3, fill: true },
+        { label: 'Revenue/Unit', data: months.map(m=>D.vas[m]?.unit_revenue), borderColor: '#cc0044', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 3, tension: 0.3, borderDash: [4,3] },
+      ]
+    },
+    options: defaults
+  });
+
+  // VAS radar
+  const vasRadarEl = document.getElementById('chart-vas-radar');
+  if (vasRadarEl) new Chart(vasRadarEl, {
+    type: 'radar',
+    data: {
+      labels: mLabels,
+      datasets: [
+        { label: 'Revenue/Unit', data: months.map(m=>D.vas[m]?.unit_revenue||0), borderColor: '#cc0044', backgroundColor: 'rgba(204,0,68,0.15)', borderWidth: 2, pointRadius: 3 },
+        { label: 'Cost/Unit', data: months.map(m=>D.vas[m]?.unit_cost||0), borderColor: '#990033', backgroundColor: 'rgba(153,0,51,0.1)', borderWidth: 2, pointRadius: 3 },
+      ]
+    },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { font:{size:9}, boxWidth:8, padding:8 } } }, scales: { r: { ticks: { font:{size:8}, backdropColor:'transparent' }, grid: { color:'rgba(0,0,0,0.06)' }, pointLabels:{font:{size:9}} } } }
+  });
+
+  // Carton trend
+  const cartonTrendEl = document.getElementById('chart-carton-trend');
+  if (cartonTrendEl) new Chart(cartonTrendEl, {
+    type: 'bar',
+    data: {
+      labels: mLabels,
+      datasets: [
+        { label: 'Billed Revenue', data: months.map(m=>D.carton[m]?.revenue||0), backgroundColor: 'rgba(139,92,246,0.5)', borderRadius: 3 },
+      ]
+    },
+    options: defaults
+  });
+}
+
+// ── Boot ──
+(async () => {
+  try {
+    const D = await loadData();
+    buildReport(D);
+  } catch(e) {
+    document.getElementById('loading').innerHTML = \`
+      <div style="text-align:center;padding:40px;">
+        <div style="font-size:18px;color:#990033;margin-bottom:8px;">Failed to load report</div>
+        <div style="font-size:12px;color:#6E6E73;">\${e.message}</div>
+      </div>
+    \`;
+  }
+})();
+</script>
+</body>
+</html>`);
+});
+
+// ── END COST UTILISATION REPORT MODULE ───────────────────────────
+
 // ---- Start ----
 app.listen(PORT, () => {
   console.log(`UID Ops backend listening on http://localhost:${PORT}`);
