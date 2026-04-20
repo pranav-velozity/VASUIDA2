@@ -4263,7 +4263,7 @@ app.post('/zendesk-completions/:weekStart',
 
 // In-memory token store (expires after 10 minutes)
 const _reportTokens = new Map();
-const _reportTokenTTL = 10 * 60 * 1000;
+const _reportTokenTTL = 30 * 60 * 1000;
 
 function _cleanReportTokens() {
   const now = Date.now();
@@ -5492,7 +5492,16 @@ function buildReport(D) {
   document.getElementById('loading').style.display = 'none';
 
   // ── Render charts ──
-  requestAnimationFrame(() => renderCharts(D, months, mLabels));
+  // Temporarily show compare-sections so Chart.js can measure canvas dimensions
+  requestAnimationFrame(() => {
+    const cmpSections = document.querySelectorAll('.compare-section');
+    cmpSections.forEach(el => { el.style.visibility = 'hidden'; el.style.display = 'block'; });
+    renderCharts(D, months, mLabels);
+    // Restore visibility after charts render
+    requestAnimationFrame(() => {
+      cmpSections.forEach(el => { el.style.visibility = ''; el.style.display = ''; });
+    });
+  });
   // Track when charts are done
   window._chartsRendered = false;
   setTimeout(() => { window._chartsRendered = true; const btn = document.getElementById("print-btn"); if(btn) btn.textContent = "\u1f5a8 Print / Save PDF"; }, 2000);
@@ -5699,6 +5708,11 @@ app.post('/report/cost-utilisation/insights',
     _cleanReportTokens();
     const reportToken = req.body?.token;
     if (reportToken && _reportTokens.has(reportToken)) { return next(); }
+    // No valid report token — try Clerk auth, but if no auth header just reject cleanly
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(403).json({ error: 'No valid token. Re-generate the report to get a fresh token.' });
+    }
     authenticateRequest(req, res, next);
   },
   async (req, res) => {
