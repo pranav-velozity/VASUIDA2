@@ -5693,6 +5693,11 @@ function _printWhenReady() {
 });
 
 
+// ── GET /report/cost-utilisation/insights — debug only
+app.get('/report/cost-utilisation/insights', (req, res) => {
+  res.json({ ok: true, message: 'POST to this endpoint with { section, data }' });
+});
+
 // ── POST /report/cost-utilisation/insights — Pulse AI insights per section
 app.post('/report/cost-utilisation/insights', (req, res) => {
   // Synchronous wrapper ensures Express catches all errors as JSON
