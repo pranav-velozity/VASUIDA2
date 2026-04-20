@@ -3519,10 +3519,15 @@ window.downloadMobileBins = async function downloadMobileBins(){
 // ── Zendesk completion toggle ──
 window._zdToggleComplete = async function(ticket, completed, weekStart) {
   try {
-    await api(`/zendesk-completions/${encodeURIComponent(weekStart)}`, {
+    const _base = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
+    let _token = null;
+    if(window.Clerk?.session){ try{ _token = await window.Clerk.session.getToken(); }catch(_){} }
+    const r = await fetch(`${_base}/zendesk-completions/${encodeURIComponent(weekStart)}`, {
       method: 'POST',
+      headers: { 'Content-Type':'application/json', ...(_token?{'Authorization':'Bearer '+_token}:{}) },
       body: JSON.stringify({ zendesk_ticket: ticket, completed: completed })
     });
+    if(!r.ok) throw new Error('HTTP ' + r.status);
     // Re-render the zendesk tab to reflect the change
     renderOpsInsights('zendesk');
   } catch(e) {
@@ -4395,7 +4400,13 @@ async function renderOpsInsights(view){
     let completions = {};
     if(ws){
       try {
-        completions = await api(`/zendesk-completions/${encodeURIComponent(ws)}`);
+        const _base = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
+        let _token = null;
+        if(window.Clerk?.session){ try{ _token = await window.Clerk.session.getToken(); }catch(_){} }
+        const _r = await fetch(`${_base}/zendesk-completions/${encodeURIComponent(ws)}`, {
+          headers: _token ? {'Authorization':'Bearer '+_token} : {}
+        });
+        if(_r.ok) completions = await _r.json();
       } catch(_) {}
     }
 
