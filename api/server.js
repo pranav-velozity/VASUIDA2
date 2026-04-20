@@ -4894,7 +4894,10 @@ async function loadPulseInsights(sectionId, sectionData) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ section: sectionId, data: sectionData, token: TOKEN })
     });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    if (!r.ok) {
+      const errBody = await r.json().catch(()=>({}));
+      throw new Error('HTTP ' + r.status + (errBody.error ? ': ' + errBody.error : ''));
+    }
     const { insights } = await r.json();
     renderInsightCards(sectionId, insights);
   } catch(e) {
@@ -5025,7 +5028,7 @@ function buildReport(D) {
 
           <div class="kpi-card sea">
             <div class="kpi-label">Sea Freight Cost / Unit</div>
-            <div class="kpi-value">\${fmtC(seaD.unit_cost)}</div>
+            <div class="kpi-value">\${fmtC(seaD.unit_revenue)}</div>
             <div class="kpi-sub">\${fmtU(seaD.applied_units)} sea units · \${D.sea_containers.ft20} × 20ft + \${D.sea_containers.ft40} × 40ft</div>
             \${delta(seaD.unit_revenue, seaPrev.unit_revenue)}
             <div class="kpi-desc">
@@ -5037,7 +5040,7 @@ function buildReport(D) {
 
           <div class="kpi-card air">
             <div class="kpi-label">Air Freight Cost / Unit</div>
-            <div class="kpi-value">\${fmtC(airD.unit_cost)}</div>
+            <div class="kpi-value">\${fmtC(airD.unit_revenue)}</div>
             <div class="kpi-sub">\${fmtU(airD.applied_units)} air units</div>
             \${delta(airD.unit_revenue, airPrev.unit_revenue)}
             <div class="kpi-desc">
@@ -5712,10 +5715,18 @@ app.post('/report/cost-utilisation/insights',
 
     const text = resp.content?.[0]?.text || '[]';
     const clean = text.replace(/```json|```/g, '').trim();
-    const insights = JSON.parse(clean);
+    let insights;
+    try {
+      insights = JSON.parse(clean);
+    } catch(parseErr) {
+      // Model didn't return valid JSON — extract manually or return empty
+      console.error('[cost-report/insights] JSON parse failed:', clean.slice(0, 200));
+      insights = [];
+    }
+    if (!Array.isArray(insights)) insights = [];
     res.json({ insights });
   } catch(e) {
-    console.error('[cost-report/insights]', e.message);
+    console.error('[cost-report/insights] ERROR:', e.message, e.stack?.split('\n')[1]);
     res.status(500).json({ error: String(e.message || e) });
   }
 });
