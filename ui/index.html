@@ -3516,7 +3516,22 @@ window.downloadMobileBins = async function downloadMobileBins(){
   }
 }
 
-function renderOpsInsights(view){
+// ── Zendesk completion toggle ──
+window._zdToggleComplete = async function(ticket, completed, weekStart) {
+  try {
+    await api(`/zendesk-completions/${encodeURIComponent(weekStart)}`, {
+      method: 'POST',
+      body: JSON.stringify({ zendesk_ticket: ticket, completed: completed })
+    });
+    // Re-render the zendesk tab to reflect the change
+    renderOpsInsights('zendesk');
+  } catch(e) {
+    console.error('[zd complete]', e.message);
+    alert('Failed to save: ' + e.message);
+  }
+};
+
+async function renderOpsInsights(view){
   const sub = document.getElementById('ops-insights-subtitle');
   const root = document.getElementById('ops-insights-content');
   if(!root) return;
@@ -4375,6 +4390,15 @@ function renderOpsInsights(view){
 
   // ----- Zendesk bubble matrix (risk vs volume) -----
   if(view==='zendesk'){
+    // Fetch completions for this week
+    const ws = state.weekStart || '';
+    let completions = {};
+    if(ws){
+      try {
+        completions = await api(`/zendesk-completions/${encodeURIComponent(ws)}`);
+      } catch(_) {}
+    }
+
     // Build per-ticket aggregates including freight mix
     const ticketAgg = new Map(); // ticket -> {planned, received, applied, air, sea, other}
     for(const r of rows){
@@ -4448,7 +4472,8 @@ function renderOpsInsights(view){
           </div>
         </div>
         <div style="border:0.5px solid rgba(0,0,0,0.08);border-radius:10px;overflow:hidden;">
-          <div style="display:grid;grid-template-columns:100px 1fr 90px 80px 70px 80px;padding:7px 14px;background:#F5F5F7;border-bottom:0.5px solid rgba(0,0,0,0.06);">
+          <div style="display:grid;grid-template-columns:32px 100px 1fr 90px 80px 70px 80px;padding:7px 14px;background:#F5F5F7;border-bottom:0.5px solid rgba(0,0,0,0.06);">
+            <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;"></div>
             <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;">Ticket</div>
             <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;">Progress</div>
             <div style="font-size:10px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;text-align:right;">Planned</div>
@@ -4463,10 +4488,23 @@ function renderOpsInsights(view){
             const recPct = t.planned>0 ? Math.min(100, 100*t.received/t.planned) : 0;
             const col = statusColor(pct);
             const bg = i%2===0 ? '#fff' : '#FAFAFA';
-            return `<div style="display:grid;grid-template-columns:100px 1fr 90px 80px 70px 80px;padding:9px 14px;background:${bg};border-bottom:0.5px solid rgba(0,0,0,0.05);align-items:center;">
+            // Auto-complete if applied >= planned, or manually completed
+            const autoComplete = t.planned > 0 && t.applied >= t.planned;
+            const isComplete = autoComplete || !!completions[t.k];
+            const completedBy = completions[t.k]?.completed_by || '';
+            const rowOpacity = isComplete ? '0.55' : '1';
+            const textDecor = isComplete ? 'text-decoration:line-through;' : '';
+            return `<div style="display:grid;grid-template-columns:32px 100px 1fr 90px 80px 70px 80px;padding:9px 14px;background:${bg};border-bottom:0.5px solid rgba(0,0,0,0.05);align-items:center;opacity:${rowOpacity};" title="${isComplete && completedBy ? 'Completed by '+completedBy : ''}">
+              <div style="display:flex;align-items:center;justify-content:center;">
+                <input type="checkbox"
+                  ${isComplete ? 'checked' : ''}
+                  ${autoComplete ? 'title="Auto-completed: applied ≥ planned" style="accent-color:#97DC21;cursor:default;"' : `style="accent-color:#990033;cursor:pointer;" onchange="window._zdToggleComplete('${esc(t.k)}', this.checked, '${ws}')"`}
+                  ${autoComplete ? 'disabled' : ''}
+                />
+              </div>
               <div style="display:flex;align-items:center;gap:6px;">
                 <span style="color:#6E6E73;">${modeIcon(t.mode)}</span>
-                <span style="font-size:12px;font-weight:600;color:#1C1C1E;">${esc(t.k)}</span>
+                <span style="font-size:12px;font-weight:600;color:#1C1C1E;${textDecor}">${esc(t.k)}</span>
               </div>
               <div style="padding:0 12px;">
                 <div style="height:6px;background:rgba(0,0,0,0.06);border-radius:3px;overflow:hidden;position:relative;">
