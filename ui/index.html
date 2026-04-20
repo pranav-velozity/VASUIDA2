@@ -3536,6 +3536,126 @@ window._zdToggleComplete = async function(ticket, completed, weekStart) {
   }
 };
 
+// ── Cost Utilisation Report modal ──
+window._costReportOpenModal = function() {
+  // Remove any existing modal
+  const existing = document.getElementById('cost-report-modal');
+  if (existing) existing.remove();
+
+  const BRAND = '#990033';
+  const overlay = document.createElement('div');
+  overlay.id = 'cost-report-modal';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;';
+
+  // Default month = last completed calendar month
+  const now = new Date();
+  const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const defaultMonth = `${lastMonth.getFullYear()}-${String(lastMonth.getMonth()+1).padStart(2,'0')}`;
+
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:16px;padding:32px;width:min(92vw,420px);box-shadow:0 20px 60px rgba(0,0,0,0.2);font-family:inherit;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+        <div style="width:32px;height:32px;border-radius:9px;background:linear-gradient(135deg,#990033,#cc0044);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        </div>
+        <div>
+          <div style="font-size:15px;font-weight:700;color:#1C1C1E;">Cost Utilisation Report</div>
+          <div style="font-size:11px;color:#6E6E73;">Monthly cost analysis — VAS, Sea, Air & Carton</div>
+        </div>
+      </div>
+      <div style="height:0.5px;background:rgba(0,0,0,0.08);margin:18px 0;"></div>
+
+      <div style="margin-bottom:14px;">
+        <label style="display:block;font-size:10px;font-weight:600;color:#6E6E73;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;">Report Month</label>
+        <input type="month" id="cr-month" value="${defaultMonth}"
+          style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:9px;padding:9px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;"/>
+      </div>
+
+      <div style="margin-bottom:14px;">
+        <label style="display:block;font-size:10px;font-weight:600;color:#6E6E73;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;">Currency</label>
+        <div style="display:flex;gap:8px;">
+          <label style="flex:1;display:flex;align-items:center;gap:8px;padding:9px 14px;border:0.5px solid rgba(0,0,0,0.15);border-radius:9px;cursor:pointer;" id="cr-usd-label">
+            <input type="radio" name="cr-currency" value="USD" checked style="accent-color:${BRAND};"> <span style="font-size:13px;font-weight:500;">USD</span> <span style="font-size:10px;color:#AEAEB2;">US Dollar</span>
+          </label>
+          <label style="flex:1;display:flex;align-items:center;gap:8px;padding:9px 14px;border:0.5px solid rgba(0,0,0,0.15);border-radius:9px;cursor:pointer;" id="cr-aud-label">
+            <input type="radio" name="cr-currency" value="AUD" style="accent-color:${BRAND};"> <span style="font-size:13px;font-weight:500;">AUD</span> <span style="font-size:10px;color:#AEAEB2;">Australian Dollar</span>
+          </label>
+        </div>
+      </div>
+
+      <div style="margin-bottom:20px;">
+        <label style="display:block;font-size:10px;font-weight:600;color:#6E6E73;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;">Access Password</label>
+        <input type="password" id="cr-password" placeholder="Enter report password"
+          style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:9px;padding:9px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;"/>
+        <div id="cr-error" style="display:none;font-size:11px;color:#EF4444;margin-top:6px;"></div>
+      </div>
+
+      <div style="display:flex;gap:10px;">
+        <button onclick="document.getElementById('cost-report-modal').remove()"
+          style="flex:1;background:#F5F5F7;color:#6E6E73;border:none;border-radius:10px;padding:11px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">
+          Cancel
+        </button>
+        <button id="cr-submit-btn" onclick="window._costReportSubmit()"
+          style="flex:2;background:${BRAND};color:#fff;border:none;border-radius:10px;padding:11px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">
+          Generate Report →
+        </button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.getElementById('cr-password').focus();
+  document.getElementById('cr-password').addEventListener('keydown', e => { if (e.key === 'Enter') window._costReportSubmit(); });
+};
+
+window._costReportSubmit = async function() {
+  const month    = document.getElementById('cr-month')?.value;
+  const currency = document.querySelector('input[name="cr-currency"]:checked')?.value || 'USD';
+  const password = document.getElementById('cr-password')?.value;
+  const errEl    = document.getElementById('cr-error');
+  const btn      = document.getElementById('cr-submit-btn');
+
+  if (!month)    { errEl.textContent = 'Please select a month.'; errEl.style.display = 'block'; return; }
+  if (!password) { errEl.textContent = 'Please enter the report password.'; errEl.style.display = 'block'; return; }
+
+  errEl.style.display = 'none';
+  btn.textContent = 'Authenticating…';
+  btn.disabled = true;
+
+  try {
+    const _base  = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/, '');
+    let _token = null;
+    if (window.Clerk?.session) { try { _token = await window.Clerk.session.getToken(); } catch(_){} }
+
+    const r = await fetch(`${_base}/report/cost-utilisation/auth`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(_token ? {'Authorization': 'Bearer ' + _token} : {}) },
+      body: JSON.stringify({ password })
+    });
+
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      errEl.textContent = err.error || 'Incorrect password.';
+      errEl.style.display = 'block';
+      btn.textContent = 'Generate Report →';
+      btn.disabled = false;
+      return;
+    }
+
+    const { token } = await r.json();
+    document.getElementById('cost-report-modal').remove();
+    // Open report in new tab
+    window.open(`${_base}/report/cost-utilisation?token=${token}&month=${month}&currency=${currency}`, '_blank');
+
+  } catch(e) {
+    errEl.textContent = 'Request failed: ' + e.message;
+    errEl.style.display = 'block';
+    btn.textContent = 'Generate Report →';
+    btn.disabled = false;
+  }
+};
+
 async function renderOpsInsights(view){
   const sub = document.getElementById('ops-insights-subtitle');
   const root = document.getElementById('ops-insights-content');
@@ -7007,6 +7127,7 @@ function renderReportsPage(container){
       <div style="padding:14px 18px;display:grid;grid-template-columns:repeat(2,1fr);gap:10px;">
         ${reportCard('Ops Summary Report','Full week summary — throughput, completion rate, at-risk POs, receiving status.','PDF','Admin only','__pdf-direct__')}
         ${reportCard('Stock Status','Planned vs actual received vs in-transit status per PO × SKU across a week or date range.','XLSX','Admin · Client','__stock-status-direct__')}
+        ${reportCard('Cost Utilisation Report','Monthly cost analysis — VAS, sea and air freight unit economics, carton replacement. 4-month trend.','PDF','Admin only','__cost-util-direct__')}
       </div>
     </div>
 
@@ -7107,6 +7228,10 @@ function renderReportsPage(container){
       }
       if(proxyId === '__stock-status-direct__'){
         window._ssOpenPanel();
+        return;
+      }
+      if(proxyId === '__cost-util-direct__'){
+        window._costReportOpenModal();
         return;
       }
       const target = document.getElementById(proxyId);
@@ -7786,6 +7911,7 @@ function reportCard(name, desc, fmt, role, proxyId){
     'Transit & Clearing Status':  '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0369A1" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
     'Ops Summary Report':         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#990033" stroke-width="1.6" stroke-linecap="round"><path d="M3 3v18h18"/><polyline points="18 9 12 15 8 11 3 16"/></svg>',
     'Stock Status':               '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0891b2" stroke-width="1.6" stroke-linecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M7 8h3M7 12h5M15 8l2 2 3-3"/></svg>',
+    'Cost Utilisation Report':    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#990033" stroke-width="1.6" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>',
   };
   const icon = icons[name] || '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#AEAEB2" stroke-width="1.6" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16h16V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
 
