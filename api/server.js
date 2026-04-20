@@ -4513,6 +4513,9 @@ app.get('/report/cost-utilisation',
   (req, res) => {
   // Serve the report shell — data is fetched client-side
   const apiBase = process.env.API_BASE || '';
+  const showCompare = req.query.compare !== 'false';
+
+  // Pre-compute comparison sections as HTML strings (avoids nested template literals)
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4761,6 +4764,8 @@ app.get('/report/cost-utilisation',
   .hbar-fill span { font-size: 9px; font-weight: 700; color: #fff; }
   .hbar-val { width: 60px; font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
 
+  .show-compare .compare-section { display: block !important; }
+  .compare-section { display: none; }
   @media print {
     #print-bar { display: none !important; }
     .report-pages { padding-top: 0; }
@@ -4785,14 +4790,14 @@ app.get('/report/cost-utilisation',
   <button onclick="window.print()">🖨 Print / Save PDF</button>
 </div>
 
-<div class="report-pages" id="report-pages"></div>
+<div class="report-pages" id="report-pages" ${showCompare ? 'class="show-compare"' : ''}></div>
 
 <script>
 const PARAMS = new URLSearchParams(location.search);
 const MONTH  = PARAMS.get('month') || '';
 const CURR   = PARAMS.get('currency') || 'USD';
 const TOKEN  = PARAMS.get('token') || '';
-const COMPARE = PARAMS.get('compare') !== 'false'; // default true
+const COMPARE = TOKEN ? true : true; // always available — set by server
 const API_BASE = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\\/+$/, '');
 
 const CUR_SYM = CURR === 'AUD' ? 'A$' : 'US$';
@@ -4818,9 +4823,15 @@ const SECTION_COLORS = {
 };
 
 async function loadData() {
-  const r = await fetch(\`\${API_BASE}/report/cost-utilisation/data?month=\${MONTH}&currency=\${CURR}&token=\${encodeURIComponent(TOKEN)}\`);
-  if (!r.ok) throw new Error('Data load failed: ' + r.status);
-  return r.json();
+  const url = \`\${API_BASE}/report/cost-utilisation/data?month=\${MONTH}&currency=\${CURR}&token=\${encodeURIComponent(TOKEN)}\`;
+  const r = await fetch(url);
+  if (!r.ok) {
+    const errText = await r.text().catch(()=>'');
+    throw new Error('Data load failed (' + r.status + '): ' + errText.slice(0,200));
+  }
+  const data = await r.json();
+  if (!data.months) throw new Error('Invalid data response — missing months array. Check server logs.');
+  return data;
 }
 
 function sparkbars(values, color) {
@@ -5050,7 +5061,7 @@ function buildReport(D) {
             {label:'Air Cost/Unit',val:airD.unit_revenue,units:airD.applied_units,ul:'air units',color:'#F59E0B'},
           ].map(k=>'<div style="padding:10px 14px;border-radius:8px;border:0.5px solid rgba(0,0,0,0.08);border-top:2px solid '+k.color+';">'
             +'<div style="font-size:9px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">'+k.label+'</div>'
-            +'<div style="font-size:20px;font-weight:700;color:#1C1C1E;font-family:'DM Serif Display',serif;">'+fmtC(k.val)+'</div>'
+            +'<div style="font-size:20px;font-weight:700;color:#1C1C1E;">'+fmtC(k.val)+'</div>'
             +'<div style="font-size:10px;color:#AEAEB2;margin-top:2px;">'+fmtU(k.units)+' '+k.ul+'</div>'
             +'</div>'
           ).join('')}
@@ -5131,37 +5142,16 @@ function buildReport(D) {
           </div>
         </div>
 
-        \${COMPARE ? \`
-        <div style="margin:8px 0 8px;display:flex;align-items:center;gap:10px;">
-          <div style="font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">4-Month Comparison — \${mLabels.join(' · ')}</div>
-          <div style="flex:1;height:0.5px;background:rgba(0,0,0,0.08);"></div>
-        </div>
-        <div class="two-col">
-          <div>
-            <div class="chart-title">Monthly Mix — Units by Mode</div>
-            <div class="chart-sub">Stacked bar: Sea vs Air volumes</div>
-            <div class="chart-wrap" style="height:140px;"><canvas id="chart-mix-bar"></canvas></div>
+        <div class="compare-section">
+          <div style="margin:8px 0;font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;">4-Month Comparison</div>
+          <div class="two-col" style="margin-bottom:12px;">
+            <div><div class="chart-title">Mix by Mode</div><div class="chart-wrap" style="height:130px;"><canvas id="chart-mix-bar"></canvas></div></div>
+            <div><div class="chart-title">Cost/Unit Trend</div><div class="chart-wrap" style="height:130px;"><canvas id="chart-mix-cost"></canvas></div></div>
           </div>
-          <div>
-            <div class="chart-title">Sea vs Air Cost/Unit Trend</div>
-            <div class="chart-sub">Cost efficiency over 4 months</div>
-            <div class="chart-wrap" style="height:140px;"><canvas id="chart-mix-cost"></canvas></div>
-          </div>
+          <table class="data-table"><thead><tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">Sea $/U</th><th class="num">Air $/U</th></tr></thead><tbody>\${months.map((mk,i)=>\`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td><td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td><td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td><td class="num">\${fmtC(D.sea[mk]?.unit_revenue)}</td><td class="num">\${fmtC(D.air[mk]?.unit_revenue)}</td></tr>\`).join('')}</tbody></table>
         </div>
-        <table class="data-table" style="margin-top:12px;">
-          <thead><tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">Air %</th><th class="num">Sea Cost/U</th><th class="num">Air Cost/U</th></tr></thead>
-          <tbody>
-            \${months.map((mk,i) => \`<tr\${i===3?' style="font-weight:600;"':''}>
-              <td>\${mLabels[i]}\${i===3?' ★':''}</td>
-              <td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td>
-              <td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td>
-              <td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td>
-              <td class="num">\${fmtP(D.freight_mix[mk]?.air_pct)}</td>
-              <td class="num">\${fmtC(D.sea[mk]?.unit_revenue)}</td>
-              <td class="num">\${fmtC(D.air[mk]?.unit_revenue)}</td>
-            </tr>\`).join('')}
-          </tbody>
-        </table>\` : ''}
+          <table class="data-table"><thead><tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">Sea $/U</th><th class="num">Air $/U</th></tr></thead><tbody>\${months.map((mk,i)=>\`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td><td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td><td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td><td class="num">\${fmtC(D.sea[mk]?.unit_revenue)}</td><td class="num">\${fmtC(D.air[mk]?.unit_revenue)}</td></tr>\`).join('')}</tbody></table>
+        </div>
       </div>
       \${pulseInsightBlock('freight_mix')}
       <div class="method-footer">
@@ -5235,31 +5225,14 @@ function buildReport(D) {
           ).join('')}
         </div>
 
-        \${COMPARE ? \`
-        <div style="margin:8px 0 8px;display:flex;align-items:center;gap:10px;">
-          <div style="font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">4-Month Comparison — \${mLabels.join(' · ')}</div>
-          <div style="flex:1;height:0.5px;background:rgba(0,0,0,0.08);"></div>
+        <div class="compare-section">
+          <div style="margin:8px 0;font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;">4-Month Comparison</div>
+          <div class="two-col">
+            <div><div class="chart-title">Units + Cost/Unit Trend</div><div class="chart-wrap" style="height:150px;"><canvas id="chart-sea-combo"></canvas></div></div>
+            <div><table class="data-table"><thead><tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">$/Unit</th></tr></thead><tbody>\${months.map((mk,i)=>{const d=D.sea[mk]||{};return \`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmt(d.revenue)}</td><td class="num">\${fmtU(d.applied_units)}</td><td class="num">\${fmtC(d.unit_revenue)}</td></tr>\`}).join('')}</tbody></table></div>
+          </div>
         </div>
-        <div class="two-col">
-          <div>
-            <div class="chart-title">Units + Cost/Unit Trend</div>
-            <div class="chart-sub">Bars = applied units (left) · Line = cost/unit (right)</div>
-            <div class="chart-wrap" style="height:150px;"><canvas id="chart-sea-combo"></canvas></div>
-          </div>
-          <div>
-            <table class="data-table">
-              <thead><tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr></thead>
-              <tbody>
-                \${months.map((mk,i) => { const d=D.sea[mk]||{}; return \`<tr\${i===3?' style="font-weight:600;"':''}>
-                  <td>\${mLabels[i]}\${i===3?' ★':''}</td>
-                  <td class="num">\${fmt(d.revenue)}</td>
-                  <td class="num">\${fmtU(d.applied_units)}</td>
-                  <td class="num">\${fmtC(d.unit_revenue)}</td>
-                </tr>\`; }).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>\` : ''}
+        </div>
       </div>
       \${pulseInsightBlock('sea')}
       <div class="method-footer">
@@ -5319,31 +5292,14 @@ function buildReport(D) {
           ).join('')}
         </div>
 
-        \${COMPARE ? \`
-        <div style="margin:8px 0 8px;display:flex;align-items:center;gap:10px;">
-          <div style="font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">4-Month Comparison — \${mLabels.join(' · ')}</div>
-          <div style="flex:1;height:0.5px;background:rgba(0,0,0,0.08);"></div>
+        <div class="compare-section">
+          <div style="margin:8px 0;font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;">4-Month Comparison</div>
+          <div class="two-col">
+            <div><div class="chart-title">Units + Cost/Unit Trend</div><div class="chart-wrap" style="height:150px;"><canvas id="chart-air-combo"></canvas></div></div>
+            <div><table class="data-table"><thead><tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">$/Unit</th></tr></thead><tbody>\${months.map((mk,i)=>{const d=D.air[mk]||{};return \`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmt(d.revenue)}</td><td class="num">\${fmtU(d.applied_units)}</td><td class="num">\${fmtC(d.unit_revenue)}</td></tr>\`}).join('')}</tbody></table></div>
+          </div>
         </div>
-        <div class="two-col">
-          <div>
-            <div class="chart-title">Units + Cost/Unit Trend</div>
-            <div class="chart-sub">Bars = applied units · Line = cost/unit</div>
-            <div class="chart-wrap" style="height:150px;"><canvas id="chart-air-combo"></canvas></div>
-          </div>
-          <div>
-            <table class="data-table">
-              <thead><tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr></thead>
-              <tbody>
-                \${months.map((mk,i) => { const d=D.air[mk]||{}; return \`<tr\${i===3?' style="font-weight:600;"':''}>
-                  <td>\${mLabels[i]}\${i===3?' ★':''}</td>
-                  <td class="num">\${fmt(d.revenue)}</td>
-                  <td class="num">\${fmtU(d.applied_units)}</td>
-                  <td class="num">\${fmtC(d.unit_revenue)}</td>
-                </tr>\`; }).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>\` : ''}
+        </div>
 
       </div>
       \${pulseInsightBlock('air')}
@@ -5410,28 +5366,18 @@ function buildReport(D) {
           ).join('')}
         </div>
 
-        \${COMPARE ? \`
-        <div style="margin:8px 0 8px;display:flex;align-items:center;gap:10px;">
-          <div style="font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">4-Month Comparison — \${mLabels.join(' · ')}</div>
-          <div style="flex:1;height:0.5px;background:rgba(0,0,0,0.08);"></div>
-        </div>
-        <div class="two-col">
-          <div>
-            <div class="chart-title">VAS Cost/Unit Trend</div>
-            <div class="chart-wrap" style="height:140px;"><canvas id="chart-vas-trend"></canvas></div>
+        <div class="compare-section">
+          <div style="margin:8px 0;font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;">4-Month Comparison</div>
+          <div class="two-col">
+            <div><div class="chart-title">VAS Cost/Unit Trend</div><div class="chart-wrap" style="height:140px;"><canvas id="chart-vas-trend"></canvas></div></div>
+            <div><table class="data-table"><thead><tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">$/Unit</th></tr></thead><tbody>\${vasMonthRows}</tbody></table></div>
           </div>
-          <div>
-            <table class="data-table">
-              <thead><tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr></thead>
-              <tbody>\${vasMonthRows}</tbody>
-            </table>
-          </div>
-        </div>
-        <div style="margin-top:12px;">
-          <div class="chart-title">Cost/Unit Trend — \${mLabels.join(' · ')}</div>
-          <div class="chart-sub">Highlighted bar = selected month.</div>
+          <div class="chart-title" style="margin-top:8px;">Cost/Unit by Month</div>
           <div class="chart-wrap" style="height:100px;"><canvas id="chart-vas-radar"></canvas></div>
-        </div>\` : ''}
+        </div>
+          <div class="chart-title" style="margin-top:8px;">Cost/Unit by Month</div>
+          <div class="chart-wrap" style="height:100px;"><canvas id="chart-vas-radar"></canvas></div>
+        </div>
       </div>
       \${pulseInsightBlock('vas')}
       <div class="method-footer">
