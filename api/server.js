@@ -4660,12 +4660,14 @@ app.get('/report/cost-utilisation',
 
   /* ── Methodology footer ── */
   .method-footer {
-    padding: 10px 40px 14px;
-    border-top: 0.5px solid rgba(0,0,0,0.06);
-    background: #FAFAFA;
-    font-size: 9px; color: var(--light); line-height: 1.6;
+    margin-top: 16px;
+    padding: 16px 20px;
+    border-top: 1.5px solid rgba(0,0,0,0.08);
+    border-radius: 0 0 8px 8px;
+    background: #F5F5F7;
+    font-size: 11px; color: #6E6E73; line-height: 1.7;
   }
-  .method-footer strong { color: var(--mid); }
+  .method-footer strong { color: #1C1C1E; font-size: 12px; display: block; margin-bottom: 4px; }
 
   /* ── Page number ── */
   .page-num {
@@ -5095,7 +5097,6 @@ function buildReport(D) {
             +'<table class="data-table"><thead><tr>'+hdrs+'</tr></thead><tbody>'+compRows+'</tbody></table>';
         })() : ''}
       </div>
-      \${pulseInsightBlock('executive')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         VAS Cost/Unit = VAS invoice lines (excl. Carton Replacement) ÷ applied units, by invoice_date month.
@@ -5156,7 +5157,6 @@ function buildReport(D) {
           <table class="data-table"><thead><tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">Sea $/U</th><th class="num">Air $/U</th></tr></thead><tbody>\${months.map((mk,i)=>\`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td><td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td><td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td><td class="num">\${fmtC(D.sea[mk]?.unit_revenue)}</td><td class="num">\${fmtC(D.air[mk]?.unit_revenue)}</td></tr>\`).join('')}</tbody></table>
         </div>
       </div>
-      \${pulseInsightBlock('freight_mix')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         Units by mode derived from plan rows filtered by freight_type (Sea/Air), matched to applied records by calendar month of completion date.
@@ -5236,7 +5236,6 @@ function buildReport(D) {
           </div>
         </div>
       </div>
-      \${pulseInsightBlock('sea')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         Cost = fin_invoices type=SEA, by invoice_date month (all statuses including draft).
@@ -5303,7 +5302,6 @@ function buildReport(D) {
         </div>
 
       </div>
-      \${pulseInsightBlock('air')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         Cost = fin_invoices type=AIR, by invoice_date month (all statuses including draft).
@@ -5377,7 +5375,6 @@ function buildReport(D) {
           <div class="chart-wrap" style="height:100px;"><canvas id="chart-vas-radar"></canvas></div>
         </div>
       </div>
-      \${pulseInsightBlock('vas')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         Cost = VAS invoice line totals excluding lines matching 'Carton Replacement - labour only', by invoice_date month (all statuses).
@@ -5461,7 +5458,6 @@ function buildReport(D) {
           </table>
         </div>
       </div>
-      \${pulseInsightBlock('carton')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         Billed revenue = fin_invoice_lines WHERE description LIKE '%Carton Replacement%', linked to VAS invoices by invoice_date month.
@@ -5668,16 +5664,7 @@ function _printWhenReady() {
   try {
     const D = await loadData();
     buildReport(D);
-    // Load Pulse insights async for each section (non-blocking)
-    const sel = D.selected_month;
-    setTimeout(() => {
-      loadPulseInsights('executive', { vas: D.vas[sel], sea: D.sea[sel], air: D.air[sel], months: D.months });
-      loadPulseInsights('freight_mix', { freight_mix: D.freight_mix, months: D.months });
-      loadPulseInsights('sea', { sea: D.sea, sea_containers: D.sea_containers, months: D.months });
-      loadPulseInsights('air', { air: D.air, months: D.months });
-      loadPulseInsights('vas', { vas: D.vas, months: D.months });
-      loadPulseInsights('carton', { carton: D.carton, carton_by_supplier: D.carton_by_supplier, months: D.months });
-    }, 500);
+
   } catch(e) {
     document.getElementById('loading').innerHTML = \`
       <div style="text-align:center;padding:40px;">
