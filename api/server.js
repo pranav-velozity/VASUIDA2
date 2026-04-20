@@ -5417,7 +5417,7 @@ function buildReport(D) {
 
         <div class="two-col">
           <div>
-            <div class="chart-title">Top Suppliers — Cartons Replaced · Physical count across 4-month window</div>
+            <div class="chart-title">Top Suppliers — Carton Replacement Over Time · Physical count across 4-month window</div>
             <div class="chart-sub">Source: receiving records (cartons_replaced field)</div>
             \${topSups.length ? topSups.map(s => \`
               <div class="hbar-row">
@@ -5432,8 +5432,8 @@ function buildReport(D) {
             \`).join('') : '<div style="font-size:11px;color:var(--light);padding:12px 0;">No replacement data recorded for this period.</div>'}
           </div>
           <div>
-            <div class="chart-title">Replacement Revenue Trend</div>
-            <div class="chart-sub">Billed carton replacement by month</div>
+            <div class="chart-title">Billed Cost Over Time</div>
+            <div class="chart-sub">Billed carton replacement cost over 4 months</div>
             <div class="chart-wrap" style="height:140px;"><canvas id="chart-carton-trend"></canvas></div>
 
             <div style="margin-top:12px;padding:10px;background:#FAFAFA;border-radius:8px;border:0.5px solid rgba(139,92,246,0.2);">
@@ -5647,7 +5647,7 @@ function renderCharts(D, months, mLabels) {
     data: {
       labels: mLabels,
       datasets: [
-        { label: 'Billed Revenue', data: months.map(m=>D.carton[m]?.revenue||0), backgroundColor: 'rgba(139,92,246,0.5)', borderRadius: 3 },
+        { label: 'Billed Cost', data: months.map(m=>D.carton[m]?.revenue||0), backgroundColor: 'rgba(139,92,246,0.5)', borderRadius: 3 },
       ]
     },
     options: defaults
@@ -5694,47 +5694,42 @@ function _printWhenReady() {
 
 
 // ── POST /report/cost-utilisation/insights — Pulse AI insights per section
-app.post('/report/cost-utilisation/insights',
-  async (req, res) => {
-  try {
+app.post('/report/cost-utilisation/insights', (req, res) => {
+  // Synchronous wrapper ensures Express catches all errors as JSON
+  const run = async () => {
     const { section, data } = req.body || {};
-    if (!section || !data) return res.status(400).json({ error: 'section and data required' });
+    if (!section) return res.status(400).json({ error: 'section required' });
 
-    const sectionPrompts = {
-      vas: 'You are Pulse, AI ops analyst for VelOzity Pinpoint. Analyse this VAS processing data and provide exactly 3 specific actionable optimization opportunities. Focus on cost efficiency, throughput, and operational excellence. Be direct with numbers from the data.',
-      sea: 'You are Pulse, AI ops analyst for VelOzity Pinpoint. Analyse this sea freight data and provide exactly 3 specific actionable optimization opportunities. Focus on container utilisation, cost per unit trends, and freight consolidation. Be direct with numbers.',
-      air: 'You are Pulse, AI ops analyst for VelOzity Pinpoint. Analyse this air freight data and provide exactly 3 specific actionable optimization opportunities. Focus on modal shift opportunities, cost reduction, and when air is justified vs sea. Be direct with numbers.',
-      freight_mix: 'You are Pulse, AI ops analyst for VelOzity Pinpoint. Analyse this freight mix data and provide exactly 3 specific actionable optimization opportunities. Focus on mode selection efficiency, cost implications of the sea/air split, and mix improvement. Be direct with numbers.',
-      carton: 'You are Pulse, AI ops analyst for VelOzity Pinpoint. Analyse this carton replacement data and provide exactly 3 specific actionable optimization opportunities. Focus on supplier performance, damage reduction, and cost impact. Be direct with numbers.',
-      executive: 'You are Pulse, AI ops analyst for VelOzity Pinpoint. Analyse this executive cost summary and provide exactly 3 high-level strategic optimization opportunities across VAS, sea, and air freight. Focus on biggest cost levers. Be direct with numbers.',
+    const prompts = {
+      vas: 'You are Pulse, VelOzity Pinpoint AI analyst. Analyse this VAS processing data. Return exactly 3 specific actionable optimization opportunities focused on cost efficiency and throughput. Use specific numbers from the data.',
+      sea: 'You are Pulse, VelOzity Pinpoint AI analyst. Analyse this sea freight data. Return exactly 3 specific actionable optimization opportunities focused on container utilisation and cost per unit. Use specific numbers.',
+      air: 'You are Pulse, VelOzity Pinpoint AI analyst. Analyse this air freight data. Return exactly 3 specific actionable optimization opportunities focused on modal shift and cost reduction. Use specific numbers.',
+      freight_mix: 'You are Pulse, VelOzity Pinpoint AI analyst. Analyse this freight mix data. Return exactly 3 specific actionable optimization opportunities focused on mode selection efficiency and cost. Use specific numbers.',
+      carton: 'You are Pulse, VelOzity Pinpoint AI analyst. Analyse this carton replacement data. Return exactly 3 specific actionable optimization opportunities focused on supplier performance and damage reduction. Use specific numbers.',
+      executive: 'You are Pulse, VelOzity Pinpoint AI analyst. Analyse this executive cost summary. Return exactly 3 high-level strategic optimization opportunities across VAS, sea, and air freight. Use specific numbers.',
     };
 
-    const dataStr = JSON.stringify(data || {}).slice(0, 3000);
-    const userMsg = `Analyse this supply chain cost data and return ONLY a valid JSON array with exactly 3 objects. No markdown, no preamble, no explanation.\nData: ${dataStr}\nReturn format: [{"title":"4-6 word headline","finding":"1-2 sentences with specific numbers","action":"one concrete next step","impact":"High|Medium|Low"}]`;
+    const systemPrompt = prompts[section] || prompts.executive;
+    const dataStr = JSON.stringify(data || {}).slice(0, 2500);
+    const userMsg = 'Data: ' + dataStr + '\n\nReturn ONLY a JSON array with exactly 3 objects, no markdown:\n[{"title":"short headline","finding":"1-2 sentences with numbers","action":"concrete next step","impact":"High|Medium|Low"}]';
 
     const resp = await getAnthropic().messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 900,
-      system: sectionPrompts[section] || sectionPrompts.executive,
+      max_tokens: 800,
+      system: systemPrompt,
       messages: [{ role: 'user', content: userMsg }],
     });
 
-    const text = resp.content?.[0]?.text || '[]';
-    const clean = text.replace(/```json|```/g, '').trim();
-    let insights;
-    try {
-      insights = JSON.parse(clean);
-    } catch(parseErr) {
-      // Model didn't return valid JSON — extract manually or return empty
-      console.error('[cost-report/insights] JSON parse failed:', clean.slice(0, 200));
-      insights = [];
-    }
+    const raw = (resp.content?.[0]?.text || '[]').replace(/```json|```/g, '').trim();
+    let insights = [];
+    try { insights = JSON.parse(raw); } catch(e) { console.error('[insights] parse fail:', raw.slice(0,100)); }
     if (!Array.isArray(insights)) insights = [];
     res.json({ insights });
-  } catch(e) {
-    console.error('[cost-report/insights] ERROR:', e.message, e.stack?.split('\n')[1]);
-    res.status(500).json({ error: String(e.message || e) });
-  }
+  };
+  run().catch(e => {
+    console.error('[cost-report/insights]', e.message);
+    res.status(500).json({ error: e.message || 'Internal error' });
+  });
 });
 
 // ── END COST UTILISATION REPORT MODULE ───────────────────────────
