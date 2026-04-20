@@ -4792,13 +4792,14 @@ const PARAMS = new URLSearchParams(location.search);
 const MONTH  = PARAMS.get('month') || '';
 const CURR   = PARAMS.get('currency') || 'USD';
 const TOKEN  = PARAMS.get('token') || '';
+const COMPARE = PARAMS.get('compare') !== 'false'; // default true
 const API_BASE = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\\/+$/, '');
 
 const CUR_SYM = CURR === 'AUD' ? 'A$' : 'US$';
 const fmt  = (v) => v == null ? '—' : CUR_SYM + Number(v).toLocaleString('en-AU', {minimumFractionDigits:2, maximumFractionDigits:2});
 const fmtU = (v) => v == null ? '—' : Number(v).toLocaleString('en-AU');
 const fmtP = (v) => v == null ? '—' : v.toFixed(0) + '%';
-const fmtC = (v, dp=4) => v == null ? '—' : CUR_SYM + Number(v).toFixed(dp);
+const fmtC = (v, dp=2) => v == null ? '—' : CUR_SYM + Number(v).toFixed(dp);
 const esc  = (s) => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
 const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -4827,6 +4828,70 @@ function sparkbars(values, color) {
   return \`<div class="sparkline-wrap">\${values.map(v =>
     \`<div class="spark-bar" style="background:\${v!=null?color:'rgba(0,0,0,0.06)'};height:\${v!=null?Math.max(4,Math.round(v/max*28)):4}px;"\${v!=null?'title="'+v+'"':''}></div>\`
   ).join('')}</div>\`;
+}
+
+// ── Pulse insights block ──
+function pulseInsightBlock(sectionId) {
+  return \`<div id="pulse-\${sectionId}" class="pulse-insights-block" style="
+    margin-top:20px;padding:16px 20px;
+    background:linear-gradient(135deg,#0d0010 0%,#1a0020 100%);
+    border-radius:12px;border:0.5px solid rgba(153,0,51,0.3);
+  ">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+      <div style="width:24px;height:24px;border-radius:6px;background:#990033;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+        <svg width="12" height="12" viewBox="0 0 46 46" fill="none"><path d="M32.73 14.9L26.3 5.77a3.93 3.93 0 0 0-6.6 0l-6.43 9.13L6.1 25.7a3.93 3.93 0 0 0 0 4.38l6.44 8.98 1.18 1.65a3.93 3.93 0 0 0 6.44 0l1.18-1.65 1.66-2.32 5.19-7.25.07-.1 4.47-6.25a3.93 3.93 0 0 0 0-4.24z" fill="#fff"/></svg>
+      </div>
+      <div>
+        <div style="font-size:11px;font-weight:700;color:#fff;letter-spacing:0.02em;">Optimization Opportunities by Pulse AI</div>
+        <div style="font-size:9px;color:rgba(255,255,255,0.4);">Powered by Anthropic Claude</div>
+      </div>
+      <div id="pulse-\${sectionId}-spinner" style="margin-left:auto;width:14px;height:14px;border-radius:50%;border:2px solid rgba(153,0,51,0.3);border-top-color:#990033;animation:spin 0.8s linear infinite;"></div>
+    </div>
+    <div id="pulse-\${sectionId}-content" style="color:rgba(255,255,255,0.5);font-size:11px;">Analysing data…</div>
+  </div>\`;
+}
+
+function renderInsightCards(containerId, insights) {
+  const el = document.getElementById('pulse-' + containerId + '-content');
+  const spinner = document.getElementById('pulse-' + containerId + '-spinner');
+  if (spinner) spinner.style.display = 'none';
+  if (!el) return;
+  if (!insights || !insights.length) {
+    el.innerHTML = '<span style="color:rgba(255,255,255,0.3);font-size:10px;">No insights available for this data.</span>';
+    return;
+  }
+  const impactColor = { High: '#EF4444', Medium: '#F59E0B', Low: '#22C55E' };
+  el.innerHTML = insights.map(ins => \`
+    <div style="margin-bottom:10px;padding:12px;background:rgba(255,255,255,0.05);border-radius:8px;border:0.5px solid rgba(255,255,255,0.08);">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+        <span style="font-size:11px;font-weight:700;color:#fff;">\${ins.title}</span>
+        <span style="font-size:9px;padding:1px 8px;border-radius:20px;background:\${impactColor[ins.impact]||'#6E6E73'}22;color:\${impactColor[ins.impact]||'#6E6E73'};font-weight:700;border:0.5px solid \${impactColor[ins.impact]||'#6E6E73'}44;">\${ins.impact}</span>
+      </div>
+      <div style="font-size:10px;color:rgba(255,255,255,0.7);margin-bottom:5px;line-height:1.5;">\${ins.finding}</div>
+      <div style="font-size:10px;color:rgba(255,255,255,0.5);display:flex;align-items:flex-start;gap:5px;">
+        <span style="color:#990033;font-weight:700;flex-shrink:0;">→</span>
+        <span>\${ins.action}</span>
+      </div>
+    </div>
+  \`).join('');
+}
+
+async function loadPulseInsights(sectionId, sectionData) {
+  try {
+    const r = await fetch(\`\${API_BASE}/report/cost-utilisation/insights\`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ section: sectionId, data: sectionData, token: TOKEN })
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const { insights } = await r.json();
+    renderInsightCards(sectionId, insights);
+  } catch(e) {
+    const el = document.getElementById('pulse-' + sectionId + '-content');
+    const spinner = document.getElementById('pulse-' + sectionId + '-spinner');
+    if (spinner) spinner.style.display = 'none';
+    if (el) el.innerHTML = \`<span style="color:rgba(255,255,255,0.3);font-size:10px;">Could not load insights: \${e.message}</span>\`;
+  }
 }
 
 function heatCell(pct) {
@@ -4973,34 +5038,48 @@ function buildReport(D) {
 
         </div>
 
-        <!-- Summary table -->
-        <table class="data-table" style="margin-top:8px;">
-          <thead>
-            <tr>
-              <th>Channel</th>
-              \${mLabels.map(l=>\`<th class="num">\${l}</th>\`).join('')}
-              <th class="num">MoM Δ</th>
-            </tr>
-          </thead>
-          <tbody>
-            \${[
-              { label:'VAS Cost/Unit', key:'unit_revenue', src:'vas', color:'#990033' },
-              { label:'Sea Cost/Unit', key:'unit_revenue', src:'sea', color:'#0EA5E9' },
-              { label:'Air Cost/Unit', key:'unit_revenue', src:'air', color:'#F59E0B' },
-            ].map(row => {
-              const vals = months.map(m => D[row.src][m]?.[row.key]);
-              const prev = vals[2], curr = vals[3];
-              const momPct = prev && curr ? ((curr-prev)/prev*100) : null;
-              const momColor = momPct == null ? 'var(--mid)' : (row.key==='unit_cost' ? (momPct>2?'#EF4444':'#22C55E') : (momPct>2?'#22C55E':'#EF4444'));
-              return \`<tr>
-                <td><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:\${row.color};margin-right:6px;"></span>\${row.label}</td>
-                \${vals.map(v=>\`<td class="num">\${fmtC(v)}</td>\`).join('')}
-                <td class="num bold" style="color:\${momColor};">\${momPct!=null?(momPct>0?'+':'')+momPct.toFixed(1)+'%':'—'}</td>
-              </tr>\`;
-            }).join('')}
-          </tbody>
-        </table>
+        <!-- Monthly snapshot: always shown -->
+        <div style="margin:16px 0 8px;display:flex;align-items:center;gap:10px;">
+          <div style="font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">${fmtMonth(sel)} — Selected Month</div>
+          <div style="flex:1;height:0.5px;background:rgba(0,0,0,0.08);"></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:12px;">
+          \${[
+            {label:'VAS Cost/Unit',val:vasD.unit_revenue,units:vasD.applied_units,ul:'units',color:'#990033'},
+            {label:'Sea Cost/Unit',val:seaD.unit_revenue,units:seaD.applied_units,ul:'sea units',color:'#0EA5E9'},
+            {label:'Air Cost/Unit',val:airD.unit_revenue,units:airD.applied_units,ul:'air units',color:'#F59E0B'},
+          ].map(k=>'<div style="padding:10px 14px;border-radius:8px;border:0.5px solid rgba(0,0,0,0.08);border-top:2px solid '+k.color+';">'
+            +'<div style="font-size:9px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">'+k.label+'</div>'
+            +'<div style="font-size:20px;font-weight:700;color:#1C1C1E;font-family:'DM Serif Display',serif;">'+fmtC(k.val)+'</div>'
+            +'<div style="font-size:10px;color:#AEAEB2;margin-top:2px;">'+fmtU(k.units)+' '+k.ul+'</div>'
+            +'</div>'
+          ).join('')}
+        </div>
+
+        \${COMPARE ? (()=>{
+          const hdrs = '<th>Channel</th>'+mLabels.map((l,i)=>'<th class="num"'+(i===3?' style="font-weight:700;color:#1C1C1E;"':'')+'>'+l+(i===3?' ★':'')+' </th>').join('')+'<th class="num">MoM Δ</th>';
+          const compRows = [
+            {label:'VAS Cost/Unit',key:'unit_revenue',src:'vas',color:'#990033'},
+            {label:'Sea Cost/Unit',key:'unit_revenue',src:'sea',color:'#0EA5E9'},
+            {label:'Air Cost/Unit',key:'unit_revenue',src:'air',color:'#F59E0B'},
+          ].map(row=>{
+            const vals=months.map(m=>D[row.src][m]?.[row.key]);
+            const prev=vals[2],curr=vals[3];
+            const momPct=prev&&curr?((curr-prev)/prev*100):null;
+            const momColor=momPct==null?'var(--mid)':(momPct>2?'#EF4444':'#22C55E');
+            return '<tr>'
+              +'<td><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:'+row.color+';margin-right:6px;"></span>'+row.label+'</td>'
+              +vals.map((v,i)=>'<td class="num"'+(i===3?' style="font-weight:600;"':'')+'>'+fmtC(v)+'</td>').join('')
+              +'<td class="num bold" style="color:'+momColor+';">'+(momPct!=null?(momPct>0?'+':'')+momPct.toFixed(1)+'%':'\u2014')+'</td>'
+              +'</tr>';
+          }).join('');
+          return '<div style="margin:16px 0 8px;display:flex;align-items:center;gap:10px;">'
+            +'<div style="font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">4-Month Comparison \u2014 '+mLabels.join(' \u00B7 ')+'</div>'
+            +'<div style="flex:1;height:0.5px;background:rgba(0,0,0,0.08);"></div></div>'
+            +'<table class="data-table"><thead><tr>'+hdrs+'</tr></thead><tbody>'+compRows+'</tbody></table>';
+        })() : ''}
       </div>
+      \${pulseInsightBlock('executive')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         VAS Cost/Unit = VAS invoice lines (excl. Carton Replacement) ÷ applied units, by invoice_date month.
@@ -5023,42 +5102,68 @@ function buildReport(D) {
         <span class="section-badge" style="background:rgba(14,165,233,0.1);color:#0EA5E9;">Freight</span>
       </div>
       <div class="section-body">
-        <div class="two-col" style="margin-bottom:20px;">
-          <div>
-            <div class="chart-title">Monthly Mix — Units by Mode</div>
-            <div class="chart-sub">Stacked bar shows absolute Sea vs Air unit volumes</div>
-            <div class="chart-wrap" style="height:160px;"><canvas id="chart-mix-bar"></canvas></div>
+        <!-- Selected month donut: always shown -->
+        <div style="margin:12px 0 8px;display:flex;align-items:center;gap:10px;">
+          <div style="font-size:9px;font-weight:700;color:#0EA5E9;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">\${fmtMonth(sel)} — Freight Split</div>
+          <div style="flex:1;height:0.5px;background:rgba(14,165,233,0.2);"></div>
+        </div>
+        <div style="display:grid;grid-template-columns:240px 1fr;gap:20px;margin-bottom:16px;align-items:center;">
+          <div class="chart-wrap" style="height:180px;"><canvas id="chart-mix-donut"></canvas></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+            <div style="padding:12px;border-radius:8px;background:#F0F9FF;border:0.5px solid rgba(14,165,233,0.2);">
+              <div style="font-size:9px;font-weight:600;color:#0EA5E9;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Sea Units</div>
+              <div style="font-size:20px;font-weight:700;color:#1C1C1E;">\${fmtU(D.freight_mix[sel]?.sea)}</div>
+              <div style="font-size:11px;color:#AEAEB2;margin-top:2px;">\${D.freight_mix[sel]?.sea_pct||0}% of total</div>
+            </div>
+            <div style="padding:12px;border-radius:8px;background:#FFFBEB;border:0.5px solid rgba(245,158,11,0.2);">
+              <div style="font-size:9px;font-weight:600;color:#F59E0B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Air Units</div>
+              <div style="font-size:20px;font-weight:700;color:#1C1C1E;">\${fmtU(D.freight_mix[sel]?.air)}</div>
+              <div style="font-size:11px;color:#AEAEB2;margin-top:2px;">\${D.freight_mix[sel]?.air_pct||0}% of total</div>
+            </div>
+            <div style="padding:12px;border-radius:8px;background:#F0F9FF;border:0.5px solid rgba(14,165,233,0.1);">
+              <div style="font-size:9px;font-weight:600;color:#0EA5E9;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Sea Cost/Unit</div>
+              <div style="font-size:20px;font-weight:700;color:#1C1C1E;">\${fmtC(D.sea[sel]?.unit_revenue)}</div>
+            </div>
+            <div style="padding:12px;border-radius:8px;background:#FFFBEB;border:0.5px solid rgba(245,158,11,0.1);">
+              <div style="font-size:9px;font-weight:600;color:#F59E0B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Air Cost/Unit</div>
+              <div style="font-size:20px;font-weight:700;color:#1C1C1E;">\${fmtC(D.air[sel]?.unit_revenue)}</div>
+            </div>
           </div>
-          <div>
-            <div class="chart-title">\${fmtMonth(sel)} — Freight Split</div>
-            <div class="chart-sub">Share of total applied units by mode</div>
-            <div class="chart-wrap" style="height:160px;"><canvas id="chart-mix-donut"></canvas></div>
-          </div>
+        </div>
+
+        \${COMPARE ? \`
+        <div style="margin:8px 0 8px;display:flex;align-items:center;gap:10px;">
+          <div style="font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">4-Month Comparison — \${mLabels.join(' · ')}</div>
+          <div style="flex:1;height:0.5px;background:rgba(0,0,0,0.08);"></div>
         </div>
         <div class="two-col">
           <div>
-            <div class="chart-title">Sea vs Air Cost/Unit Trend</div>
-            <div class="chart-sub">Cost efficiency comparison over 4 months</div>
-            <div class="chart-wrap" style="height:140px;"><canvas id="chart-mix-cost"></canvas></div>
+            <div class="chart-title">Monthly Mix — Units by Mode</div>
+            <div class="chart-sub">Stacked bar: Sea vs Air volumes</div>
+            <div class="chart-wrap" style="height:140px;"><canvas id="chart-mix-bar"></canvas></div>
           </div>
           <div>
-            <table class="data-table">
-              <thead>
-                <tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">Air %</th></tr>
-              </thead>
-              <tbody>
-                \${months.map((mk,i) => \`<tr\${i===3?' style="font-weight:600;"':''}>
-                  <td>\${mLabels[i]}\${i===3?' ★':''}</td>
-                  <td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td>
-                  <td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td>
-                  <td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td>
-                  <td class="num">\${fmtP(D.freight_mix[mk]?.air_pct)}</td>
-                </tr>\`).join('')}
-              </tbody>
-            </table>
+            <div class="chart-title">Sea vs Air Cost/Unit Trend</div>
+            <div class="chart-sub">Cost efficiency over 4 months</div>
+            <div class="chart-wrap" style="height:140px;"><canvas id="chart-mix-cost"></canvas></div>
           </div>
         </div>
+        <table class="data-table" style="margin-top:12px;">
+          <thead><tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">Air %</th><th class="num">Sea Cost/U</th><th class="num">Air Cost/U</th></tr></thead>
+          <tbody>
+            \${months.map((mk,i) => \`<tr\${i===3?' style="font-weight:600;"':''}>
+              <td>\${mLabels[i]}\${i===3?' ★':''}</td>
+              <td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td>
+              <td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td>
+              <td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td>
+              <td class="num">\${fmtP(D.freight_mix[mk]?.air_pct)}</td>
+              <td class="num">\${fmtC(D.sea[mk]?.unit_revenue)}</td>
+              <td class="num">\${fmtC(D.air[mk]?.unit_revenue)}</td>
+            </tr>\`).join('')}
+          </tbody>
+        </table>\` : ''}
       </div>
+      \${pulseInsightBlock('freight_mix')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         Units by mode derived from plan rows filtered by freight_type (Sea/Air), matched to applied records by calendar month of completion date.
@@ -5112,17 +5217,38 @@ function buildReport(D) {
           </div>
         </div>
 
+        <!-- Selected month summary -->
+        <div style="margin:12px 0 8px;display:flex;align-items:center;gap:10px;">
+          <div style="font-size:9px;font-weight:700;color:#0EA5E9;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">\${fmtMonth(sel)} — Selected Month</div>
+          <div style="flex:1;height:0.5px;background:rgba(14,165,233,0.2);"></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px;">
+          \${[
+            {label:'Total Cost',val:fmt(seaD.revenue),sub:'Sea freight invoices'},
+            {label:'Units Shipped',val:fmtU(seaD.applied_units),sub:'Applied sea units'},
+            {label:'Cost / Unit',val:fmtC(seaD.unit_revenue),sub:'Invoice \u00F7 applied units'},
+          ].map(k=>'<div style="padding:10px 14px;border-radius:8px;background:#F0F9FF;border:0.5px solid rgba(14,165,233,0.2);">'
+            +'<div style="font-size:9px;font-weight:600;color:#0EA5E9;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">'+k.label+'</div>'
+            +'<div style="font-size:18px;font-weight:700;color:#1C1C1E;">'+k.val+'</div>'
+            +'<div style="font-size:10px;color:#AEAEB2;margin-top:2px;">'+k.sub+'</div>'
+            +'</div>'
+          ).join('')}
+        </div>
+
+        \${COMPARE ? \`
+        <div style="margin:8px 0 8px;display:flex;align-items:center;gap:10px;">
+          <div style="font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">4-Month Comparison — \${mLabels.join(' · ')}</div>
+          <div style="flex:1;height:0.5px;background:rgba(0,0,0,0.08);"></div>
+        </div>
         <div class="two-col">
           <div>
             <div class="chart-title">Units + Cost/Unit Trend</div>
-            <div class="chart-sub">Bars = applied units (left axis) · Line = cost/unit (right axis)</div>
+            <div class="chart-sub">Bars = applied units (left) · Line = cost/unit (right)</div>
             <div class="chart-wrap" style="height:150px;"><canvas id="chart-sea-combo"></canvas></div>
           </div>
           <div>
             <table class="data-table">
-              <thead>
-                <tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr>
-              </thead>
+              <thead><tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr></thead>
               <tbody>
                 \${months.map((mk,i) => { const d=D.sea[mk]||{}; return \`<tr\${i===3?' style="font-weight:600;"':''}>
                   <td>\${mLabels[i]}\${i===3?' ★':''}</td>
@@ -5133,8 +5259,9 @@ function buildReport(D) {
               </tbody>
             </table>
           </div>
-        </div>
+        </div>\` : ''}
       </div>
+      \${pulseInsightBlock('sea')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         Cost = fin_invoices type=SEA, by invoice_date month (all statuses including draft).
@@ -5174,6 +5301,29 @@ function buildReport(D) {
             <div class="kpi-sub">Invoice ÷ applied units</div>
           </div>
         </div>
+        <!-- Selected month summary -->
+        <div style="margin:12px 0 8px;display:flex;align-items:center;gap:10px;">
+          <div style="font-size:9px;font-weight:700;color:#F59E0B;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">\${fmtMonth(sel)} — Selected Month</div>
+          <div style="flex:1;height:0.5px;background:rgba(245,158,11,0.2);"></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px;">
+          \${[
+            {label:'Total Cost',val:fmt(airD.revenue),sub:'Air freight invoices'},
+            {label:'Units Shipped',val:fmtU(airD.applied_units),sub:'Applied air units'},
+            {label:'Cost / Unit',val:fmtC(airD.unit_revenue),sub:'Invoice \u00F7 applied units'},
+          ].map(k=>'<div style="padding:10px 14px;border-radius:8px;background:#FFFBEB;border:0.5px solid rgba(245,158,11,0.2);">'
+            +'<div style="font-size:9px;font-weight:600;color:#F59E0B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">'+k.label+'</div>'
+            +'<div style="font-size:18px;font-weight:700;color:#1C1C1E;">'+k.val+'</div>'
+            +'<div style="font-size:10px;color:#AEAEB2;margin-top:2px;">'+k.sub+'</div>'
+            +'</div>'
+          ).join('')}
+        </div>
+
+        \${COMPARE ? \`
+        <div style="margin:8px 0 8px;display:flex;align-items:center;gap:10px;">
+          <div style="font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">4-Month Comparison — \${mLabels.join(' · ')}</div>
+          <div style="flex:1;height:0.5px;background:rgba(0,0,0,0.08);"></div>
+        </div>
         <div class="two-col">
           <div>
             <div class="chart-title">Units + Cost/Unit Trend</div>
@@ -5182,9 +5332,7 @@ function buildReport(D) {
           </div>
           <div>
             <table class="data-table">
-              <thead>
-                <tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr>
-              </thead>
+              <thead><tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr></thead>
               <tbody>
                 \${months.map((mk,i) => { const d=D.air[mk]||{}; return \`<tr\${i===3?' style="font-weight:600;"':''}>
                   <td>\${mLabels[i]}\${i===3?' ★':''}</td>
@@ -5195,13 +5343,10 @@ function buildReport(D) {
               </tbody>
             </table>
           </div>
-        </div>
-        <div style="margin-top:16px;">
-          <div class="chart-title">Sea vs Air Cost/Unit Comparison</div>
-          <div class="chart-sub">Side-by-side cost per unit by month</div>
-          <div class="chart-wrap" style="height:110px;"><canvas id="chart-air-radar"></canvas></div>
-        </div>
+        </div>\` : ''}
+
       </div>
+      \${pulseInsightBlock('air')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         Cost = fin_invoices type=AIR, by invoice_date month (all statuses including draft).
@@ -5247,6 +5392,29 @@ function buildReport(D) {
             <div class="kpi-sub">Invoice ÷ units processed</div>
           </div>
         </div>
+        <!-- Selected month summary -->
+        <div style="margin:12px 0 8px;display:flex;align-items:center;gap:10px;">
+          <div style="font-size:9px;font-weight:700;color:#990033;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">\${fmtMonth(sel)} — Selected Month</div>
+          <div style="flex:1;height:0.5px;background:rgba(153,0,51,0.15);"></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px;">
+          \${[
+            {label:'VAS Cost (excl. carton)',val:fmt(vasD.revenue),sub:'Invoice lines, selected month'},
+            {label:'Units Processed',val:fmtU(vasD.applied_units),sub:'Completed records'},
+            {label:'Cost / Unit',val:fmtC(vasD.unit_revenue),sub:'Invoice \u00F7 units processed'},
+          ].map(k=>'<div style="padding:10px 14px;border-radius:8px;background:#FFF0F3;border:0.5px solid rgba(153,0,51,0.15);">'
+            +'<div style="font-size:9px;font-weight:600;color:#990033;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">'+k.label+'</div>'
+            +'<div style="font-size:18px;font-weight:700;color:#1C1C1E;">'+k.val+'</div>'
+            +'<div style="font-size:10px;color:#AEAEB2;margin-top:2px;">'+k.sub+'</div>'
+            +'</div>'
+          ).join('')}
+        </div>
+
+        \${COMPARE ? \`
+        <div style="margin:8px 0 8px;display:flex;align-items:center;gap:10px;">
+          <div style="font-size:9px;font-weight:700;color:#AEAEB2;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;">4-Month Comparison — \${mLabels.join(' · ')}</div>
+          <div style="flex:1;height:0.5px;background:rgba(0,0,0,0.08);"></div>
+        </div>
         <div class="two-col">
           <div>
             <div class="chart-title">VAS Cost/Unit Trend</div>
@@ -5259,12 +5427,13 @@ function buildReport(D) {
             </table>
           </div>
         </div>
-        <div style="margin-top:16px;">
+        <div style="margin-top:12px;">
           <div class="chart-title">Cost/Unit Trend — \${mLabels.join(' · ')}</div>
-          <div class="chart-sub">Cost per processed unit by month. Highlighted bar = selected month.</div>
-          <div class="chart-wrap" style="height:110px;"><canvas id="chart-vas-radar"></canvas></div>
-        </div>
+          <div class="chart-sub">Highlighted bar = selected month.</div>
+          <div class="chart-wrap" style="height:100px;"><canvas id="chart-vas-radar"></canvas></div>
+        </div>\` : ''}
       </div>
+      \${pulseInsightBlock('vas')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         Cost = VAS invoice line totals excluding lines matching 'Carton Replacement - labour only', by invoice_date month (all statuses).
@@ -5291,20 +5460,20 @@ function buildReport(D) {
       <div class="section-body">
         <div class="two-col" style="margin-bottom:20px;">
           <div class="kpi-card carton" style="padding:14px 16px;">
-            <div class="kpi-label">Billed Replacement Revenue</div>
+            <div class="kpi-label">Billed Cost — \${fmtMonth(sel)}</div>
             <div class="kpi-value" style="font-size:22px;">\${fmt(ctnD.revenue)}</div>
-            <div class="kpi-sub">From VAS invoice lines — \${fmtMonth(sel)}</div>
+            <div class="kpi-sub">From VAS invoice lines, selected month only</div>
           </div>
           <div class="kpi-card carton" style="padding:14px 16px;">
-            <div class="kpi-label">Cartons Replaced (billed)</div>
+            <div class="kpi-label">Cartons Billed — \${fmtMonth(sel)}</div>
             <div class="kpi-value" style="font-size:22px;">\${fmtU(ctnD.qty)}</div>
-            <div class="kpi-sub">Rate: \${fmt(ctnD.unit_rate)} / carton</div>
+            <div class="kpi-sub">Rate: \${fmt(ctnD.unit_rate)} / carton · Selected month only</div>
           </div>
         </div>
 
         <div class="two-col">
           <div>
-            <div class="chart-title">Top Suppliers — Cartons Replaced (Physical Count, last 4 months)</div>
+            <div class="chart-title">Top Suppliers — Cartons Replaced · Physical count across 4-month window</div>
             <div class="chart-sub">Source: receiving records (cartons_replaced field)</div>
             \${topSups.length ? topSups.map(s => \`
               <div class="hbar-row">
@@ -5348,6 +5517,7 @@ function buildReport(D) {
           </table>
         </div>
       </div>
+      \${pulseInsightBlock('carton')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         Billed revenue = fin_invoice_lines WHERE description LIKE '%Carton Replacement%', linked to VAS invoices by invoice_date month.
@@ -5378,6 +5548,8 @@ function buildReport(D) {
 }
 
 function renderCharts(D, months, mLabels) {
+  // Skip comparison charts when not in compare mode
+  const el = id => document.getElementById(id);
   const defaults = {
     responsive: true, maintainAspectRatio: false,
     plugins: { legend: { labels: { font: { size: 9, family: 'DM Sans' }, boxWidth: 8, padding: 8 } } },
@@ -5407,13 +5579,16 @@ function renderCharts(D, months, mLabels) {
   if (mixDonutEl) new Chart(mixDonutEl, {
     type: 'doughnut',
     data: {
-      labels: ['Sea', 'Air'],
+      labels: [
+        \`Sea — \${Number(selMix.sea||0).toLocaleString('en-AU')} units (\${selMix.sea_pct||0}%)\`,
+        \`Air — \${Number(selMix.air||0).toLocaleString('en-AU')} units (\${selMix.air_pct||0}%)\`
+      ],
       datasets: [{ data: [selMix.sea||0, selMix.air||0], backgroundColor: ['rgba(14,165,233,0.8)','rgba(245,158,11,0.8)'], borderWidth: 0, hoverOffset: 4 }]
     },
     options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { font: {size:9}, boxWidth:8, padding:8 } } } }
   });
 
-  // Mix cost line
+  // Mix cost line with data labels
   const mixCostEl = document.getElementById('chart-mix-cost');
   if (mixCostEl) new Chart(mixCostEl, {
     type: 'line',
@@ -5424,35 +5599,53 @@ function renderCharts(D, months, mLabels) {
         { label: 'Air Cost/Unit', data: months.map(m=>D.air[m]?.unit_revenue), borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.1)', borderWidth: 2, pointRadius: 4, tension: 0.3, fill: true },
       ]
     },
-    options: defaults
+    options: { ...defaults, plugins: { ...defaults.plugins, datalabels: false },
+      scales: { ...defaults.scales,
+        y: { ...defaults.scales.y, ticks: { ...defaults.scales.y.ticks,
+          callback: v => v != null ? CUR_SYM + Number(v).toFixed(2) : ''
+        }}
+      }
+    }
   });
 
-  // Sea combo
+  // Sea combo — properly scaled dual axis
   const seaComboEl = document.getElementById('chart-sea-combo');
   if (seaComboEl) new Chart(seaComboEl, {
     type: 'bar',
     data: {
       labels: mLabels,
       datasets: [
-        { type: 'bar', label: 'Units', data: months.map(m=>D.sea[m]?.applied_units||0), backgroundColor: 'rgba(14,165,233,0.3)', borderRadius: 3, yAxisID: 'y' },
-        { type: 'line', label: 'Cost/Unit', data: months.map(m=>D.sea[m]?.unit_revenue), borderColor: '#0EA5E9', backgroundColor: 'transparent', borderWidth: 2.5, pointRadius: 4, yAxisID: 'y2', tension: 0.3 },
+        { type: 'bar', label: 'Units', data: months.map(m=>D.sea[m]?.applied_units||0), backgroundColor: 'rgba(14,165,233,0.3)', borderRadius: 3, yAxisID: 'y', order: 2 },
+        { type: 'line', label: 'Cost/Unit', data: months.map(m=>D.sea[m]?.unit_revenue), borderColor: '#0EA5E9', backgroundColor: 'transparent', borderWidth: 2.5, pointRadius: 5, pointBackgroundColor: '#fff', pointBorderColor: '#0EA5E9', pointBorderWidth: 2, yAxisID: 'y2', tension: 0.3, order: 1 },
       ]
     },
-    options: { ...defaults, scales: { x: defaults.scales.x, y: { ...defaults.scales.y, position:'left' }, y2: { position:'right', ticks:{font:{size:9}}, grid:{display:false} } } }
+    options: { ...defaults,
+      scales: {
+        x: defaults.scales.x,
+        y: { position:'left', ticks:{font:{size:9}, callback: v => Number(v).toLocaleString('en-AU')}, grid:{color:'rgba(0,0,0,0.04)'}, beginAtZero:true, title:{display:true,text:'Units',font:{size:9},color:'#AEAEB2'} },
+        y2: { position:'right', ticks:{font:{size:9}, callback: v => v != null ? CUR_SYM + Number(v).toFixed(2) : ''}, grid:{display:false}, beginAtZero:true, title:{display:true,text:'Cost/Unit',font:{size:9},color:'#0EA5E9'} }
+      }
+    }
   });
 
-  // Air combo
+  // Air combo — properly scaled dual axis
   const airComboEl = document.getElementById('chart-air-combo');
   if (airComboEl) new Chart(airComboEl, {
     type: 'bar',
     data: {
       labels: mLabels,
       datasets: [
-        { type: 'bar', label: 'Units', data: months.map(m=>D.air[m]?.applied_units||0), backgroundColor: 'rgba(245,158,11,0.3)', borderRadius: 3, yAxisID: 'y' },
-        { type: 'line', label: 'Cost/Unit', data: months.map(m=>D.air[m]?.unit_revenue), borderColor: '#F59E0B', backgroundColor: 'transparent', borderWidth: 2.5, pointRadius: 4, yAxisID: 'y2', tension: 0.3 },
+        { type: 'bar', label: 'Units', data: months.map(m=>D.air[m]?.applied_units||0), backgroundColor: 'rgba(245,158,11,0.3)', borderRadius: 3, yAxisID: 'y', order: 2 },
+        { type: 'line', label: 'Cost/Unit', data: months.map(m=>D.air[m]?.unit_revenue), borderColor: '#F59E0B', backgroundColor: 'transparent', borderWidth: 2.5, pointRadius: 5, pointBackgroundColor: '#fff', pointBorderColor: '#F59E0B', pointBorderWidth: 2, yAxisID: 'y2', tension: 0.3, order: 1 },
       ]
     },
-    options: { ...defaults, scales: { x: defaults.scales.x, y: { ...defaults.scales.y, position:'left' }, y2: { position:'right', ticks:{font:{size:9}}, grid:{display:false} } } }
+    options: { ...defaults,
+      scales: {
+        x: defaults.scales.x,
+        y: { position:'left', ticks:{font:{size:9}, callback: v => Number(v).toLocaleString('en-AU')}, grid:{color:'rgba(0,0,0,0.04)'}, beginAtZero:true, title:{display:true,text:'Units',font:{size:9},color:'#AEAEB2'} },
+        y2: { position:'right', ticks:{font:{size:9}, callback: v => v != null ? CUR_SYM + Number(v).toFixed(2) : ''}, grid:{display:false}, beginAtZero:true, title:{display:true,text:'Cost/Unit',font:{size:9},color:'#F59E0B'} }
+      }
+    }
   });
 
   // Air page - Sea vs Air cost/unit grouped bar (replaces unreadable radar)
@@ -5515,6 +5708,16 @@ function renderCharts(D, months, mLabels) {
   try {
     const D = await loadData();
     buildReport(D);
+    // Load Pulse insights async for each section (non-blocking)
+    const sel = D.selected_month;
+    setTimeout(() => {
+      loadPulseInsights('executive', { vas: D.vas[sel], sea: D.sea[sel], air: D.air[sel], months: D.months });
+      loadPulseInsights('freight_mix', { freight_mix: D.freight_mix, months: D.months });
+      loadPulseInsights('sea', { sea: D.sea, sea_containers: D.sea_containers, months: D.months });
+      loadPulseInsights('air', { air: D.air, months: D.months });
+      loadPulseInsights('vas', { vas: D.vas, months: D.months });
+      loadPulseInsights('carton', { carton: D.carton, carton_by_supplier: D.carton_by_supplier, months: D.months });
+    }, 500);
   } catch(e) {
     document.getElementById('loading').innerHTML = \`
       <div style="text-align:center;padding:40px;">
@@ -5527,6 +5730,48 @@ function renderCharts(D, months, mLabels) {
 </script>
 </body>
 </html>`);
+});
+
+
+// ── POST /report/cost-utilisation/insights — Pulse AI insights per section
+app.post('/report/cost-utilisation/insights',
+  (req, res, next) => {
+    _cleanReportTokens();
+    const reportToken = req.body?.token;
+    if (reportToken && _reportTokens.has(reportToken)) { return next(); }
+    authenticateRequest(req, res, next);
+  },
+  async (req, res) => {
+  try {
+    const { section, data } = req.body || {};
+    if (!section || !data) return res.status(400).json({ error: 'section and data required' });
+
+    const sectionPrompts = {
+      vas: 'You are Pulse, AI ops analyst for VelOzity Pinpoint. Analyse this VAS processing data and provide exactly 3 specific actionable optimization opportunities. Focus on cost efficiency, throughput, and operational excellence. Be direct with numbers from the data.',
+      sea: 'You are Pulse, AI ops analyst for VelOzity Pinpoint. Analyse this sea freight data and provide exactly 3 specific actionable optimization opportunities. Focus on container utilisation, cost per unit trends, and freight consolidation. Be direct with numbers.',
+      air: 'You are Pulse, AI ops analyst for VelOzity Pinpoint. Analyse this air freight data and provide exactly 3 specific actionable optimization opportunities. Focus on modal shift opportunities, cost reduction, and when air is justified vs sea. Be direct with numbers.',
+      freight_mix: 'You are Pulse, AI ops analyst for VelOzity Pinpoint. Analyse this freight mix data and provide exactly 3 specific actionable optimization opportunities. Focus on mode selection efficiency, cost implications of the sea/air split, and mix improvement. Be direct with numbers.',
+      carton: 'You are Pulse, AI ops analyst for VelOzity Pinpoint. Analyse this carton replacement data and provide exactly 3 specific actionable optimization opportunities. Focus on supplier performance, damage reduction, and cost impact. Be direct with numbers.',
+      executive: 'You are Pulse, AI ops analyst for VelOzity Pinpoint. Analyse this executive cost summary and provide exactly 3 high-level strategic optimization opportunities across VAS, sea, and air freight. Focus on biggest cost levers. Be direct with numbers.',
+    };
+
+    const userMsg = `Data:\n${JSON.stringify(data, null, 2)}\n\nReturn ONLY a JSON array with exactly 3 objects. No markdown, no preamble.\nEach: { "title": "4-6 word headline", "finding": "1-2 sentences with specific numbers", "action": "one concrete next step", "impact": "High|Medium|Low" }`;
+
+    const resp = await getAnthropic().messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 900,
+      system: sectionPrompts[section] || sectionPrompts.executive,
+      messages: [{ role: 'user', content: userMsg }],
+    });
+
+    const text = resp.content?.[0]?.text || '[]';
+    const clean = text.replace(/```json|```/g, '').trim();
+    const insights = JSON.parse(clean);
+    res.json({ insights });
+  } catch(e) {
+    console.error('[cost-report/insights]', e.message);
+    res.status(500).json({ error: String(e.message || e) });
+  }
 });
 
 // ── END COST UTILISATION REPORT MODULE ───────────────────────────
