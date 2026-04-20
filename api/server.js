@@ -4395,7 +4395,7 @@ app.get('/report/cost-utilisation/data',
       for (const [type, store] of [['SEA', seaData], ['AIR', airData]]) {
         const invs = db.prepare(`
           SELECT total FROM fin_invoices
-          WHERE type=? AND substr(invoice_date,1,7)=? AND status != 'draft'
+          WHERE type=? AND substr(invoice_date,1,7)=?
         `).all(type, mk);
         const invoiceTotal = invs.reduce((s, i) => s + (i.total || 0), 0);
 
@@ -4454,8 +4454,9 @@ app.get('/report/cost-utilisation/data',
       const allFlowRows = db.prepare('SELECT data FROM flow_week WHERE week_start=?').all(ws);
       for (const row of allFlowRows) {
         const d = safeJsonParse(row.data, {});
-        const containers = Array.isArray(d.containers) ? d.containers :
-          (Array.isArray(d?.containers?.containers) ? d.containers.containers : []);
+        // Containers stored under intl_weekcontainers key
+        const wc = d.intl_weekcontainers;
+        const containers = Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []);
         for (const c of containers) {
           const size = String(c.size_ft || '40').trim().toLowerCase();
           if (size === 'air') seaContainers.air++;
@@ -4936,38 +4937,38 @@ function buildReport(D) {
 
           <div class="kpi-card vas">
             <div class="kpi-label">VAS Cost / Unit</div>
-            <div class="kpi-value">\${fmtC(vasD.unit_cost)}</div>
-            <div class="kpi-sub">\${fmtU(vasD.applied_units)} units applied</div>
-            \${delta(vasD.unit_cost, vasPrev.unit_cost)}
+            <div class="kpi-value">\${fmtC(vasD.unit_revenue)}</div>
+            <div class="kpi-sub">\${fmtU(vasD.applied_units)} units processed</div>
+            \${delta(vasD.unit_revenue, vasPrev.unit_revenue)}
             <div class="kpi-desc">
-              Direct VAS processing cost per applied unit. Calculated as total VAS expense divided by completed records.
+              VAS processing cost per unit, based on invoiced amounts.
               <strong>Excludes carton replacement.</strong>
             </div>
-            \${sparkbars(months.map(m=>D.vas[m]?.unit_cost), 'rgba(153,0,51,0.4)')}
+            \${sparkbars(months.map(m=>D.vas[m]?.unit_revenue), 'rgba(153,0,51,0.4)')}
           </div>
 
           <div class="kpi-card sea">
             <div class="kpi-label">Sea Freight Cost / Unit</div>
             <div class="kpi-value">\${fmtC(seaD.unit_cost)}</div>
             <div class="kpi-sub">\${fmtU(seaD.applied_units)} sea units · \${D.sea_containers.ft20} × 20ft + \${D.sea_containers.ft40} × 40ft</div>
-            \${delta(seaD.unit_cost, seaPrev.unit_cost)}
+            \${delta(seaD.unit_revenue, seaPrev.unit_revenue)}
             <div class="kpi-desc">
               Sea freight expense per applied unit shipped by sea. Container count reflects \${fmtMonth(sel)} only.
               Air containers are excluded from this metric.
             </div>
-            \${sparkbars(months.map(m=>D.sea[m]?.unit_cost), 'rgba(14,165,233,0.4)')}
+            \${sparkbars(months.map(m=>D.sea[m]?.unit_revenue), 'rgba(14,165,233,0.4)')}
           </div>
 
           <div class="kpi-card air">
             <div class="kpi-label">Air Freight Cost / Unit</div>
             <div class="kpi-value">\${fmtC(airD.unit_cost)}</div>
             <div class="kpi-sub">\${fmtU(airD.applied_units)} air units</div>
-            \${delta(airD.unit_cost, airPrev.unit_cost)}
+            \${delta(airD.unit_revenue, airPrev.unit_revenue)}
             <div class="kpi-desc">
               Air freight expense per applied unit shipped by air.
               Higher per-unit cost vs sea reflects speed premium. Monitor ratio to sea cost.
             </div>
-            \${sparkbars(months.map(m=>D.air[m]?.unit_cost), 'rgba(245,158,11,0.4)')}
+            \${sparkbars(months.map(m=>D.air[m]?.unit_revenue), 'rgba(245,158,11,0.4)')}
           </div>
 
         </div>
@@ -4983,12 +4984,9 @@ function buildReport(D) {
           </thead>
           <tbody>
             \${[
-              { label:'VAS Cost/Unit', key:'unit_cost', src:'vas', color:'#990033' },
-              { label:'VAS Revenue/Unit', key:'unit_revenue', src:'vas', color:'#990033' },
-              { label:'Sea Cost/Unit', key:'unit_cost', src:'sea', color:'#0EA5E9' },
-              { label:'Sea Revenue/Unit', key:'unit_revenue', src:'sea', color:'#0EA5E9' },
-              { label:'Air Cost/Unit', key:'unit_cost', src:'air', color:'#F59E0B' },
-              { label:'Air Revenue/Unit', key:'unit_revenue', src:'air', color:'#F59E0B' },
+              { label:'VAS Cost/Unit', key:'unit_revenue', src:'vas', color:'#990033' },
+              { label:'Sea Cost/Unit', key:'unit_revenue', src:'sea', color:'#0EA5E9' },
+              { label:'Air Cost/Unit', key:'unit_revenue', src:'air', color:'#F59E0B' },
             ].map(row => {
               const vals = months.map(m => D[row.src][m]?.[row.key]);
               const prev = vals[2], curr = vals[3];
@@ -5005,9 +5003,9 @@ function buildReport(D) {
       </div>
       <div class="method-footer">
         <strong>Methodology:</strong>
-        VAS Cost/Unit = fin_expenses (category: VAS Cost) ÷ completed records, by calendar month.
-        Sea/Air Cost/Unit = fin_expenses (category: Sea/Air Freight Cost) ÷ applied units filtered by freight type on plan rows.
-        Revenue/Unit = invoice line totals ÷ applied units. Carton Replacement lines excluded from VAS.
+        VAS Cost/Unit = VAS invoice lines (excl. Carton Replacement) ÷ applied units, by invoice_date month.
+        Sea/Air Cost/Unit = invoice totals (type=SEA/AIR) ÷ applied units filtered by freight type on plan rows.
+        All invoices included regardless of status. Carton Replacement excluded from VAS totals.
         All values in \${D.fx_note}. MoM compares selected month to prior month.
       </div>
     </div>
@@ -5083,7 +5081,7 @@ function buildReport(D) {
       <div class="section-body">
         <div class="three-col" style="margin-bottom:20px;">
           <div class="kpi-card sea" style="padding:14px 16px;">
-            <div class="kpi-label">Total Revenue</div>
+            <div class="kpi-label">Total Cost</div>
             <div class="kpi-value" style="font-size:22px;">\${fmt(seaD.revenue)}</div>
             <div class="kpi-sub">Sea freight invoices</div>
           </div>
@@ -5094,8 +5092,8 @@ function buildReport(D) {
           </div>
           <div class="kpi-card sea" style="padding:14px 16px;">
             <div class="kpi-label">Cost / Unit</div>
-            <div class="kpi-value" style="font-size:22px;">\${fmtC(seaD.unit_cost)}</div>
-            <div class="kpi-sub">Expense ÷ applied units</div>
+            <div class="kpi-value" style="font-size:22px;">\${fmtC(seaD.unit_revenue)}</div>
+            <div class="kpi-sub">Invoice ÷ applied units</div>
           </div>
         </div>
 
@@ -5123,15 +5121,14 @@ function buildReport(D) {
           <div>
             <table class="data-table">
               <thead>
-                <tr><th>Month</th><th class="num">Revenue</th><th class="num">Expense</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr>
+                <tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr>
               </thead>
               <tbody>
                 \${months.map((mk,i) => { const d=D.sea[mk]||{}; return \`<tr\${i===3?' style="font-weight:600;"':''}>
                   <td>\${mLabels[i]}\${i===3?' ★':''}</td>
                   <td class="num">\${fmt(d.revenue)}</td>
-                  <td class="num">\${fmt(d.expense)}</td>
                   <td class="num">\${fmtU(d.applied_units)}</td>
-                  <td class="num">\${fmtC(d.unit_cost)}</td>
+                  <td class="num">\${fmtC(d.unit_revenue)}</td>
                 </tr>\`; }).join('')}
               </tbody>
             </table>
@@ -5140,10 +5137,10 @@ function buildReport(D) {
       </div>
       <div class="method-footer">
         <strong>Methodology:</strong>
-        Revenue = fin_invoices type=SEA, by invoice_date month, excluding drafts.
+        Cost = fin_invoices type=SEA, by invoice_date month (all statuses including draft).
         Expense = fin_expenses category='Sea Freight Cost', by month_key.
         Units = applied records (status=complete) for POs with freight_type=Sea on plan rows.
-        Cost/Unit = Expense ÷ Units. Container counts from flow_week data for weeks in selected month (Air containers excluded).
+        Cost/Unit = Invoice total ÷ Units. Container counts from flow_week data for weeks in selected month (Air containers excluded).
       </div>
     </div>
   \`);
@@ -5162,7 +5159,7 @@ function buildReport(D) {
       <div class="section-body">
         <div class="three-col" style="margin-bottom:20px;">
           <div class="kpi-card air" style="padding:14px 16px;">
-            <div class="kpi-label">Total Revenue</div>
+            <div class="kpi-label">Total Cost</div>
             <div class="kpi-value" style="font-size:22px;">\${fmt(airD.revenue)}</div>
             <div class="kpi-sub">Air freight invoices</div>
           </div>
@@ -5173,8 +5170,8 @@ function buildReport(D) {
           </div>
           <div class="kpi-card air" style="padding:14px 16px;">
             <div class="kpi-label">Cost / Unit</div>
-            <div class="kpi-value" style="font-size:22px;">\${fmtC(airD.unit_cost)}</div>
-            <div class="kpi-sub">Expense ÷ applied units</div>
+            <div class="kpi-value" style="font-size:22px;">\${fmtC(airD.unit_revenue)}</div>
+            <div class="kpi-sub">Invoice ÷ applied units</div>
           </div>
         </div>
         <div class="two-col">
@@ -5186,28 +5183,28 @@ function buildReport(D) {
           <div>
             <table class="data-table">
               <thead>
-                <tr><th>Month</th><th class="num">Revenue</th><th class="num">Expense</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr>
+                <tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr>
               </thead>
               <tbody>
                 \${months.map((mk,i) => { const d=D.air[mk]||{}; return \`<tr\${i===3?' style="font-weight:600;"':''}>
                   <td>\${mLabels[i]}\${i===3?' ★':''}</td>
                   <td class="num">\${fmt(d.revenue)}</td>
-                  <td class="num">\${fmt(d.expense)}</td>
                   <td class="num">\${fmtU(d.applied_units)}</td>
-                  <td class="num">\${fmtC(d.unit_cost)}</td>
+                  <td class="num">\${fmtC(d.unit_revenue)}</td>
                 </tr>\`; }).join('')}
               </tbody>
             </table>
           </div>
         </div>
         <div style="margin-top:16px;">
-          <div class="chart-title">Sea vs Air Cost Premium</div>
-          <div class="chart-wrap" style="height:100px;"><canvas id="chart-air-radar"></canvas></div>
+          <div class="chart-title">Sea vs Air Cost/Unit Comparison</div>
+          <div class="chart-sub">Side-by-side cost per unit by month</div>
+          <div class="chart-wrap" style="height:110px;"><canvas id="chart-air-radar"></canvas></div>
         </div>
       </div>
       <div class="method-footer">
         <strong>Methodology:</strong>
-        Revenue = fin_invoices type=AIR, by invoice_date month, excluding drafts.
+        Cost = fin_invoices type=AIR, by invoice_date month (all statuses including draft).
         Expense = fin_expenses category='Air Freight Cost', by month_key.
         Units = applied records for POs with freight_type=Air on plan rows.
         Cost/Unit = Expense ÷ Units.
@@ -5218,8 +5215,8 @@ function buildReport(D) {
   // ── PAGE 7: VAS PROCESSING ────────────────────────────────────
   const vasMonthRows = months.map((mk,i) => { const d=D.vas[mk]||{}; return \`<tr\${i===3?' style="font-weight:600;"':''}>
     <td>\${mLabels[i]}\${i===3?' ★':''}</td>
-    <td class="num">\${fmt(d.revenue)}</td><td class="num">\${fmt(d.expense)}</td>
-    <td class="num">\${fmtU(d.applied_units)}</td><td class="num">\${fmtC(d.unit_cost)}</td>
+    <td class="num">\${fmt(d.revenue)}</td>
+    <td class="num">\${fmtU(d.applied_units)}</td><td class="num">\${fmtC(d.unit_revenue)}</td>
   </tr>\`; }).join('');
 
   pages.push(\`
@@ -5235,7 +5232,7 @@ function buildReport(D) {
       <div class="section-body">
         <div class="three-col" style="margin-bottom:16px;">
           <div class="kpi-card vas" style="padding:14px 16px;">
-            <div class="kpi-label">VAS Revenue (excl. carton)</div>
+            <div class="kpi-label">VAS Cost (excl. carton)</div>
             <div class="kpi-value" style="font-size:22px;">\${fmt(vasD.revenue)}</div>
             <div class="kpi-sub">\${fmtMonth(sel)}</div>
           </div>
@@ -5246,8 +5243,8 @@ function buildReport(D) {
           </div>
           <div class="kpi-card vas" style="padding:14px 16px;">
             <div class="kpi-label">Cost / Unit</div>
-            <div class="kpi-value" style="font-size:22px;">\${fmtC(vasD.unit_cost)}</div>
-            <div class="kpi-sub">VAS expense ÷ units</div>
+            <div class="kpi-value" style="font-size:22px;">\${fmtC(vasD.unit_revenue)}</div>
+            <div class="kpi-sub">Invoice ÷ units processed</div>
           </div>
         </div>
         <div class="two-col">
@@ -5257,23 +5254,22 @@ function buildReport(D) {
           </div>
           <div>
             <table class="data-table">
-              <thead><tr><th>Month</th><th class="num">Revenue</th><th class="num">Expense</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr></thead>
+              <thead><tr><th>Month</th><th class="num">Cost</th><th class="num">Units</th><th class="num">Cost/Unit</th></tr></thead>
               <tbody>\${vasMonthRows}</tbody>
             </table>
           </div>
         </div>
         <div style="margin-top:16px;">
-          <div class="chart-title">Unit Cost vs Revenue/Unit — \${mLabels.join(' · ')}</div>
-          <div class="chart-sub">Radar chart — outer = higher value. Ideal: revenue line outside cost line on all axes.</div>
-          <div class="chart-wrap" style="height:120px;"><canvas id="chart-vas-radar"></canvas></div>
+          <div class="chart-title">Cost/Unit Trend — \${mLabels.join(' · ')}</div>
+          <div class="chart-sub">Cost per processed unit by month. Highlighted bar = selected month.</div>
+          <div class="chart-wrap" style="height:110px;"><canvas id="chart-vas-radar"></canvas></div>
         </div>
       </div>
       <div class="method-footer">
         <strong>Methodology:</strong>
-        Revenue = VAS invoice line totals excluding lines matching 'Carton Replacement - labour only', by invoice_date month.
-        Expense = fin_expenses category='VAS Cost', by month_key.
+        Cost = VAS invoice line totals excluding lines matching 'Carton Replacement - labour only', by invoice_date month (all statuses).
         Units = records table, status=complete, by date_local month.
-        Carton Replacement lines are reported separately on the following page.
+        Cost/Unit = total invoiced cost ÷ applied units. Carton Replacement lines reported separately on the following page.
       </div>
     </div>
   \`);
@@ -5424,8 +5420,8 @@ function renderCharts(D, months, mLabels) {
     data: {
       labels: mLabels,
       datasets: [
-        { label: 'Sea Cost/Unit', data: months.map(m=>D.sea[m]?.unit_cost), borderColor: '#0EA5E9', backgroundColor: 'rgba(14,165,233,0.1)', borderWidth: 2, pointRadius: 4, tension: 0.3, fill: true },
-        { label: 'Air Cost/Unit', data: months.map(m=>D.air[m]?.unit_cost), borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.1)', borderWidth: 2, pointRadius: 4, tension: 0.3, fill: true },
+        { label: 'Sea Cost/Unit', data: months.map(m=>D.sea[m]?.unit_revenue), borderColor: '#0EA5E9', backgroundColor: 'rgba(14,165,233,0.1)', borderWidth: 2, pointRadius: 4, tension: 0.3, fill: true },
+        { label: 'Air Cost/Unit', data: months.map(m=>D.air[m]?.unit_revenue), borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.1)', borderWidth: 2, pointRadius: 4, tension: 0.3, fill: true },
       ]
     },
     options: defaults
@@ -5439,7 +5435,7 @@ function renderCharts(D, months, mLabels) {
       labels: mLabels,
       datasets: [
         { type: 'bar', label: 'Units', data: months.map(m=>D.sea[m]?.applied_units||0), backgroundColor: 'rgba(14,165,233,0.3)', borderRadius: 3, yAxisID: 'y' },
-        { type: 'line', label: 'Cost/Unit', data: months.map(m=>D.sea[m]?.unit_cost), borderColor: '#0EA5E9', backgroundColor: 'transparent', borderWidth: 2.5, pointRadius: 4, yAxisID: 'y2', tension: 0.3 },
+        { type: 'line', label: 'Cost/Unit', data: months.map(m=>D.sea[m]?.unit_revenue), borderColor: '#0EA5E9', backgroundColor: 'transparent', borderWidth: 2.5, pointRadius: 4, yAxisID: 'y2', tension: 0.3 },
       ]
     },
     options: { ...defaults, scales: { x: defaults.scales.x, y: { ...defaults.scales.y, position:'left' }, y2: { position:'right', ticks:{font:{size:9}}, grid:{display:false} } } }
@@ -5453,24 +5449,24 @@ function renderCharts(D, months, mLabels) {
       labels: mLabels,
       datasets: [
         { type: 'bar', label: 'Units', data: months.map(m=>D.air[m]?.applied_units||0), backgroundColor: 'rgba(245,158,11,0.3)', borderRadius: 3, yAxisID: 'y' },
-        { type: 'line', label: 'Cost/Unit', data: months.map(m=>D.air[m]?.unit_cost), borderColor: '#F59E0B', backgroundColor: 'transparent', borderWidth: 2.5, pointRadius: 4, yAxisID: 'y2', tension: 0.3 },
+        { type: 'line', label: 'Cost/Unit', data: months.map(m=>D.air[m]?.unit_revenue), borderColor: '#F59E0B', backgroundColor: 'transparent', borderWidth: 2.5, pointRadius: 4, yAxisID: 'y2', tension: 0.3 },
       ]
     },
     options: { ...defaults, scales: { x: defaults.scales.x, y: { ...defaults.scales.y, position:'left' }, y2: { position:'right', ticks:{font:{size:9}}, grid:{display:false} } } }
   });
 
-  // Air radar (sea vs air cost comparison)
+  // Air page - Sea vs Air cost/unit grouped bar (replaces unreadable radar)
   const airRadarEl = document.getElementById('chart-air-radar');
   if (airRadarEl) new Chart(airRadarEl, {
-    type: 'radar',
+    type: 'bar',
     data: {
       labels: mLabels,
       datasets: [
-        { label: 'Sea Cost/Unit', data: months.map(m=>D.sea[m]?.unit_cost||0), borderColor: '#0EA5E9', backgroundColor: 'rgba(14,165,233,0.15)', borderWidth: 2, pointRadius: 3 },
-        { label: 'Air Cost/Unit', data: months.map(m=>D.air[m]?.unit_cost||0), borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.15)', borderWidth: 2, pointRadius: 3 },
+        { label: 'Sea Cost/Unit', data: months.map(m=>D.sea[m]?.unit_revenue||0), backgroundColor: 'rgba(14,165,233,0.7)', borderRadius: 4, barPercentage: 0.6 },
+        { label: 'Air Cost/Unit', data: months.map(m=>D.air[m]?.unit_revenue||0), backgroundColor: 'rgba(245,158,11,0.7)', borderRadius: 4, barPercentage: 0.6 },
       ]
     },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { font:{size:9}, boxWidth:8, padding:8 } } }, scales: { r: { ticks: { font:{size:8}, backdropColor:'transparent' }, grid: { color:'rgba(0,0,0,0.06)' }, pointLabels:{font:{size:9}} } } }
+    options: { ...defaults, plugins: { ...defaults.plugins, legend: { labels: { font:{size:9}, boxWidth:8, padding:8 } } } }
   });
 
   // VAS trend
@@ -5480,25 +5476,24 @@ function renderCharts(D, months, mLabels) {
     data: {
       labels: mLabels,
       datasets: [
-        { label: 'Cost/Unit', data: months.map(m=>D.vas[m]?.unit_cost), borderColor: '#990033', backgroundColor: 'rgba(153,0,51,0.1)', borderWidth: 2.5, pointRadius: 4, tension: 0.3, fill: true },
-        { label: 'Revenue/Unit', data: months.map(m=>D.vas[m]?.unit_revenue), borderColor: '#cc0044', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 3, tension: 0.3, borderDash: [4,3] },
+        { label: 'Cost/Unit', data: months.map(m=>D.vas[m]?.unit_revenue), borderColor: '#990033', backgroundColor: 'rgba(153,0,51,0.1)', borderWidth: 2.5, pointRadius: 4, tension: 0.3, fill: true },
       ]
     },
     options: defaults
   });
 
   // VAS radar
+  // VAS cost/unit trend by month - bar chart showing cost per unit across 4 months
   const vasRadarEl = document.getElementById('chart-vas-radar');
   if (vasRadarEl) new Chart(vasRadarEl, {
-    type: 'radar',
+    type: 'bar',
     data: {
       labels: mLabels,
       datasets: [
-        { label: 'Revenue/Unit', data: months.map(m=>D.vas[m]?.unit_revenue||0), borderColor: '#cc0044', backgroundColor: 'rgba(204,0,68,0.15)', borderWidth: 2, pointRadius: 3 },
-        { label: 'Cost/Unit', data: months.map(m=>D.vas[m]?.unit_cost||0), borderColor: '#990033', backgroundColor: 'rgba(153,0,51,0.1)', borderWidth: 2, pointRadius: 3 },
+        { label: 'Cost/Unit', data: months.map(m=>D.vas[m]?.unit_revenue||0), backgroundColor: months.map((_,i)=>i===3?'rgba(153,0,51,0.85)':'rgba(153,0,51,0.35)'), borderRadius: 4, barPercentage: 0.6 },
       ]
     },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { font:{size:9}, boxWidth:8, padding:8 } } }, scales: { r: { ticks: { font:{size:8}, backdropColor:'transparent' }, grid: { color:'rgba(0,0,0,0.06)' }, pointLabels:{font:{size:9}} } } }
+    options: { ...defaults }
   });
 
   // Carton trend
