@@ -4410,10 +4410,10 @@ app.get('/report/cost-utilisation/data',
     for (const mk of months) {
       for (const [type, store] of [['SEA', seaData], ['AIR', airData]]) {
         const invs = db.prepare(`
-          SELECT total FROM fin_invoices
+          SELECT subtotal FROM fin_invoices
           WHERE type=? AND substr(week_start,1,7)=?
         `).all(type, mk);
-        const invoiceTotal = invs.reduce((s, i) => s + (i.total || 0), 0);
+        const invoiceTotal = invs.reduce((s, i) => s + (i.subtotal || 0), 0);
 
         // Applied units by freight type (from plan + records join)
         // Get all week_starts in this month
@@ -4995,7 +4995,7 @@ function buildReport(D) {
         <div style="font-size:10px;font-weight:600;color:var(--mid);margin-bottom:6px;">About this report</div>
         <div style="font-size:10px;color:var(--mid);line-height:1.7;">
           This report covers the calendar month of <strong>\${fmtMonth(sel)}</strong> and compares against the three prior months.
-          All monetary values are in <strong>\${CURR} (\${D.fx_note})</strong>.
+          All monetary values are in <strong>\${CURR} (\${D.fx_note})</strong>, excluding GST.
           Unit costs are calculated using completed records for POs in the same operational week as each invoice. Weeks are assigned to months by their Monday start date.
           Carton replacement is reported separately and excluded from VAS unit cost calculations.
         </div>
@@ -5253,7 +5253,7 @@ function buildReport(D) {
       </div>
       <div class="method-footer">
         <strong>Methodology:</strong>
-        Cost = fin_invoices type=SEA, grouped by week_start month (all statuses including draft). Week of 30 Mar counts in March, not April.
+        Cost = fin_invoices subtotal (ex-GST), type=SEA, grouped by week_start month (all statuses including draft).
         Expense = fin_expenses category='Sea Freight Cost', by month_key.
         Units = completed records for POs on plan weeks with week_start in this month (date_local not used).
         Cost/Unit = Invoice total ÷ Units. Container counts from flow_week data for weeks in selected month (Air containers excluded).
@@ -5319,7 +5319,7 @@ function buildReport(D) {
       </div>
       <div class="method-footer">
         <strong>Methodology:</strong>
-        Cost = fin_invoices type=AIR, grouped by week_start month (all statuses including draft). Week of 30 Mar counts in March, not April.
+        Cost = fin_invoices subtotal (ex-GST), type=AIR, grouped by week_start month (all statuses including draft).
         Expense = fin_expenses category='Air Freight Cost', by month_key.
         Units = completed records for POs on plan weeks with week_start in this month (date_local not used).
         Cost/Unit = Invoice total ÷ Units.
@@ -5392,7 +5392,7 @@ function buildReport(D) {
       </div>
       <div class="method-footer">
         <strong>Methodology:</strong>
-        Cost = VAS invoice line totals excluding lines matching 'Carton Replacement - labour only', grouped by invoice week_start month (all statuses).
+        Cost = VAS invoice line totals (ex-GST) excluding lines matching 'Carton Replacement - labour only', grouped by invoice week_start month (all statuses).
         Units = completed records for POs on plan weeks with week_start in this month.
         Cost/Unit = total invoiced cost ÷ applied units. Carton Replacement lines reported separately on the following page.
       </div>
