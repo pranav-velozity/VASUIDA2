@@ -2043,6 +2043,24 @@ function computeManualNodeStatuses(ws, tz) {
     const ctx = window.__FLOW_INTL_CTX__ || null;
     if (!ctx || !ctx.lanes) return;
 
+    // Layer 1: ensure snapshots are loaded before rendering so plannedForLane()
+    // and laneDateCell() have authoritative data. Non-blocking if missing.
+    try {
+      if (window.LaneSnapshots && typeof window.LaneSnapshots.fetchSnapshotsForWeek === 'function' && ws) {
+        window.LaneSnapshots.fetchSnapshotsForWeek(ws).then(() => {
+          // Re-render once loaded (second pass). Idempotent — same ws, same tz.
+          try { _renderIntlOverviewModal(ws, tz); } catch (_) {}
+        }).catch(() => {});
+      }
+    } catch (_) { /* ignore */ }
+
+    _renderIntlOverviewModal(ws, tz);
+  }
+
+  function _renderIntlOverviewModal(ws, tz) {
+    const ctx = window.__FLOW_INTL_CTX__ || null;
+    if (!ctx || !ctx.lanes) return;
+
     const lanes = Array.isArray(ctx.lanes) ? ctx.lanes.slice() : [];
     const weekContainers = Array.isArray(ctx.weekContainers) ? ctx.weekContainers : [];
     const intl = ctx.intl || null;
@@ -2062,9 +2080,28 @@ function computeManualNodeStatuses(ws, tz) {
       try { return fmtInTZ(s, tz); } catch { return s; }
     };
 
-    // Planned fallback baselines for a lane (derived from Intl window + freight mode).
-    // We intentionally do NOT store these in backend; UI recomputes them.
+    // Planned dates for a lane — prefer persisted snapshot (from /lanes/snapshots)
+    // when available; otherwise fall back to the legacy window-based computation.
+    // Snapshot data is authoritative once lane_planned_snapshots is populated for
+    // this week; the legacy formula remains for transitional cases (no snapshot
+    // yet, offline, week that predates Chunk 2).
     const plannedForLane = (lane) => {
+      // Snapshot path (Layer 1)
+      try {
+        if (window.LaneSnapshots && typeof window.LaneSnapshots.getPlanned === 'function' && ws && lane && lane.key) {
+          const p = window.LaneSnapshots.getPlanned(ws, lane.key);
+          if (p && p.hasSnapshot) {
+            return {
+              pack: p.pack, originClr: p.originClr, departed: p.departed,
+              arrived: p.arrived, destClr: p.destClr, fcReceipt: p.fcReceipt,
+              _snapshot: true,
+              _overridden: p.overridden,
+            };
+          }
+        }
+      } catch (_) { /* fall through to legacy */ }
+
+      // Legacy fallback (pre-Chunk-2 formula)
       const originMin = (intl && intl.originMin instanceof Date) ? intl.originMin : null;
       const originMax = (intl && intl.originMax instanceof Date) ? intl.originMax : null;
       if (!originMin || !originMax) return { pack: null, originClr: null, departed: null, arrived: null, destClr: null };
@@ -2086,7 +2123,12 @@ function computeManualNodeStatuses(ws, tz) {
       } catch (e) { return ''; }
     };
 
-    const laneDateCell = (manualObj, plannedDate, keys) => {
+    // Layer 2: render auto-filled actuals in a muted style, manual actuals bold.
+    // The source lookup uses LaneSnapshots.getActualSourceByIntlKeys which reads
+    // from lane_actual_dates (the authoritative source of `source` tagging).
+    // If snapshot data isn't loaded (cache miss) or the lane has no entries yet,
+    // we fall back to the original bold-slate style so behavior is unchanged.
+    const laneDateCell = (manualObj, plannedDate, keys, laneKeyForSource) => {
       const tryKey = (k) => {
         const v = manualObj && (manualObj[k] != null) ? String(manualObj[k]).trim() : '';
         return v ? v : '';
@@ -2094,7 +2136,20 @@ function computeManualNodeStatuses(ws, tz) {
       const actualRaw = (keys || []).map(tryKey).find(Boolean) || '';
       if (actualRaw) {
         const d = fmtDateOnly(actualRaw);
-        return d ? `<span class="whitespace-nowrap font-semibold" style="color:#334155">${escapeHtml(d)}</span>` : '<span class="text-gray-400">—</span>';
+        if (!d) return '<span class="text-gray-400">—</span>';
+        // Look up source tag (auto_filled / manual / imported). Default to 'manual'
+        // for back-compat when we have no info.
+        let source = null;
+        try {
+          if (laneKeyForSource && window.LaneSnapshots && typeof window.LaneSnapshots.getActualSourceByIntlKeys === 'function') {
+            source = window.LaneSnapshots.getActualSourceByIntlKeys(ws, laneKeyForSource, keys);
+          }
+        } catch (_) { /* ignore */ }
+        if (source === 'auto_filled') {
+          // Muted grey-blue with subtle "sys" pill so ops know it's not yet confirmed.
+          return `<span class="whitespace-nowrap" style="color:#64748b">${escapeHtml(d)} <span class="text-[10px]" style="color:#94a3b8">sys</span></span>`;
+        }
+        return `<span class="whitespace-nowrap font-semibold" style="color:#334155">${escapeHtml(d)}</span>`;
       }
       if (plannedDate && !isNaN(plannedDate)) {
         const d = fmtDateOnly(plannedDate);
@@ -2169,14 +2224,22 @@ function computeManualNodeStatuses(ws, tz) {
           <td class="py-3 px-4 text-center">${escapeHtml(String(manual.hbl || '').trim() || '—')}</td>
           <td class="py-3 px-4 text-center">${escapeHtml(String(manual.mbl || '').trim() || '—')}</td>
           <td class="py-3 px-4 text-center">${holdFlag ? '✓' : '—'}</td>
-          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.pack, ['packing_list_ready_at','packingListReadyAt','pack','packing_list_ready'])}</td>
-          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.originClr, ['origin_customs_cleared_at','originClearedAt','originClr','origin_customs_cleared'])}</td>
-          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.departed, ['departed_at','departedAt','departed'])}</td>
-          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.arrived, ['arrived_at','arrivedAt','arrived'])}</td>
-                    <td class=\"py-3 px-4 text-center\">${laneDateCell(manual, null, ['eta_fc','etaFC','eta_fc_at','eta_fc_fc'])}</td>
-          <td class=\"py-3 px-4 text-center\">${laneDateCell(manual, null, ['latest_arrival_date','latestArrivalDate','latestArrival','latest_arrival'])}</td>
-          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.destClr, ['dest_customs_cleared_at','destClearedAt','destClr','dest_customs_cleared'])}</td>
+          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.pack, ['packing_list_ready_at','packingListReadyAt','pack','packing_list_ready'], l.key)}</td>
+          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.originClr, ['origin_customs_cleared_at','originClearedAt','originClr','origin_customs_cleared'], l.key)}</td>
+          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.departed, ['departed_at','departedAt','departed'], l.key)}</td>
+          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.arrived, ['arrived_at','arrivedAt','arrived'], l.key)}</td>
+                    <td class=\"py-3 px-4 text-center\">${laneDateCell(manual, pl.fcReceipt || null, ['eta_fc','etaFC','eta_fc_at','eta_fc_fc'], l.key)}</td>
+          <td class=\"py-3 px-4 text-center\">${laneDateCell(manual, null, ['latest_arrival_date','latestArrivalDate','latestArrival','latest_arrival'], l.key)}</td>
+          <td class="py-3 px-4 text-center">${laneDateCell(manual, pl.destClr, ['dest_customs_cleared_at','destClearedAt','destClr','dest_customs_cleared'], l.key)}</td>
           <td class="py-3 pl-4 pr-4 text-left">${containers.length ? containers.map(c=>escapeHtml(c)).join('<br/>') : '—'}</td>
+          <td class="py-3 px-4 text-center">
+            <button data-edit-planned="${escapeAttr(l.key)}" data-lane-label="${escapeAttr(l.supplier + ' • ' + l.freight)}"
+              title="Edit planned dates"
+              style="padding:4px 8px;border:1px solid #e5e7eb;border-radius:6px;background:white;font-size:11px;color:#6b7280;cursor:pointer;"
+              ${(pl._snapshot) ? '' : 'disabled'}>
+              ${(pl._overridden && pl._overridden.size) ? `<span style="color:#990033;">✎ ${pl._overridden.size}</span>` : '✎'}
+            </button>
+          </td>
         </tr>
       `;
     }).join('');
@@ -2186,7 +2249,11 @@ function computeManualNodeStatuses(ws, tz) {
         <div class="flex items-start justify-between gap-3">
           <div>
             <div class="text-sm font-semibold text-gray-700">Lanes</div>
-            <div class="text-xs text-gray-500 mt-1">Dates show <b>Actual</b> when entered; otherwise fall back to <b>Planned</b>.</div>
+            <div class="text-xs text-gray-500 mt-1">
+              Dates show <b>Actual</b> when entered; otherwise fall back to <b>Planned</b>.
+              <span style="color:#9ca3af;"> · </span>
+              <a href="#" data-open-baselines style="color:#7a1f33;font-weight:500;text-decoration:underline;text-underline-offset:2px;">Lane baselines</a>
+            </div>
           </div>
           <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
             <div class="rounded-lg border px-2 py-1 bg-white"><span class="text-gray-500">Sea</span> <b>${counts.sea}</b></div>
@@ -2214,10 +2281,11 @@ function computeManualNodeStatuses(ws, tz) {
                 <th class=\"text-center py-3 px-4\">📅 Latest arrival</th>
                 <th class="text-center py-3 px-4">🛃 Dest Customs</th>
                 <th class="text-left py-2 pr-2">Container #</th>
+                <th class="text-center py-3 px-4" title="Edit planned dates">✎</th>
               </tr>
             </thead>
             <tbody>
-              ${rows || '<tr><td class="py-2 text-gray-500" colspan="15">No lanes found.</td></tr>'}
+              ${rows || '<tr><td class="py-2 text-gray-500" colspan="16">No lanes found.</td></tr>'}
             </tbody>
           </table>
         </div>
@@ -2233,6 +2301,41 @@ function computeManualNodeStatuses(ws, tz) {
         const k = btn.getAttribute('data-open-lane');
         if (!k) return;
         openLaneModal(ws, tz, k);
+      });
+    });
+
+    // Layer 3: Edit planned dates button per lane
+    root.querySelectorAll('[data-edit-planned]').forEach(btn => {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const k = btn.getAttribute('data-edit-planned');
+        const label = btn.getAttribute('data-lane-label') || k;
+        if (!k) return;
+        if (!window.LaneSnapshots || typeof window.LaneSnapshots.openOverrideDialog !== 'function') {
+          console.warn('LaneSnapshots module not loaded');
+          return;
+        }
+        await window.LaneSnapshots.openOverrideDialog({ laneKey: k, weekStart: ws, laneLabel: label });
+        // Re-open the lane overview modal after edit so user sees updated values.
+        try { setTimeout(() => openIntlOverviewModal(ws, tz), 350); } catch (_) {}
+      });
+    });
+
+    // Layer 4: Baselines admin link in the lanes modal header
+    root.querySelectorAll('[data-open-baselines]').forEach(btn => {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!window.LaneSnapshots || typeof window.LaneSnapshots.openBaselinesAdmin !== 'function') {
+          console.warn('LaneSnapshots module not loaded');
+          return;
+        }
+        window.LaneSnapshots.openBaselinesAdmin();
       });
     });
 
