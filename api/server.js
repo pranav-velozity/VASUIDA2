@@ -2321,6 +2321,117 @@ app.post('/lanes/snapshot/backfill',
   }
 );
 
+// ---- One-time mirror backfill ----
+//
+// Pre-Chunk-2 manual actuals entered via the flow_week UI never ran through
+// the mirror hook (which only fires on fresh /flow/week POSTs). This endpoint
+// walks every stored flow_week row, mirrors any intl_lanes manual dates into
+// lane_actual_dates with source='imported', and triggers recompute so
+// downstream planned dates shift to match the now-known actuals.
+//
+// Idempotent: re-running skips actuals that are already present with a
+// non-'auto_filled' source.
+
+function backfillMirrorIntlLanesToActuals() {
+  const summary = {
+    flow_weeks_scanned: 0,
+    lanes_with_data: 0,
+    lanes_skipped_no_snapshot: 0,
+    stages_imported: 0,
+    lanes_recomputed: 0,
+    errors: [],
+  };
+
+  const allFlowRows = db.prepare(
+    `SELECT week_start, facility, data FROM flow_week ORDER BY week_start, facility`
+  ).all();
+
+  for (const fr of allFlowRows) {
+    summary.flow_weeks_scanned++;
+    let blob;
+    try { blob = safeJsonParse(fr.data, {}) || {}; }
+    catch (e) {
+      summary.errors.push({ week_start: fr.week_start, facility: fr.facility, reason: 'bad json' });
+      continue;
+    }
+
+    const intlLanes = (blob.intl_lanes && typeof blob.intl_lanes === 'object') ? blob.intl_lanes : null;
+    if (!intlLanes) continue;
+
+    for (const laneKey of Object.keys(intlLanes)) {
+      const manualObj = intlLanes[laneKey];
+      if (!manualObj || typeof manualObj !== 'object') continue;
+
+      // Check if this lane has any mirrorable fields set
+      const hasAny = Object.keys(LANE_INTL_FIELD_TO_STAGE).some(k => {
+        const v = manualObj[k];
+        return v && String(v).trim();
+      });
+      if (!hasAny) continue;
+      summary.lanes_with_data++;
+
+      // Ensure a snapshot exists; if not, we can't recompute downstream. Still
+      // import the actuals, but note it.
+      const existingSnap = lane_snapshot_get.get(laneKey, fr.week_start);
+      if (!existingSnap) {
+        summary.lanes_skipped_no_snapshot++;
+      }
+
+      // Custom mirror that tags source='imported' instead of 'manual' so we can
+      // tell pre-existing data apart from new saves in audit trails.
+      let importedStages = 0;
+      for (const [intlField, stage] of Object.entries(LANE_INTL_FIELD_TO_STAGE)) {
+        const raw = manualObj[intlField];
+        if (!raw) continue;
+        const actualIso = String(raw).trim();
+        if (!actualIso) continue;
+
+        const existing = lane_actual_by_stage_get.get(laneKey, fr.week_start, stage);
+        // Skip if an equal/better actual is already there.
+        //   - 'manual' source wins over everything (already correct)
+        //   - 'imported' source at same value (already backfilled)
+        //   - 'auto_filled' gets overwritten by imported (intl is more trustworthy)
+        if (existing && (existing.source === 'manual' || existing.source === 'imported') && existing.actual_at === actualIso) continue;
+
+        lane_actual_upsert.run(laneKey, fr.week_start, stage, actualIso, 'imported', 'backfill_mirror');
+        importedStages++;
+      }
+
+      if (importedStages > 0) {
+        summary.stages_imported += importedStages;
+        if (existingSnap) {
+          try {
+            recomputeLaneFromActuals(laneKey, fr.week_start, 'mirror_backfill');
+            summary.lanes_recomputed++;
+          } catch (e) {
+            summary.errors.push({
+              week_start: fr.week_start, lane_key: laneKey,
+              reason: 'recompute failed: ' + (e.message || e),
+            });
+          }
+        }
+      }
+    }
+  }
+  return summary;
+}
+
+app.post('/lanes/mirror/backfill',
+  authenticateRequest,
+  requireRole(['admin']),
+  writeOpLimiter,
+  auditLog('backfill_mirror_intl_lanes'),
+  (req, res) => {
+    try {
+      const summary = backfillMirrorIntlLanesToActuals();
+      return res.json({ ok: true, ...summary });
+    } catch (e) {
+      console.error('[POST /lanes/mirror/backfill]', e);
+      return res.status(500).json({ error: 'mirror backfill failed: ' + (e.message || e) });
+    }
+  }
+);
+
 // POST /lanes/snapshot/override/:laneKey/:weekStart
 // Body: { field: "planned_departed_at", value: "2026-04-30T04:00:00.000Z" }
 //  OR:  { overrides: { planned_departed_at: "...", planned_arrived_at: "..." } }
@@ -2792,9 +2903,10 @@ function buildReportForWeek(ws, currentWs, summary) {
       const hasAnyActual = ['packing_list_ready','origin_cleared','departed','arrived','dest_cleared','fc_receipt']
         .some(s => actuals[s]);
       if (hasAnyActual) {
-        // Count as projected or confirmed based on whether any manual actual exists
-        const hasManual = Object.values(actuals).some(a => a && a.source === 'manual');
-        if (hasManual) transitOnTrackConfirmed++; else transitOnTrackProjected++;
+        // Confirmed = any manual OR imported (ops-confirmed) actual exists.
+        // Projected = only auto_filled actuals.
+        const hasOpsConfirmed = Object.values(actuals).some(a => a && (a.source === 'manual' || a.source === 'imported'));
+        if (hasOpsConfirmed) transitOnTrackConfirmed++; else transitOnTrackProjected++;
       }
     }
   }
@@ -2953,11 +3065,15 @@ function buildTransitRow({ ws, planRow, laneKey, snap, actuals, manual, containe
       dest_cleared:       snap.planned_dest_cleared_at,
       fc_receipt:         snap.planned_fc_receipt_at,
     };
+    // Helper: treat imported (mirrored from historical intl_lanes) the same as
+    // manual — both represent ops-confirmed actuals. Only auto_filled is
+    // system-projected.
+    const isOpsConfirmed = (a) => !!(a && (a.source === 'manual' || a.source === 'imported'));
     for (const s of stages) {
       const planned = planCols[s];
       if (!planned) continue;
       const actual = actuals[s];
-      if (actual && actual.source === 'manual') continue;   // manual actual wins
+      if (isOpsConfirmed(actual)) continue;   // ops-confirmed actual wins
       const plannedDate = new Date(planned);
       const graceEnd = addBusinessDays(plannedDate, EMAIL_GRACE_BUSINESS_DAYS);
       if (now > graceEnd && !actual) {
@@ -2965,8 +3081,8 @@ function buildTransitRow({ ws, planRow, laneKey, snap, actuals, manual, containe
         offTrackReason = `${EMAIL_STAGE_LABEL[s]} expected ${plannedDate.toISOString().slice(0,10)}, not logged`;
         break;
       }
-      // Also off-track if an actual exists but actual > planned + grace
-      if (actual && actual.source === 'manual') {
+      // Also off-track if an ops-confirmed actual exists but is late
+      if (isOpsConfirmed(actual)) {
         const actualDate = new Date(actual.actual_at);
         if (actualDate > graceEnd) {
           status = 'off_track';
@@ -2981,9 +3097,13 @@ function buildTransitRow({ ws, planRow, laneKey, snap, actuals, manual, containe
   if (status === 'off_track') summary.off_track_count++;
   else {
     summary.on_track_count++;
-    // If ANY stage that has passed has only auto_filled actuals, count as projected; else confirmed.
-    const hasAnyManual = stages.some(s => actuals[s] && actuals[s].source === 'manual');
-    if (hasAnyManual) summary.on_track_confirmed++; else summary.on_track_projected++;
+    // Confirmed = any stage has an ops-confirmed actual (manual OR imported).
+    // Projected = only auto_filled (or none).
+    const hasAnyOpsConfirmed = stages.some(s => {
+      const a = actuals[s];
+      return a && (a.source === 'manual' || a.source === 'imported');
+    });
+    if (hasAnyOpsConfirmed) summary.on_track_confirmed++; else summary.on_track_projected++;
   }
 
   const contIds = containers.map(c => String(c.container_id || c.container || '').trim()).filter(Boolean);
