@@ -280,6 +280,31 @@ CREATE INDEX IF NOT EXISTS idx_lane_actual_ws ON lane_actual_dates(week_start);
 CREATE INDEX IF NOT EXISTS idx_lane_actual_source ON lane_actual_dates(source);
 `);
 
+// ---- Email send log (audit trail for exception emails) ----
+// Records every attempt (successful or not). Captures the full report payload
+// so we can reconstruct what was sent without re-running the report builder.
+db.exec(`
+CREATE TABLE IF NOT EXISTS email_send_log (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  sent_at            TEXT NOT NULL DEFAULT (datetime('now')),
+  kind               TEXT NOT NULL,          -- 'exception_report'
+  trigger_source     TEXT,                   -- 'cron' / 'manual_api' / 'preview' / 'dry_run'
+  to_internal        TEXT,                   -- comma-separated copy of recipients at send time
+  to_client          TEXT,                   -- comma-separated copy of recipients at send time
+  from_address       TEXT,
+  reply_to           TEXT,
+  subject            TEXT,
+  narrative_source   TEXT,                   -- 'pulse' / 'template' / 'template_after_pulse_error'
+  narrative_text     TEXT,
+  resend_message_id  TEXT,                   -- Resend API returns this on success
+  status             TEXT NOT NULL,          -- 'success' / 'failed' / 'dry_run' / 'preview'
+  error              TEXT,                   -- populated on failure
+  report_json        TEXT                    -- the structured exception set
+);
+CREATE INDEX IF NOT EXISTS idx_email_log_sent ON email_send_log(sent_at);
+CREATE INDEX IF NOT EXISTS idx_email_log_status ON email_send_log(status);
+`);
+
 // ── Lane baseline seed (idempotent) ──
 // Day-one facilities: VOZ_KY, VOZ_UL (Shenzhen) + VOS_KY, VOS_UL (Shanghai).
 // Same numbers across all four per agreed design; tune per-row via the
@@ -2443,6 +2468,909 @@ app.get('/lanes/snapshots/:weekStart',
 
 // ==================================================================
 // ===== End lane engine ============================================
+// ==================================================================
+
+
+// ==================================================================
+// ===== Chunk 4: Exception Email Engine ============================
+// ==================================================================
+//
+// Twice-weekly (Tue + Thu 5 PM CT) email summarizing on-track and
+// off-track items across Receiving, VAS, Transit & Clearing, Last Mile.
+//
+// Pipeline:
+//   1. buildExceptionReport() pulls plan rows, receiving, snapshots,
+//      actuals, containers, and last-mile receipts, then organizes
+//      everything by week -> line item.
+//   2. generatePulseNarrative() attempts 2-3 sentence intro with a 10s
+//      timeout. Falls back to deterministic template on any failure.
+//   3. renderExceptionEmail() produces HTML + plain-text versions.
+//   4. sendExceptionEmail() calls Resend. Logs every attempt.
+//
+// Endpoints:
+//   POST /ops/exception-email/run            (cron trigger + manual)
+//   POST /ops/exception-email/run?dryRun=1   (build + log, no send)
+//   GET  /ops/exception-email/preview        (HTML in browser, Clerk-authed)
+
+// ---- Config knobs ----
+const EMAIL_BUSINESS_TZ = 'America/Chicago';   // display TZ in the email (client reads in CT)
+const EMAIL_PULSE_TIMEOUT_MS = 10000;
+const EMAIL_MAX_ROWS_PER_SECTION = 50;         // safety cap against runaway reports
+const EMAIL_GRACE_BUSINESS_DAYS = 1;
+
+// Map engine stage -> UI field name in intl_lanes (mirrors Chunk 2)
+const EMAIL_STAGE_TO_INTL = {
+  packing_list_ready: 'packing_list_ready_at',
+  origin_cleared:     'origin_customs_cleared_at',
+  departed:           'departed_at',
+  arrived:            'arrived_at',
+  dest_cleared:       'dest_customs_cleared_at',
+  fc_receipt:         'eta_fc',
+};
+const EMAIL_STAGE_LABEL = {
+  packing_list_ready: 'Packing list ready',
+  origin_cleared:     'Origin customs cleared',
+  departed:           'Departed origin',
+  arrived:            'Arrived destination',
+  dest_cleared:       'Destination customs cleared',
+  fc_receipt:         'FC ETA',
+};
+
+// ---- Date helpers ----
+function mondayOfDate(d) {
+  const dt = new Date(d);
+  const dow = dt.getUTCDay();               // 0=Sun..6=Sat
+  const delta = (dow === 0) ? -6 : (1 - dow);
+  const mon = new Date(dt.getTime() + delta * 86400000);
+  const y = mon.getUTCFullYear();
+  const m = String(mon.getUTCMonth() + 1).padStart(2, '0');
+  const da = String(mon.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${da}`;
+}
+
+// ISO week number. Returns { week, weekYear } — note weekYear may differ from
+// the Gregorian year around year boundaries (a week in early Jan can belong to
+// the prior ISO year).
+function isoWeekOf(monIso) {
+  const d = parseIsoDateUTC(monIso);
+  if (!d) return { week: 0, weekYear: 0 };
+  // ISO week: Thursday of this week belongs to the target year
+  const thu = new Date(d.getTime() + 3 * 86400000);
+  const year = thu.getUTCFullYear();
+  const jan1 = new Date(Date.UTC(year, 0, 1));
+  const diffDays = Math.floor((thu - jan1) / 86400000);
+  const week = Math.floor(diffDays / 7) + 1;
+  return { week, weekYear: year };
+}
+
+// Returns "Apr 20–26" given a Monday ISO date
+function emailWeekRangeLabel(monIso) {
+  const mon = parseIsoDateUTC(monIso);
+  if (!mon) return '';
+  const sun = new Date(mon.getTime() + 6 * 86400000);
+  const fmt = (d) => new Intl.DateTimeFormat('en-US', { month: 'short', day: '2-digit', timeZone: 'UTC' }).format(d);
+  const monLabel = fmt(mon);
+  const sunLabel = fmt(sun);
+  // Same month: "Apr 20–26"; cross-month: "Apr 27–May 03"
+  if (mon.getUTCMonth() === sun.getUTCMonth()) {
+    return `${monLabel}–${String(sun.getUTCDate()).padStart(2, '0')}`;
+  }
+  return `${monLabel}–${sunLabel}`;
+}
+
+function emailWeekLabel(monIso) {
+  const { week } = isoWeekOf(monIso);
+  const range = emailWeekRangeLabel(monIso);
+  return `Week ${week} (${range})`;
+}
+
+// Add N business days to an ISO date (skipping Sat/Sun). Used for grace window.
+function addBusinessDays(dateLike, nDays) {
+  const d = new Date(dateLike);
+  if (isNaN(d)) return null;
+  let remaining = Math.max(0, Math.round(nDays));
+  while (remaining > 0) {
+    d.setUTCDate(d.getUTCDate() + 1);
+    const dow = d.getUTCDay();
+    if (dow !== 0 && dow !== 6) remaining--;
+  }
+  return d;
+}
+
+// ---- Lane delivery check (per Chunk 4 scope rule) ----
+// A lane is "delivered" (and excluded from the email) when ANY of:
+//   - manual.delivered_at is populated (lane-level)
+//   - ANY container mapped to this lane has status Delivered/Complete or delivered_at
+// Follows the existing UI isDelivered logic.
+function emailLaneIsDelivered(manualObj, containersForLane) {
+  if (manualObj && (manualObj.delivered_at || (manualObj.manual && manualObj.manual.delivered_at))) return true;
+  for (const c of (containersForLane || [])) {
+    if (!c) continue;
+    if (c.status === 'Delivered' || c.status === 'Complete') return true;
+    if (c.delivered_local || c.delivered_at) return true;
+  }
+  return false;
+}
+
+// Lookup containers from flow_week blob's week-level containers store.
+function emailContainersForLane(flowWeekBlob, laneKey) {
+  const all = Array.isArray(flowWeekBlob?.intl_weekcontainers)
+    ? flowWeekBlob.intl_weekcontainers
+    : (Array.isArray(flowWeekBlob?.intl_weekcontainers?.containers)
+       ? flowWeekBlob.intl_weekcontainers.containers : []);
+  return all.filter(c => Array.isArray(c?.lane_keys) && c.lane_keys.includes(laneKey));
+}
+
+// Lookup last-mile receipts for a given container (by container_uid or container_id).
+function emailLastMileStatus(flowWeekBlob, container) {
+  const receipts = (flowWeekBlob && flowWeekBlob.lastmile_receipts && typeof flowWeekBlob.lastmile_receipts === 'object')
+    ? flowWeekBlob.lastmile_receipts : {};
+  const uid = String(container?.container_uid || container?.uid || '').trim();
+  const cid = String(container?.container_id || container?.container || '').trim();
+  return receipts[uid] || receipts[cid] || null;
+}
+
+// ---- Plan-row → lane key (mirror of Chunk 2 logic) ----
+function emailPlanRowLaneKey(r) {
+  const supplier = String(r?.supplier_name ?? r?.supplier ?? r?.vendor ?? 'Unknown').trim() || 'Unknown';
+  const ticket   = String(r?.zendesk_ticket ?? r?.zendesk ?? r?.ticket ?? 'NO_TICKET').trim() || 'NO_TICKET';
+  const fRaw     = String(r?.freight_type ?? r?.freight ?? r?.mode ?? 'Sea').trim() || 'Sea';
+  const mode = /air/i.test(fRaw) ? 'Air' : (/sea|ocean/i.test(fRaw) ? 'Sea' : fRaw);
+  return `${supplier}||${ticket}||${mode}`;
+}
+
+// ---- Build the exception report ----
+//
+// Returns a nested structure:
+//   {
+//     generated_at, current_week_start, current_week_label,
+//     weeks: [
+//       { week_start, week_label, is_current, receiving: [...], vas: {...},
+//         transit: [...], last_mile: [...] }
+//     ],
+//     summary: { total_items, off_track_count, on_track_count,
+//                on_track_confirmed, on_track_projected }
+//   }
+
+function buildExceptionReport(opts) {
+  const now = (opts && opts.now) ? new Date(opts.now) : new Date();
+  const currentWs = mondayOfDate(now);
+
+  const summary = {
+    total_items: 0,
+    off_track_count: 0,
+    on_track_count: 0,
+    on_track_confirmed: 0,
+    on_track_projected: 0,
+  };
+
+  // -- Determine which weeks to include --
+  // Rule: current week + any prior week that has an in-flight, undelivered lane.
+  // NO future weeks.
+  const allPlanWeeks = db.prepare(`
+    SELECT DISTINCT week_start FROM lane_planned_snapshots
+    WHERE week_start <= ?
+    UNION
+    SELECT ? AS week_start
+    ORDER BY week_start ASC
+  `).all(currentWs, currentWs);
+
+  // Also pull plans + receiving for every candidate week so we can report on
+  // them even without snapshots (edge case: phantom rows, legacy weeks).
+  const candidateWeeks = Array.from(new Set(allPlanWeeks.map(r => r.week_start))).sort();
+
+  const reportWeeks = [];
+  for (const ws of candidateWeeks) {
+    const wkBlock = buildReportForWeek(ws, currentWs, summary);
+    if (wkBlock && (wkBlock.receiving.length || wkBlock.transit.length || wkBlock.last_mile.length || wkBlock.vas.has_data)) {
+      reportWeeks.push(wkBlock);
+    }
+  }
+
+  return {
+    generated_at: now.toISOString(),
+    current_week_start: currentWs,
+    current_week_label: emailWeekLabel(currentWs),
+    weeks: reportWeeks,
+    summary,
+  };
+}
+
+function buildReportForWeek(ws, currentWs, summary) {
+  const isCurrent = (ws === currentWs);
+  const week_label = emailWeekLabel(ws);
+
+  // Pull snapshots for this week
+  const snapshots = db.prepare(
+    `SELECT * FROM lane_planned_snapshots WHERE week_start = ? ORDER BY lane_key`
+  ).all(ws);
+  const snapByLane = Object.fromEntries(snapshots.map(s => [s.lane_key, s]));
+
+  // Pull actuals for this week
+  const actuals = db.prepare(
+    `SELECT * FROM lane_actual_dates WHERE week_start = ?`
+  ).all(ws);
+  const actualsByLaneStage = {};
+  for (const a of actuals) {
+    if (!actualsByLaneStage[a.lane_key]) actualsByLaneStage[a.lane_key] = {};
+    actualsByLaneStage[a.lane_key][a.stage] = a;
+  }
+
+  // Pull plan rows for this week
+  const planRow = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(ws);
+  const planRows = planRow ? (safeJsonParse(planRow.data, []) || []) : [];
+
+  // Pull facility-scoped flow_week blob(s) for intl_lanes manual data, containers, receipts.
+  // A single week can have multiple facilities; merge them for lookup.
+  const flowRows = db.prepare('SELECT facility, data FROM flow_week WHERE week_start = ?').all(ws);
+  let mergedFlowBlob = { intl_lanes: {}, intl_weekcontainers: [], lastmile_receipts: {} };
+  for (const fr of flowRows) {
+    const d = safeJsonParse(fr.data, {}) || {};
+    if (d.intl_lanes && typeof d.intl_lanes === 'object') {
+      Object.assign(mergedFlowBlob.intl_lanes, d.intl_lanes);
+    }
+    if (d.intl_weekcontainers) {
+      const arr = Array.isArray(d.intl_weekcontainers) ? d.intl_weekcontainers : (Array.isArray(d.intl_weekcontainers.containers) ? d.intl_weekcontainers.containers : []);
+      mergedFlowBlob.intl_weekcontainers.push(...(arr || []));
+    }
+    if (d.lastmile_receipts && typeof d.lastmile_receipts === 'object') {
+      Object.assign(mergedFlowBlob.lastmile_receipts, d.lastmile_receipts);
+    }
+  }
+
+  // -- Receiving section (current week only) --
+  const receiving = [];
+  if (isCurrent && planRows.length) {
+    receiving.push(...buildReceivingRows(ws, planRows, summary));
+  }
+
+  // -- VAS section (current week only) --
+  const vas = isCurrent ? buildVasSummary(ws, planRows, summary) : { has_data: false };
+
+  // -- Transit section (all weeks, but filter to in-flight) --
+  const transit = [];
+  const lastMile = [];
+  const laneKeysSeen = new Set();
+  for (const p of planRows) {
+    const lk = emailPlanRowLaneKey(p);
+    if (laneKeysSeen.has(lk)) continue;
+    laneKeysSeen.add(lk);
+
+    const snap = snapByLane[lk];
+    const actuals = actualsByLaneStage[lk] || {};
+    const manual = mergedFlowBlob.intl_lanes[lk] || {};
+    const containers = emailContainersForLane(mergedFlowBlob, lk);
+
+    // Scope rule: exclude if delivered
+    if (emailLaneIsDelivered(manual, containers)) continue;
+    // Exclude prior-week lanes that have NO activity (never had a snapshot and
+    // no actuals) AND are not current week — these are phantoms.
+    if (!isCurrent && !snap && Object.keys(actuals).length === 0) continue;
+
+    const row = buildTransitRow({ ws, planRow: p, laneKey: lk, snap, actuals, manual, containers, summary });
+    if (row) {
+      transit.push(row);
+      // Last-mile derived row if any container has arrived but not delivered
+      const lmRow = buildLastMileRow({ ws, laneKey: lk, row, containers, flowBlob: mergedFlowBlob, summary });
+      if (lmRow) lastMile.push(lmRow);
+    }
+  }
+
+  return {
+    week_start: ws,
+    week_label,
+    is_current: isCurrent,
+    receiving: receiving.slice(0, EMAIL_MAX_ROWS_PER_SECTION),
+    vas,
+    transit: transit.slice(0, EMAIL_MAX_ROWS_PER_SECTION),
+    last_mile: lastMile.slice(0, EMAIL_MAX_ROWS_PER_SECTION),
+  };
+}
+
+function buildReceivingRows(ws, planRows, summary) {
+  // Receiving is PO-based, not lane-based
+  const receivingRows = db.prepare(
+    `SELECT po_number, supplier_name, cartons_received FROM receiving WHERE week_start = ?`
+  ).all(ws);
+  const recvByPo = Object.fromEntries(
+    receivingRows.map(r => [String(r.po_number || '').trim().toUpperCase(), r])
+  );
+
+  const out = [];
+  const seen = new Set();
+  const now = new Date();
+  // "Due" is Monday noon Shanghai = 04:00 UTC of Monday
+  const mondayNoon = new Date(`${ws}T04:00:00.000Z`);
+  const pastDue = now > addBusinessDays(mondayNoon, EMAIL_GRACE_BUSINESS_DAYS);
+
+  for (const p of planRows) {
+    const po = String(p?.po_number || '').trim().toUpperCase();
+    if (!po || seen.has(po)) continue;
+    seen.add(po);
+
+    const recv = recvByPo[po];
+    const received = recv && (recv.cartons_received > 0);
+    const target = Number(p?.target_qty || 0);
+    const supplier = String(p?.supplier_name || p?.supplier || 'Unknown').trim();
+
+    let status;
+    if (received) status = 'on_track';
+    else if (pastDue) status = 'off_track';
+    else status = 'on_track';
+
+    const row = {
+      type: 'receiving',
+      po_number: po,
+      supplier,
+      target_qty: target,
+      cartons_received: recv ? recv.cartons_received : 0,
+      status,
+      note: received
+        ? `${recv.cartons_received} cartons received`
+        : (pastDue ? 'Past due, not received' : 'Not yet received'),
+    };
+    out.push(row);
+    summary.total_items++;
+    if (status === 'off_track') summary.off_track_count++;
+    else { summary.on_track_count++; summary.on_track_confirmed++; }
+  }
+  return out;
+}
+
+function buildVasSummary(ws, planRows, summary) {
+  // VAS is applied-units-based, week-level.
+  const plannedUnits = planRows.reduce((s, p) => s + Number(p?.target_qty || 0), 0);
+  // Pull applied from records (status=complete for POs in the plan).
+  const poList = [...new Set(planRows.map(p => String(p?.po_number || '').trim().toUpperCase()).filter(Boolean))];
+  let appliedUnits = 0;
+  if (poList.length) {
+    const placeholders = poList.map(() => '?').join(',');
+    const r = db.prepare(
+      `SELECT COUNT(*) as n FROM records WHERE status='complete' AND po_number IN (${placeholders})`
+    ).get(...poList);
+    appliedUnits = r?.n || 0;
+  }
+  const pct = plannedUnits > 0 ? Math.round((appliedUnits / plannedUnits) * 100) : 0;
+
+  // Due: Friday noon Shanghai of this week = (week_start + 4 days) 04:00 UTC
+  const fri = new Date(`${ws}T04:00:00.000Z`);
+  fri.setUTCDate(fri.getUTCDate() + 4);
+  const now = new Date();
+  const pastDue = now > addBusinessDays(fri, EMAIL_GRACE_BUSINESS_DAYS);
+
+  let status = 'on_track';
+  if (pastDue && pct < 90) status = 'off_track';
+
+  summary.total_items++;
+  if (status === 'off_track') summary.off_track_count++;
+  else { summary.on_track_count++; summary.on_track_confirmed++; }
+
+  return {
+    has_data: plannedUnits > 0,
+    planned_units: plannedUnits,
+    applied_units: appliedUnits,
+    pct,
+    status,
+    due_friday: fri.toISOString(),
+  };
+}
+
+function buildTransitRow({ ws, planRow, laneKey, snap, actuals, manual, containers, summary }) {
+  const parts = laneKey.split('||');
+  const supplier = parts[0] || 'Unknown';
+  const ticket = parts[1] === 'NO_TICKET' ? '' : parts[1];
+  const mode = parts[2] || 'Sea';
+
+  // Determine current "stage" the lane is at, and whether it's off-track.
+  const stages = ['packing_list_ready', 'origin_cleared', 'departed', 'arrived', 'dest_cleared', 'fc_receipt'];
+  let latestActualStage = null;
+  let latestActualAt = null;
+  let latestSource = null;
+  for (const s of stages) {
+    const a = actuals[s];
+    if (a && a.actual_at) {
+      latestActualStage = s;
+      latestActualAt = a.actual_at;
+      latestSource = a.source;
+    }
+  }
+
+  // Off-track rule: binary, based on snap vs actual with 1 business day grace.
+  // If no snapshot, we can't compute -> treat as on_track (no claim to make).
+  let status = 'on_track';
+  let offTrackReason = '';
+  const now = new Date();
+
+  if (snap) {
+    // Check each stage. A stage is off-track if its planned date has passed
+    // by more than grace and no actual (manual OR auto_filled) is present.
+    const planCols = {
+      packing_list_ready: snap.planned_packing_list_ready_at,
+      origin_cleared:     snap.planned_origin_cleared_at,
+      departed:           snap.planned_departed_at,
+      arrived:            snap.planned_arrived_at,
+      dest_cleared:       snap.planned_dest_cleared_at,
+      fc_receipt:         snap.planned_fc_receipt_at,
+    };
+    for (const s of stages) {
+      const planned = planCols[s];
+      if (!planned) continue;
+      const actual = actuals[s];
+      if (actual && actual.source === 'manual') continue;   // manual actual wins
+      const plannedDate = new Date(planned);
+      const graceEnd = addBusinessDays(plannedDate, EMAIL_GRACE_BUSINESS_DAYS);
+      if (now > graceEnd && !actual) {
+        status = 'off_track';
+        offTrackReason = `${EMAIL_STAGE_LABEL[s]} expected ${plannedDate.toISOString().slice(0,10)}, not logged`;
+        break;
+      }
+      // Also off-track if an actual exists but actual > planned + grace
+      if (actual && actual.source === 'manual') {
+        const actualDate = new Date(actual.actual_at);
+        if (actualDate > graceEnd) {
+          status = 'off_track';
+          offTrackReason = `${EMAIL_STAGE_LABEL[s]} logged ${actualDate.toISOString().slice(0,10)}, planned ${plannedDate.toISOString().slice(0,10)}`;
+          break;
+        }
+      }
+    }
+  }
+
+  summary.total_items++;
+  if (status === 'off_track') summary.off_track_count++;
+  else {
+    summary.on_track_count++;
+    // If ANY stage that has passed has only auto_filled actuals, count as projected; else confirmed.
+    const hasAnyManual = stages.some(s => actuals[s] && actuals[s].source === 'manual');
+    if (hasAnyManual) summary.on_track_confirmed++; else summary.on_track_projected++;
+  }
+
+  const contIds = containers.map(c => String(c.container_id || c.container || '').trim()).filter(Boolean);
+  const contLabel = contIds.length ? contIds.join(', ') : '—';
+
+  return {
+    type: 'transit',
+    week_start: ws,
+    lane_key: laneKey,
+    zendesk: ticket,
+    supplier,
+    mode,
+    container: contLabel,
+    has_containers: contIds.length > 0,
+    latest_stage: latestActualStage,
+    latest_stage_label: latestActualStage ? EMAIL_STAGE_LABEL[latestActualStage] : null,
+    latest_actual_at: latestActualAt,
+    latest_source: latestSource,
+    status,
+    off_track_reason: offTrackReason,
+  };
+}
+
+function buildLastMileRow({ ws, laneKey, row, containers, flowBlob, summary }) {
+  // Last mile only relevant for lanes that have arrived but not yet delivered.
+  if (!row || !['arrived', 'dest_cleared'].includes(row.latest_stage || '')) return null;
+  // Count one per container (or one row if no containers yet)
+  const container = containers && containers[0] ? containers[0] : null;
+  const receipt = container ? emailLastMileStatus(flowBlob, container) : null;
+  if (receipt && (receipt.status === 'Delivered' || receipt.delivered_at)) return null;  // excluded elsewhere, safety
+
+  // Skip — we already counted the transit row; just return a mirror for the
+  // Last Mile section so the reader can see "at FC, not received" clearly.
+  return {
+    type: 'last_mile',
+    week_start: ws,
+    lane_key: laneKey,
+    zendesk: row.zendesk,
+    supplier: row.supplier,
+    container: row.container,
+    status: row.status,
+    note: row.latest_stage === 'dest_cleared'
+      ? 'Cleared customs, pending FC receipt'
+      : 'At destination, pending clearance',
+  };
+}
+
+// ---- Pulse narrative ----
+
+async function generatePulseNarrative(report) {
+  const facts = summarizeFactsForPulse(report);
+  // Deterministic templated fallback — used when Pulse fails or returns bad output.
+  const fallback = buildTemplatedNarrative(report);
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { text: fallback, source: 'template' };
+
+  const prompt = `You are writing a 2-3 sentence executive summary for VelOzity's twice-weekly exception report to The Iconic (a logistics client). Use ONLY the facts below. Do NOT speculate, use hedging language (might, possibly, may, perhaps, etc.), or add information not in the facts. Factual, direct, and professional. No greetings, no sign-offs.
+
+Facts:
+${facts}
+
+Write the 2-3 sentence summary only, nothing else.`;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), EMAIL_PULSE_TIMEOUT_MS);
+    const client = getAnthropic();
+    const resp = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 200,
+      messages: [{ role: 'user', content: prompt }],
+    }, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    const text = (resp?.content?.[0]?.text || '').trim();
+    if (!text) return { text: fallback, source: 'template_after_pulse_error' };
+    // Reject if contains hedging words (strict prompt)
+    const hedges = /\b(might|possibly|perhaps|maybe|may\s|could\s|seems|appears|likely|unlikely)\b/i;
+    if (hedges.test(text)) {
+      console.warn('[exception-email] Pulse returned hedging language, using template fallback');
+      return { text: fallback, source: 'template_after_pulse_error' };
+    }
+    // Reject if too long (more than ~4 sentences worth of characters)
+    if (text.length > 600) return { text: fallback, source: 'template_after_pulse_error' };
+    return { text, source: 'pulse' };
+  } catch (e) {
+    console.warn('[exception-email] Pulse narrative failed:', e.message || e);
+    return { text: fallback, source: 'template_after_pulse_error' };
+  }
+}
+
+function summarizeFactsForPulse(report) {
+  const lines = [];
+  lines.push(`- Report period: ${report.current_week_label}`);
+  lines.push(`- Total items tracked: ${report.summary.total_items}`);
+  lines.push(`- Off-track: ${report.summary.off_track_count}`);
+  lines.push(`- On-track: ${report.summary.on_track_count} (confirmed ${report.summary.on_track_confirmed}, system-projected ${report.summary.on_track_projected})`);
+  for (const wk of report.weeks) {
+    if (wk.receiving.length) lines.push(`- ${wk.week_label} receiving: ${wk.receiving.filter(r=>r.status==='off_track').length} off-track of ${wk.receiving.length} POs`);
+    if (wk.vas && wk.vas.has_data) lines.push(`- ${wk.week_label} VAS: ${wk.vas.pct}% applied (${wk.vas.applied_units}/${wk.vas.planned_units}), ${wk.vas.status}`);
+    if (wk.transit.length) lines.push(`- ${wk.week_label} transit: ${wk.transit.filter(r=>r.status==='off_track').length} off-track of ${wk.transit.length} lanes`);
+  }
+  return lines.join('\n');
+}
+
+function buildTemplatedNarrative(report) {
+  const s = report.summary;
+  if (s.total_items === 0) {
+    return `This report covers ${report.current_week_label}. No tracked items in the current window.`;
+  }
+  const parts = [];
+  parts.push(`This report covers ${report.current_week_label} and in-flight lanes from prior weeks.`);
+  if (s.off_track_count === 0) {
+    parts.push(`All ${s.total_items} tracked items are on track (${s.on_track_confirmed} confirmed by ops, ${s.on_track_projected} system-projected).`);
+  } else {
+    parts.push(`${s.off_track_count} of ${s.total_items} items are off-track; ${s.on_track_count} remain on track (${s.on_track_confirmed} confirmed by ops, ${s.on_track_projected} system-projected).`);
+  }
+  return parts.join(' ');
+}
+
+// ---- Email rendering ----
+
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
+function renderEmailSubject(report) {
+  const off = report.summary.off_track_count;
+  const weeks = report.weeks.length;
+  if (off === 0) {
+    return `VelOzity Exception Report — ${report.current_week_label.split(' (')[0]} — all on track`;
+  }
+  return `VelOzity Exception Report — ${report.current_week_label.split(' (')[0]} — ${off} off-track across ${weeks} week${weeks === 1 ? '' : 's'}`;
+}
+
+function renderEmailHtml(report, narrative) {
+  const base = process.env.EXCEPTION_REPORT_URL_BASE || '';
+  const headerBrand = '#990033';
+  const offTrackColor = '#b91c1c';
+  const onTrackColor = '#16a34a';
+  const mutedColor = '#6b7280';
+  const borderColor = '#e5e7eb';
+
+  const css = `
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #111827; line-height: 1.5; margin: 0; padding: 20px; background: #f9fafb; }
+    .container { max-width: 720px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; border: 1px solid ${borderColor}; }
+    h1 { font-size: 20px; color: ${headerBrand}; margin: 0 0 8px 0; }
+    .narrative { font-size: 14px; color: #374151; margin: 16px 0 24px 0; padding: 12px 16px; background: #fef2f2; border-left: 3px solid ${headerBrand}; border-radius: 4px; }
+    h2 { font-size: 15px; color: #111827; margin: 24px 0 8px 0; padding-bottom: 6px; border-bottom: 1px solid ${borderColor}; }
+    .subtle { color: ${mutedColor}; font-size: 12px; }
+    .row { padding: 8px 10px; margin: 4px 0; border-radius: 4px; font-size: 13px; border: 1px solid ${borderColor}; }
+    .row.off-track { border-left: 3px solid ${offTrackColor}; background: #fef2f2; }
+    .row.on-track { border-left: 3px solid ${onTrackColor}; background: #f0fdf4; }
+    .badge { display: inline-block; padding: 1px 8px; font-size: 10px; font-weight: 600; text-transform: uppercase; border-radius: 10px; letter-spacing: 0.04em; }
+    .badge.off { background: ${offTrackColor}; color: white; }
+    .badge.on { background: ${onTrackColor}; color: white; }
+    .meta { color: ${mutedColor}; font-size: 11px; margin-top: 2px; }
+    .summary { margin-top: 24px; padding: 14px 18px; background: #f3f4f6; border-radius: 6px; font-size: 13px; }
+    .footer { margin-top: 30px; padding-top: 16px; border-top: 1px solid ${borderColor}; font-size: 11px; color: ${mutedColor}; }
+    a { color: ${headerBrand}; }
+  `;
+
+  const weekSections = report.weeks.map(wk => {
+    const parts = [];
+    parts.push(`<h2>${escHtml(wk.week_label)}${wk.is_current ? ' <span class="subtle">· current</span>' : ''}</h2>`);
+    if (wk.receiving.length) {
+      parts.push(`<div class="subtle" style="margin: 4px 0 6px 0;">Receiving · ${wk.receiving.length} POs</div>`);
+      for (const r of wk.receiving) {
+        parts.push(`<div class="row ${r.status === 'off_track' ? 'off-track' : 'on-track'}">
+          <span class="badge ${r.status === 'off_track' ? 'off' : 'on'}">${r.status === 'off_track' ? 'off' : 'on'} track</span>
+          &nbsp;PO <strong>${escHtml(r.po_number)}</strong> · ${escHtml(r.supplier)} · ${r.target_qty} units
+          <div class="meta">${escHtml(r.note)}</div>
+        </div>`);
+      }
+    }
+    if (wk.vas && wk.vas.has_data) {
+      parts.push(`<div class="subtle" style="margin: 10px 0 6px 0;">VAS</div>`);
+      parts.push(`<div class="row ${wk.vas.status === 'off_track' ? 'off-track' : 'on-track'}">
+        <span class="badge ${wk.vas.status === 'off_track' ? 'off' : 'on'}">${wk.vas.status === 'off_track' ? 'off' : 'on'} track</span>
+        &nbsp;<strong>${wk.vas.pct}%</strong> applied (${wk.vas.applied_units} of ${wk.vas.planned_units} units)
+        <div class="meta">Due Fri noon Shanghai</div>
+      </div>`);
+    }
+    if (wk.transit.length) {
+      parts.push(`<div class="subtle" style="margin: 10px 0 6px 0;">Transit &amp; Clearing · ${wk.transit.length} lanes</div>`);
+      for (const t of wk.transit) {
+        const zLabel = t.zendesk ? `Zendesk <strong>${escHtml(t.zendesk)}</strong>` : 'no ticket';
+        parts.push(`<div class="row ${t.status === 'off_track' ? 'off-track' : 'on-track'}">
+          <span class="badge ${t.status === 'off_track' ? 'off' : 'on'}">${t.status === 'off_track' ? 'off' : 'on'} track</span>
+          &nbsp;${zLabel} · ${escHtml(t.supplier)} · ${escHtml(t.mode)} · Container ${escHtml(t.container)}
+          <div class="meta">${t.status === 'off_track' ? escHtml(t.off_track_reason) : (t.latest_stage_label ? `Last update: ${escHtml(t.latest_stage_label)}${t.latest_source === 'auto_filled' ? ' (system-projected)' : ''}` : 'No activity logged yet')}</div>
+        </div>`);
+      }
+    }
+    if (wk.last_mile.length) {
+      parts.push(`<div class="subtle" style="margin: 10px 0 6px 0;">Last Mile · ${wk.last_mile.length} at destination</div>`);
+      for (const lm of wk.last_mile) {
+        parts.push(`<div class="row on-track">
+          <span class="badge on">pending</span>
+          &nbsp;${lm.zendesk ? `Zendesk <strong>${escHtml(lm.zendesk)}</strong>` : 'no ticket'} · ${escHtml(lm.supplier)} · Container ${escHtml(lm.container)}
+          <div class="meta">${escHtml(lm.note)}</div>
+        </div>`);
+      }
+    }
+    return parts.join('\n');
+  }).join('\n');
+
+  const s = report.summary;
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><style>${css}</style></head>
+<body><div class="container">
+  <h1>VelOzity Exception Report</h1>
+  <div class="subtle">${escHtml(report.current_week_label)} · generated ${escHtml(report.generated_at.slice(0, 16).replace('T', ' '))} UTC</div>
+  <div class="narrative">${escHtml(narrative.text)}</div>
+  ${weekSections || '<div class="subtle" style="padding: 40px; text-align: center;">No tracked items in the current window.</div>'}
+  <div class="summary">
+    <strong>Summary:</strong> ${s.total_items} items tracked ·
+    <span style="color: ${offTrackColor}; font-weight: 600;">${s.off_track_count} off-track</span> ·
+    <span style="color: ${onTrackColor}; font-weight: 600;">${s.on_track_count} on track</span>
+    (${s.on_track_confirmed} confirmed by ops, ${s.on_track_projected} system-projected)
+  </div>
+  <div class="footer">
+    ${base ? `Full details: <a href="${escHtml(base)}">${escHtml(base)}</a><br/>` : ''}
+    Reply to this email with questions or to request changes.
+  </div>
+</div></body></html>`;
+}
+
+function renderEmailText(report, narrative) {
+  const lines = [];
+  lines.push(`VelOzity Exception Report — ${report.current_week_label}`);
+  lines.push(`Generated ${report.generated_at.slice(0, 16).replace('T', ' ')} UTC`);
+  lines.push('');
+  lines.push(narrative.text);
+  lines.push('');
+  for (const wk of report.weeks) {
+    lines.push(`━━━ ${wk.week_label}${wk.is_current ? ' · current' : ''} ━━━`);
+    if (wk.receiving.length) {
+      lines.push(`  Receiving (${wk.receiving.length} POs):`);
+      for (const r of wk.receiving) {
+        lines.push(`    [${r.status === 'off_track' ? 'OFF-TRACK' : 'on track'}] PO ${r.po_number} · ${r.supplier} · ${r.target_qty}u — ${r.note}`);
+      }
+    }
+    if (wk.vas && wk.vas.has_data) {
+      lines.push(`  VAS: [${wk.vas.status === 'off_track' ? 'OFF-TRACK' : 'on track'}] ${wk.vas.pct}% applied (${wk.vas.applied_units}/${wk.vas.planned_units})`);
+    }
+    if (wk.transit.length) {
+      lines.push(`  Transit & Clearing (${wk.transit.length} lanes):`);
+      for (const t of wk.transit) {
+        lines.push(`    [${t.status === 'off_track' ? 'OFF-TRACK' : 'on track'}] Zendesk ${t.zendesk || '—'} · ${t.supplier} · ${t.mode} · Container ${t.container}`);
+        lines.push(`      ${t.status === 'off_track' ? t.off_track_reason : (t.latest_stage_label || 'No activity logged')}`);
+      }
+    }
+    if (wk.last_mile.length) {
+      lines.push(`  Last Mile (${wk.last_mile.length} pending):`);
+      for (const lm of wk.last_mile) {
+        lines.push(`    Zendesk ${lm.zendesk || '—'} · ${lm.supplier} · Container ${lm.container} — ${lm.note}`);
+      }
+    }
+    lines.push('');
+  }
+  const s = report.summary;
+  lines.push(`Summary: ${s.total_items} items · ${s.off_track_count} off-track · ${s.on_track_count} on track (${s.on_track_confirmed} confirmed by ops, ${s.on_track_projected} system-projected)`);
+  const base = process.env.EXCEPTION_REPORT_URL_BASE || '';
+  if (base) { lines.push(''); lines.push(`Full details: ${base}`); }
+  lines.push(''); lines.push('Reply to this email with questions or to request changes.');
+  return lines.join('\n');
+}
+
+// ---- Resend send ----
+
+async function sendViaResend({ from, replyTo, to, subject, html, text }) {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) throw new Error('RESEND_API_KEY not set');
+  const body = {
+    from,
+    to: Array.isArray(to) ? to : [to],
+    subject,
+    html,
+    text,
+  };
+  if (replyTo) body.reply_to = replyTo;
+
+  const resp = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => '');
+    throw new Error(`Resend ${resp.status}: ${t.slice(0, 300)}`);
+  }
+  const j = await resp.json();
+  return { id: j?.id || null, raw: j };
+}
+
+// ---- Recipient helpers ----
+function parseEmailList(envVal) {
+  return String(envVal || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+function getRecipients() {
+  const internal = parseEmailList(process.env.EXCEPTION_EMAIL_TO_INTERNAL);
+  const client = parseEmailList(process.env.EXCEPTION_EMAIL_TO_CLIENT);
+  // Deduplicate in case the same address is on both lists
+  const union = Array.from(new Set([...internal, ...client]));
+  return { internal, client, union };
+}
+
+// ---- Log insert ----
+const email_log_insert = db.prepare(`
+  INSERT INTO email_send_log (
+    kind, trigger_source, to_internal, to_client, from_address, reply_to,
+    subject, narrative_source, narrative_text, resend_message_id, status, error, report_json
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+// ---- Endpoints ----
+
+// POST /ops/exception-email/run[?dryRun=1]
+// - Cron trigger: uses x-lane-cron-secret header. Falls back to Clerk auth.
+// - Builds report, generates narrative, optionally sends, logs the attempt.
+app.post('/ops/exception-email/run', (req, res, next) => {
+  const cronSecret = process.env.LANE_CRON_SECRET;
+  const supplied = req.headers['x-lane-cron-secret'];
+  if (cronSecret && supplied === cronSecret) return next();
+  return authenticateRequest(req, res, next);
+}, auditLog('run_exception_email'), async (req, res) => {
+  const dryRun = String(req.query.dryRun || '') === '1';
+  const trigger = (req.headers['x-lane-cron-secret']) ? 'cron' : 'manual_api';
+
+  try {
+    const report = buildExceptionReport();
+    const narrative = await generatePulseNarrative(report);
+    const subject = renderEmailSubject(report);
+    const html = renderEmailHtml(report, narrative);
+    const text = renderEmailText(report, narrative);
+
+    const from = process.env.EXCEPTION_EMAIL_FROM;
+    const replyTo = process.env.EXCEPTION_EMAIL_REPLY_TO;
+    const { internal, client, union } = getRecipients();
+
+    if (!from) {
+      email_log_insert.run('exception_report', trigger, internal.join(','), client.join(','),
+        from || '', replyTo || '', subject, narrative.source, narrative.text, null, 'failed',
+        'EXCEPTION_EMAIL_FROM not set', JSON.stringify(report));
+      return res.status(500).json({ error: 'EXCEPTION_EMAIL_FROM not set' });
+    }
+    if (!union.length) {
+      email_log_insert.run('exception_report', trigger, '', '', from, replyTo || '',
+        subject, narrative.source, narrative.text, null, 'failed',
+        'No recipients configured', JSON.stringify(report));
+      return res.status(500).json({ error: 'No recipients configured (EXCEPTION_EMAIL_TO_INTERNAL + EXCEPTION_EMAIL_TO_CLIENT both empty)' });
+    }
+
+    if (dryRun) {
+      email_log_insert.run('exception_report', trigger + '_dryrun', internal.join(','), client.join(','),
+        from, replyTo || '', subject, narrative.source, narrative.text, null, 'dry_run',
+        null, JSON.stringify(report));
+      return res.json({
+        ok: true, dryRun: true, subject, narrative: narrative.text, narrative_source: narrative.source,
+        recipients: { internal, client, total: union.length },
+        summary: report.summary,
+      });
+    }
+
+    let sendResult;
+    try {
+      sendResult = await sendViaResend({ from, replyTo, to: union, subject, html, text });
+    } catch (e) {
+      email_log_insert.run('exception_report', trigger, internal.join(','), client.join(','),
+        from, replyTo || '', subject, narrative.source, narrative.text, null, 'failed',
+        e.message || String(e), JSON.stringify(report));
+      throw e;
+    }
+
+    email_log_insert.run('exception_report', trigger, internal.join(','), client.join(','),
+      from, replyTo || '', subject, narrative.source, narrative.text,
+      sendResult.id || null, 'success', null, JSON.stringify(report));
+
+    return res.json({
+      ok: true, dryRun: false, subject,
+      narrative_source: narrative.source,
+      resend_message_id: sendResult.id,
+      recipients: { internal, client, total: union.length },
+      summary: report.summary,
+    });
+  } catch (e) {
+    console.error('[POST /ops/exception-email/run]', e);
+    return res.status(500).json({ error: 'exception email failed: ' + (e.message || e) });
+  }
+});
+
+// GET /ops/exception-email/preview — HTML preview in browser (Clerk-authed).
+app.get('/ops/exception-email/preview',
+  authenticateRequest,
+  auditLog('preview_exception_email'),
+  async (req, res) => {
+    try {
+      const report = buildExceptionReport();
+      const narrative = await generatePulseNarrative(report);
+      const html = renderEmailHtml(report, narrative);
+      // Log the preview too (not a send, but worth auditing).
+      const { internal, client } = getRecipients();
+      email_log_insert.run('exception_report', 'preview', internal.join(','), client.join(','),
+        process.env.EXCEPTION_EMAIL_FROM || '', process.env.EXCEPTION_EMAIL_REPLY_TO || '',
+        renderEmailSubject(report), narrative.source, narrative.text, null, 'preview',
+        null, JSON.stringify(report));
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.send(html);
+    } catch (e) {
+      console.error('[GET /ops/exception-email/preview]', e);
+      return res.status(500).json({ error: 'preview failed: ' + (e.message || e) });
+    }
+  }
+);
+
+// GET /ops/exception-email/log — recent send log entries for debugging.
+app.get('/ops/exception-email/log',
+  authenticateRequest,
+  auditLog('view_exception_email_log'),
+  (req, res) => {
+    try {
+      const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+      const rows = db.prepare(`
+        SELECT id, sent_at, kind, trigger_source, to_internal, to_client, from_address, reply_to,
+               subject, narrative_source, resend_message_id, status, error
+        FROM email_send_log ORDER BY id DESC LIMIT ?
+      `).all(limit);
+      return res.json({ count: rows.length, log: rows });
+    } catch (e) {
+      console.error('[GET /ops/exception-email/log]', e);
+      return res.status(500).json({ error: 'log failed: ' + (e.message || e) });
+    }
+  }
+);
+
+// ==================================================================
+// ===== End Chunk 4 Exception Email Engine =========================
 // ==================================================================
 
 
