@@ -2928,10 +2928,10 @@ function buildReportForWeek(ws, currentWs, summary) {
     }
   }
 
-  // Group rows when ≥3 share the same root cause (keeps the email scannable
-  // when one container is stuck behind the same blocker for many suppliers).
-  // Below N=3 we keep rows individual so each feels meaningful.
-  const GROUP_THRESHOLD = 3;
+  // Group rows when ≥2 share the same root cause (aggressive consolidation
+  // chosen during design — keeps the email from ballooning when many lanes
+  // share a single blocker).
+  const GROUP_THRESHOLD = 2;
   const groupedTransit = groupTransitRows(transit, GROUP_THRESHOLD);
   const groupedReceiving = groupReceivingRows(receiving, GROUP_THRESHOLD);
 
@@ -2950,32 +2950,42 @@ function buildReportForWeek(ws, currentWs, summary) {
 }
 
 // Group transit rows by (container, off_track_reason) when N≥threshold.
-// Below threshold, rows remain individual. Grouped rows get a synthetic
-// `is_grouped` flag and carry arrays of zendesk/supplier values.
+// Group transit rows by (root_cause, mode) within a week. Container is
+// collapsed into the grouped row's data, not the key — which means 11 lanes
+// all "packing list pending, Sea" consolidate regardless of whether containers
+// have been assigned yet. Off-track only; on-track rows already aggregated
+// to counts upstream.
 function groupTransitRows(rows, threshold) {
-  const buckets = new Map();   // key -> { rep, members: [] }
+  const buckets = new Map();
   for (const r of rows) {
-    // Only group off-track rows; on-track rows are already collapsed into a count
-    const containerKey = (r.container && r.container !== '—') ? r.container : null;
-    // Require a real container to group. If no container, keep row individual.
-    const groupable = !!(containerKey && r.status === 'off_track' && r.off_track_reason);
+    const groupable = !!(r.status === 'off_track' && r.off_track_reason);
     if (!groupable) {
       buckets.set(`__solo_${buckets.size}`, { rep: r, members: [r] });
       continue;
     }
-    const key = `${containerKey}||${r.off_track_reason}`;
+    const key = `${r.off_track_reason}||${r.mode}`;
     if (!buckets.has(key)) buckets.set(key, { rep: r, members: [] });
     buckets.get(key).members.push(r);
   }
   const out = [];
   for (const { rep, members } of buckets.values()) {
     if (members.length >= threshold) {
+      // Build a deduped container list for the grouped row's detail. Many
+      // early-stage lanes share "no container yet" — collapse to a sensible
+      // label.
+      const containers = Array.from(new Set(
+        members.map(m => m.container).filter(c => c && c !== '—')
+      ));
+      const containerLabel = containers.length === 0
+        ? 'containers pending'
+        : (containers.length === 1 ? containers[0] : `${containers.length} containers`);
       out.push({
         type: 'transit',
         is_grouped: true,
         member_count: members.length,
         week_start: rep.week_start,
-        container: rep.container,
+        container: containerLabel,
+        containers_list: containers,     // for detail text
         mode: rep.mode,
         status: 'off_track',
         off_track_reason: rep.off_track_reason,
@@ -2989,12 +2999,14 @@ function groupTransitRows(rows, threshold) {
   return out;
 }
 
-// Group receiving rows by (supplier, status, note) when N≥threshold.
-// Emits a grouped row with aggregated cartons + list of PO numbers.
+// Group receiving rows by (supplier, status) within a week. Varying carton
+// counts or "N cartons received" notes no longer split the group — the
+// outcome (on-track received / past due) is the thing that matters for
+// client-facing rollup. Emits a grouped row with aggregated totals.
 function groupReceivingRows(rows, threshold) {
   const buckets = new Map();
   for (const r of rows) {
-    const key = `${r.supplier}||${r.status}||${r.note}`;
+    const key = `${r.supplier}||${r.status}`;
     if (!buckets.has(key)) buckets.set(key, []);
     buckets.get(key).push(r);
   }
@@ -3003,16 +3015,21 @@ function groupReceivingRows(rows, threshold) {
     if (members.length >= threshold) {
       const cartons = members.reduce((s, m) => s + (Number(m.cartons_received) || 0), 0);
       const target = members.reduce((s, m) => s + (Number(m.target_qty) || 0), 0);
+      // Pick a clean outcome note that summarizes the group
+      const note = members[0].status === 'off_track'
+        ? `${members.length} POs past due, not received`
+        : `${members.length} POs received · ${cartons} cartons`;
       out.push({
         type: 'receiving',
         is_grouped: true,
         member_count: members.length,
         supplier: members[0].supplier,
         status: members[0].status,
-        note: members[0].note,
+        note,
         pos: members.map(m => m.po_number),
         cartons_received: cartons,
         target_qty: target,
+        pos: members.map(m => m.po_number),
       });
     } else {
       for (const m of members) out.push(m);
@@ -3404,12 +3421,13 @@ function renderEmailHtml(report, narrative) {
 
     let headline, identifier, detail;
     if (t.is_grouped) {
-      // Grouped row: headline is the shared root cause, identifier lists
-      // the container + supplier count, detail expands tickets + suppliers.
+      // Grouped row: headline is the shared root cause. Identifier leads with
+      // the lane count + mode; container summary (may be "containers pending"
+      // for early-stage groups). Detail expands tickets + suppliers.
       headline = escHtml(capitalize(t.off_track_reason.split(' (')[0]));
       const parenMatch = t.off_track_reason.match(/\(([^)]+)\)/);
       const expectedDetail = parenMatch ? parenMatch[1] : '';
-      identifier = `Container <strong>${escHtml(t.container)}</strong> · ${escHtml(t.mode)} · <strong>${t.member_count} lanes affected</strong>`;
+      identifier = `<strong>${t.member_count} ${t.mode} lanes affected</strong> · ${escHtml(t.container)}`;
       const zList = t.zendesks.slice(0, 15).join(', ') + (t.zendesks.length > 15 ? ` +${t.zendesks.length - 15} more` : '');
       const supplierList = t.suppliers.slice(0, 5).join(', ') + (t.suppliers.length > 5 ? ` +${t.suppliers.length - 5} more` : '');
       detail = `${expectedDetail ? expectedDetail + ' · ' : ''}Zendesk: ${escHtml(zList)}<br/>Suppliers: ${escHtml(supplierList)}`;
@@ -3444,9 +3462,9 @@ function renderEmailHtml(report, narrative) {
     let headline, identifier, detail;
     if (r.is_grouped) {
       headline = escHtml(capitalize(r.note));
-      identifier = `<strong>${escHtml(r.supplier)}</strong> · <strong>${r.member_count} POs</strong> · ${r.target_qty} units planned`;
+      identifier = `<strong>${escHtml(r.supplier)}</strong> · ${r.target_qty} units planned`;
       const poList = r.pos.slice(0, 20).join(', ') + (r.pos.length > 20 ? ` +${r.pos.length - 20} more` : '');
-      detail = `${r.cartons_received} cartons received · POs: ${escHtml(poList)}`;
+      detail = `POs: ${escHtml(poList)}`;
     } else {
       headline = escHtml(capitalize(r.note));
       identifier = `PO <strong>${escHtml(r.po_number)}</strong> · ${escHtml(r.supplier)} · ${r.target_qty} units`;
@@ -3551,7 +3569,7 @@ function renderEmailText(report, narrative) {
         if (r.is_grouped) {
           const poList = r.pos.slice(0, 10).join(', ') + (r.pos.length > 10 ? ` +${r.pos.length - 10} more` : '');
           lines.push(`    [${tag}] ${capitalize(r.note)}`);
-          lines.push(`      ${r.supplier} · ${r.member_count} POs · ${r.target_qty}u planned · ${r.cartons_received} cartons received`);
+          lines.push(`      ${r.supplier} · ${r.target_qty}u planned`);
           lines.push(`      POs: ${poList}`);
         } else {
           lines.push(`    [${tag}] ${capitalize(r.note)}`);
@@ -3579,7 +3597,7 @@ function renderEmailText(report, narrative) {
           const parenMatch = t.off_track_reason.match(/\(([^)]+)\)/);
           const expectedDetail = parenMatch ? parenMatch[1] : '';
           lines.push(`    [OFF-TRACK] ${headline}`);
-          lines.push(`      Container ${t.container} · ${t.mode} · ${t.member_count} lanes affected`);
+          lines.push(`      ${t.member_count} ${t.mode} lanes affected · ${t.container}`);
           if (expectedDetail) lines.push(`      ${expectedDetail}`);
           const zList = t.zendesks.slice(0, 15).join(', ') + (t.zendesks.length > 15 ? ` +${t.zendesks.length - 15} more` : '');
           lines.push(`      Zendesk: ${zList}`);
