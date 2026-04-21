@@ -3548,78 +3548,86 @@ function renderEmailHtml(report, narrative) {
   const mutedColor = '#6b7280';
   const borderColor = '#e5e7eb';
 
-  const css = `
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #111827; line-height: 1.5; margin: 0; padding: 20px; background: #f9fafb; }
-    .container { max-width: 720px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; border: 1px solid ${borderColor}; }
-    h1 { font-size: 20px; color: ${headerBrand}; margin: 0 0 8px 0; }
-    /* Narrative block: neutral styling, bullet list. Attribution line sits below. */
-    .narrative { font-size: 14px; color: #374151; margin: 16px 0 6px 0; padding: 14px 18px; background: #f9fafb; border: 1px solid ${borderColor}; border-radius: 6px; }
-    .narrative ul { margin: 0; padding: 0 0 0 20px; }
-    .narrative li { margin: 2px 0; line-height: 1.55; }
-    .attribution { font-size: 11px; color: ${mutedColor}; margin: 0 0 24px 0; padding: 0 4px; font-style: italic; }
-    h2 { font-size: 15px; color: #111827; margin: 24px 0 8px 0; padding-bottom: 6px; border-bottom: 1px solid ${borderColor}; }
-    .subtle { color: ${mutedColor}; font-size: 12px; }
-    /* Row layout: headline-first, badge top-right, identifier below, muted detail at bottom */
-    .row { position: relative; padding: 10px 90px 10px 12px; margin: 6px 0; border-radius: 4px; font-size: 13px; border: 1px solid ${borderColor}; }
-    .row.off-track { border-left: 3px solid ${offTrackColor}; background: #fef2f2; }
-    .row.on-track { border-left: 3px solid ${onTrackColor}; background: #f0fdf4; }
-    .row .headline { font-weight: 600; font-size: 13px; color: #111827; margin-bottom: 2px; }
-    .row .identifier { color: #374151; font-size: 12px; }
-    .row .detail { color: ${mutedColor}; font-size: 11px; margin-top: 2px; }
-    .row .badge { position: absolute; top: 10px; right: 12px; padding: 2px 8px; font-size: 9px; font-weight: 700; text-transform: uppercase; border-radius: 10px; letter-spacing: 0.05em; }
-    .badge.off { background: ${offTrackColor}; color: white; }
-    .badge.on { background: ${onTrackColor}; color: white; }
-    .summary { margin-top: 24px; padding: 14px 18px; background: #f3f4f6; border-radius: 6px; font-size: 13px; }
-    .footer { margin-top: 30px; padding-top: 16px; border-top: 1px solid ${borderColor}; font-size: 11px; color: ${mutedColor}; }
-    a { color: ${headerBrand}; }
-  `;
+  // Email clients strip or ignore CSS in <style> blocks (Gmail in particular).
+  // Every visual attribute must be inline on the element. We also avoid
+  // position:absolute and flexbox since Outlook won't render them. Layout uses
+  // table cells where alignment matters.
+
+  // Pre-computed inline style strings
+  const S = {
+    body: `font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #111827; line-height: 1.5; margin: 0; padding: 20px; background: #f9fafb;`,
+    container: `max-width: 720px; margin: 0 auto; background: #ffffff; padding: 30px; border-radius: 8px; border: 1px solid ${borderColor};`,
+    h1: `font-size: 20px; color: ${headerBrand}; margin: 0 0 8px 0;`,
+    subtitle: `color: ${mutedColor}; font-size: 12px;`,
+    narrative: `font-size: 14px; color: #374151; margin: 16px 0 6px 0; padding: 14px 18px; background: #f9fafb; border: 1px solid ${borderColor}; border-radius: 6px;`,
+    narrativeUl: `margin: 0; padding: 0 0 0 20px;`,
+    narrativeLi: `margin: 2px 0; line-height: 1.55;`,
+    attribution: `font-size: 11px; color: ${mutedColor}; margin: 0 0 24px 0; padding: 0 4px; font-style: italic;`,
+    h2: `font-size: 15px; color: #111827; margin: 24px 0 8px 0; padding-bottom: 6px; border-bottom: 1px solid ${borderColor};`,
+    sectionHeader: `color: ${mutedColor}; font-size: 12px; margin: 10px 0 6px 0;`,
+
+    // Row: a table wrapper so the badge can align right without absolute positioning
+    rowTableOff: `width: 100%; margin: 6px 0; border-collapse: separate; border-spacing: 0; background: #fef2f2; border: 1px solid ${borderColor}; border-left: 3px solid ${offTrackColor}; border-radius: 4px;`,
+    rowTableOn:  `width: 100%; margin: 6px 0; border-collapse: separate; border-spacing: 0; background: #f0fdf4; border: 1px solid ${borderColor}; border-left: 3px solid ${onTrackColor}; border-radius: 4px;`,
+    rowCellMain: `padding: 10px 12px; vertical-align: top;`,
+    rowCellBadge: `padding: 10px 12px; vertical-align: top; text-align: right; white-space: nowrap; width: 90px;`,
+    headline: `font-weight: 600; font-size: 13px; color: #111827; margin-bottom: 2px; display: block;`,
+    identifier: `color: #374151; font-size: 12px; display: block;`,
+    detail: `color: ${mutedColor}; font-size: 11px; margin-top: 2px; display: block;`,
+    badgeOff: `display: inline-block; padding: 3px 9px; font-size: 9px; font-weight: 700; text-transform: uppercase; border-radius: 10px; letter-spacing: 0.05em; background: ${offTrackColor}; color: #ffffff;`,
+    badgeOn:  `display: inline-block; padding: 3px 9px; font-size: 9px; font-weight: 700; text-transform: uppercase; border-radius: 10px; letter-spacing: 0.05em; background: ${onTrackColor}; color: #ffffff;`,
+
+    summaryBox: `margin-top: 24px; padding: 14px 18px; background: #f3f4f6; border-radius: 6px; font-size: 13px;`,
+    footer: `margin-top: 30px; padding-top: 16px; border-top: 1px solid ${borderColor}; font-size: 11px; color: ${mutedColor};`,
+    link: `color: ${headerBrand};`,
+  };
+
+  // Row builder — table-based for cross-client badge alignment
+  const makeRow = (isOffTrack, headlineText, identifierHtml, detailHtml) => {
+    const rowStyle = isOffTrack ? S.rowTableOff : S.rowTableOn;
+    const badgeStyle = isOffTrack ? S.badgeOff : S.badgeOn;
+    const badgeText = isOffTrack ? 'off track' : 'on track';
+    return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="${rowStyle}"><tr>
+      <td style="${S.rowCellMain}">
+        <span style="${S.headline}">${headlineText}</span>
+        <span style="${S.identifier}">${identifierHtml}</span>
+        ${detailHtml ? `<span style="${S.detail}">${detailHtml}</span>` : ''}
+      </td>
+      <td style="${S.rowCellBadge}">
+        <span style="${badgeStyle}">${badgeText}</span>
+      </td>
+    </tr></table>`;
+  };
 
   // Helpers: render a transit row (handles individual + grouped)
   const renderTransitRow = (t) => {
-    const statusClass = t.status === 'off_track' ? 'off-track' : 'on-track';
-    const badgeClass = t.status === 'off_track' ? 'off' : 'on';
-    const badgeText = t.status === 'off_track' ? 'off track' : 'on track';
-
+    const isOff = t.status === 'off_track';
     let headline, identifier, detail;
     if (t.is_grouped) {
-      // Grouped row: headline is the shared root cause. Identifier leads with
-      // the lane count + mode; container summary (may be "containers pending"
-      // for early-stage groups). Detail expands tickets + suppliers.
       headline = escHtml(capitalize(t.off_track_reason.split(' (')[0]));
       const parenMatch = t.off_track_reason.match(/\(([^)]+)\)/);
       const expectedDetail = parenMatch ? parenMatch[1] : '';
-      identifier = `<strong>${t.member_count} ${t.mode} lanes affected</strong> · ${escHtml(t.container)}`;
+      identifier = `<strong>${t.member_count} ${escHtml(t.mode)} lanes affected</strong> · ${escHtml(t.container)}`;
       const zList = t.zendesks.slice(0, 15).join(', ') + (t.zendesks.length > 15 ? ` +${t.zendesks.length - 15} more` : '');
       const supplierList = t.suppliers.slice(0, 5).join(', ') + (t.suppliers.length > 5 ? ` +${t.suppliers.length - 5} more` : '');
-      detail = `${expectedDetail ? expectedDetail + ' · ' : ''}Zendesk: ${escHtml(zList)}<br/>Suppliers: ${escHtml(supplierList)}`;
+      detail = `${expectedDetail ? escHtml(expectedDetail) + ' · ' : ''}Zendesk: ${escHtml(zList)}<br/>Suppliers: ${escHtml(supplierList)}`;
     } else {
-      // Individual row: headline is the root cause (or "on track" info),
-      // identifier is the usual Zendesk · supplier · mode · container.
-      if (t.status === 'off_track') {
+      if (isOff) {
         headline = escHtml(capitalize(t.off_track_reason.split(' (')[0]));
         const parenMatch = t.off_track_reason.match(/\(([^)]+)\)/);
         detail = parenMatch ? escHtml(parenMatch[1]) : '';
       } else {
-        headline = t.latest_stage_label ? `${escHtml(t.latest_stage_label)}` : 'On schedule, no activity logged yet';
+        headline = t.latest_stage_label ? escHtml(t.latest_stage_label) : 'On schedule, no activity logged yet';
         detail = t.latest_source === 'auto_filled' ? 'System-projected' : '';
       }
       const zLabel = t.zendesk ? `Zendesk <strong>${escHtml(t.zendesk)}</strong>` : 'no ticket';
       identifier = `${zLabel} · ${escHtml(t.supplier)} · ${escHtml(t.mode)} · Container ${escHtml(t.container)}`;
     }
-
-    return `<div class="row ${statusClass}">
-      <span class="badge ${badgeClass}">${badgeText}</span>
-      <div class="headline">${headline}</div>
-      <div class="identifier">${identifier}</div>
-      ${detail ? `<div class="detail">${detail}</div>` : ''}
-    </div>`;
+    return makeRow(isOff, headline, identifier, detail);
   };
 
   const renderReceivingRow = (r) => {
-    const statusClass = r.status === 'off_track' ? 'off-track' : 'on-track';
-    const badgeClass = r.status === 'off_track' ? 'off' : 'on';
-    const badgeText = r.status === 'off_track' ? 'off track' : 'on track';
-
+    const isOff = r.status === 'off_track';
     let headline, identifier, detail;
     if (r.is_grouped) {
       headline = escHtml(capitalize(r.note));
@@ -3631,43 +3639,31 @@ function renderEmailHtml(report, narrative) {
       identifier = `PO <strong>${escHtml(r.po_number)}</strong> · ${escHtml(r.supplier)} · ${r.target_qty} units`;
       detail = '';
     }
-
-    return `<div class="row ${statusClass}">
-      <span class="badge ${badgeClass}">${badgeText}</span>
-      <div class="headline">${headline}</div>
-      <div class="identifier">${identifier}</div>
-      ${detail ? `<div class="detail">${detail}</div>` : ''}
-    </div>`;
+    return makeRow(isOff, headline, identifier, detail);
   };
 
   const weekSections = report.weeks.map(wk => {
     const parts = [];
-    parts.push(`<h2>${escHtml(wk.week_label)}${wk.is_current ? ' <span class="subtle">· current</span>' : ''}</h2>`);
+    parts.push(`<h2 style="${S.h2}">${escHtml(wk.week_label)}${wk.is_current ? ` <span style="${S.subtitle}">· current</span>` : ''}</h2>`);
 
-    // Receiving: count totals across grouped + individual rows
     if (wk.receiving.length) {
       const totalPOs = wk.receiving.reduce((s, r) => s + (r.is_grouped ? r.member_count : 1), 0);
       const offPOs = wk.receiving.filter(r => r.status === 'off_track').reduce((s, r) => s + (r.is_grouped ? r.member_count : 1), 0);
       const header = offPOs > 0
         ? `Receiving · ${totalPOs} POs · <strong style="color:${offTrackColor}">${offPOs} off-track</strong>`
         : `Receiving · ${totalPOs} POs · all on track`;
-      parts.push(`<div class="subtle" style="margin: 4px 0 6px 0;">${header}</div>`);
+      parts.push(`<div style="${S.sectionHeader}">${header}</div>`);
       for (const r of wk.receiving) parts.push(renderReceivingRow(r));
     }
 
     if (wk.vas && wk.vas.has_data) {
-      const statusClass = wk.vas.status === 'off_track' ? 'off-track' : 'on-track';
-      const badgeClass = wk.vas.status === 'off_track' ? 'off' : 'on';
-      const badgeText = wk.vas.status === 'off_track' ? 'off track' : 'on track';
-      parts.push(`<div class="subtle" style="margin: 10px 0 6px 0;">VAS</div>`);
-      parts.push(`<div class="row ${statusClass}">
-        <span class="badge ${badgeClass}">${badgeText}</span>
-        <div class="headline">${escHtml(capitalize(wk.vas.context_note || 'In progress'))}</div>
-        <div class="identifier"><strong>${wk.vas.pct}%</strong> applied · ${wk.vas.applied_units} of ${wk.vas.planned_units} units</div>
-      </div>`);
+      const isOff = wk.vas.status === 'off_track';
+      parts.push(`<div style="${S.sectionHeader}">VAS</div>`);
+      const headline = escHtml(capitalize(wk.vas.context_note || 'In progress'));
+      const identifier = `<strong>${wk.vas.pct}%</strong> applied · ${wk.vas.applied_units} of ${wk.vas.planned_units} units`;
+      parts.push(makeRow(isOff, headline, identifier, ''));
     }
 
-    // Transit: handle grouped + individual rows, sum group member counts
     const offCountLanes = wk.transit.reduce((s, r) => s + (r.is_grouped ? r.member_count : 1), 0);
     const onCount = wk.transit_on_track_count || 0;
     const totalTransit = offCountLanes + onCount;
@@ -3677,36 +3673,31 @@ function renderEmailHtml(report, narrative) {
       const header = offCountLanes > 0
         ? `Transit &amp; Clearing · ${totalTransit} lanes · <strong style="color:${offTrackColor}">${offCountLanes} off-track</strong> shown below · ${onCount} on track (${confirmed} confirmed, ${projected} projected)`
         : `Transit &amp; Clearing · ${totalTransit} lanes · all on track (${confirmed} confirmed, ${projected} projected)`;
-      parts.push(`<div class="subtle" style="margin: 10px 0 6px 0;">${header}</div>`);
+      parts.push(`<div style="${S.sectionHeader}">${header}</div>`);
       for (const t of wk.transit) parts.push(renderTransitRow(t));
     }
 
     return parts.join('\n');
   }).join('\n');
 
-  // Parse the narrative text into an HTML bullet list. Pulse is prompted to
-  // output "- " prefixed lines; the template fallback does the same. If a line
-  // doesn't start with "- ", treat the whole block as a single paragraph (rare
-  // fallback path for when Pulse ignores format instructions).
+  // Parse narrative into bullet list with inline-styled ul/li
   function renderNarrativeHtml(text) {
     const raw = String(text || '').trim();
     if (!raw) return '';
     const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
     const allBullets = lines.length > 0 && lines.every(l => /^[-•*]\s+/.test(l));
     if (allBullets) {
-      const items = lines.map(l => `<li>${escHtml(l.replace(/^[-•*]\s+/, ''))}</li>`).join('');
-      return `<ul>${items}</ul>`;
+      const items = lines.map(l => `<li style="${S.narrativeLi}">${escHtml(l.replace(/^[-•*]\s+/, ''))}</li>`).join('');
+      return `<ul style="${S.narrativeUl}">${items}</ul>`;
     }
-    // Fallback: prose. Split on sentence boundaries into bullets for consistency.
     const sentences = raw.split(/(?<=[.!?])\s+(?=[A-Z])/).map(s => s.trim()).filter(Boolean);
     if (sentences.length > 1) {
-      const items = sentences.map(s => `<li>${escHtml(s)}</li>`).join('');
-      return `<ul>${items}</ul>`;
+      const items = sentences.map(s => `<li style="${S.narrativeLi}">${escHtml(s)}</li>`).join('');
+      return `<ul style="${S.narrativeUl}">${items}</ul>`;
     }
     return `<p style="margin:0">${escHtml(raw)}</p>`;
   }
 
-  // Attribution line — conditional on where the narrative came from.
   const narrativeFromPulse = narrative.source === 'pulse';
   const attributionText = narrativeFromPulse
     ? 'The summary above is generated by Pulse AI (powered by Anthropic Claude) from VelOzity\'s operational data. All figures, POs, and status classifications are sourced directly from VelOzity\'s logistics systems.'
@@ -3714,24 +3705,26 @@ function renderEmailHtml(report, narrative) {
 
   const s = report.summary;
   return `<!doctype html>
-<html><head><meta charset="utf-8"><style>${css}</style></head>
-<body><div class="container">
-  <h1>VelOzity Exception Report</h1>
-  <div class="subtle">${escHtml(report.current_week_label)} · generated ${escHtml(report.generated_at.slice(0, 16).replace('T', ' '))} UTC</div>
-  <div class="narrative">${renderNarrativeHtml(narrative.text)}</div>
-  <div class="attribution">${escHtml(attributionText)}</div>
-  ${weekSections || '<div class="subtle" style="padding: 40px; text-align: center;">No tracked items in the current window.</div>'}
-  <div class="summary">
+<html><head><meta charset="utf-8"></head>
+<body style="${S.body}">
+<div style="${S.container}">
+  <h1 style="${S.h1}">VelOzity Exception Report</h1>
+  <div style="${S.subtitle}">${escHtml(report.current_week_label)} · generated ${escHtml(report.generated_at.slice(0, 16).replace('T', ' '))} UTC</div>
+  <div style="${S.narrative}">${renderNarrativeHtml(narrative.text)}</div>
+  <div style="${S.attribution}">${escHtml(attributionText)}</div>
+  ${weekSections || `<div style="${S.subtitle} padding: 40px; text-align: center;">No tracked items in the current window.</div>`}
+  <div style="${S.summaryBox}">
     <strong>Summary:</strong> ${s.total_items} items tracked ·
     <span style="color: ${offTrackColor}; font-weight: 600;">${s.off_track_count} off-track</span> ·
     <span style="color: ${onTrackColor}; font-weight: 600;">${s.on_track_count} on track</span>
     (${s.on_track_confirmed} confirmed by ops, ${s.on_track_projected} system-projected)
   </div>
-  <div class="footer">
-    ${base ? `Full details: <a href="${escHtml(base)}">${escHtml(base)}</a><br/>` : ''}
+  <div style="${S.footer}">
+    ${base ? `Full details: <a style="${S.link}" href="${escHtml(base)}">${escHtml(base)}</a><br/>` : ''}
     Reply to this email with questions or to request changes.
   </div>
-</div></body></html>`;
+</div>
+</body></html>`;
 }
 
 // Small title-case helper: first letter up, rest unchanged.
