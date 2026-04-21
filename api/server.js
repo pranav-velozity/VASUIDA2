@@ -3302,26 +3302,34 @@ async function generatePulseNarrative(report) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return { text: fallback, source: 'template' };
 
-  const prompt = `You are the VelOzity operations lead writing a brief executive note to The Iconic's supply chain team, reporting on their inbound logistics. Write 4-5 sentences that read like a person updating a colleague, not a dashboard readout.
+  const prompt = `You are the VelOzity operations lead writing a brief executive note to The Iconic's supply chain team, reporting on their inbound logistics. Write 3-5 bullet points that read like a person briefing a colleague, not a dashboard readout.
 
 Your goal is to describe WHAT IS HAPPENING and WHERE THE PAIN IS, not restate the numbers the reader will see below. Narrate patterns: which weeks are stuck, what stage is blocking them, whether current-week operations are on pace, whether issues are concentrated or spread out.
 
 Rules:
+- Output format: 3-5 bullet points, each starting with "- " on its own line.
+- Each bullet is one focused observation — a complete thought, one or two sentences max.
 - Use ONLY the facts provided. Do not invent information.
 - Do NOT mention specific Zendesk ticket numbers, container IDs, or supplier names — keep it generic ("one container", "several suppliers", "older weeks").
-- Do NOT use hedging language (might, possibly, may, could, perhaps, seems, appears, likely).
+- Do NOT use hedging language (might, possibly, may, could, perhaps).
 - Do NOT repeat the summary counts verbatim — the reader will see them in the body.
-- Be direct and factual. No greetings, no sign-offs.
-- If everything is genuinely on-track, say so plainly in one or two sentences.
+- Be direct and factual. No greetings, no sign-offs, no headers, no intro paragraph — just the bullets.
+- If everything is genuinely on-track, use 1-2 bullets rather than padding.
 
-Good example: "Destination customs clearance is the dominant issue this period, with a container from three weeks ago holding up seven suppliers for over a week past the expected clearance date. A second older container is running two days late on arrival. The current week's receiving is also behind — nearly a third of this week's POs are past due, though VAS is on pace with Friday's deadline. No current-week transit issues."
+Good example:
+- Destination customs clearance is the dominant issue this period, with a container from three weeks ago holding up seven suppliers for over a week past the expected date.
+- A second older container is running two days late on arrival, affecting five suppliers.
+- Current-week receiving is roughly a third behind plan, concentrated on a single supplier.
+- VAS is on pace against its Friday deadline and current-week transit is clean.
 
-Bad example (do not write like this): "During Week 17, 53 of 123 items were off-track with 7 off-track lanes in Week 13, 5 in Week 14, and 11 in Week 16. Receiving had 4 off-track POs. VAS was on-track at 24%."
+Bad example (do not write like this):
+- During Week 17, 53 of 123 items were off-track.
+- Receiving had 4 off-track POs and VAS was at 24%.
 
 Facts:
 ${facts}
 
-Write the executive note only, nothing else.`;
+Write only the bullet points, nothing else.`;
 
   try {
     const controller = new AbortController();
@@ -3447,7 +3455,7 @@ function summarizeFactsForPulse(report) {
 function buildTemplatedNarrative(report) {
   const s = report.summary;
   if (s.total_items === 0) {
-    return `This report covers ${report.current_week_label}. No tracked items in the current window.`;
+    return `- This report covers ${report.current_week_label}. No tracked items in the current window.`;
   }
 
   const parts = [];
@@ -3510,7 +3518,9 @@ function buildTemplatedNarrative(report) {
     }
   }
 
-  return parts.join(' ');
+  // Emit as bullet list — each part becomes its own bullet. The renderer
+  // detects lines starting with "- " and formats them as an HTML <ul>.
+  return parts.map(p => `- ${p}`).join('\n');
 }
 
 // ---- Email rendering ----
@@ -3542,7 +3552,11 @@ function renderEmailHtml(report, narrative) {
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #111827; line-height: 1.5; margin: 0; padding: 20px; background: #f9fafb; }
     .container { max-width: 720px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; border: 1px solid ${borderColor}; }
     h1 { font-size: 20px; color: ${headerBrand}; margin: 0 0 8px 0; }
-    .narrative { font-size: 14px; color: #374151; margin: 16px 0 24px 0; padding: 12px 16px; background: #fef2f2; border-left: 3px solid ${headerBrand}; border-radius: 4px; }
+    /* Narrative block: neutral styling, bullet list. Attribution line sits below. */
+    .narrative { font-size: 14px; color: #374151; margin: 16px 0 6px 0; padding: 14px 18px; background: #f9fafb; border: 1px solid ${borderColor}; border-radius: 6px; }
+    .narrative ul { margin: 0; padding: 0 0 0 20px; }
+    .narrative li { margin: 2px 0; line-height: 1.55; }
+    .attribution { font-size: 11px; color: ${mutedColor}; margin: 0 0 24px 0; padding: 0 4px; font-style: italic; }
     h2 { font-size: 15px; color: #111827; margin: 24px 0 8px 0; padding-bottom: 6px; border-bottom: 1px solid ${borderColor}; }
     .subtle { color: ${mutedColor}; font-size: 12px; }
     /* Row layout: headline-first, badge top-right, identifier below, muted detail at bottom */
@@ -3670,13 +3684,42 @@ function renderEmailHtml(report, narrative) {
     return parts.join('\n');
   }).join('\n');
 
+  // Parse the narrative text into an HTML bullet list. Pulse is prompted to
+  // output "- " prefixed lines; the template fallback does the same. If a line
+  // doesn't start with "- ", treat the whole block as a single paragraph (rare
+  // fallback path for when Pulse ignores format instructions).
+  function renderNarrativeHtml(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return '';
+    const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const allBullets = lines.length > 0 && lines.every(l => /^[-•*]\s+/.test(l));
+    if (allBullets) {
+      const items = lines.map(l => `<li>${escHtml(l.replace(/^[-•*]\s+/, ''))}</li>`).join('');
+      return `<ul>${items}</ul>`;
+    }
+    // Fallback: prose. Split on sentence boundaries into bullets for consistency.
+    const sentences = raw.split(/(?<=[.!?])\s+(?=[A-Z])/).map(s => s.trim()).filter(Boolean);
+    if (sentences.length > 1) {
+      const items = sentences.map(s => `<li>${escHtml(s)}</li>`).join('');
+      return `<ul>${items}</ul>`;
+    }
+    return `<p style="margin:0">${escHtml(raw)}</p>`;
+  }
+
+  // Attribution line — conditional on where the narrative came from.
+  const narrativeFromPulse = narrative.source === 'pulse';
+  const attributionText = narrativeFromPulse
+    ? 'The summary above is generated by Pulse AI (powered by Anthropic Claude) from VelOzity\'s operational data. All figures, POs, and status classifications are sourced directly from VelOzity\'s logistics systems.'
+    : 'The summary above is auto-generated from VelOzity\'s operational data.';
+
   const s = report.summary;
   return `<!doctype html>
 <html><head><meta charset="utf-8"><style>${css}</style></head>
 <body><div class="container">
   <h1>VelOzity Exception Report</h1>
   <div class="subtle">${escHtml(report.current_week_label)} · generated ${escHtml(report.generated_at.slice(0, 16).replace('T', ' '))} UTC</div>
-  <div class="narrative">${escHtml(narrative.text)}</div>
+  <div class="narrative">${renderNarrativeHtml(narrative.text)}</div>
+  <div class="attribution">${escHtml(attributionText)}</div>
   ${weekSections || '<div class="subtle" style="padding: 40px; text-align: center;">No tracked items in the current window.</div>'}
   <div class="summary">
     <strong>Summary:</strong> ${s.total_items} items tracked ·
@@ -3703,6 +3746,10 @@ function renderEmailText(report, narrative) {
   lines.push(`Generated ${report.generated_at.slice(0, 16).replace('T', ' ')} UTC`);
   lines.push('');
   lines.push(narrative.text);
+  lines.push('');
+  lines.push(narrative.source === 'pulse'
+    ? 'The summary above is generated by Pulse AI (powered by Anthropic Claude) from VelOzity\'s operational data. All figures, POs, and status classifications are sourced directly from VelOzity\'s logistics systems.'
+    : 'The summary above is auto-generated from VelOzity\'s operational data.');
   lines.push('');
   for (const wk of report.weeks) {
     lines.push(`━━━ ${wk.week_label}${wk.is_current ? ' · current' : ''} ━━━`);
