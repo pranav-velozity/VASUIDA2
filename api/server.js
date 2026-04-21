@@ -4333,7 +4333,7 @@ app.get('/report/cost-utilisation/data',
       // All VAS invoices for this month
       const invs = db.prepare(`
         SELECT i.id, i.invoice_date FROM fin_invoices i
-        WHERE i.type='VAS' AND substr(i.invoice_date,1,7)=?
+        WHERE i.type='VAS' AND substr(i.week_start,1,7)=?
       `).all(mk);
 
       let vasRev = 0, cartonRev = 0, cartonQty = 0;
@@ -4349,12 +4349,28 @@ app.get('/report/cost-utilisation/data',
         }
       }
 
-      // Applied units this month
-      const recRows = db.prepare(`
-        SELECT COUNT(*) as n FROM records
-        WHERE status='complete' AND substr(date_local,1,7)=?
-      `).get(mk);
-      const appliedUnits = recRows?.n || 0;
+      // Applied units this month — via plan week_starts (same logic as Sea/Air)
+      // Units belong to the week their PO was planned, not their completion date
+      const vasWeekStarts = db.prepare(`
+        SELECT DISTINCT week_start FROM plans WHERE substr(week_start,1,7)=?
+      `).all(mk).map(r => r.week_start);
+
+      let appliedUnits = 0;
+      for (const ws of vasWeekStarts) {
+        const planRow = db.prepare('SELECT data FROM plans WHERE week_start=?').get(ws);
+        if (!planRow) continue;
+        const planRows = safeJsonParse(planRow.data, []);
+        const pos = planRows
+          .map(p => String(p.po_number||'').trim())
+          .filter(Boolean);
+        if (!pos.length) continue;
+        const placeholders = pos.map(() => '?').join(',');
+        const count = db.prepare(`
+          SELECT COUNT(*) as n FROM records
+          WHERE status='complete' AND po_number IN (${placeholders})
+        `).get(...pos);
+        appliedUnits += count?.n || 0;
+      }
 
       // VAS expenses this month
       const vasExp = db.prepare(`
@@ -4395,7 +4411,7 @@ app.get('/report/cost-utilisation/data',
       for (const [type, store] of [['SEA', seaData], ['AIR', airData]]) {
         const invs = db.prepare(`
           SELECT total FROM fin_invoices
-          WHERE type=? AND substr(invoice_date,1,7)=?
+          WHERE type=? AND substr(week_start,1,7)=?
         `).all(type, mk);
         const invoiceTotal = invs.reduce((s, i) => s + (i.total || 0), 0);
 
@@ -4420,9 +4436,8 @@ app.get('/report/cost-utilisation/data',
           const count = db.prepare(`
             SELECT COUNT(*) as n FROM records
             WHERE status='complete'
-              AND substr(date_local,1,7)=?
               AND po_number IN (${placeholders})
-          `).get(mk, ...pos);
+          `).get(...pos);
           appliedUnits += count?.n || 0;
         }
 
@@ -4981,7 +4996,7 @@ function buildReport(D) {
         <div style="font-size:10px;color:var(--mid);line-height:1.7;">
           This report covers the calendar month of <strong>\${fmtMonth(sel)}</strong> and compares against the three prior months.
           All monetary values are in <strong>\${CURR} (\${D.fx_note})</strong>.
-          Unit costs are calculated using applied records (completed units) and actual invoiced amounts by invoice date.
+          Unit costs are calculated using completed records for POs in the same operational week as each invoice. Weeks are assigned to months by their Monday start date.
           Carton replacement is reported separately and excluded from VAS unit cost calculations.
         </div>
       </div>
@@ -5100,7 +5115,7 @@ function buildReport(D) {
       <div class="method-footer">
         <strong>Methodology:</strong>
         VAS Cost/Unit = VAS invoice lines (excl. Carton Replacement) ÷ applied units, by invoice_date month.
-        Sea/Air Cost/Unit = invoice totals (type=SEA/AIR) ÷ applied units filtered by freight type on plan rows.
+        Sea/Air Cost/Unit = invoice totals (type=SEA/AIR) grouped by invoice week_start month ÷ applied units filtered by freight type on plan rows.
         All invoices included regardless of status. Carton Replacement excluded from VAS totals.
         All values in \${D.fx_note}. MoM compares selected month to prior month.
       </div>
@@ -5238,9 +5253,9 @@ function buildReport(D) {
       </div>
       <div class="method-footer">
         <strong>Methodology:</strong>
-        Cost = fin_invoices type=SEA, by invoice_date month (all statuses including draft).
+        Cost = fin_invoices type=SEA, grouped by week_start month (all statuses including draft). Week of 30 Mar counts in March, not April.
         Expense = fin_expenses category='Sea Freight Cost', by month_key.
-        Units = applied records (status=complete) for POs with freight_type=Sea on plan rows.
+        Units = completed records for POs on plan weeks with week_start in this month (date_local not used).
         Cost/Unit = Invoice total ÷ Units. Container counts from flow_week data for weeks in selected month (Air containers excluded).
       </div>
     </div>
@@ -5304,10 +5319,10 @@ function buildReport(D) {
       </div>
       <div class="method-footer">
         <strong>Methodology:</strong>
-        Cost = fin_invoices type=AIR, by invoice_date month (all statuses including draft).
+        Cost = fin_invoices type=AIR, grouped by week_start month (all statuses including draft). Week of 30 Mar counts in March, not April.
         Expense = fin_expenses category='Air Freight Cost', by month_key.
-        Units = applied records for POs with freight_type=Air on plan rows.
-        Cost/Unit = Expense ÷ Units.
+        Units = completed records for POs on plan weeks with week_start in this month (date_local not used).
+        Cost/Unit = Invoice total ÷ Units.
       </div>
     </div>
   \`);
@@ -5377,8 +5392,8 @@ function buildReport(D) {
       </div>
       <div class="method-footer">
         <strong>Methodology:</strong>
-        Cost = VAS invoice line totals excluding lines matching 'Carton Replacement - labour only', by invoice_date month (all statuses).
-        Units = records table, status=complete, by date_local month.
+        Cost = VAS invoice line totals excluding lines matching 'Carton Replacement - labour only', grouped by invoice week_start month (all statuses).
+        Units = completed records for POs on plan weeks with week_start in this month.
         Cost/Unit = total invoiced cost ÷ applied units. Carton Replacement lines reported separately on the following page.
       </div>
     </div>
