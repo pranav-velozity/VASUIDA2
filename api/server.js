@@ -3302,12 +3302,26 @@ async function generatePulseNarrative(report) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return { text: fallback, source: 'template' };
 
-  const prompt = `You are writing a 2-3 sentence executive summary for VelOzity's twice-weekly exception report to The Iconic (a logistics client). Use ONLY the facts below. Do NOT speculate, use hedging language (might, possibly, may, perhaps, etc.), or add information not in the facts. Factual, direct, and professional. No greetings, no sign-offs.
+  const prompt = `You are the VelOzity operations lead writing a brief executive note to The Iconic's supply chain team, reporting on their inbound logistics. Write 4-5 sentences that read like a person updating a colleague, not a dashboard readout.
+
+Your goal is to describe WHAT IS HAPPENING and WHERE THE PAIN IS, not restate the numbers the reader will see below. Narrate patterns: which weeks are stuck, what stage is blocking them, whether current-week operations are on pace, whether issues are concentrated or spread out.
+
+Rules:
+- Use ONLY the facts provided. Do not invent information.
+- Do NOT mention specific Zendesk ticket numbers, container IDs, or supplier names — keep it generic ("one container", "several suppliers", "older weeks").
+- Do NOT use hedging language (might, possibly, may, could, perhaps, seems, appears, likely).
+- Do NOT repeat the summary counts verbatim — the reader will see them in the body.
+- Be direct and factual. No greetings, no sign-offs.
+- If everything is genuinely on-track, say so plainly in one or two sentences.
+
+Good example: "Destination customs clearance is the dominant issue this period, with a container from three weeks ago holding up seven suppliers for over a week past the expected clearance date. A second older container is running two days late on arrival. The current week's receiving is also behind — nearly a third of this week's POs are past due, though VAS is on pace with Friday's deadline. No current-week transit issues."
+
+Bad example (do not write like this): "During Week 17, 53 of 123 items were off-track with 7 off-track lanes in Week 13, 5 in Week 14, and 11 in Week 16. Receiving had 4 off-track POs. VAS was on-track at 24%."
 
 Facts:
 ${facts}
 
-Write the 2-3 sentence summary only, nothing else.`;
+Write the executive note only, nothing else.`;
 
   try {
     const controller = new AbortController();
@@ -3315,7 +3329,7 @@ Write the 2-3 sentence summary only, nothing else.`;
     const client = getAnthropic();
     const resp = await client.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 200,
+      max_tokens: 400,
       messages: [{ role: 'user', content: prompt }],
     }, { signal: controller.signal });
     clearTimeout(timeout);
@@ -3323,13 +3337,17 @@ Write the 2-3 sentence summary only, nothing else.`;
     const text = (resp?.content?.[0]?.text || '').trim();
     if (!text) return { text: fallback, source: 'template_after_pulse_error' };
     // Reject if contains hedging words (strict prompt)
-    const hedges = /\b(might|possibly|perhaps|maybe|may\s|could\s|seems|appears|likely|unlikely)\b/i;
+    // Reject only on strong speculation words. "appears/seems/likely" are
+    // legitimate descriptive words in narrative prose — the old filter was
+    // too aggressive and fell back to template for good narratives. Keep
+    // rejecting unambiguous hedges.
+    const hedges = /\b(might|possibly|perhaps|maybe|speculativ|presumabl|supposedl|allegedl)\w*/i;
     if (hedges.test(text)) {
       console.warn('[exception-email] Pulse returned hedging language, using template fallback');
       return { text: fallback, source: 'template_after_pulse_error' };
     }
-    // Reject if too long (more than ~4 sentences worth of characters)
-    if (text.length > 600) return { text: fallback, source: 'template_after_pulse_error' };
+    // Reject if too long (more than ~6 sentences worth of characters)
+    if (text.length > 1100) return { text: fallback, source: 'template_after_pulse_error' };
     return { text, source: 'pulse' };
   } catch (e) {
     console.warn('[exception-email] Pulse narrative failed:', e.message || e);
@@ -3338,16 +3356,91 @@ Write the 2-3 sentence summary only, nothing else.`;
 }
 
 function summarizeFactsForPulse(report) {
+  // Richer, pattern-oriented facts. We don't name tickets/containers/suppliers;
+  // Pulse is asked to narrate patterns generically. But we DO tell Pulse where
+  // the concentrations are (which weeks, which root cause), how severe the
+  // lateness is, and how many suppliers are affected — enough for contextual
+  // interpretation without naming specifics.
   const lines = [];
-  lines.push(`- Report period: ${report.current_week_label}`);
-  lines.push(`- Total items tracked: ${report.summary.total_items}`);
-  lines.push(`- Off-track: ${report.summary.off_track_count}`);
-  lines.push(`- On-track: ${report.summary.on_track_count} (confirmed ${report.summary.on_track_confirmed}, system-projected ${report.summary.on_track_projected})`);
+  const s = report.summary;
+
+  lines.push(`Report period: ${report.current_week_label} (current week)`);
+  lines.push(`Scale: ${s.total_items} items tracked across ${report.weeks.length} week${report.weeks.length === 1 ? '' : 's'}`);
+  lines.push(`Off-track: ${s.off_track_count}`);
+  lines.push(`On-track: ${s.on_track_count} (${s.on_track_confirmed} confirmed by ops, ${s.on_track_projected} system-projected)`);
+  lines.push('');
+
+  // Identify concentrated issues — which week has the largest single cluster
+  // of lanes sharing the same root cause.
+  const clusters = [];
   for (const wk of report.weeks) {
-    if (wk.receiving.length) lines.push(`- ${wk.week_label} receiving: ${wk.receiving.filter(r=>r.status==='off_track').length} off-track of ${wk.receiving.length} POs`);
-    if (wk.vas && wk.vas.has_data) lines.push(`- ${wk.week_label} VAS: ${wk.vas.pct}% applied (${wk.vas.applied_units}/${wk.vas.planned_units}), ${wk.vas.status}`);
-    if (wk.transit.length) lines.push(`- ${wk.week_label} transit: ${wk.transit.filter(r=>r.status==='off_track').length} off-track of ${wk.transit.length} lanes`);
+    for (const t of (wk.transit || [])) {
+      if (t.status !== 'off_track') continue;
+      if (t.is_grouped) {
+        clusters.push({
+          week_label: wk.week_label,
+          is_current: !!wk.is_current,
+          count: t.member_count,
+          reason: (t.off_track_reason || '').split(' (')[0],
+          late_detail: (t.off_track_reason.match(/\(([^)]+)\)/) || [,''])[1],
+          suppliers_affected: t.suppliers ? t.suppliers.length : 0,
+          mode: t.mode,
+        });
+      } else {
+        clusters.push({
+          week_label: wk.week_label,
+          is_current: !!wk.is_current,
+          count: 1,
+          reason: (t.off_track_reason || '').split(' (')[0],
+          late_detail: (t.off_track_reason.match(/\(([^)]+)\)/) || [,''])[1],
+          suppliers_affected: 1,
+          mode: t.mode,
+        });
+      }
+    }
   }
+  clusters.sort((a, b) => b.count - a.count);
+
+  if (clusters.length) {
+    lines.push('Off-track transit patterns (largest clusters first, no specific identifiers):');
+    for (const c of clusters.slice(0, 5)) {
+      const currentFlag = c.is_current ? ' [CURRENT WEEK]' : '';
+      lines.push(`- ${c.week_label}${currentFlag}: ${c.count} ${c.mode} lane${c.count === 1 ? '' : 's'} — ${c.reason} — ${c.late_detail} — ${c.suppliers_affected} supplier${c.suppliers_affected === 1 ? '' : 's'} affected`);
+    }
+    lines.push('');
+  }
+
+  // Receiving patterns for the current week
+  const currentWk = report.weeks.find(w => w.is_current);
+  if (currentWk) {
+    const recvRows = currentWk.receiving || [];
+    const totalPOs = recvRows.reduce((n, r) => n + (r.is_grouped ? r.member_count : 1), 0);
+    const offPOs = recvRows.filter(r => r.status === 'off_track').reduce((n, r) => n + (r.is_grouped ? r.member_count : 1), 0);
+    if (totalPOs > 0) {
+      const pct = Math.round((offPOs / totalPOs) * 100);
+      const offSuppliers = Array.from(new Set(recvRows.filter(r => r.status === 'off_track').map(r => r.supplier)));
+      lines.push(`Current-week receiving: ${offPOs} of ${totalPOs} POs past due (${pct}%), concentrated across ${offSuppliers.length} supplier${offSuppliers.length === 1 ? '' : 's'}`);
+    }
+
+    if (currentWk.vas && currentWk.vas.has_data) {
+      const v = currentWk.vas;
+      // Determine day-of-week in UTC to give Pulse context about whether the %
+      // looks low-but-on-track or actually late.
+      const today = new Date();
+      const dow = today.getUTCDay(); // 0=Sun..6=Sat
+      const dayName = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][dow];
+      lines.push(`Current-week VAS: ${v.pct}% applied (${v.status === 'off_track' ? 'off-track, past Friday deadline' : `on pace, today is ${dayName}, deadline is Friday noon Shanghai`})`);
+    }
+
+    // Current-week transit — is the current week itself healthy?
+    const curTransit = currentWk.transit || [];
+    const curOff = curTransit.reduce((n, r) => n + (r.is_grouped ? r.member_count : 1), 0);
+    const curOn = currentWk.transit_on_track_count || 0;
+    if (curTransit.length > 0 || curOn > 0) {
+      lines.push(`Current-week transit: ${curOff} off-track, ${curOn} on track`);
+    }
+  }
+
   return lines.join('\n');
 }
 
@@ -3356,13 +3449,67 @@ function buildTemplatedNarrative(report) {
   if (s.total_items === 0) {
     return `This report covers ${report.current_week_label}. No tracked items in the current window.`;
   }
+
   const parts = [];
-  parts.push(`This report covers ${report.current_week_label} and in-flight lanes from prior weeks.`);
-  if (s.off_track_count === 0) {
-    parts.push(`All ${s.total_items} tracked items are on track (${s.on_track_confirmed} confirmed by ops, ${s.on_track_projected} system-projected).`);
-  } else {
-    parts.push(`${s.off_track_count} of ${s.total_items} items are off-track; ${s.on_track_count} remain on track (${s.on_track_confirmed} confirmed by ops, ${s.on_track_projected} system-projected).`);
+
+  // Lead with the biggest pattern if there's a concentrated cluster.
+  // Find the largest off-track grouped cluster across all weeks.
+  let biggestCluster = null;
+  for (const wk of report.weeks) {
+    for (const t of (wk.transit || [])) {
+      if (t.status !== 'off_track' || !t.is_grouped) continue;
+      if (!biggestCluster || t.member_count > biggestCluster.count) {
+        biggestCluster = {
+          count: t.member_count,
+          reason: (t.off_track_reason || '').split(' (')[0].toLowerCase(),
+          week_label: wk.week_label,
+          late_detail: (t.off_track_reason.match(/\(([^)]+)\)/) || [,''])[1],
+        };
+      }
+    }
   }
+
+  if (biggestCluster && biggestCluster.count >= 3) {
+    // biggestCluster.late_detail looks like "expected 2026-04-17, 2 days late"
+    // Strip the "expected YYYY-MM-DD, " prefix to leave just "2 days late".
+    const cleanLate = biggestCluster.late_detail
+      ? biggestCluster.late_detail.replace(/^expected \d{4}-\d{2}-\d{2},\s*/, '').trim()
+      : 'behind schedule';
+    parts.push(`The dominant pattern this period is ${biggestCluster.reason} on an older shipment, affecting ${biggestCluster.count} lanes from ${biggestCluster.week_label}, running ${cleanLate}.`);
+  }
+
+  // Current-week context
+  const currentWk = report.weeks.find(w => w.is_current);
+  if (currentWk) {
+    const recvRows = currentWk.receiving || [];
+    const offPOs = recvRows.filter(r => r.status === 'off_track').reduce((n, r) => n + (r.is_grouped ? r.member_count : 1), 0);
+    const totalPOs = recvRows.reduce((n, r) => n + (r.is_grouped ? r.member_count : 1), 0);
+    if (totalPOs > 0) {
+      if (offPOs === 0) {
+        parts.push(`Current-week receiving is on pace.`);
+      } else {
+        const pct = Math.round((offPOs / totalPOs) * 100);
+        parts.push(`Current-week receiving has ${offPOs} of ${totalPOs} POs past due (${pct}%).`);
+      }
+    }
+    if (currentWk.vas && currentWk.vas.has_data) {
+      if (currentWk.vas.status === 'off_track') {
+        parts.push(`VAS is past its Friday deadline at ${currentWk.vas.pct}%.`);
+      } else {
+        parts.push(`VAS is on pace at ${currentWk.vas.pct}%.`);
+      }
+    }
+  }
+
+  // Baseline facts if we haven't said anything meaningful yet
+  if (parts.length === 0) {
+    if (s.off_track_count === 0) {
+      parts.push(`All ${s.total_items} tracked items are on track.`);
+    } else {
+      parts.push(`${s.off_track_count} of ${s.total_items} items are off-track across ${report.weeks.length} week${report.weeks.length === 1 ? '' : 's'}; ${s.on_track_count} remain on track.`);
+    }
+  }
+
   return parts.join(' ');
 }
 
