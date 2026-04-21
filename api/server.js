@@ -2636,6 +2636,14 @@ function buildExceptionReport(opts) {
   const now = (opts && opts.now) ? new Date(opts.now) : new Date();
   const currentWs = mondayOfDate(now);
 
+  // Fix 1 (age cutoff): include weeks starting no more than 30 days before
+  // today. Transit + most ops complete well within 30 days, so anything older
+  // is almost certainly delivered-but-not-marked OR a phantom. Keeps the
+  // email focused on what's actually actionable.
+  const AGE_CUTOFF_DAYS = 30;
+  const cutoffDate = new Date(now.getTime() - AGE_CUTOFF_DAYS * 86400000);
+  const cutoffWs = mondayOfDate(cutoffDate);
+
   const summary = {
     total_items: 0,
     off_track_count: 0,
@@ -2645,32 +2653,39 @@ function buildExceptionReport(opts) {
   };
 
   // -- Determine which weeks to include --
-  // Rule: current week + any prior week that has an in-flight, undelivered lane.
+  // Current week + any prior week within 30 days that has an in-flight lane.
   // NO future weeks.
   const allPlanWeeks = db.prepare(`
     SELECT DISTINCT week_start FROM lane_planned_snapshots
-    WHERE week_start <= ?
+    WHERE week_start <= ? AND week_start >= ?
     UNION
     SELECT ? AS week_start
     ORDER BY week_start ASC
-  `).all(currentWs, currentWs);
+  `).all(currentWs, cutoffWs, currentWs);
 
   // Also pull plans + receiving for every candidate week so we can report on
-  // them even without snapshots (edge case: phantom rows, legacy weeks).
+  // them even without snapshots (edge case: legacy weeks).
   const candidateWeeks = Array.from(new Set(allPlanWeeks.map(r => r.week_start))).sort();
 
   const reportWeeks = [];
   for (const ws of candidateWeeks) {
     const wkBlock = buildReportForWeek(ws, currentWs, summary);
-    if (wkBlock && (wkBlock.receiving.length || wkBlock.transit.length || wkBlock.last_mile.length || wkBlock.vas.has_data)) {
-      reportWeeks.push(wkBlock);
-    }
+    const hasContent = wkBlock && (
+      wkBlock.receiving.length ||
+      wkBlock.transit.length ||
+      wkBlock.last_mile.length ||
+      wkBlock.vas.has_data ||
+      (wkBlock.transit_on_track_count || 0) > 0
+    );
+    if (hasContent) reportWeeks.push(wkBlock);
   }
 
   return {
     generated_at: now.toISOString(),
     current_week_start: currentWs,
     current_week_label: emailWeekLabel(currentWs),
+    age_cutoff_days: AGE_CUTOFF_DAYS,
+    age_cutoff_week: cutoffWs,
     weeks: reportWeeks,
     summary,
   };
@@ -2727,11 +2742,26 @@ function buildReportForWeek(ws, currentWs, summary) {
   // -- VAS section (current week only) --
   const vas = isCurrent ? buildVasSummary(ws, planRows, summary) : { has_data: false };
 
-  // -- Transit section (all weeks, but filter to in-flight) --
+  // -- Transit section --
+  // Fixes 2, 3, 4:
+  //   • Skip phantom rows (no zendesk + TBD freight / #N/A ticket — data-hygiene placeholders).
+  //   • Skip "no activity yet" current-week lanes (scheduled but not started).
+  //   • Show ONLY off-track lanes in the body. On-track lanes collapse to a count.
   const transit = [];
   const lastMile = [];
   const laneKeysSeen = new Set();
+  let transitOnTrackCount = 0;
+  let transitOnTrackConfirmed = 0;
+  let transitOnTrackProjected = 0;
   for (const p of planRows) {
+    // Fix 3: phantom-row filter. Skip rows where BOTH ticket is empty/#N/A
+    // AND freight is TBD — these are data-hygiene placeholders, not real lanes.
+    const rawTicket = String(p?.zendesk_ticket ?? p?.zendesk ?? p?.ticket ?? '').trim();
+    const rawFreight = String(p?.freight_type ?? p?.freight ?? p?.mode ?? '').trim();
+    const ticketIsPhantom = !rawTicket || rawTicket === '#N/A' || rawTicket === 'NA' || /^n\/?a$/i.test(rawTicket);
+    const freightIsPhantom = !rawFreight || /^tbd$/i.test(rawFreight);
+    if (ticketIsPhantom && freightIsPhantom) continue;
+
     const lk = emailPlanRowLaneKey(p);
     if (laneKeysSeen.has(lk)) continue;
     laneKeysSeen.add(lk);
@@ -2743,16 +2773,29 @@ function buildReportForWeek(ws, currentWs, summary) {
 
     // Scope rule: exclude if delivered
     if (emailLaneIsDelivered(manual, containers)) continue;
-    // Exclude prior-week lanes that have NO activity (never had a snapshot and
-    // no actuals) AND are not current week — these are phantoms.
+    // Exclude prior-week lanes with no snapshot AND no actuals.
     if (!isCurrent && !snap && Object.keys(actuals).length === 0) continue;
 
     const row = buildTransitRow({ ws, planRow: p, laneKey: lk, snap, actuals, manual, containers, summary });
-    if (row) {
+    if (!row) continue;
+
+    // Fix 4: only keep off-track rows in the detailed list; aggregate on-track into a count.
+    if (row.status === 'off_track') {
       transit.push(row);
-      // Last-mile derived row if any container has arrived but not delivered
       const lmRow = buildLastMileRow({ ws, laneKey: lk, row, containers, flowBlob: mergedFlowBlob, summary });
       if (lmRow) lastMile.push(lmRow);
+    } else {
+      transitOnTrackCount++;
+      // Fix 2: further split on-track into "active" vs "no activity yet".
+      // On-track with some actual logged (manual OR auto_filled) = active/real.
+      // On-track with no actual at all = "scheduled but nothing has happened" — bucket separately.
+      const hasAnyActual = ['packing_list_ready','origin_cleared','departed','arrived','dest_cleared','fc_receipt']
+        .some(s => actuals[s]);
+      if (hasAnyActual) {
+        // Count as projected or confirmed based on whether any manual actual exists
+        const hasManual = Object.values(actuals).some(a => a && a.source === 'manual');
+        if (hasManual) transitOnTrackConfirmed++; else transitOnTrackProjected++;
+      }
     }
   }
 
@@ -2764,6 +2807,9 @@ function buildReportForWeek(ws, currentWs, summary) {
     vas,
     transit: transit.slice(0, EMAIL_MAX_ROWS_PER_SECTION),
     last_mile: lastMile.slice(0, EMAIL_MAX_ROWS_PER_SECTION),
+    transit_on_track_count: transitOnTrackCount,
+    transit_on_track_confirmed: transitOnTrackConfirmed,
+    transit_on_track_projected: transitOnTrackProjected,
   };
 }
 
@@ -2845,6 +2891,20 @@ function buildVasSummary(ws, planRows, summary) {
   if (status === 'off_track') summary.off_track_count++;
   else { summary.on_track_count++; summary.on_track_confirmed++; }
 
+  // Fix 5: contextualize VAS for on-track partial applications.
+  // "10% applied" on a Tuesday is normal — it's not an exception. Add a note
+  // that makes this clear to the client. Off-track cases keep a starker note.
+  let contextNote;
+  if (status === 'off_track') {
+    contextNote = `Past due Friday noon Shanghai, ${pct}% applied`;
+  } else if (pct >= 100) {
+    contextNote = 'Complete';
+  } else if (pct === 0) {
+    contextNote = 'In progress — due Fri noon Shanghai';
+  } else {
+    contextNote = `In progress — ${pct}% applied, due Fri noon Shanghai`;
+  }
+
   return {
     has_data: plannedUnits > 0,
     planned_units: plannedUnits,
@@ -2852,6 +2912,7 @@ function buildVasSummary(ws, planRows, summary) {
     pct,
     status,
     due_friday: fri.toISOString(),
+    context_note: contextNote,
   };
 }
 
@@ -3106,17 +3167,26 @@ function renderEmailHtml(report, narrative) {
       parts.push(`<div class="row ${wk.vas.status === 'off_track' ? 'off-track' : 'on-track'}">
         <span class="badge ${wk.vas.status === 'off_track' ? 'off' : 'on'}">${wk.vas.status === 'off_track' ? 'off' : 'on'} track</span>
         &nbsp;<strong>${wk.vas.pct}%</strong> applied (${wk.vas.applied_units} of ${wk.vas.planned_units} units)
-        <div class="meta">Due Fri noon Shanghai</div>
+        <div class="meta">${escHtml(wk.vas.context_note || 'Due Fri noon Shanghai')}</div>
       </div>`);
     }
-    if (wk.transit.length) {
-      parts.push(`<div class="subtle" style="margin: 10px 0 6px 0;">Transit &amp; Clearing · ${wk.transit.length} lanes</div>`);
+    // Fix 4: show off-track transit rows in detail; collapse on-track to a one-liner count.
+    const totalTransit = (wk.transit ? wk.transit.length : 0) + (wk.transit_on_track_count || 0);
+    if (totalTransit > 0) {
+      const offCount = wk.transit.length;
+      const onCount = wk.transit_on_track_count || 0;
+      const confirmed = wk.transit_on_track_confirmed || 0;
+      const projected = wk.transit_on_track_projected || 0;
+      const header = offCount > 0
+        ? `Transit &amp; Clearing · ${totalTransit} lanes · <strong style="color:${offTrackColor}">${offCount} off-track</strong> shown below · ${onCount} on track (${confirmed} confirmed, ${projected} projected)`
+        : `Transit &amp; Clearing · ${totalTransit} lanes · all on track (${confirmed} confirmed, ${projected} projected)`;
+      parts.push(`<div class="subtle" style="margin: 10px 0 6px 0;">${header}</div>`);
       for (const t of wk.transit) {
         const zLabel = t.zendesk ? `Zendesk <strong>${escHtml(t.zendesk)}</strong>` : 'no ticket';
-        parts.push(`<div class="row ${t.status === 'off_track' ? 'off-track' : 'on-track'}">
-          <span class="badge ${t.status === 'off_track' ? 'off' : 'on'}">${t.status === 'off_track' ? 'off' : 'on'} track</span>
+        parts.push(`<div class="row off-track">
+          <span class="badge off">off track</span>
           &nbsp;${zLabel} · ${escHtml(t.supplier)} · ${escHtml(t.mode)} · Container ${escHtml(t.container)}
-          <div class="meta">${t.status === 'off_track' ? escHtml(t.off_track_reason) : (t.latest_stage_label ? `Last update: ${escHtml(t.latest_stage_label)}${t.latest_source === 'auto_filled' ? ' (system-projected)' : ''}` : 'No activity logged yet')}</div>
+          <div class="meta">${escHtml(t.off_track_reason)}</div>
         </div>`);
       }
     }
@@ -3170,13 +3240,18 @@ function renderEmailText(report, narrative) {
       }
     }
     if (wk.vas && wk.vas.has_data) {
-      lines.push(`  VAS: [${wk.vas.status === 'off_track' ? 'OFF-TRACK' : 'on track'}] ${wk.vas.pct}% applied (${wk.vas.applied_units}/${wk.vas.planned_units})`);
+      lines.push(`  VAS: [${wk.vas.status === 'off_track' ? 'OFF-TRACK' : 'on track'}] ${wk.vas.pct}% applied (${wk.vas.applied_units}/${wk.vas.planned_units}) — ${wk.vas.context_note || 'Due Fri noon Shanghai'}`);
     }
-    if (wk.transit.length) {
-      lines.push(`  Transit & Clearing (${wk.transit.length} lanes):`);
+    const totalTransitTxt = (wk.transit ? wk.transit.length : 0) + (wk.transit_on_track_count || 0);
+    if (totalTransitTxt > 0) {
+      const offTxt = wk.transit.length;
+      const onTxt = wk.transit_on_track_count || 0;
+      const confTxt = wk.transit_on_track_confirmed || 0;
+      const projTxt = wk.transit_on_track_projected || 0;
+      lines.push(`  Transit & Clearing: ${totalTransitTxt} lanes — ${offTxt} off-track, ${onTxt} on track (${confTxt} confirmed, ${projTxt} projected)`);
       for (const t of wk.transit) {
-        lines.push(`    [${t.status === 'off_track' ? 'OFF-TRACK' : 'on track'}] Zendesk ${t.zendesk || '—'} · ${t.supplier} · ${t.mode} · Container ${t.container}`);
-        lines.push(`      ${t.status === 'off_track' ? t.off_track_reason : (t.latest_stage_label || 'No activity logged')}`);
+        lines.push(`    [OFF-TRACK] Zendesk ${t.zendesk || '—'} · ${t.supplier} · ${t.mode} · Container ${t.container}`);
+        lines.push(`      ${t.off_track_reason}`);
       }
     }
     if (wk.last_mile.length) {
