@@ -2907,8 +2907,11 @@ function buildReportForWeek(ws, currentWs, summary) {
     // Fix 4: only keep off-track rows in the detailed list; aggregate on-track into a count.
     if (row.status === 'off_track') {
       transit.push(row);
-      const lmRow = buildLastMileRow({ ws, laneKey: lk, row, containers, flowBlob: mergedFlowBlob, summary });
-      if (lmRow) lastMile.push(lmRow);
+      // NOTE: Last Mile used to generate a separate row here, but that caused
+      // duplication — an off-track lane already gets described in transit with
+      // the right specific reason. Removed; the Last Mile section is now only
+      // useful for the narrow "cleared customs, container physically at FC,
+      // awaiting POD" case, which is a future enhancement.
     } else {
       transitOnTrackCount++;
       // Fix 2: further split on-track into "active" vs "no activity yet".
@@ -3083,6 +3086,16 @@ function buildTransitRow({ ws, planRow, laneKey, snap, actuals, manual, containe
     // manual — both represent ops-confirmed actuals. Only auto_filled is
     // system-projected.
     const isOpsConfirmed = (a) => !!(a && (a.source === 'manual' || a.source === 'imported'));
+    // Human-readable stage → action mapping. "not logged" is ops jargon; the
+    // client wants to know what's actually happening.
+    const stageAwaiting = {
+      packing_list_ready: 'packing list pending',
+      origin_cleared:     'origin customs clearance pending',
+      departed:           'departure from origin pending',
+      arrived:            'still in transit, arrival pending',
+      dest_cleared:       'awaiting destination customs clearance',
+      fc_receipt:         'awaiting FC receipt',
+    };
     for (const s of stages) {
       const planned = planCols[s];
       if (!planned) continue;
@@ -3090,9 +3103,11 @@ function buildTransitRow({ ws, planRow, laneKey, snap, actuals, manual, containe
       if (isOpsConfirmed(actual)) continue;   // ops-confirmed actual wins
       const plannedDate = new Date(planned);
       const graceEnd = addBusinessDays(plannedDate, EMAIL_GRACE_BUSINESS_DAYS);
+      const daysLateMs = now - graceEnd;
+      const daysLate = Math.max(1, Math.round(daysLateMs / 86400000));
       if (now > graceEnd && !actual) {
         status = 'off_track';
-        offTrackReason = `${EMAIL_STAGE_LABEL[s]} expected ${plannedDate.toISOString().slice(0,10)}, not logged`;
+        offTrackReason = `${stageAwaiting[s]} (expected ${plannedDate.toISOString().slice(0,10)}, ${daysLate} day${daysLate === 1 ? '' : 's'} late)`;
         break;
       }
       // Also off-track if an ops-confirmed actual exists but is late
@@ -3100,7 +3115,11 @@ function buildTransitRow({ ws, planRow, laneKey, snap, actuals, manual, containe
         const actualDate = new Date(actual.actual_at);
         if (actualDate > graceEnd) {
           status = 'off_track';
-          offTrackReason = `${EMAIL_STAGE_LABEL[s]} logged ${actualDate.toISOString().slice(0,10)}, planned ${plannedDate.toISOString().slice(0,10)}`;
+          const actualIso = actualDate.toISOString().slice(0, 10);
+          const plannedIso = plannedDate.toISOString().slice(0, 10);
+          const lateMs = actualDate - graceEnd;
+          const lateDays = Math.max(1, Math.round(lateMs / 86400000));
+          offTrackReason = `${EMAIL_STAGE_LABEL[s].toLowerCase()} completed ${actualIso}, ${lateDays} day${lateDays === 1 ? '' : 's'} late (planned ${plannedIso})`;
           break;
         }
       }
@@ -3141,6 +3160,10 @@ function buildTransitRow({ ws, planRow, laneKey, snap, actuals, manual, containe
   };
 }
 
+// Currently UNUSED — kept as a skeleton for a future narrow "container at FC,
+// awaiting POD" Last Mile section. Removed from the report pipeline on
+// 2026-04-21 because it was duplicating off-track rows already surfaced in the
+// transit section with more specific reasons.
 function buildLastMileRow({ ws, laneKey, row, containers, flowBlob, summary }) {
   // Last mile only relevant for lanes that have arrived but not yet delivered.
   if (!row || !['arrived', 'dest_cleared'].includes(row.latest_stage || '')) return null;
