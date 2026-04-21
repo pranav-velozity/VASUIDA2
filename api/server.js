@@ -199,6 +199,124 @@ CREATE INDEX IF NOT EXISTS idx_flow_week_ws ON flow_week(week_start);
 CREATE INDEX IF NOT EXISTS idx_flow_week_fac ON flow_week(facility);
 `);
 
+// ---- Lane baselines (per-facility-per-mode transit durations) ----
+// One row per (facility, freight_mode). Durations are in days and represent
+// the median gap from each milestone to the next. These are editable via the
+// /lanes/baselines admin API and seeded from LANE_BASELINE_SEED on first boot.
+db.exec(`
+CREATE TABLE IF NOT EXISTS lane_baselines (
+  facility                          TEXT NOT NULL,
+  freight_mode                      TEXT NOT NULL CHECK(freight_mode IN ('Sea','Air')),
+  vas_to_packing_days               REAL NOT NULL,
+  packing_to_origin_cleared_days    REAL NOT NULL,
+  origin_cleared_to_departed_days   REAL NOT NULL,
+  departed_to_arrived_days          REAL NOT NULL,
+  arrived_to_dest_cleared_days      REAL NOT NULL,
+  dest_cleared_to_fc_days           REAL NOT NULL,
+  grace_days                        REAL NOT NULL DEFAULT 1,
+  updated_at                        TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_by                        TEXT,
+  PRIMARY KEY (facility, freight_mode)
+);
+`);
+
+// ---- Lane planned-date snapshots (per-lane-per-week, frozen at creation) ----
+// A snapshot captures the six planned milestone dates for a lane at the moment
+// it entered a weekly plan. baseline_version_json stores the duration config
+// used at snapshot time so later baseline edits do not retroactively shift
+// in-flight lanes. overridden_fields_json lists fields manually edited by ops;
+// those fields are preserved during recompute-from-actuals.
+db.exec(`
+CREATE TABLE IF NOT EXISTS lane_planned_snapshots (
+  lane_key                        TEXT NOT NULL,
+  week_start                      TEXT NOT NULL,
+  facility                        TEXT NOT NULL,
+  freight_mode                    TEXT NOT NULL,
+  planned_packing_list_ready_at   TEXT,
+  planned_origin_cleared_at       TEXT,
+  planned_departed_at             TEXT,
+  planned_arrived_at              TEXT,
+  planned_dest_cleared_at         TEXT,
+  planned_fc_receipt_at           TEXT,
+  baseline_version_json           TEXT NOT NULL,
+  overridden_fields_json          TEXT NOT NULL DEFAULT '[]',
+  last_recomputed_at              TEXT,
+  last_recomputed_trigger         TEXT,
+  created_at                      TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at                      TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (lane_key, week_start)
+);
+CREATE INDEX IF NOT EXISTS idx_lane_snap_ws ON lane_planned_snapshots(week_start);
+CREATE INDEX IF NOT EXISTS idx_lane_snap_fac ON lane_planned_snapshots(facility);
+`);
+
+// ---- Lane actual dates (auto-filled + manually logged, source-tagged) ----
+// Separate from lane_planned_snapshots so we can distinguish system-projected
+// (source='auto_filled') from ops-confirmed (source='manual') entries. This is
+// the integrity backbone of the exception email: the email can accurately
+// report "on-track (confirmed)" vs "on-track (system-projected)".
+//
+// Stage values map 1:1 to the existing intl_lanes field names used by the UI:
+//   packing_list_ready  → packing_list_ready_at
+//   origin_cleared      → origin_customs_cleared_at
+//   departed            → departed_at
+//   arrived             → arrived_at
+//   dest_cleared        → dest_customs_cleared_at
+//   fc_receipt          → eta_fc   (existing last-mile ETA field)
+db.exec(`
+CREATE TABLE IF NOT EXISTS lane_actual_dates (
+  lane_key     TEXT NOT NULL,
+  week_start   TEXT NOT NULL,
+  stage        TEXT NOT NULL CHECK(stage IN (
+                 'packing_list_ready','origin_cleared','departed',
+                 'arrived','dest_cleared','fc_receipt')),
+  actual_at    TEXT NOT NULL,
+  source       TEXT NOT NULL CHECK(source IN ('auto_filled','manual','imported')),
+  source_user  TEXT,
+  logged_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (lane_key, week_start, stage)
+);
+CREATE INDEX IF NOT EXISTS idx_lane_actual_ws ON lane_actual_dates(week_start);
+CREATE INDEX IF NOT EXISTS idx_lane_actual_source ON lane_actual_dates(source);
+`);
+
+// ── Lane baseline seed (idempotent) ──
+// Day-one facilities: VOZ_KY, VOZ_UL (Shenzhen) + VOS_KY, VOS_UL (Shanghai).
+// Same numbers across all four per agreed design; tune per-row via the
+// /settings/lane-baselines admin UI once it ships.
+const LANE_BASELINE_SEED = [
+  { facility: 'VOZ_KY', mode: 'Sea', nums: [0, 1, 2, 11, 2, 2] },
+  { facility: 'VOZ_KY', mode: 'Air', nums: [0, 1, 2,  2, 2, 2] },
+  { facility: 'VOZ_UL', mode: 'Sea', nums: [0, 1, 2, 11, 2, 2] },
+  { facility: 'VOZ_UL', mode: 'Air', nums: [0, 1, 2,  2, 2, 2] },
+  { facility: 'VOS_KY', mode: 'Sea', nums: [0, 1, 2, 11, 2, 2] },
+  { facility: 'VOS_KY', mode: 'Air', nums: [0, 1, 2,  2, 2, 2] },
+  { facility: 'VOS_UL', mode: 'Sea', nums: [0, 1, 2, 11, 2, 2] },
+  { facility: 'VOS_UL', mode: 'Air', nums: [0, 1, 2,  2, 2, 2] },
+];
+(function seedLaneBaselines() {
+  try {
+    const countRow = db.prepare('SELECT COUNT(*) AS n FROM lane_baselines').get();
+    if (countRow && countRow.n > 0) return; // already seeded, respect any edits
+    const ins = db.prepare(`
+      INSERT INTO lane_baselines (
+        facility, freight_mode,
+        vas_to_packing_days, packing_to_origin_cleared_days,
+        origin_cleared_to_departed_days, departed_to_arrived_days,
+        arrived_to_dest_cleared_days, dest_cleared_to_fc_days,
+        grace_days, updated_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'seed')
+    `);
+    const tx = db.transaction((rows) => {
+      for (const r of rows) ins.run(r.facility, r.mode, ...r.nums);
+    });
+    tx(LANE_BASELINE_SEED);
+    console.log('[seed] lane_baselines: inserted', LANE_BASELINE_SEED.length, 'rows');
+  } catch (e) {
+    console.error('[seed] lane_baselines failed:', e.message || e);
+  }
+})();
+
 // ── Finance tables ──
 db.exec(`
 CREATE TABLE IF NOT EXISTS fin_invoices (
@@ -1378,7 +1496,24 @@ app.post('/flow/week/:weekStart',
         const prev = (existingObj && existingObj.intl_lanes && typeof existingObj.intl_lanes === 'object' && !Array.isArray(existingObj.intl_lanes))
           ? existingObj.intl_lanes
           : {};
-        out.intl_lanes = { ...prev, ...v };
+        // Deep merge per-lane: `{...prev, ...v}` alone would replace each
+        // lane's full blob with the incoming blob. With auto-fill writing
+        // fields in the background, that races with UI saves and wipes
+        // auto-filled values. Merge at lane-field level instead.
+        const mergedLanes = { ...prev };
+        for (const [laneK, laneV] of Object.entries(v)) {
+          if (laneV && typeof laneV === 'object' && !Array.isArray(laneV)) {
+            const priorLane = (mergedLanes[laneK] && typeof mergedLanes[laneK] === 'object' && !Array.isArray(mergedLanes[laneK])) ? mergedLanes[laneK] : {};
+            // Shallow merge per lane. Preserves `containers` array merge
+            // behavior too — an incoming `containers: [...]` still replaces
+            // the prior one (which is what saveIntlLaneManual expects since
+            // it already did its own container merge before sending).
+            mergedLanes[laneK] = { ...priorLane, ...laneV };
+          } else {
+            mergedLanes[laneK] = laneV;
+          }
+        }
+        out.intl_lanes = mergedLanes;
         continue;
       }
       out[k] = v;
@@ -1388,9 +1523,927 @@ app.post('/flow/week/:weekStart',
 
   flowWeekUpsert.run(facility, monday, JSON.stringify(merged));
 
+  // Chunk 2 hook — if the patch touched intl_lanes, mirror any manual date
+  // changes into lane_actual_dates and trigger recompute for downstream
+  // planned dates. Non-fatal: mirror/recompute errors log but don't break save.
+  try {
+    if (patch && patch.intl_lanes && typeof patch.intl_lanes === 'object' && !Array.isArray(patch.intl_lanes)) {
+      const userId = (req.auth && req.auth.userId) || null;
+      const prevLanes = (existing && existing.intl_lanes && typeof existing.intl_lanes === 'object') ? existing.intl_lanes : {};
+      for (const [laneKey, incomingLaneObj] of Object.entries(patch.intl_lanes)) {
+        if (!incomingLaneObj || typeof incomingLaneObj !== 'object') continue;
+        // Ensure snapshot exists for this lane/week. If not, we can't recompute
+        // but we still want to mirror actuals to lane_actual_dates.
+        try {
+          const parts = String(laneKey).split('||');
+          const mode = (parts[2] === 'Air') ? 'Air' : 'Sea';
+          ensureLaneSnapshot(laneKey, monday, facility, mode);
+        } catch (_) { /* best-effort */ }
+
+        // Identify which date fields actually changed in this patch vs prior blob.
+        const prevLaneObj = (prevLanes[laneKey] && typeof prevLanes[laneKey] === 'object') ? prevLanes[laneKey] : {};
+        const changedDateFields = [];
+        for (const intlField of Object.keys(LANE_INTL_FIELD_TO_STAGE)) {
+          const incoming = incomingLaneObj[intlField];
+          const previous = prevLaneObj[intlField];
+          if (incoming && incoming !== previous) changedDateFields.push(intlField);
+        }
+        if (!changedDateFields.length) continue;
+
+        const mirror = mirrorIntlLanesToActuals(incomingLaneObj, laneKey, monday, userId);
+        if (mirror.changed_stages && mirror.changed_stages.length) {
+          try {
+            recomputeLaneFromActuals(laneKey, monday, `manual_edit:${mirror.changed_stages.join(',')}`);
+          } catch (e) {
+            console.warn('[flow-week→recompute]', laneKey, 'failed:', e.message || e);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[flow-week→actuals] hook failed (non-fatal):', e.message || e);
+  }
+
   return res.json({ ok: true, facility, week_start: monday, data: merged });
 });
 
+
+// ===== Lane Baselines Admin API =====
+// Config table read/write for per-(facility, freight_mode) transit durations.
+// Any Clerk-authed user can edit per agreed scope; every edit is audited and
+// tagged with the editing user's Clerk ID in updated_by for traceability.
+
+const LANE_BASELINE_DURATION_FIELDS = [
+  'vas_to_packing_days',
+  'packing_to_origin_cleared_days',
+  'origin_cleared_to_departed_days',
+  'departed_to_arrived_days',
+  'arrived_to_dest_cleared_days',
+  'dest_cleared_to_fc_days',
+];
+const LANE_BASELINE_ALL_NUMERIC_FIELDS = [
+  ...LANE_BASELINE_DURATION_FIELDS,
+  'grace_days',
+];
+
+function sanitizeFreightMode(v) {
+  const s = String(v || '').trim();
+  if (!s) return null;
+  if (/^sea$/i.test(s)) return 'Sea';
+  if (/^air$/i.test(s)) return 'Air';
+  return null;
+}
+
+function validateBaselineNumbers(body) {
+  for (const key of LANE_BASELINE_ALL_NUMERIC_FIELDS) {
+    if (body[key] === undefined || body[key] === null || body[key] === '') {
+      return { ok: false, error: `${key} is required` };
+    }
+    const n = Number(body[key]);
+    if (!Number.isFinite(n)) return { ok: false, error: `${key} must be a number` };
+    if (n < 0) return { ok: false, error: `${key} must be >= 0` };
+    if (n > 365) return { ok: false, error: `${key} must be <= 365` };
+  }
+  return { ok: true };
+}
+
+app.get('/lanes/baselines',
+  authenticateRequest,
+  auditLog('view_lane_baselines'),
+  (req, res) => {
+    try {
+      const rows = db.prepare(`
+        SELECT facility, freight_mode,
+               vas_to_packing_days, packing_to_origin_cleared_days,
+               origin_cleared_to_departed_days, departed_to_arrived_days,
+               arrived_to_dest_cleared_days, dest_cleared_to_fc_days,
+               grace_days, updated_at, updated_by
+        FROM lane_baselines
+        ORDER BY facility, freight_mode
+      `).all();
+      return res.json({ baselines: rows, count: rows.length });
+    } catch (e) {
+      console.error('[GET /lanes/baselines]', e);
+      return res.status(500).json({ error: 'Failed to load baselines: ' + (e.message || e) });
+    }
+  }
+);
+
+app.put('/lanes/baselines/:facility/:mode',
+  authenticateRequest,
+  writeOpLimiter,
+  auditLog('edit_lane_baseline'),
+  (req, res) => {
+    try {
+      const facility = normFacility(req.params.facility);
+      const mode = sanitizeFreightMode(req.params.mode);
+      if (!facility) return res.status(400).json({ error: 'facility required' });
+      if (!mode) return res.status(400).json({ error: 'freight_mode must be Sea or Air' });
+
+      const body = (req.body && typeof req.body === 'object') ? req.body : {};
+      const v = validateBaselineNumbers(body);
+      if (!v.ok) return res.status(400).json({ error: v.error });
+
+      const userId = (req.auth && req.auth.userId) || 'unknown';
+      const nums = LANE_BASELINE_ALL_NUMERIC_FIELDS.map((k) => Number(body[k]));
+
+      db.prepare(`
+        INSERT INTO lane_baselines (
+          facility, freight_mode,
+          vas_to_packing_days, packing_to_origin_cleared_days,
+          origin_cleared_to_departed_days, departed_to_arrived_days,
+          arrived_to_dest_cleared_days, dest_cleared_to_fc_days,
+          grace_days, updated_at, updated_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+        ON CONFLICT(facility, freight_mode) DO UPDATE SET
+          vas_to_packing_days             = excluded.vas_to_packing_days,
+          packing_to_origin_cleared_days  = excluded.packing_to_origin_cleared_days,
+          origin_cleared_to_departed_days = excluded.origin_cleared_to_departed_days,
+          departed_to_arrived_days        = excluded.departed_to_arrived_days,
+          arrived_to_dest_cleared_days    = excluded.arrived_to_dest_cleared_days,
+          dest_cleared_to_fc_days         = excluded.dest_cleared_to_fc_days,
+          grace_days                      = excluded.grace_days,
+          updated_at                      = excluded.updated_at,
+          updated_by                      = excluded.updated_by
+      `).run(facility, mode, ...nums, userId);
+
+      const saved = db.prepare(`
+        SELECT facility, freight_mode,
+               vas_to_packing_days, packing_to_origin_cleared_days,
+               origin_cleared_to_departed_days, departed_to_arrived_days,
+               arrived_to_dest_cleared_days, dest_cleared_to_fc_days,
+               grace_days, updated_at, updated_by
+        FROM lane_baselines WHERE facility = ? AND freight_mode = ?
+      `).get(facility, mode);
+
+      return res.json({ ok: true, baseline: saved });
+    } catch (e) {
+      console.error('[PUT /lanes/baselines]', e);
+      return res.status(500).json({ error: 'Failed to save baseline: ' + (e.message || e) });
+    }
+  }
+);
+
+app.get('/lanes/baselines/:facility/:mode',
+  authenticateRequest,
+  auditLog('view_lane_baseline'),
+  (req, res) => {
+    try {
+      const facility = normFacility(req.params.facility);
+      const mode = sanitizeFreightMode(req.params.mode);
+      if (!facility) return res.status(400).json({ error: 'facility required' });
+      if (!mode) return res.status(400).json({ error: 'freight_mode must be Sea or Air' });
+      const row = db.prepare(`
+        SELECT facility, freight_mode,
+               vas_to_packing_days, packing_to_origin_cleared_days,
+               origin_cleared_to_departed_days, departed_to_arrived_days,
+               arrived_to_dest_cleared_days, dest_cleared_to_fc_days,
+               grace_days, updated_at, updated_by
+        FROM lane_baselines WHERE facility = ? AND freight_mode = ?
+      `).get(facility, mode);
+      if (!row) return res.status(404).json({ error: 'baseline not found' });
+      return res.json({ baseline: row });
+    } catch (e) {
+      console.error('[GET /lanes/baselines/:facility/:mode]', e);
+      return res.status(500).json({ error: 'Failed to load baseline: ' + (e.message || e) });
+    }
+  }
+);
+// ===== End Lane Baselines Admin API =====
+
+
+// ==================================================================
+// ===== Lane Planned Snapshots + Auto-fill + Recompute Engine ======
+// ==================================================================
+//
+// Storage model:
+//   - lane_planned_snapshots is the system-of-record for PLANNED dates.
+//   - lane_actual_dates      is the system-of-record for ACTUAL dates + source.
+//   - flow_week.data.intl_lanes[laneKey] is a DISPLAY CACHE that the UI still
+//     reads from. The auto-fill job writes-through to both this cache and
+//     lane_actual_dates, so the UI "just works" without Chunk 3 changes.
+//   - lane_planned_snapshots.baseline_version_json is a JSON snapshot of the
+//     lane_baselines row at snapshot-creation time. Later baseline edits do
+//     NOT retroactively shift in-flight lanes.
+//   - lane_planned_snapshots.overridden_fields_json lists field names that
+//     ops manually edited. Those fields are preserved during recompute.
+
+const LANE_ENGINE_BUSINESS_TZ = 'Asia/Shanghai';
+const LANE_ENGINE_WINDOW_WEEKS_BACK = 8;
+const LANE_AUTO_FILL_HOUR_BIZ = 6;
+
+// Canonical stage ordering — used by recompute to walk downstream.
+const LANE_STAGES = [
+  { key: 'packing_list_ready', planCol: 'planned_packing_list_ready_at', duration: 'vas_to_packing_days',             anchorPrev: null                 },
+  { key: 'origin_cleared',     planCol: 'planned_origin_cleared_at',     duration: 'packing_to_origin_cleared_days',  anchorPrev: 'packing_list_ready' },
+  { key: 'departed',           planCol: 'planned_departed_at',           duration: 'origin_cleared_to_departed_days', anchorPrev: 'origin_cleared'     },
+  { key: 'arrived',            planCol: 'planned_arrived_at',            duration: 'departed_to_arrived_days',        anchorPrev: 'departed'           },
+  { key: 'dest_cleared',       planCol: 'planned_dest_cleared_at',       duration: 'arrived_to_dest_cleared_days',    anchorPrev: 'arrived'            },
+  { key: 'fc_receipt',         planCol: 'planned_fc_receipt_at',         duration: 'dest_cleared_to_fc_days',         anchorPrev: 'dest_cleared'       },
+];
+
+// Mapping between lane_actual_dates.stage and the intl_lanes blob field
+// used by the UI. These are EXISTING fields — not net-new. fc_receipt maps
+// to eta_fc (the last-mile ETA field ops already edits in the UI).
+const LANE_STAGE_TO_INTL_FIELD = {
+  packing_list_ready: 'packing_list_ready_at',
+  origin_cleared:     'origin_customs_cleared_at',
+  departed:           'departed_at',
+  arrived:            'arrived_at',
+  dest_cleared:       'dest_customs_cleared_at',
+  fc_receipt:         'eta_fc',
+};
+const LANE_INTL_FIELD_TO_STAGE = Object.fromEntries(
+  Object.entries(LANE_STAGE_TO_INTL_FIELD).map(([k, v]) => [v, k])
+);
+
+// ---- Date helpers ----
+
+function isoDateInTZ(date, tz) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(date).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function addDaysUTC(date, days) {
+  const ms = (Number(days) || 0) * 86400000;
+  return new Date(date.getTime() + ms);
+}
+
+function parseIsoDateUTC(iso) {
+  const s = String(iso || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const d = new Date(`${s}T00:00:00.000Z`);
+  return isNaN(d) ? null : d;
+}
+
+function businessNoonIso(isoDay) {
+  const d = parseIsoDateUTC(isoDay);
+  if (!d) return null;
+  // 12:00 Shanghai = 04:00 UTC (Shanghai is UTC+8 year-round, no DST).
+  return new Date(d.getTime() + 4 * 3600000).toISOString();
+}
+
+function vasDueIsoForWeek(weekStartIso) {
+  const iso = String(weekStartIso || '').trim();
+  const d = parseIsoDateUTC(iso);
+  if (!d) return null;
+  const friday = new Date(d.getTime() + 4 * 86400000);
+  const y = friday.getUTCFullYear();
+  const m = String(friday.getUTCMonth() + 1).padStart(2, '0');
+  const da = String(friday.getUTCDate()).padStart(2, '0');
+  return businessNoonIso(`${y}-${m}-${da}`);
+}
+
+// ---- Plan-row helpers (mirror UI extractors so lane keys match) ----
+
+function planRowPO(r) {
+  const v = r?.po_number ?? r?.poNumber ?? r?.po_num ?? r?.poNum ?? r?.PO_Number ?? r?.PO ?? r?.po ?? r?.PO_NO ?? r?.po_no ?? '';
+  return String(v || '').trim().toUpperCase();
+}
+function planRowSupplier(r) {
+  const v = r?.supplier_name ?? r?.supplierName ?? r?.supplier ?? r?.vendor ?? r?.vendor_name ?? r?.factory ?? r?.Supplier ?? r?.Vendor ?? '';
+  const s = String(v || '').trim();
+  return s || 'Unknown';
+}
+function planRowFreightMode(r) {
+  const v = r?.freight_type ?? r?.freightType ?? r?.freight ?? r?.mode ?? r?.transport_mode ?? '';
+  const s = String(v || '').trim();
+  if (!s) return 'Sea';
+  const low = s.toLowerCase();
+  if (low.includes('sea') || low.includes('ocean')) return 'Sea';
+  if (low.includes('air')) return 'Air';
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+function planRowTicket(r) {
+  const v = r?.zendesk_ticket ?? r?.zendeskTicket ?? r?.zendesk ?? r?.ticket ?? r?.ticket_id ?? r?.ticketId ?? '';
+  const s = String(v || '').trim();
+  return s || 'NO_TICKET';
+}
+function planRowFacility(r, fallback) {
+  const v = r?.facility_name ?? r?.facility ?? '';
+  const s = String(v || '').trim();
+  return s || String(fallback || '').trim() || '';
+}
+
+function buildLaneKey(supplier, ticket, freight) {
+  const s = String(supplier || 'Unknown').trim() || 'Unknown';
+  const t = String(ticket || 'NO_TICKET').trim() || 'NO_TICKET';
+  const f = String(freight || 'Sea').trim() || 'Sea';
+  return `${s}||${t}||${f}`;
+}
+
+// ---- Baseline resolver ----
+
+function loadBaseline(facility, freightMode) {
+  const mode = (freightMode === 'Air') ? 'Air' : 'Sea';
+  const row = db.prepare(`
+    SELECT facility, freight_mode,
+           vas_to_packing_days, packing_to_origin_cleared_days,
+           origin_cleared_to_departed_days, departed_to_arrived_days,
+           arrived_to_dest_cleared_days, dest_cleared_to_fc_days,
+           grace_days, updated_at
+    FROM lane_baselines
+    WHERE facility = ? AND freight_mode = ?
+  `).get(String(facility || '').trim(), mode);
+  return row || null;
+}
+
+// ---- Snapshot computation ----
+
+function computePlannedFromBaseline(baseline, vasDueIso) {
+  const vasDue = new Date(vasDueIso);
+  if (isNaN(vasDue)) return null;
+  let cursor = vasDue;
+  const out = {};
+  for (const stage of LANE_STAGES) {
+    cursor = addDaysUTC(cursor, Number(baseline[stage.duration]) || 0);
+    out[stage.planCol] = cursor.toISOString();
+  }
+  return out;
+}
+
+function serializeBaselineVersion(baseline) {
+  return JSON.stringify({
+    facility: baseline.facility,
+    freight_mode: baseline.freight_mode,
+    vas_to_packing_days: Number(baseline.vas_to_packing_days),
+    packing_to_origin_cleared_days: Number(baseline.packing_to_origin_cleared_days),
+    origin_cleared_to_departed_days: Number(baseline.origin_cleared_to_departed_days),
+    departed_to_arrived_days: Number(baseline.departed_to_arrived_days),
+    arrived_to_dest_cleared_days: Number(baseline.arrived_to_dest_cleared_days),
+    dest_cleared_to_fc_days: Number(baseline.dest_cleared_to_fc_days),
+    grace_days: Number(baseline.grace_days),
+    baseline_updated_at: baseline.updated_at || null,
+    snapshot_taken_at: new Date().toISOString(),
+  });
+}
+
+const lane_snapshot_get = db.prepare(`
+  SELECT * FROM lane_planned_snapshots WHERE lane_key = ? AND week_start = ?
+`);
+const lane_snapshot_insert = db.prepare(`
+  INSERT INTO lane_planned_snapshots (
+    lane_key, week_start, facility, freight_mode,
+    planned_packing_list_ready_at, planned_origin_cleared_at,
+    planned_departed_at, planned_arrived_at,
+    planned_dest_cleared_at, planned_fc_receipt_at,
+    baseline_version_json, overridden_fields_json
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]')
+`);
+
+function ensureLaneSnapshot(laneKey, weekStart, facility, freightMode) {
+  if (!laneKey || !weekStart) return { ok: false, reason: 'lane_key or week_start missing' };
+  const existing = lane_snapshot_get.get(laneKey, weekStart);
+  if (existing) return { ok: true, created: false, snapshot: existing };
+
+  if (!facility) return { ok: false, reason: 'facility missing on plan row' };
+  const baseline = loadBaseline(facility, freightMode);
+  if (!baseline) return { ok: false, reason: `no baseline for ${facility}/${freightMode}` };
+
+  const vasDueIso = vasDueIsoForWeek(weekStart);
+  if (!vasDueIso) return { ok: false, reason: 'invalid week_start' };
+
+  const planned = computePlannedFromBaseline(baseline, vasDueIso);
+  if (!planned) return { ok: false, reason: 'planned date computation failed' };
+
+  const versionJson = serializeBaselineVersion(baseline);
+
+  try {
+    lane_snapshot_insert.run(
+      laneKey, weekStart, facility, (freightMode === 'Air' ? 'Air' : 'Sea'),
+      planned.planned_packing_list_ready_at,
+      planned.planned_origin_cleared_at,
+      planned.planned_departed_at,
+      planned.planned_arrived_at,
+      planned.planned_dest_cleared_at,
+      planned.planned_fc_receipt_at,
+      versionJson
+    );
+  } catch (e) {
+    return { ok: false, reason: 'insert failed: ' + (e.message || e) };
+  }
+
+  const saved = lane_snapshot_get.get(laneKey, weekStart);
+  return { ok: true, created: true, snapshot: saved };
+}
+
+function createSnapshotsFromPlan(planRows, weekStart, queryFacility) {
+  const lanesByKey = new Map();
+  for (const r of (planRows || [])) {
+    if (!r || typeof r !== 'object') continue;
+    const supplier = planRowSupplier(r);
+    const ticket   = planRowTicket(r);
+    const freight  = planRowFreightMode(r);
+    const mode = (freight === 'Air') ? 'Air' : 'Sea';
+    const facility = planRowFacility(r, queryFacility);
+    const key = buildLaneKey(supplier, ticket, mode);
+    if (!lanesByKey.has(key)) lanesByKey.set(key, { facility, freightMode: mode, count: 0 });
+    lanesByKey.get(key).count += 1;
+  }
+
+  const summary = { total_lanes: lanesByKey.size, created: 0, skipped_existing: 0, errors: [] };
+  const createRuns = db.transaction(() => {
+    for (const [key, info] of lanesByKey.entries()) {
+      const r = ensureLaneSnapshot(key, weekStart, info.facility, info.freightMode);
+      if (r.ok && r.created) summary.created += 1;
+      else if (r.ok && !r.created) summary.skipped_existing += 1;
+      else summary.errors.push({ lane_key: key, reason: r.reason });
+    }
+  });
+  createRuns();
+  return summary;
+}
+
+// ---- Actuals: mirror + source tagging ----
+
+const lane_actual_upsert = db.prepare(`
+  INSERT INTO lane_actual_dates (lane_key, week_start, stage, actual_at, source, source_user, logged_at)
+  VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+  ON CONFLICT(lane_key, week_start, stage) DO UPDATE SET
+    actual_at   = excluded.actual_at,
+    source      = excluded.source,
+    source_user = excluded.source_user,
+    logged_at   = excluded.logged_at
+`);
+const lane_actual_by_stage_get = db.prepare(`
+  SELECT * FROM lane_actual_dates WHERE lane_key = ? AND week_start = ? AND stage = ?
+`);
+
+function mirrorIntlLanesToActuals(manualObj, laneKey, weekStart, sourceUser) {
+  const result = { mirrored_stages: [], changed_stages: [] };
+  if (!manualObj || typeof manualObj !== 'object') return result;
+
+  for (const [intlField, stage] of Object.entries(LANE_INTL_FIELD_TO_STAGE)) {
+    const raw = manualObj[intlField];
+    if (!raw) continue;
+    const actualIso = String(raw).trim();
+    if (!actualIso) continue;
+
+    const existing = lane_actual_by_stage_get.get(laneKey, weekStart, stage);
+    if (existing && existing.actual_at === actualIso && existing.source === 'manual') continue;
+    if (existing && existing.source === 'auto_filled' && existing.actual_at === actualIso) continue;
+
+    lane_actual_upsert.run(laneKey, weekStart, stage, actualIso, 'manual', sourceUser || null);
+    result.mirrored_stages.push(stage);
+    if (!existing || existing.actual_at !== actualIso) result.changed_stages.push(stage);
+  }
+
+  return result;
+}
+
+// ---- Recompute-from-actuals ----
+
+const lane_snapshot_update_planned = db.prepare(`
+  UPDATE lane_planned_snapshots SET
+    planned_packing_list_ready_at = ?,
+    planned_origin_cleared_at     = ?,
+    planned_departed_at           = ?,
+    planned_arrived_at            = ?,
+    planned_dest_cleared_at       = ?,
+    planned_fc_receipt_at         = ?,
+    last_recomputed_at            = datetime('now'),
+    last_recomputed_trigger       = ?,
+    updated_at                    = datetime('now')
+  WHERE lane_key = ? AND week_start = ?
+`);
+
+function recomputeLaneFromActuals(laneKey, weekStart, trigger) {
+  const snap = lane_snapshot_get.get(laneKey, weekStart);
+  if (!snap) return { updated: false, reason: 'no snapshot found' };
+
+  let baseline;
+  try { baseline = JSON.parse(snap.baseline_version_json || '{}'); }
+  catch { return { updated: false, reason: 'bad baseline_version_json' }; }
+
+  let overridden = [];
+  try { overridden = JSON.parse(snap.overridden_fields_json || '[]'); }
+  catch { overridden = []; }
+  const overrideSet = new Set(overridden);
+
+  const allActuals = db.prepare(
+    `SELECT stage, actual_at, source FROM lane_actual_dates WHERE lane_key = ? AND week_start = ?`
+  ).all(laneKey, weekStart);
+  const actualsByStage = new Map(allActuals.map(a => [a.stage, a]));
+
+  const newPlanned = {
+    planned_packing_list_ready_at: snap.planned_packing_list_ready_at,
+    planned_origin_cleared_at:     snap.planned_origin_cleared_at,
+    planned_departed_at:           snap.planned_departed_at,
+    planned_arrived_at:            snap.planned_arrived_at,
+    planned_dest_cleared_at:       snap.planned_dest_cleared_at,
+    planned_fc_receipt_at:         snap.planned_fc_receipt_at,
+  };
+
+  const vasDueIso = vasDueIsoForWeek(weekStart);
+  if (!vasDueIso) return { updated: false, reason: 'invalid week_start' };
+  let anchor = new Date(vasDueIso);
+
+  const fieldsUpdated = [];
+  for (const stage of LANE_STAGES) {
+    const duration = Number(baseline[stage.duration]) || 0;
+    const actual = actualsByStage.get(stage.key);
+
+    if (overrideSet.has(stage.planCol)) {
+      const pv = newPlanned[stage.planCol];
+      if (pv) anchor = new Date(pv);
+      continue;
+    }
+
+    const candidate = addDaysUTC(anchor, duration).toISOString();
+
+    if (actual && actual.source === 'manual') {
+      const actualIso = actual.actual_at;
+      if (newPlanned[stage.planCol] !== actualIso) {
+        newPlanned[stage.planCol] = actualIso;
+        fieldsUpdated.push(stage.planCol);
+      }
+      anchor = new Date(actualIso);
+      continue;
+    }
+
+    if (newPlanned[stage.planCol] !== candidate) {
+      newPlanned[stage.planCol] = candidate;
+      fieldsUpdated.push(stage.planCol);
+    }
+    anchor = new Date(candidate);
+  }
+
+  if (!fieldsUpdated.length) return { updated: false, reason: 'no change needed' };
+
+  lane_snapshot_update_planned.run(
+    newPlanned.planned_packing_list_ready_at,
+    newPlanned.planned_origin_cleared_at,
+    newPlanned.planned_departed_at,
+    newPlanned.planned_arrived_at,
+    newPlanned.planned_dest_cleared_at,
+    newPlanned.planned_fc_receipt_at,
+    String(trigger || 'unspecified'),
+    laneKey, weekStart
+  );
+
+  return { updated: true, fields_updated: fieldsUpdated };
+}
+
+// ---- Auto-fill job ----
+
+function isoDateLE(isoA, isoB) {
+  return String(isoA).slice(0, 10) <= String(isoB).slice(0, 10);
+}
+
+function autoFillLookbackWeeks(nowDate) {
+  const today = isoDateInTZ(nowDate, LANE_ENGINE_BUSINESS_TZ);
+  const d = parseIsoDateUTC(today);
+  const cutoff = new Date(d.getTime() - LANE_ENGINE_WINDOW_WEEKS_BACK * 7 * 86400000);
+  const y = cutoff.getUTCFullYear();
+  const m = String(cutoff.getUTCMonth() + 1).padStart(2, '0');
+  const da = String(cutoff.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${da}`;
+}
+
+const flow_week_get_raw = db.prepare(`SELECT data FROM flow_week WHERE facility = ? AND week_start = ?`);
+const flow_week_upsert_raw = db.prepare(`
+  INSERT INTO flow_week (facility, week_start, data, updated_at)
+  VALUES (?, ?, ?, datetime('now'))
+  ON CONFLICT(facility, week_start) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
+`);
+
+function mirrorAutoFillToIntlLanes(facility, weekStart, laneKey, stage, actualIso) {
+  try {
+    const row = flow_week_get_raw.get(facility, weekStart);
+    const blob = row ? (safeJsonParse(row.data, {}) || {}) : {};
+    const intlLanes = (blob.intl_lanes && typeof blob.intl_lanes === 'object') ? blob.intl_lanes : {};
+    const laneBlob = (intlLanes[laneKey] && typeof intlLanes[laneKey] === 'object') ? intlLanes[laneKey] : {};
+    const field = LANE_STAGE_TO_INTL_FIELD[stage];
+    if (!field) return false;
+    // Never overwrite an existing value — ops may be typing something.
+    if (laneBlob[field]) return false;
+    laneBlob[field] = actualIso;
+    laneBlob.__auto_fill_sources = { ...(laneBlob.__auto_fill_sources || {}), [field]: 'auto_filled' };
+    intlLanes[laneKey] = laneBlob;
+    blob.intl_lanes = intlLanes;
+    flow_week_upsert_raw.run(facility, weekStart, JSON.stringify(blob));
+    return true;
+  } catch (e) {
+    console.error('[mirrorAutoFillToIntlLanes]', e.message || e);
+    return false;
+  }
+}
+
+function runAutoFillJob(opts) {
+  const now = (opts && opts.now) ? new Date(opts.now) : new Date();
+  const todayIso = isoDateInTZ(now, LANE_ENGINE_BUSINESS_TZ);
+  const fromWs = autoFillLookbackWeeks(now);
+
+  const snaps = db.prepare(`
+    SELECT * FROM lane_planned_snapshots WHERE week_start >= ? ORDER BY week_start, lane_key
+  `).all(fromWs);
+
+  const summary = { scanned_lanes: snaps.length, today_iso: todayIso, from_week: fromWs, stages_filled: 0, lanes_touched: 0, errors: [] };
+
+  for (const snap of snaps) {
+    let filledForLane = 0;
+    for (const stage of LANE_STAGES) {
+      const plannedIso = snap[stage.planCol];
+      if (!plannedIso) continue;
+      if (!isoDateLE(plannedIso, todayIso)) continue;
+
+      const existing = lane_actual_by_stage_get.get(snap.lane_key, snap.week_start, stage.key);
+      if (existing) continue;
+
+      try {
+        lane_actual_upsert.run(snap.lane_key, snap.week_start, stage.key, plannedIso, 'auto_filled', null);
+        mirrorAutoFillToIntlLanes(snap.facility, snap.week_start, snap.lane_key, stage.key, plannedIso);
+        filledForLane += 1;
+      } catch (e) {
+        summary.errors.push({ lane_key: snap.lane_key, stage: stage.key, error: e.message || String(e) });
+      }
+    }
+    if (filledForLane > 0) {
+      summary.stages_filled += filledForLane;
+      summary.lanes_touched += 1;
+    }
+  }
+
+  return summary;
+}
+
+let _laneAutoFillTimer = null;
+function scheduleAutoFillJob() {
+  if (_laneAutoFillTimer) return;
+  function msUntilNext6amShanghai() {
+    const now = new Date();
+    const nowUtcMs = now.getTime();
+    const shDate = new Date(nowUtcMs + 8 * 3600000);
+    const target = new Date(Date.UTC(shDate.getUTCFullYear(), shDate.getUTCMonth(), shDate.getUTCDate(), 6, 0, 0));
+    const targetUtcMs = target.getTime() - 8 * 3600000;
+    let delta = targetUtcMs - nowUtcMs;
+    if (delta <= 0) delta += 86400000;
+    return delta;
+  }
+  function fire() {
+    try {
+      const s = runAutoFillJob();
+      console.log('[lane-autofill]', JSON.stringify(s));
+    } catch (e) {
+      console.error('[lane-autofill] job failed:', e.message || e);
+    } finally {
+      const ms = msUntilNext6amShanghai();
+      _laneAutoFillTimer = setTimeout(fire, ms);
+      if (_laneAutoFillTimer && _laneAutoFillTimer.unref) _laneAutoFillTimer.unref();
+    }
+  }
+  const ms = msUntilNext6amShanghai();
+  console.log('[lane-autofill] first fire in', Math.round(ms / 60000), 'min');
+  _laneAutoFillTimer = setTimeout(fire, ms);
+  if (_laneAutoFillTimer && _laneAutoFillTimer.unref) _laneAutoFillTimer.unref();
+}
+try { scheduleAutoFillJob(); } catch (e) { console.error('[lane-autofill] schedule failed:', e.message || e); }
+
+// ---- Backfill ----
+
+function backfillSnapshots() {
+  const result = { weeks_scanned: 0, lanes_processed: 0, created: 0, skipped_existing: 0, errors: [] };
+  try {
+    const weeks = db.prepare('SELECT week_start, data FROM plans').all();
+    for (const w of weeks) {
+      result.weeks_scanned += 1;
+      const plan = safeJsonParse(w.data, []) || [];
+      if (!Array.isArray(plan) || !plan.length) continue;
+      const s = createSnapshotsFromPlan(plan, w.week_start, null);
+      result.lanes_processed += s.total_lanes;
+      result.created += s.created;
+      result.skipped_existing += s.skipped_existing;
+      for (const e of s.errors) result.errors.push({ week_start: w.week_start, ...e });
+    }
+  } catch (e) {
+    result.errors.push({ fatal: e.message || String(e) });
+  }
+  return result;
+}
+
+// ---- Engine routes ----
+
+app.post('/lanes/snapshot/ensure',
+  authenticateRequest,
+  writeOpLimiter,
+  auditLog('ensure_lane_snapshots'),
+  (req, res) => {
+    try {
+      const ws = String(req.query.weekStart || req.body?.weekStart || '').trim();
+      if (!ws) return res.status(400).json({ error: 'weekStart required' });
+      const queryFacility = normFacility(req.query.facility || req.body?.facility || '');
+      const row = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(ws);
+      if (!row) return res.status(404).json({ error: 'no plan found for weekStart' });
+      const planRows = safeJsonParse(row.data, []) || [];
+      const summary = createSnapshotsFromPlan(planRows, ws, queryFacility);
+      return res.json({ ok: true, week_start: ws, ...summary });
+    } catch (e) {
+      console.error('[POST /lanes/snapshot/ensure]', e);
+      return res.status(500).json({ error: 'ensure failed: ' + (e.message || e) });
+    }
+  }
+);
+
+app.post('/lanes/recompute/:laneKey/:weekStart',
+  authenticateRequest,
+  writeOpLimiter,
+  auditLog('recompute_lane'),
+  (req, res) => {
+    try {
+      const laneKey = String(req.params.laneKey || '').trim();
+      const ws = String(req.params.weekStart || '').trim();
+      if (!laneKey || !ws) return res.status(400).json({ error: 'laneKey and weekStart required' });
+      const trigger = String(req.body?.trigger || 'manual_api');
+      const r = recomputeLaneFromActuals(laneKey, ws, trigger);
+      return res.json({ ok: true, lane_key: laneKey, week_start: ws, ...r });
+    } catch (e) {
+      console.error('[POST /lanes/recompute]', e);
+      return res.status(500).json({ error: 'recompute failed: ' + (e.message || e) });
+    }
+  }
+);
+
+app.post('/lanes/autofill/run', (req, res, next) => {
+  const cronSecret = process.env.LANE_CRON_SECRET;
+  const supplied = req.headers['x-lane-cron-secret'];
+  if (cronSecret && supplied === cronSecret) return next();
+  return authenticateRequest(req, res, next);
+}, auditLog('run_lane_autofill'), (req, res) => {
+  try {
+    const summary = runAutoFillJob();
+    return res.json({ ok: true, ...summary });
+  } catch (e) {
+    console.error('[POST /lanes/autofill/run]', e);
+    return res.status(500).json({ error: 'autofill failed: ' + (e.message || e) });
+  }
+});
+
+app.post('/lanes/snapshot/backfill',
+  authenticateRequest,
+  requireRole(['admin']),
+  writeOpLimiter,
+  auditLog('backfill_lane_snapshots'),
+  (req, res) => {
+    try {
+      const summary = backfillSnapshots();
+      return res.json({ ok: true, ...summary });
+    } catch (e) {
+      console.error('[POST /lanes/snapshot/backfill]', e);
+      return res.status(500).json({ error: 'backfill failed: ' + (e.message || e) });
+    }
+  }
+);
+
+// POST /lanes/snapshot/override/:laneKey/:weekStart
+// Body: { field: "planned_departed_at", value: "2026-04-30T04:00:00.000Z" }
+//  OR:  { overrides: { planned_departed_at: "...", planned_arrived_at: "..." } }
+//
+// Sets one or more planned date fields to user-chosen values AND marks each
+// as overridden (added to overridden_fields_json). Overridden fields are
+// preserved through future recomputes. Pass value=null to CLEAR an override
+// (removes it from the set and re-derives from baseline on the next recompute).
+//
+// Any overridden field change triggers a recompute so downstream auto-filled
+// planned dates re-anchor from the new value.
+app.post('/lanes/snapshot/override/:laneKey/:weekStart',
+  authenticateRequest,
+  writeOpLimiter,
+  auditLog('override_lane_planned'),
+  (req, res) => {
+    try {
+      const laneKey = String(req.params.laneKey || '').trim();
+      const ws = String(req.params.weekStart || '').trim();
+      if (!laneKey || !ws) return res.status(400).json({ error: 'laneKey and weekStart required' });
+
+      // Accept either { field, value } or { overrides: {...} }
+      const body = req.body || {};
+      const incoming = (body.overrides && typeof body.overrides === 'object')
+        ? body.overrides
+        : (body.field ? { [body.field]: body.value } : null);
+      if (!incoming) return res.status(400).json({ error: 'field+value or overrides object required' });
+
+      const allowedFields = new Set([
+        'planned_packing_list_ready_at','planned_origin_cleared_at',
+        'planned_departed_at','planned_arrived_at',
+        'planned_dest_cleared_at','planned_fc_receipt_at',
+      ]);
+      for (const k of Object.keys(incoming)) {
+        if (!allowedFields.has(k)) return res.status(400).json({ error: `field not allowed: ${k}` });
+      }
+
+      const snap = lane_snapshot_get.get(laneKey, ws);
+      if (!snap) return res.status(404).json({ error: 'snapshot not found for this lane/week' });
+
+      let overridden = [];
+      try { overridden = JSON.parse(snap.overridden_fields_json || '[]'); }
+      catch { overridden = []; }
+      const overrideSet = new Set(overridden);
+
+      // Build the update: null value means "clear this override",
+      // any non-null ISO string means "set and mark overridden".
+      const newPlanned = {
+        planned_packing_list_ready_at: snap.planned_packing_list_ready_at,
+        planned_origin_cleared_at:     snap.planned_origin_cleared_at,
+        planned_departed_at:           snap.planned_departed_at,
+        planned_arrived_at:            snap.planned_arrived_at,
+        planned_dest_cleared_at:       snap.planned_dest_cleared_at,
+        planned_fc_receipt_at:         snap.planned_fc_receipt_at,
+      };
+      const changed = [];
+      for (const [field, value] of Object.entries(incoming)) {
+        if (value === null || value === '' || value === undefined) {
+          if (overrideSet.has(field)) {
+            overrideSet.delete(field);
+            changed.push(field);
+          }
+          continue;
+        }
+        // Coerce user-friendly YYYY-MM-DD to midnight UTC ISO (or accept full ISO).
+        let iso = String(value).trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+          // Anchor to business noon (Shanghai) for consistency with baseline anchor.
+          iso = businessNoonIso(iso);
+        }
+        if (!iso || isNaN(new Date(iso))) {
+          return res.status(400).json({ error: `invalid date value for ${field}: ${value}` });
+        }
+        if (newPlanned[field] !== iso) {
+          newPlanned[field] = iso;
+          changed.push(field);
+        }
+        overrideSet.add(field);
+      }
+
+      db.prepare(`
+        UPDATE lane_planned_snapshots SET
+          planned_packing_list_ready_at = ?,
+          planned_origin_cleared_at     = ?,
+          planned_departed_at           = ?,
+          planned_arrived_at            = ?,
+          planned_dest_cleared_at       = ?,
+          planned_fc_receipt_at         = ?,
+          overridden_fields_json        = ?,
+          updated_at                    = datetime('now')
+        WHERE lane_key = ? AND week_start = ?
+      `).run(
+        newPlanned.planned_packing_list_ready_at,
+        newPlanned.planned_origin_cleared_at,
+        newPlanned.planned_departed_at,
+        newPlanned.planned_arrived_at,
+        newPlanned.planned_dest_cleared_at,
+        newPlanned.planned_fc_receipt_at,
+        JSON.stringify(Array.from(overrideSet)),
+        laneKey, ws
+      );
+
+      // Recompute to re-derive downstream fields that are NOT overridden.
+      // The overridden fields are preserved inside recomputeLaneFromActuals.
+      try {
+        recomputeLaneFromActuals(laneKey, ws, `override:${changed.join(',')}`);
+      } catch (e) {
+        console.warn('[override→recompute] failed:', e.message || e);
+      }
+
+      const updated = lane_snapshot_get.get(laneKey, ws);
+      return res.json({ ok: true, snapshot: updated, changed_fields: changed, overridden_fields: Array.from(overrideSet) });
+    } catch (e) {
+      console.error('[POST /lanes/snapshot/override]', e);
+      return res.status(500).json({ error: 'override failed: ' + (e.message || e) });
+    }
+  }
+);
+
+app.get('/lanes/snapshots/:weekStart',
+  authenticateRequest,
+  auditLog('view_lane_snapshots'),
+  (req, res) => {
+    try {
+      const ws = String(req.params.weekStart || '').trim();
+      if (!ws) return res.status(400).json({ error: 'weekStart required' });
+      const rows = db.prepare(`
+        SELECT * FROM lane_planned_snapshots WHERE week_start = ? ORDER BY lane_key
+      `).all(ws);
+      const actuals = db.prepare(`
+        SELECT * FROM lane_actual_dates WHERE week_start = ?
+      `).all(ws);
+      const actualsByLane = {};
+      for (const a of actuals) {
+        if (!actualsByLane[a.lane_key]) actualsByLane[a.lane_key] = {};
+        actualsByLane[a.lane_key][a.stage] = { actual_at: a.actual_at, source: a.source, source_user: a.source_user, logged_at: a.logged_at };
+      }
+      return res.json({ week_start: ws, snapshots: rows, actuals_by_lane: actualsByLane });
+    } catch (e) {
+      console.error('[GET /lanes/snapshots]', e);
+      return res.status(500).json({ error: 'load failed: ' + (e.message || e) });
+    }
+  }
+);
+
+// ==================================================================
+// ===== End lane engine ============================================
+// ==================================================================
 
 
 // --- Inline cell patch from Intake table ---
@@ -2661,6 +3714,17 @@ app.put('/plan/weeks/:mondayISO',
     VALUES(?, ?, datetime('now'))
     ON CONFLICT(week_start) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
   `).run(monday, JSON.stringify(arr));
+  // Lane engine hook — ensure planned-date snapshots exist for every lane
+  // (supplier, ticket, mode) in the uploaded plan. Non-fatal: snapshot
+  // creation failures log but never break the plan save.
+  try {
+    const qFacility = normFacility(req.query.facility || '');
+    const s = createSnapshotsFromPlan(arr, monday, qFacility);
+    if (s.errors && s.errors.length) console.warn('[plan-upload→snapshots] partial errors:', s.errors.slice(0, 5));
+    console.log('[plan-upload→snapshots]', monday, JSON.stringify({ total: s.total_lanes, created: s.created, skipped: s.skipped_existing, errors: s.errors.length }));
+  } catch (e) {
+    console.error('[plan-upload→snapshots] failed (non-fatal):', e.message || e);
+  }
   return res.json(arr);
 });
 
