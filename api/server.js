@@ -2692,13 +2692,27 @@ function addBusinessDays(dateLike, nDays) {
 // A lane is "delivered" (and excluded from the email) when ANY of:
 //   - manual.delivered_at is populated (lane-level)
 //   - ANY container mapped to this lane has status Delivered/Complete or delivered_at
-// Follows the existing UI isDelivered logic.
-function emailLaneIsDelivered(manualObj, containersForLane) {
+// Follows the existing UI isDelivered logic. A lane is delivered if ANY of:
+//   1. lane-level manual.delivered_at is set
+//   2. the container record itself has a delivered marker (rare)
+//   3. ANY container assigned to the lane has a receipt in lastmile_receipts
+//      showing Delivered/Complete or a delivered_at/delivered_local timestamp
+// Case (3) is the common path: ops clicks Delivered in the last-mile panel,
+// which writes to lastmile_receipts keyed by container UID. That store is
+// separate from the container record itself, so we must look it up explicitly.
+function emailLaneIsDelivered(manualObj, containersForLane, flowBlob) {
   if (manualObj && (manualObj.delivered_at || (manualObj.manual && manualObj.manual.delivered_at))) return true;
   for (const c of (containersForLane || [])) {
     if (!c) continue;
+    // Check on the container record itself (defensive; rarely populated)
     if (c.status === 'Delivered' || c.status === 'Complete') return true;
     if (c.delivered_local || c.delivered_at) return true;
+    // Check the last-mile receipt for this container — the canonical source
+    const receipt = emailLastMileStatus(flowBlob, c);
+    if (receipt) {
+      if (receipt.status === 'Delivered' || receipt.status === 'Complete') return true;
+      if (receipt.delivered_local || receipt.delivered_at) return true;
+    }
   }
   return false;
 }
@@ -2883,7 +2897,7 @@ function buildReportForWeek(ws, currentWs, summary) {
     const containers = emailContainersForLane(mergedFlowBlob, lk);
 
     // Scope rule: exclude if delivered
-    if (emailLaneIsDelivered(manual, containers)) continue;
+    if (emailLaneIsDelivered(manual, containers, mergedFlowBlob)) continue;
     // Exclude prior-week lanes with no snapshot AND no actuals.
     if (!isCurrent && !snap && Object.keys(actuals).length === 0) continue;
 
