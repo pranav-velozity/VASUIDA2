@@ -2928,18 +2928,97 @@ function buildReportForWeek(ws, currentWs, summary) {
     }
   }
 
+  // Group rows when ≥3 share the same root cause (keeps the email scannable
+  // when one container is stuck behind the same blocker for many suppliers).
+  // Below N=3 we keep rows individual so each feels meaningful.
+  const GROUP_THRESHOLD = 3;
+  const groupedTransit = groupTransitRows(transit, GROUP_THRESHOLD);
+  const groupedReceiving = groupReceivingRows(receiving, GROUP_THRESHOLD);
+
   return {
     week_start: ws,
     week_label,
     is_current: isCurrent,
-    receiving: receiving.slice(0, EMAIL_MAX_ROWS_PER_SECTION),
+    receiving: groupedReceiving.slice(0, EMAIL_MAX_ROWS_PER_SECTION),
     vas,
-    transit: transit.slice(0, EMAIL_MAX_ROWS_PER_SECTION),
+    transit: groupedTransit.slice(0, EMAIL_MAX_ROWS_PER_SECTION),
     last_mile: lastMile.slice(0, EMAIL_MAX_ROWS_PER_SECTION),
     transit_on_track_count: transitOnTrackCount,
     transit_on_track_confirmed: transitOnTrackConfirmed,
     transit_on_track_projected: transitOnTrackProjected,
   };
+}
+
+// Group transit rows by (container, off_track_reason) when N≥threshold.
+// Below threshold, rows remain individual. Grouped rows get a synthetic
+// `is_grouped` flag and carry arrays of zendesk/supplier values.
+function groupTransitRows(rows, threshold) {
+  const buckets = new Map();   // key -> { rep, members: [] }
+  for (const r of rows) {
+    // Only group off-track rows; on-track rows are already collapsed into a count
+    const containerKey = (r.container && r.container !== '—') ? r.container : null;
+    // Require a real container to group. If no container, keep row individual.
+    const groupable = !!(containerKey && r.status === 'off_track' && r.off_track_reason);
+    if (!groupable) {
+      buckets.set(`__solo_${buckets.size}`, { rep: r, members: [r] });
+      continue;
+    }
+    const key = `${containerKey}||${r.off_track_reason}`;
+    if (!buckets.has(key)) buckets.set(key, { rep: r, members: [] });
+    buckets.get(key).members.push(r);
+  }
+  const out = [];
+  for (const { rep, members } of buckets.values()) {
+    if (members.length >= threshold) {
+      out.push({
+        type: 'transit',
+        is_grouped: true,
+        member_count: members.length,
+        week_start: rep.week_start,
+        container: rep.container,
+        mode: rep.mode,
+        status: 'off_track',
+        off_track_reason: rep.off_track_reason,
+        zendesks: members.map(m => m.zendesk).filter(Boolean),
+        suppliers: Array.from(new Set(members.map(m => m.supplier).filter(Boolean))),
+      });
+    } else {
+      for (const m of members) out.push(m);
+    }
+  }
+  return out;
+}
+
+// Group receiving rows by (supplier, status, note) when N≥threshold.
+// Emits a grouped row with aggregated cartons + list of PO numbers.
+function groupReceivingRows(rows, threshold) {
+  const buckets = new Map();
+  for (const r of rows) {
+    const key = `${r.supplier}||${r.status}||${r.note}`;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(r);
+  }
+  const out = [];
+  for (const members of buckets.values()) {
+    if (members.length >= threshold) {
+      const cartons = members.reduce((s, m) => s + (Number(m.cartons_received) || 0), 0);
+      const target = members.reduce((s, m) => s + (Number(m.target_qty) || 0), 0);
+      out.push({
+        type: 'receiving',
+        is_grouped: true,
+        member_count: members.length,
+        supplier: members[0].supplier,
+        status: members[0].status,
+        note: members[0].note,
+        pos: members.map(m => m.po_number),
+        cartons_received: cartons,
+        target_qty: target,
+      });
+    } else {
+      for (const m of members) out.push(m);
+    }
+  }
+  return out;
 }
 
 function buildReceivingRows(ws, planRows, summary) {
@@ -3139,7 +3218,15 @@ function buildTransitRow({ ws, planRow, laneKey, snap, actuals, manual, containe
     if (hasAnyOpsConfirmed) summary.on_track_confirmed++; else summary.on_track_projected++;
   }
 
-  const contIds = containers.map(c => String(c.container_id || c.container || '').trim()).filter(Boolean);
+  // Build a clean container label. Ops sometimes uses placeholder strings
+  // like "ContainerTBD", "TBD", "Air Freight" (for air shipments without a
+  // container #) while the real identifier is pending. These are operational
+  // noise; omit them from the client-facing label.
+  const CONTAINER_PLACEHOLDER = /^(containertbd|tbd|n\/?a|pending|air\s*freight|unknown)$/i;
+  const contIds = containers
+    .map(c => String(c.container_id || c.container || '').trim())
+    .filter(Boolean)
+    .filter(s => !CONTAINER_PLACEHOLDER.test(s));
   const contLabel = contIds.length ? contIds.join(', ') : '—';
 
   return {
@@ -3294,69 +3381,127 @@ function renderEmailHtml(report, narrative) {
     .narrative { font-size: 14px; color: #374151; margin: 16px 0 24px 0; padding: 12px 16px; background: #fef2f2; border-left: 3px solid ${headerBrand}; border-radius: 4px; }
     h2 { font-size: 15px; color: #111827; margin: 24px 0 8px 0; padding-bottom: 6px; border-bottom: 1px solid ${borderColor}; }
     .subtle { color: ${mutedColor}; font-size: 12px; }
-    .row { padding: 8px 10px; margin: 4px 0; border-radius: 4px; font-size: 13px; border: 1px solid ${borderColor}; }
+    /* Row layout: headline-first, badge top-right, identifier below, muted detail at bottom */
+    .row { position: relative; padding: 10px 90px 10px 12px; margin: 6px 0; border-radius: 4px; font-size: 13px; border: 1px solid ${borderColor}; }
     .row.off-track { border-left: 3px solid ${offTrackColor}; background: #fef2f2; }
     .row.on-track { border-left: 3px solid ${onTrackColor}; background: #f0fdf4; }
-    .badge { display: inline-block; padding: 1px 8px; font-size: 10px; font-weight: 600; text-transform: uppercase; border-radius: 10px; letter-spacing: 0.04em; }
+    .row .headline { font-weight: 600; font-size: 13px; color: #111827; margin-bottom: 2px; }
+    .row .identifier { color: #374151; font-size: 12px; }
+    .row .detail { color: ${mutedColor}; font-size: 11px; margin-top: 2px; }
+    .row .badge { position: absolute; top: 10px; right: 12px; padding: 2px 8px; font-size: 9px; font-weight: 700; text-transform: uppercase; border-radius: 10px; letter-spacing: 0.05em; }
     .badge.off { background: ${offTrackColor}; color: white; }
     .badge.on { background: ${onTrackColor}; color: white; }
-    .meta { color: ${mutedColor}; font-size: 11px; margin-top: 2px; }
     .summary { margin-top: 24px; padding: 14px 18px; background: #f3f4f6; border-radius: 6px; font-size: 13px; }
     .footer { margin-top: 30px; padding-top: 16px; border-top: 1px solid ${borderColor}; font-size: 11px; color: ${mutedColor}; }
     a { color: ${headerBrand}; }
   `;
 
+  // Helpers: render a transit row (handles individual + grouped)
+  const renderTransitRow = (t) => {
+    const statusClass = t.status === 'off_track' ? 'off-track' : 'on-track';
+    const badgeClass = t.status === 'off_track' ? 'off' : 'on';
+    const badgeText = t.status === 'off_track' ? 'off track' : 'on track';
+
+    let headline, identifier, detail;
+    if (t.is_grouped) {
+      // Grouped row: headline is the shared root cause, identifier lists
+      // the container + supplier count, detail expands tickets + suppliers.
+      headline = escHtml(capitalize(t.off_track_reason.split(' (')[0]));
+      const parenMatch = t.off_track_reason.match(/\(([^)]+)\)/);
+      const expectedDetail = parenMatch ? parenMatch[1] : '';
+      identifier = `Container <strong>${escHtml(t.container)}</strong> · ${escHtml(t.mode)} · <strong>${t.member_count} lanes affected</strong>`;
+      const zList = t.zendesks.slice(0, 15).join(', ') + (t.zendesks.length > 15 ? ` +${t.zendesks.length - 15} more` : '');
+      const supplierList = t.suppliers.slice(0, 5).join(', ') + (t.suppliers.length > 5 ? ` +${t.suppliers.length - 5} more` : '');
+      detail = `${expectedDetail ? expectedDetail + ' · ' : ''}Zendesk: ${escHtml(zList)}<br/>Suppliers: ${escHtml(supplierList)}`;
+    } else {
+      // Individual row: headline is the root cause (or "on track" info),
+      // identifier is the usual Zendesk · supplier · mode · container.
+      if (t.status === 'off_track') {
+        headline = escHtml(capitalize(t.off_track_reason.split(' (')[0]));
+        const parenMatch = t.off_track_reason.match(/\(([^)]+)\)/);
+        detail = parenMatch ? escHtml(parenMatch[1]) : '';
+      } else {
+        headline = t.latest_stage_label ? `${escHtml(t.latest_stage_label)}` : 'On schedule, no activity logged yet';
+        detail = t.latest_source === 'auto_filled' ? 'System-projected' : '';
+      }
+      const zLabel = t.zendesk ? `Zendesk <strong>${escHtml(t.zendesk)}</strong>` : 'no ticket';
+      identifier = `${zLabel} · ${escHtml(t.supplier)} · ${escHtml(t.mode)} · Container ${escHtml(t.container)}`;
+    }
+
+    return `<div class="row ${statusClass}">
+      <span class="badge ${badgeClass}">${badgeText}</span>
+      <div class="headline">${headline}</div>
+      <div class="identifier">${identifier}</div>
+      ${detail ? `<div class="detail">${detail}</div>` : ''}
+    </div>`;
+  };
+
+  const renderReceivingRow = (r) => {
+    const statusClass = r.status === 'off_track' ? 'off-track' : 'on-track';
+    const badgeClass = r.status === 'off_track' ? 'off' : 'on';
+    const badgeText = r.status === 'off_track' ? 'off track' : 'on track';
+
+    let headline, identifier, detail;
+    if (r.is_grouped) {
+      headline = escHtml(capitalize(r.note));
+      identifier = `<strong>${escHtml(r.supplier)}</strong> · <strong>${r.member_count} POs</strong> · ${r.target_qty} units planned`;
+      const poList = r.pos.slice(0, 20).join(', ') + (r.pos.length > 20 ? ` +${r.pos.length - 20} more` : '');
+      detail = `${r.cartons_received} cartons received · POs: ${escHtml(poList)}`;
+    } else {
+      headline = escHtml(capitalize(r.note));
+      identifier = `PO <strong>${escHtml(r.po_number)}</strong> · ${escHtml(r.supplier)} · ${r.target_qty} units`;
+      detail = '';
+    }
+
+    return `<div class="row ${statusClass}">
+      <span class="badge ${badgeClass}">${badgeText}</span>
+      <div class="headline">${headline}</div>
+      <div class="identifier">${identifier}</div>
+      ${detail ? `<div class="detail">${detail}</div>` : ''}
+    </div>`;
+  };
+
   const weekSections = report.weeks.map(wk => {
     const parts = [];
     parts.push(`<h2>${escHtml(wk.week_label)}${wk.is_current ? ' <span class="subtle">· current</span>' : ''}</h2>`);
+
+    // Receiving: count totals across grouped + individual rows
     if (wk.receiving.length) {
-      parts.push(`<div class="subtle" style="margin: 4px 0 6px 0;">Receiving · ${wk.receiving.length} POs</div>`);
-      for (const r of wk.receiving) {
-        parts.push(`<div class="row ${r.status === 'off_track' ? 'off-track' : 'on-track'}">
-          <span class="badge ${r.status === 'off_track' ? 'off' : 'on'}">${r.status === 'off_track' ? 'off' : 'on'} track</span>
-          &nbsp;PO <strong>${escHtml(r.po_number)}</strong> · ${escHtml(r.supplier)} · ${r.target_qty} units
-          <div class="meta">${escHtml(r.note)}</div>
-        </div>`);
-      }
+      const totalPOs = wk.receiving.reduce((s, r) => s + (r.is_grouped ? r.member_count : 1), 0);
+      const offPOs = wk.receiving.filter(r => r.status === 'off_track').reduce((s, r) => s + (r.is_grouped ? r.member_count : 1), 0);
+      const header = offPOs > 0
+        ? `Receiving · ${totalPOs} POs · <strong style="color:${offTrackColor}">${offPOs} off-track</strong>`
+        : `Receiving · ${totalPOs} POs · all on track`;
+      parts.push(`<div class="subtle" style="margin: 4px 0 6px 0;">${header}</div>`);
+      for (const r of wk.receiving) parts.push(renderReceivingRow(r));
     }
+
     if (wk.vas && wk.vas.has_data) {
+      const statusClass = wk.vas.status === 'off_track' ? 'off-track' : 'on-track';
+      const badgeClass = wk.vas.status === 'off_track' ? 'off' : 'on';
+      const badgeText = wk.vas.status === 'off_track' ? 'off track' : 'on track';
       parts.push(`<div class="subtle" style="margin: 10px 0 6px 0;">VAS</div>`);
-      parts.push(`<div class="row ${wk.vas.status === 'off_track' ? 'off-track' : 'on-track'}">
-        <span class="badge ${wk.vas.status === 'off_track' ? 'off' : 'on'}">${wk.vas.status === 'off_track' ? 'off' : 'on'} track</span>
-        &nbsp;<strong>${wk.vas.pct}%</strong> applied (${wk.vas.applied_units} of ${wk.vas.planned_units} units)
-        <div class="meta">${escHtml(wk.vas.context_note || 'Due Fri noon Shanghai')}</div>
+      parts.push(`<div class="row ${statusClass}">
+        <span class="badge ${badgeClass}">${badgeText}</span>
+        <div class="headline">${escHtml(capitalize(wk.vas.context_note || 'In progress'))}</div>
+        <div class="identifier"><strong>${wk.vas.pct}%</strong> applied · ${wk.vas.applied_units} of ${wk.vas.planned_units} units</div>
       </div>`);
     }
-    // Fix 4: show off-track transit rows in detail; collapse on-track to a one-liner count.
-    const totalTransit = (wk.transit ? wk.transit.length : 0) + (wk.transit_on_track_count || 0);
+
+    // Transit: handle grouped + individual rows, sum group member counts
+    const offCountLanes = wk.transit.reduce((s, r) => s + (r.is_grouped ? r.member_count : 1), 0);
+    const onCount = wk.transit_on_track_count || 0;
+    const totalTransit = offCountLanes + onCount;
     if (totalTransit > 0) {
-      const offCount = wk.transit.length;
-      const onCount = wk.transit_on_track_count || 0;
       const confirmed = wk.transit_on_track_confirmed || 0;
       const projected = wk.transit_on_track_projected || 0;
-      const header = offCount > 0
-        ? `Transit &amp; Clearing · ${totalTransit} lanes · <strong style="color:${offTrackColor}">${offCount} off-track</strong> shown below · ${onCount} on track (${confirmed} confirmed, ${projected} projected)`
+      const header = offCountLanes > 0
+        ? `Transit &amp; Clearing · ${totalTransit} lanes · <strong style="color:${offTrackColor}">${offCountLanes} off-track</strong> shown below · ${onCount} on track (${confirmed} confirmed, ${projected} projected)`
         : `Transit &amp; Clearing · ${totalTransit} lanes · all on track (${confirmed} confirmed, ${projected} projected)`;
       parts.push(`<div class="subtle" style="margin: 10px 0 6px 0;">${header}</div>`);
-      for (const t of wk.transit) {
-        const zLabel = t.zendesk ? `Zendesk <strong>${escHtml(t.zendesk)}</strong>` : 'no ticket';
-        parts.push(`<div class="row off-track">
-          <span class="badge off">off track</span>
-          &nbsp;${zLabel} · ${escHtml(t.supplier)} · ${escHtml(t.mode)} · Container ${escHtml(t.container)}
-          <div class="meta">${escHtml(t.off_track_reason)}</div>
-        </div>`);
-      }
+      for (const t of wk.transit) parts.push(renderTransitRow(t));
     }
-    if (wk.last_mile.length) {
-      parts.push(`<div class="subtle" style="margin: 10px 0 6px 0;">Last Mile · ${wk.last_mile.length} at destination</div>`);
-      for (const lm of wk.last_mile) {
-        parts.push(`<div class="row on-track">
-          <span class="badge on">pending</span>
-          &nbsp;${lm.zendesk ? `Zendesk <strong>${escHtml(lm.zendesk)}</strong>` : 'no ticket'} · ${escHtml(lm.supplier)} · Container ${escHtml(lm.container)}
-          <div class="meta">${escHtml(lm.note)}</div>
-        </div>`);
-      }
-    }
+
     return parts.join('\n');
   }).join('\n');
 
@@ -3381,6 +3526,12 @@ function renderEmailHtml(report, narrative) {
 </div></body></html>`;
 }
 
+// Small title-case helper: first letter up, rest unchanged.
+function capitalize(s) {
+  const t = String(s || '').trim();
+  return t ? t[0].toUpperCase() + t.slice(1) : '';
+}
+
 function renderEmailText(report, narrative) {
   const lines = [];
   lines.push(`VelOzity Exception Report — ${report.current_week_label}`);
@@ -3390,31 +3541,64 @@ function renderEmailText(report, narrative) {
   lines.push('');
   for (const wk of report.weeks) {
     lines.push(`━━━ ${wk.week_label}${wk.is_current ? ' · current' : ''} ━━━`);
+
     if (wk.receiving.length) {
-      lines.push(`  Receiving (${wk.receiving.length} POs):`);
+      const totalPOs = wk.receiving.reduce((s, r) => s + (r.is_grouped ? r.member_count : 1), 0);
+      const offPOs = wk.receiving.filter(r => r.status === 'off_track').reduce((s, r) => s + (r.is_grouped ? r.member_count : 1), 0);
+      lines.push(`  Receiving: ${totalPOs} POs — ${offPOs} off-track, ${totalPOs - offPOs} on track`);
       for (const r of wk.receiving) {
-        lines.push(`    [${r.status === 'off_track' ? 'OFF-TRACK' : 'on track'}] PO ${r.po_number} · ${r.supplier} · ${r.target_qty}u — ${r.note}`);
+        const tag = r.status === 'off_track' ? 'OFF-TRACK' : 'on track';
+        if (r.is_grouped) {
+          const poList = r.pos.slice(0, 10).join(', ') + (r.pos.length > 10 ? ` +${r.pos.length - 10} more` : '');
+          lines.push(`    [${tag}] ${capitalize(r.note)}`);
+          lines.push(`      ${r.supplier} · ${r.member_count} POs · ${r.target_qty}u planned · ${r.cartons_received} cartons received`);
+          lines.push(`      POs: ${poList}`);
+        } else {
+          lines.push(`    [${tag}] ${capitalize(r.note)}`);
+          lines.push(`      PO ${r.po_number} · ${r.supplier} · ${r.target_qty}u`);
+        }
       }
     }
+
     if (wk.vas && wk.vas.has_data) {
-      lines.push(`  VAS: [${wk.vas.status === 'off_track' ? 'OFF-TRACK' : 'on track'}] ${wk.vas.pct}% applied (${wk.vas.applied_units}/${wk.vas.planned_units}) — ${wk.vas.context_note || 'Due Fri noon Shanghai'}`);
+      const tag = wk.vas.status === 'off_track' ? 'OFF-TRACK' : 'on track';
+      lines.push(`  VAS: [${tag}] ${capitalize(wk.vas.context_note || 'In progress')}`);
+      lines.push(`      ${wk.vas.pct}% applied (${wk.vas.applied_units}/${wk.vas.planned_units} units)`);
     }
-    const totalTransitTxt = (wk.transit ? wk.transit.length : 0) + (wk.transit_on_track_count || 0);
-    if (totalTransitTxt > 0) {
-      const offTxt = wk.transit.length;
-      const onTxt = wk.transit_on_track_count || 0;
-      const confTxt = wk.transit_on_track_confirmed || 0;
-      const projTxt = wk.transit_on_track_projected || 0;
-      lines.push(`  Transit & Clearing: ${totalTransitTxt} lanes — ${offTxt} off-track, ${onTxt} on track (${confTxt} confirmed, ${projTxt} projected)`);
+
+    const offCountLanes = wk.transit.reduce((s, r) => s + (r.is_grouped ? r.member_count : 1), 0);
+    const onCount = wk.transit_on_track_count || 0;
+    const totalTransit = offCountLanes + onCount;
+    if (totalTransit > 0) {
+      const confirmed = wk.transit_on_track_confirmed || 0;
+      const projected = wk.transit_on_track_projected || 0;
+      lines.push(`  Transit & Clearing: ${totalTransit} lanes — ${offCountLanes} off-track, ${onCount} on track (${confirmed} confirmed, ${projected} projected)`);
       for (const t of wk.transit) {
-        lines.push(`    [OFF-TRACK] Zendesk ${t.zendesk || '—'} · ${t.supplier} · ${t.mode} · Container ${t.container}`);
-        lines.push(`      ${t.off_track_reason}`);
-      }
-    }
-    if (wk.last_mile.length) {
-      lines.push(`  Last Mile (${wk.last_mile.length} pending):`);
-      for (const lm of wk.last_mile) {
-        lines.push(`    Zendesk ${lm.zendesk || '—'} · ${lm.supplier} · Container ${lm.container} — ${lm.note}`);
+        if (t.is_grouped) {
+          const headline = capitalize(t.off_track_reason.split(' (')[0]);
+          const parenMatch = t.off_track_reason.match(/\(([^)]+)\)/);
+          const expectedDetail = parenMatch ? parenMatch[1] : '';
+          lines.push(`    [OFF-TRACK] ${headline}`);
+          lines.push(`      Container ${t.container} · ${t.mode} · ${t.member_count} lanes affected`);
+          if (expectedDetail) lines.push(`      ${expectedDetail}`);
+          const zList = t.zendesks.slice(0, 15).join(', ') + (t.zendesks.length > 15 ? ` +${t.zendesks.length - 15} more` : '');
+          lines.push(`      Zendesk: ${zList}`);
+          const supplierList = t.suppliers.slice(0, 5).join(', ') + (t.suppliers.length > 5 ? ` +${t.suppliers.length - 5} more` : '');
+          lines.push(`      Suppliers: ${supplierList}`);
+        } else {
+          const headline = t.status === 'off_track'
+            ? capitalize(t.off_track_reason.split(' (')[0])
+            : (t.latest_stage_label ? t.latest_stage_label : 'On schedule, no activity logged yet');
+          const tag = t.status === 'off_track' ? 'OFF-TRACK' : 'on track';
+          lines.push(`    [${tag}] ${headline}`);
+          lines.push(`      Zendesk ${t.zendesk || '—'} · ${t.supplier} · ${t.mode} · Container ${t.container}`);
+          if (t.status === 'off_track') {
+            const parenMatch = t.off_track_reason.match(/\(([^)]+)\)/);
+            if (parenMatch) lines.push(`      ${parenMatch[1]}`);
+          } else if (t.latest_source === 'auto_filled') {
+            lines.push(`      System-projected`);
+          }
+        }
       }
     }
     lines.push('');
