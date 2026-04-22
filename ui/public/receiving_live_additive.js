@@ -403,6 +403,16 @@ function computeCartonsOutByPOFromRecords(records) {
         damaged: Number(r.cartons_damaged || 0) || 0,
         non_compliant: Number(r.cartons_noncompliant || 0) || 0,
         replaced: Number(r.cartons_replaced || 0) || 0,
+        carton_length_cm: (r.carton_length_cm != null ? Number(r.carton_length_cm) : null),
+        carton_width_cm:  (r.carton_width_cm  != null ? Number(r.carton_width_cm)  : null),
+        carton_height_cm: (r.carton_height_cm != null ? Number(r.carton_height_cm) : null),
+        cbm: (() => {
+          const L = Number(r.carton_length_cm), W = Number(r.carton_width_cm), H = Number(r.carton_height_cm);
+          if (!Number.isFinite(L) || !Number.isFinite(W) || !Number.isFinite(H)) return null;
+          if (L <= 0 || W <= 0 || H <= 0) return null;
+          const cartons = Number(r.cartons_received || 0) || 0;
+          return Math.round((L * W * H / 1000000) * cartons * 1000) / 1000;
+        })(),
         // Editable, Excel-friendly local datetime (viewer local)
         received_at_local: fmtLocalYMDHMFromUtc(receivedAtUtc),
         received_at_utc: receivedAtUtc,
@@ -505,6 +515,10 @@ function computeCartonsOutByPOFromRecords(records) {
   <th class="text-left py-2 px-2">Facility</th>
   <th class="text-right py-2 px-2">Cartons In</th>
   <th class="text-right py-2 px-2" style="color:#990033">Carton Out</th>
+  <th class="text-right py-2 px-2" title="Carton length in cm">L (cm)</th>
+  <th class="text-right py-2 px-2" title="Carton width in cm">W (cm)</th>
+  <th class="text-right py-2 px-2" title="Carton height in cm">H (cm)</th>
+  <th class="text-right py-2 px-2" title="Computed from L × W × H ÷ 1,000,000 × cartons in">CBM</th>
   <th class="text-right py-2 px-2">Damaged</th>
   <th class="text-right py-2 px-2">Non-compliant</th>
   <th class="text-right py-2 px-2">Replaced</th>
@@ -513,7 +527,7 @@ function computeCartonsOutByPOFromRecords(records) {
 
                 </thead>
                 <tbody id="recv-body">
-                  <tr><td colspan="9" class="text-center text-xs text-gray-400 py-6">Loading…</td></tr>
+                  <tr><td colspan="13" class="text-center text-xs text-gray-400 py-6">Loading…</td></tr>
                 </tbody>
               </table>
             </div>
@@ -834,9 +848,35 @@ function computeSummaryAll(planRows, receivingRows) {
     const damagedInput = row.querySelector('input[data-f="cartons_damaged"]');
     const noncInput = row.querySelector('input[data-f="cartons_noncompliant"]');
     const replInput = row.querySelector('input[data-f="cartons_replaced"]');
+    const lengthInput = row.querySelector('input[data-field="carton_length_cm"]');
+    const widthInput  = row.querySelector('input[data-field="carton_width_cm"]');
+    const heightInput = row.querySelector('input[data-field="carton_height_cm"]');
+    const cbmCell = row.querySelector('.recv-cbm-cell');
     const receiveBtn = row.querySelector('button[data-act="receive"]');
 
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+
+    function parseDim(el) {
+      const raw = String(el?.value ?? '').trim();
+      if (!raw) return null;
+      const n = Number(raw);
+      return (Number.isFinite(n) && n > 0) ? n : null;
+    }
+
+    function updateCbmPreview() {
+      if (!cbmCell) return;
+      const L = parseDim(lengthInput);
+      const W = parseDim(widthInput);
+      const H = parseDim(heightInput);
+      const cartons = Number(cartonsInput?.value || 0) || 0;
+      if (L == null || W == null || H == null) { cbmCell.textContent = '—'; return; }
+      const per = (L * W * H) / 1000000;
+      const total = per * cartons;
+      cbmCell.textContent = total > 0 ? total.toFixed(3) : per.toFixed(3) + ' /ctn';
+    }
+
+    // Initial preview from existing values
+    updateCbmPreview();
 
     function currentPayload() {
       const facility_name = (facilityInput?.value || planFacility || '').trim();
@@ -853,7 +893,10 @@ function computeSummaryAll(planRows, receivingRows) {
         cartons_received: Number(cartonsInput?.value || 0) || 0,
         cartons_damaged: Number(damagedInput?.value || 0) || 0,
         cartons_noncompliant: Number(noncInput?.value || 0) || 0,
-        cartons_replaced: Number(replInput?.value || 0) || 0
+        cartons_replaced: Number(replInput?.value || 0) || 0,
+        carton_length_cm: parseDim(lengthInput),
+        carton_width_cm:  parseDim(widthInput),
+        carton_height_cm: parseDim(heightInput)
       };
     }
 
@@ -917,12 +960,13 @@ function computeSummaryAll(planRows, receivingRows) {
       };
     }
 
-    for (const inp of [facilityInput, receivedInput, cartonsInput, damagedInput, noncInput, replInput]) {
+    for (const inp of [facilityInput, receivedInput, cartonsInput, damagedInput, noncInput, replInput, lengthInput, widthInput, heightInput]) {
       if (!inp) continue;
-      inp.onchange = debounceSave;
-      inp.onblur = debounceSave;
+      inp.onchange = () => { updateCbmPreview(); debounceSave(); };
+      inp.onblur = () => { updateCbmPreview(); debounceSave(); };
       // allow quick typing without excessive saves
       inp.oninput = () => {
+        updateCbmPreview();
         // only debounce numeric/text fields, not for performance
         debounceSave();
       };
@@ -943,7 +987,7 @@ function computeSummaryAll(planRows, receivingRows) {
     if (poRecvEl) poRecvEl.textContent = String(receivedCount);
 
     if (!rows.length) {
-      tbody.innerHTML = `<tr><td colspan="9" class="text-center text-xs text-gray-400 py-6">No POs for this supplier in this week’s plan.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="13" class="text-center text-xs text-gray-400 py-6">No POs for this supplier in this week’s plan.</td></tr>`;
       return;
     }
 
@@ -976,6 +1020,32 @@ function computeSummaryAll(planRows, receivingRows) {
          style="background:#fff5f7;border-color:#e8b3c6;color:#990033"
          title="Carton Out (Mobile Bin count, read-only)">
       ${cartonsOut}
+    </div>
+  </td>
+  <td class="py-2 px-2 text-right">
+    <input class="recv-num border rounded px-2 py-1 text-sm w-[60px] text-right"
+           data-field="carton_length_cm" data-po="${esc(x.po)}"
+           type="number" min="0" step="0.1"
+           value="${r.carton_length_cm != null ? Number(r.carton_length_cm) : ''}" placeholder="—" />
+  </td>
+  <td class="py-2 px-2 text-right">
+    <input class="recv-num border rounded px-2 py-1 text-sm w-[60px] text-right"
+           data-field="carton_width_cm" data-po="${esc(x.po)}"
+           type="number" min="0" step="0.1"
+           value="${r.carton_width_cm != null ? Number(r.carton_width_cm) : ''}" placeholder="—" />
+  </td>
+  <td class="py-2 px-2 text-right">
+    <input class="recv-num border rounded px-2 py-1 text-sm w-[60px] text-right"
+           data-field="carton_height_cm" data-po="${esc(x.po)}"
+           type="number" min="0" step="0.1"
+           value="${r.carton_height_cm != null ? Number(r.carton_height_cm) : ''}" placeholder="—" />
+  </td>
+  <td class="py-2 px-2 text-right">
+    <div class="recv-cbm-cell px-2 py-1 text-sm w-[80px] text-right rounded border tabular-nums text-gray-700"
+         style="background:#f9fafb;border-color:#e5e7eb"
+         data-po="${esc(x.po)}"
+         title="L × W × H ÷ 1,000,000 × cartons in">
+      —
     </div>
   </td>
   <td class="py-2 px-2 text-right">
