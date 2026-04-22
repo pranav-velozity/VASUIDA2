@@ -186,6 +186,34 @@ CREATE INDEX IF NOT EXISTS idx_receiving_week ON receiving(week_start);
 CREATE INDEX IF NOT EXISTS idx_receiving_supplier ON receiving(week_start, supplier_name);
 `);
 
+// ---- Carton dimension columns (idempotent migrations) ----
+// CBM is now computed from L/W/H per carton instead of a fixed 0.046 rate.
+// Legacy rows get NULL and will render as `—` downstream. Run each ALTER in
+// its own try/catch so re-boots on already-migrated DBs don't throw.
+function _addColumnIfMissing(table, col, typeDecl) {
+  try {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+    if (cols.some(c => c.name === col)) return;
+    db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${typeDecl}`).run();
+  } catch (e) {
+    console.warn(`[migration] ${table}.${col}:`, e.message || e);
+  }
+}
+_addColumnIfMissing('receiving', 'carton_length_cm', 'REAL');
+_addColumnIfMissing('receiving', 'carton_width_cm',  'REAL');
+_addColumnIfMissing('receiving', 'carton_height_cm', 'REAL');
+
+// ---- CBM helper (single source of truth on the backend) ----
+// Returns CBM for ONE carton/bin given L/W/H in centimeters.
+// Returns null if any dimension is missing, non-finite, or non-positive.
+// Callers multiply the result by the carton count when aggregating.
+function cbmPerCarton(l_cm, w_cm, h_cm) {
+  const L = Number(l_cm), W = Number(w_cm), H = Number(h_cm);
+  if (!Number.isFinite(L) || !Number.isFinite(W) || !Number.isFinite(H)) return null;
+  if (L <= 0 || W <= 0 || H <= 0) return null;
+  return (L * W * H) / 1_000_000;
+}
+
 // ---- Flow week persistence (facility-scoped) ----
 db.exec(`
 CREATE TABLE IF NOT EXISTS flow_week (
@@ -4543,7 +4571,9 @@ function _getPlanRowsForWeek(ws) {
 }
 
 function _getBinsForWeek(ws) {
-  return db.prepare(`SELECT week_start, mobile_bin, total_units, weight_kg, date_local FROM bins WHERE week_start = ?`).all(ws);
+  return db.prepare(`SELECT week_start, mobile_bin, total_units, weight_kg, date_local,
+                            carton_length_cm, carton_width_cm, carton_height_cm
+                       FROM bins WHERE week_start = ?`).all(ws);
 }
 
 app.get('/summary/shipment_summary',
@@ -4592,10 +4622,12 @@ app.get('/summary/shipment_summary',
 
     const bins = _getBinsForWeek(ws);
     const binWeight = new Map();
+    const binCbm = new Map();     // mobile_bin -> CBM (null when dims missing)
     for (const b of bins) {
       const mb = String(b?.mobile_bin ?? '').trim();
       if (!mb) continue;
       binWeight.set(mb, Number(b?.weight_kg || 0) || 0);
+      binCbm.set(mb, cbmPerCarton(b?.carton_length_cm, b?.carton_width_cm, b?.carton_height_cm));
     }
 
     const binsByPO = new Map();
@@ -4623,6 +4655,8 @@ app.get('/summary/shipment_summary',
           'Facility Name': m.facility,
           _poSet: new Set(),
           _binSet: new Set(),
+          _cbmTotal: 0,         // sum of known per-bin CBM
+          _binsMissingDims: 0,  // bins with NULL dims (shown in report if > 0)
           'Unique PO Count': 0,
           'Total Units Applied': 0,
           'Total Mobile Bins': 0,
@@ -4640,6 +4674,9 @@ app.get('/summary/shipment_summary',
         if (!binAssigned.has(mb)) {
           binAssigned.set(mb, gkey);
           g['Gross Weight'] += binWeight.get(mb) || 0;
+          const bcbm = binCbm.get(mb);
+          if (bcbm == null) g._binsMissingDims += 1;
+          else g._cbmTotal += bcbm;
         }
       }
     }
@@ -4647,7 +4684,7 @@ app.get('/summary/shipment_summary',
     const out = [];
     for (const g of groups.values()) {
       const binCount = g._binSet.size;
-      out.push({
+      const row = {
         'Supplier Name': g['Supplier Name'],
         'Zendesk Ticket #': g['Zendesk Ticket #'],
         'Freight Type': g['Freight Type'],
@@ -4656,8 +4693,12 @@ app.get('/summary/shipment_summary',
         'Total Units Applied': Number(g['Total Units Applied'] || 0),
         'Total Mobile Bins': binCount,
         'Gross Weight': Math.round((Number(g['Gross Weight'] || 0) + Number.EPSILON) * 100) / 100,
-        'CBM': Math.round((binCount * 0.046 + Number.EPSILON) * 1000) / 1000,
-      });
+        'CBM': (binCount > 0 && binCount === g._binsMissingDims)
+          ? null  // no bins have dims → show dash
+          : Math.round((g._cbmTotal + Number.EPSILON) * 1000) / 1000,
+      };
+      if (g._binsMissingDims > 0) row['Bins Missing Dimensions'] = g._binsMissingDims;
+      out.push(row);
     }
 
     out.sort((a, b) =>
@@ -4912,10 +4953,12 @@ app.get('/summary/shipment_detail',
 
     const bins = _getBinsForWeek(ws);
     const binWeight = new Map();
+    const binCbm = new Map();
     for (const b of bins) {
       const mb = String(b?.mobile_bin ?? '').trim();
       if (!mb) continue;
       binWeight.set(mb, Number(b?.weight_kg || 0) || 0);
+      binCbm.set(mb, cbmPerCarton(b?.carton_length_cm, b?.carton_width_cm, b?.carton_height_cm));
     }
 
     const binsByPO = new Map();
@@ -4944,6 +4987,8 @@ app.get('/summary/shipment_detail',
           'Facility Name': m.facility,
           'PO': po,
           _binSet: new Set(),
+          _cbmTotal: 0,
+          _binsMissingDims: 0,
           'Total Units Applied': 0,
           'Total Mobile Bins': 0,
           'Gross Weight': 0,
@@ -4960,6 +5005,9 @@ app.get('/summary/shipment_detail',
         if (!binAssigned.has(mb)) {
           binAssigned.set(mb, gkey);
           g['Gross Weight'] += binWeight.get(mb) || 0;
+          const bcbm = binCbm.get(mb);
+          if (bcbm == null) g._binsMissingDims += 1;
+          else g._cbmTotal += bcbm;
         }
       }
     }
@@ -4967,7 +5015,7 @@ app.get('/summary/shipment_detail',
     const out = [];
     for (const g of groups.values()) {
       const binCount = g._binSet.size;
-      out.push({
+      const row = {
         'Supplier Name': g['Supplier Name'],
         'Zendesk Ticket #': g['Zendesk Ticket #'],
         'Freight Type': g['Freight Type'],
@@ -4976,8 +5024,12 @@ app.get('/summary/shipment_detail',
         'Total Units Applied': Number(g['Total Units Applied'] || 0),
         'Total Mobile Bins': binCount,
         'Gross Weight': Math.round((Number(g['Gross Weight'] || 0) + Number.EPSILON) * 100) / 100,
-        'CBM': Math.round((binCount * 0.046 + Number.EPSILON) * 1000) / 1000,
-      });
+        'CBM': (binCount > 0 && binCount === g._binsMissingDims)
+          ? null
+          : Math.round((g._cbmTotal + Number.EPSILON) * 1000) / 1000,
+      };
+      if (g._binsMissingDims > 0) row['Bins Missing Dimensions'] = g._binsMissingDims;
+      out.push(row);
     }
 
     out.sort((a, b) =>
@@ -5319,16 +5371,24 @@ CREATE TABLE IF NOT EXISTS bins (
 );
 CREATE INDEX IF NOT EXISTS idx_bins_week ON bins(week_start);
 `);
+_addColumnIfMissing('bins', 'carton_length_cm', 'REAL');
+_addColumnIfMissing('bins', 'carton_width_cm',  'REAL');
+_addColumnIfMissing('bins', 'carton_height_cm', 'REAL');
 
 const Bins = {
   upsertMany: db.transaction((rows) => {
     const stmt = db.prepare(`
-      INSERT INTO bins (week_start, mobile_bin, total_units, weight_kg, date_local)
-      VALUES (@week_start, @mobile_bin, @total_units, @weight_kg, @date_local)
+      INSERT INTO bins (week_start, mobile_bin, total_units, weight_kg, date_local,
+                        carton_length_cm, carton_width_cm, carton_height_cm)
+      VALUES (@week_start, @mobile_bin, @total_units, @weight_kg, @date_local,
+              @carton_length_cm, @carton_width_cm, @carton_height_cm)
       ON CONFLICT(week_start, mobile_bin) DO UPDATE SET
         total_units = excluded.total_units,
         weight_kg   = excluded.weight_kg,
-        date_local  = excluded.date_local
+        date_local  = excluded.date_local,
+        carton_length_cm = COALESCE(excluded.carton_length_cm, bins.carton_length_cm),
+        carton_width_cm  = COALESCE(excluded.carton_width_cm,  bins.carton_width_cm),
+        carton_height_cm = COALESCE(excluded.carton_height_cm, bins.carton_height_cm)
     `);
     let n = 0;
     for (const r of rows) { stmt.run(r); n++; }
@@ -5336,7 +5396,8 @@ const Bins = {
   }),
   getByWeek: (ws) => {
     return db.prepare(`
-      SELECT week_start, mobile_bin, total_units, weight_kg, date_local
+      SELECT week_start, mobile_bin, total_units, weight_kg, date_local,
+             carton_length_cm, carton_width_cm, carton_height_cm
       FROM bins
       WHERE week_start = ?
       ORDER BY mobile_bin
@@ -5382,6 +5443,17 @@ binsRouter.put('/weeks/:ws',
       if (units != null && (!Number.isFinite(units) || units < 0)) { errors.push({row:r, reason:'invalid total_units'}); continue; }
       if (weight != null && (!Number.isFinite(weight) || weight < 0)) { errors.push({row:r, reason:'invalid weight_kg'}); continue; }
 
+      // Carton dimensions (optional). Accept several aliases for CSV flexibility.
+      // Any non-positive / non-finite value is stored as NULL (legacy behavior).
+      const toDim = (v) => {
+        if (v === undefined || v === null || v === '') return null;
+        const n = Number(v);
+        return (Number.isFinite(n) && n > 0) ? n : null;
+      };
+      const lenCm = toDim(r.carton_length_cm ?? r.length_cm ?? r.L ?? r.l);
+      const widCm = toDim(r.carton_width_cm  ?? r.width_cm  ?? r.W ?? r.w);
+      const hgtCm = toDim(r.carton_height_cm ?? r.height_cm ?? r.H ?? r.h);
+
       // de-dupe per (ws,bin). If multiple entries present, keep last one.
       const key = ws + '|' + bin;
       if (seen.has(key)) clean.pop();
@@ -5392,7 +5464,10 @@ binsRouter.put('/weeks/:ws',
         mobile_bin: bin,
         total_units: units,
         weight_kg: weight,
-        date_local: dateLocal
+        date_local: dateLocal,
+        carton_length_cm: lenCm,
+        carton_width_cm:  widCm,
+        carton_height_cm: hgtCm,
       });
     }
 
@@ -5481,6 +5556,11 @@ const receivingRouter = express.Router();
 
 function normalizeReceivingArray(body, ws) {
   if (!Array.isArray(body)) return [];
+  const numOrNull = (v) => {
+    if (v === undefined || v === null || v === '') return null;
+    const n = Number(v);
+    return (Number.isFinite(n) && n > 0) ? n : null;
+  };
   return body.map(r => ({
     week_start: ws,
     po_number: String(r?.po_number ?? r?.po ?? '').trim(),
@@ -5493,6 +5573,9 @@ function normalizeReceivingArray(body, ws) {
     cartons_damaged: Number(r?.cartons_damaged ?? r?.damaged ?? 0) || 0,
     cartons_noncompliant: Number(r?.cartons_noncompliant ?? r?.noncompliant ?? r?.non_compliant ?? 0) || 0,
     cartons_replaced: Number(r?.cartons_replaced ?? r?.replaced ?? 0) || 0,
+    carton_length_cm: numOrNull(r?.carton_length_cm ?? r?.length_cm ?? r?.L ?? r?.l),
+    carton_width_cm:  numOrNull(r?.carton_width_cm  ?? r?.width_cm  ?? r?.W ?? r?.w),
+    carton_height_cm: numOrNull(r?.carton_height_cm ?? r?.height_cm ?? r?.H ?? r?.h),
     updated_at: new Date().toISOString(),
   })).filter(x => x.po_number);
 }
@@ -5524,11 +5607,13 @@ receivingRouter.put('/weeks/:ws',
       week_start, po_number, supplier_name, facility_name,
       received_at_utc, received_at_local, received_tz,
       cartons_received, cartons_damaged, cartons_noncompliant, cartons_replaced,
+      carton_length_cm, carton_width_cm, carton_height_cm,
       updated_at
     ) VALUES (
       @week_start, @po_number, @supplier_name, @facility_name,
       @received_at_utc, @received_at_local, @received_tz,
       @cartons_received, @cartons_damaged, @cartons_noncompliant, @cartons_replaced,
+      @carton_length_cm, @carton_width_cm, @carton_height_cm,
       @updated_at
     )
     ON CONFLICT(week_start, po_number) DO UPDATE SET
@@ -5541,6 +5626,9 @@ receivingRouter.put('/weeks/:ws',
       cartons_damaged=excluded.cartons_damaged,
       cartons_noncompliant=excluded.cartons_noncompliant,
       cartons_replaced=excluded.cartons_replaced,
+      carton_length_cm=COALESCE(excluded.carton_length_cm, receiving.carton_length_cm),
+      carton_width_cm =COALESCE(excluded.carton_width_cm,  receiving.carton_width_cm),
+      carton_height_cm=COALESCE(excluded.carton_height_cm, receiving.carton_height_cm),
       updated_at=excluded.updated_at
   `);
 
