@@ -600,6 +600,14 @@ function iconContainer() {
     return Number.isFinite(n) ? n : 0;
   }
 
+  // CBM for ONE carton/bin given L/W/H in cm. Returns null if any dim missing.
+  function cbmPerCarton(l_cm, w_cm, h_cm) {
+    const L = Number(l_cm), W = Number(w_cm), H = Number(h_cm);
+    if (!Number.isFinite(L) || !Number.isFinite(W) || !Number.isFinite(H)) return null;
+    if (L <= 0 || W <= 0 || H <= 0) return null;
+    return (L * W * H) / 1000000;
+  }
+
 
   function getPlanUnits(planRows) {
     // canonical field in this codebase is target_qty (Exec/Plan); keep fallbacks.
@@ -710,6 +718,21 @@ function computeCartonStatsFromRecords(records) {
     // Cartons In (from receiving rows)
     const cartonsInTotal = (receivingRows || []).reduce((acc, r) => acc + num(r.cartons_in ?? r.cartonsIn ?? r.cartons ?? r.cartons_received ?? 0), 0);
 
+    // CBM In (dimension-based): sum cartons × per-carton CBM across rows that
+    // have L/W/H. Legacy rows missing dims contribute 0 but are counted so the
+    // UI can show a partial-data indicator.
+    let cbmInTotal = 0;
+    let cbmInHasDims = false;
+    let cbmInMissingRows = 0;
+    for (const r of (receivingRows || [])) {
+      const cartons = num(r.cartons_in ?? r.cartonsIn ?? r.cartons ?? r.cartons_received ?? 0);
+      if (cartons <= 0) continue;
+      const per = cbmPerCarton(r.carton_length_cm, r.carton_width_cm, r.carton_height_cm);
+      if (per == null) { cbmInMissingRows += 1; continue; }
+      cbmInHasDims = true;
+      cbmInTotal += per * cartons;
+    }
+
     // Cartons Out (from completed records): SAME as receiving_live_additive.js.
 // Build a per-PO map (unique mobile bins per PO) and sum across POs for total.
     const cs = computeCartonStatsFromRecords(records);
@@ -750,6 +773,25 @@ function computeCartonStatsFromRecords(records) {
       };
     });
 
+    // CBM Out (dimension-based): one bin = one carton. Sum per-bin CBM from
+    // window.state.bins when available.
+    let cbmOutTotal = 0;
+    let cbmOutHasDims = false;
+    let cbmOutMissingBins = 0;
+    try {
+      const binsArr = (window.state && Array.isArray(window.state.bins)) ? window.state.bins : [];
+      const seen = new Set();
+      for (const b of binsArr) {
+        const mb = String(b.mobile_bin || '').trim();
+        if (!mb || seen.has(mb)) continue;
+        seen.add(mb);
+        const per = cbmPerCarton(b.carton_length_cm, b.carton_width_cm, b.carton_height_cm);
+        if (per == null) { cbmOutMissingBins += 1; continue; }
+        cbmOutHasDims = true;
+        cbmOutTotal += per;
+      }
+    } catch {}
+
     return {
       due,
       lastReceived,
@@ -760,6 +802,12 @@ function computeCartonStatsFromRecords(records) {
       missingPOs: missingPOs.length,
       cartonsInTotal,
       cartonsOutTotal,
+      cbmInTotal,
+      cbmInHasDims,
+      cbmInMissingRows,
+      cbmOutTotal,
+      cbmOutHasDims,
+      cbmOutMissingBins,
       suppliers,
       latePOList: latePOs,
       missingPOList: missingPOs,
@@ -3265,10 +3313,13 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
 
     const appliedUnits = num(vas?.appliedUnits || 0);
     const plannedUnits = num(vas?.plannedUnits || 0);
-    const cbm = appliedUnits * 0.00375;
+    // CBM "applied" = sum of per-bin CBM for mobile bins completed this week.
+    // Falls back to NaN (then rendered as dash) when no bin has dimensions.
+    const cbm = (receiving && receiving.cbmOutHasDims) ? receiving.cbmOutTotal : NaN;
 
-    // Receiving CBM is derived from planned units (plan rows) * 0.00375
-    const receivingCbmPlanned = plannedUnits * 0.00375;
+    // "Receiving CBM" is the actual received cartons × their dimensions.
+    // When receiving has no dims yet (legacy or not yet entered), show dash.
+    const receivingCbmPlanned = (receiving && receiving.cbmInHasDims) ? receiving.cbmInTotal : NaN;
 
     const recPlannedPOs = num(receiving?.plannedPOs || 0);
     const recReceivedPOs = num(receiving?.receivedPOs || 0);
@@ -3319,7 +3370,8 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
     `;
 
     const fmt2 = (n) => {
-      const v = Number(n) || 0;
+      const v = Number(n);
+      if (!Number.isFinite(v)) return '—';
       return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
     };
 
@@ -3523,8 +3575,12 @@ const signoffSection = (context) => {
       const due = vas?.due ? fmtInTZ(vas.due, tz) : '—';
       const pctDone = plannedUnits ? Math.round((appliedUnits / plannedUnits) * 100) : 0;
       const remainingUnits = Math.max(0, plannedUnits - appliedUnits);
-      const remainingCbm = Math.max(0, remainingUnits) * 0.00375;
-      const appliedCbm = appliedUnits * 0.00375;
+      // CBM applied = bin-out CBM (one bin per completed carton).
+      // CBM remaining = received CBM minus applied. If no dims yet, both are dash.
+      const appliedCbm = (receiving && receiving.cbmOutHasDims) ? receiving.cbmOutTotal : NaN;
+      const remainingCbm = (receiving && receiving.cbmInHasDims && receiving.cbmOutHasDims)
+        ? Math.max(0, receiving.cbmInTotal - receiving.cbmOutTotal)
+        : NaN;
 
       // Pace / deadline helper (UI-only)
       const pace = (() => {
