@@ -676,6 +676,10 @@ app.get('/pulse/context',
           shipment_number: manual.shipmentNumber || manual.shipment || null,
           hbl: manual.hbl || null,
           mbl: manual.mbl || null,
+          is_non_vas: !!manual.is_non_vas,
+          units_total: manual.is_non_vas ? (Number(manual.units_total) || 0) : null,
+          po_list: manual.is_non_vas ? (manual.po_list || '') : null,
+          ticket_ref: manual.is_non_vas ? (manual.ticket_ref || '') : null,
         });
       }
 
@@ -6265,6 +6269,28 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
       if (ft === 'air') airUnitsByMonth[r.month_key] = (airUnitsByMonth[r.month_key] || 0) + 1;
     }
 
+    // ── 4b. Non-VAS consolidated units by month ──
+    // Declared on lanes with is_non_vas=true in flow_week.intl_lanes. Bucketed
+    // by lane's week_start month (same convention as Cost Utilisation Report).
+    const flowRowsYear = db.prepare(`
+      SELECT week_start, data FROM flow_week
+      WHERE week_start >= ? AND week_start <= ?
+    `).all(`${y}-01-01`, `${y}-12-31`);
+    for (const row of flowRowsYear) {
+      const d = safeJsonParse(row.data, {});
+      const lanes = (d.intl_lanes && typeof d.intl_lanes === 'object') ? d.intl_lanes : {};
+      const mk = String(row.week_start || '').slice(0, 7);
+      if (!mk) continue;
+      for (const [laneKey, lane] of Object.entries(lanes)) {
+        if (!lane || typeof lane !== 'object' || !lane.is_non_vas) continue;
+        const u = Number(lane.units_total) || 0;
+        if (u <= 0) continue;
+        const laneMode = String(laneKey.split('||')[2] || '').toLowerCase();
+        if (laneMode === 'sea') seaUnitsByMonth[mk] = (seaUnitsByMonth[mk] || 0) + u;
+        if (laneMode === 'air') airUnitsByMonth[mk] = (airUnitsByMonth[mk] || 0) + u;
+      }
+    }
+
     // ── 5. Build month objects ──
     const months = {};
     for (let m = 1; m <= 12; m++) {
@@ -7029,12 +7055,17 @@ app.get('/report/cost-utilisation/data',
         const invoiceTotal = invs.reduce((s, i) => s + (i.subtotal || 0), 0);
 
         // Applied units by freight type (from plan + records join)
-        // Get all week_starts in this month
+        // Get all week_starts in this month. Use UNION so weeks with only
+        // non-VAS lanes (no plan row) still get picked up below.
         const weekStarts = db.prepare(`
-          SELECT DISTINCT week_start FROM plans WHERE substr(week_start,1,7)=?
-        `).all(mk).map(r => r.week_start);
+          SELECT week_start FROM (
+            SELECT DISTINCT week_start FROM plans WHERE substr(week_start,1,7)=?
+            UNION
+            SELECT DISTINCT week_start FROM flow_week WHERE substr(week_start,1,7)=?
+          ) ORDER BY week_start
+        `).all(mk, mk).map(r => r.week_start);
 
-        let appliedUnits = 0;
+        let vasUnits = 0;
         for (const ws of weekStarts) {
           const planRow = db.prepare('SELECT data FROM plans WHERE week_start=?').get(ws);
           if (!planRow) continue;
@@ -7051,8 +7082,30 @@ app.get('/report/cost-utilisation/data',
             WHERE status='complete'
               AND po_number IN (${placeholders})
           `).get(...pos);
-          appliedUnits += count?.n || 0;
+          vasUnits += count?.n || 0;
         }
+
+        // Non-VAS consolidated units — declared on lanes with is_non_vas=true
+        // in flow_week.intl_lanes. Mode is encoded in the lane key's 3rd segment
+        // (supplier||zendesk||freight).
+        let nonVasUnits = 0;
+        const modeKey = type === 'SEA' ? 'sea' : 'air';
+        for (const ws of weekStarts) {
+          const flowRows = db.prepare('SELECT data FROM flow_week WHERE week_start=?').all(ws);
+          for (const row of flowRows) {
+            const d = safeJsonParse(row.data, {});
+            const lanes = (d.intl_lanes && typeof d.intl_lanes === 'object') ? d.intl_lanes : {};
+            for (const [laneKey, lane] of Object.entries(lanes)) {
+              if (!lane || typeof lane !== 'object' || !lane.is_non_vas) continue;
+              const laneMode = String(laneKey.split('||')[2] || '').toLowerCase();
+              if (laneMode !== modeKey) continue;
+              const u = Number(lane.units_total) || 0;
+              if (u > 0) nonVasUnits += u;
+            }
+          }
+        }
+
+        const appliedUnits = vasUnits + nonVasUnits;
 
         // Expenses
         const expCat = type === 'SEA' ? 'Sea Freight Cost' : 'Air Freight Cost';
@@ -7064,6 +7117,8 @@ app.get('/report/cost-utilisation/data',
         store[mk] = {
           revenue: applyFx(invoiceTotal),
           applied_units: appliedUnits,
+          vas_units: vasUnits,
+          nonvas_units: nonVasUnits,
           expense: applyFx(expense),
           unit_cost: appliedUnits > 0 ? Math.round(applyFx(expense) / appliedUnits * 10000) / 10000 : null,
           unit_revenue: appliedUnits > 0 ? Math.round(applyFx(invoiceTotal) / appliedUnits * 10000) / 10000 : null,
@@ -7800,7 +7855,7 @@ function buildReport(D) {
       <div class="section-header">
         <div>
           <div class="section-title">Sea Freight Utilisation</div>
-          <div class="section-subtitle">Container throughput, cost and revenue — \${fmtMonth(sel)}</div>
+          <div class="section-subtitle">Container throughput and unit cost — \${fmtMonth(sel)}</div>
         </div>
         <span class="section-badge" style="background:rgba(14,165,233,0.1);color:#0EA5E9;">Sea</span>
       </div>
@@ -7868,8 +7923,8 @@ function buildReport(D) {
         <strong>Methodology:</strong>
         Cost = fin_invoices subtotal (ex-GST), type=SEA, grouped by week_start month (all statuses including draft).
         Expense = fin_expenses category='Sea Freight Cost', by month_key.
-        Units = completed records for POs on plan weeks with week_start in this month (date_local not used).
-        Cost/Unit = Invoice total ÷ Units. Container counts from flow_week data for weeks in selected month (Air containers excluded).
+        Units = completed VAS records for POs on plan weeks with week_start in this month, plus any consolidated non-VAS units declared on lanes (is_non_vas=true) for the same weeks.
+        Cost/Unit = Invoice total ÷ total units. Container counts from flow_week data for weeks in selected month (Air containers excluded).
       </div>
     </div>
   \`);
@@ -7881,7 +7936,7 @@ function buildReport(D) {
       <div class="section-header">
         <div>
           <div class="section-title">Air Freight Utilisation</div>
-          <div class="section-subtitle">Airfreight throughput, cost and revenue — \${fmtMonth(sel)}</div>
+          <div class="section-subtitle">Airfreight throughput and unit cost — \${fmtMonth(sel)}</div>
         </div>
         <span class="section-badge" style="background:rgba(245,158,11,0.1);color:#F59E0B;">Air</span>
       </div>
@@ -7934,8 +7989,8 @@ function buildReport(D) {
         <strong>Methodology:</strong>
         Cost = fin_invoices subtotal (ex-GST), type=AIR, grouped by week_start month (all statuses including draft).
         Expense = fin_expenses category='Air Freight Cost', by month_key.
-        Units = completed records for POs on plan weeks with week_start in this month (date_local not used).
-        Cost/Unit = Invoice total ÷ Units.
+        Units = completed VAS records for POs on plan weeks with week_start in this month, plus any consolidated non-VAS units declared on lanes (is_non_vas=true) for the same weeks.
+        Cost/Unit = Invoice total ÷ total units.
       </div>
     </div>
   \`);
