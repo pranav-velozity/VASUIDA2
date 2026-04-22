@@ -1269,6 +1269,35 @@ function saveWeekSignoff(ws, next) {
       cartonsOutByLane.set(key, (cartonsOutByLane.get(key) || 0) + (cnt || 0));
     }
 
+    // Inject non-VAS consolidation lanes — these live only in intl storage
+    // (no plan row backs them). Scan localStorage for keys under this ws and
+    // add any lane with is_non_vas=true that isn't already in the Map.
+    try {
+      const prefix = `flow:intl:${ws}:`;
+      for (let i = 0; i < localStorage.length; i++) {
+        const storageKey = localStorage.key(i);
+        if (!storageKey || !storageKey.startsWith(prefix)) continue;
+        const lk = storageKey.slice(prefix.length);
+        if (!lk || lanes.has(lk)) continue;
+        let obj = {};
+        try { obj = JSON.parse(localStorage.getItem(storageKey) || '{}') || {}; } catch { obj = {}; }
+        if (!obj || !obj.is_non_vas) continue;
+        const parts = lk.split('||');
+        const supplier = parts[0] || 'Unknown';
+        const ticket = parts[1] || 'NO_TICKET';
+        const freight = parts[2] || 'Sea';
+        lanes.set(lk, {
+          key: lk,
+          supplier: normalizeSupplier(supplier),
+          ticket,
+          freight,
+          plannedUnits: Number(obj.units_total) || 0,
+          plannedPOs: new Set(),
+          is_non_vas: true,
+        });
+      }
+    } catch { /* localStorage unavailable — ignore */ }
+
     // Baseline windows
     const originMin = addDays(vasDue, BASELINE.origin_ready_days_min);
     const originMax = addDays(vasDue, BASELINE.origin_ready_days_max);
@@ -1353,7 +1382,9 @@ function saveWeekSignoff(ws, next) {
       else if (!destClearedAt || isNaN(destClearedAt)) missingDestClear++;
 
       const plannedUnits = Math.round(lane.plannedUnits || 0);
-      const appliedUnits = Math.round(appliedByLane.get(lane.key) || 0);
+      const appliedUnits = lane.is_non_vas
+        ? (Number(manual.units_total) || lane.plannedUnits || 0)
+        : Math.round(appliedByLane.get(lane.key) || 0);
       const cartonsOut = Math.round(cartonsOutByLane.get(lane.key) || 0);
 
       laneRows.push({
@@ -4692,7 +4723,7 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => {
             return !!(cid || ves || pos);
           }).length;
         return [
-          `<button class="text-left hover:underline" data-lane-select="${escapeAttr(l.key)}">${escapeHtml(l.supplier)}</button>`,
+          `<button class="text-left hover:underline" data-lane-select="${escapeAttr(l.key)}">${escapeHtml(l.supplier)}${l.is_non_vas ? ' <span style="display:inline-block;font-size:8px;font-weight:700;color:#7A4FBF;background:rgba(139,92,246,0.12);border-radius:4px;padding:1px 5px;margin-left:4px;letter-spacing:0.04em;vertical-align:1px;">CONSOLIDATED</span>' : ''}</button>`,
           ticket,
           escapeHtml(l.freight || ''),
           `${(l.appliedUnits || 0).toLocaleString()}`,
@@ -4720,6 +4751,7 @@ detail.innerHTML = [
           <div class="flex items-center justify-between gap-2">
             <div class="text-sm font-semibold text-gray-700">Lanes</div>
             <div style="display:flex;gap:6px;">
+              <button type="button" id="flow-nonvas-add" style="font-size:10px;color:#1C1C1E;background:#fff;border:0.5px solid rgba(0,0,0,0.15);border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;" title="Add a consolidation lane for non-VAS units (e.g. freight-only, no VAS processing)">+ Non-VAS Lane</button>
               <button type="button" id="flow-containers-btn" style="font-size:10px;color:#fff;background:#1C1C1E;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;">Manage Containers</button>
               <button type="button" id="flow-lanes-fullscreen" style="font-size:10px;color:#fff;background:#990033;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;">Full screen</button>
             </div>
@@ -5091,6 +5123,29 @@ detail.innerHTML = [
             <div></div>
           </div>
 
+          ${manual.is_non_vas ? `
+          <div style="margin-top:12px;padding:10px 12px;background:rgba(139,92,246,0.04);border:0.5px solid rgba(139,92,246,0.25);border-radius:10px;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+              <span style="font-size:9px;font-weight:700;color:#7A4FBF;background:rgba(139,92,246,0.12);border-radius:4px;padding:2px 6px;letter-spacing:0.04em;">CONSOLIDATED</span>
+              <span style="font-size:10px;color:#6E6E73;">Non-VAS consolidation — units entered manually, no VAS plan required</span>
+            </div>
+            <div style="display:grid;grid-template-columns:130px 1fr 160px;gap:8px;align-items:end;">
+              <label class="text-sm">
+                <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">Units Total *</div>
+                <input id="flow-intl-units-total" type="number" min="0" step="1" class="w-full px-2 py-1.5 border rounded-lg text-xs" value="${escapeAttr(String(manual.units_total || ''))}" placeholder="e.g. 12000"/>
+              </label>
+              <label class="text-sm">
+                <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">PO List *</div>
+                <input id="flow-intl-po-list" type="text" class="w-full px-2 py-1.5 border rounded-lg text-xs" value="${escapeAttr(String(manual.po_list || ''))}" placeholder="PO123, PO456, ..."/>
+              </label>
+              <label class="text-sm">
+                <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">Ticket / Zendesk # *</div>
+                <input id="flow-intl-ticket-ref" type="text" class="w-full px-2 py-1.5 border rounded-lg text-xs" value="${escapeAttr(String(manual.ticket_ref || ''))}" placeholder="ZD-77634"/>
+              </label>
+            </div>
+          </div>
+          ` : ''}
+
           <label class="text-sm mt-3 block">
             <div class="text-[10px] text-gray-500 mb-1 font-medium uppercase tracking-wide">Note (optional)</div>
             <textarea id="flow-intl-note" rows="2" class="w-full px-2 py-1.5 border rounded-lg text-xs" placeholder="Quick update for the team...">${escapeHtml(note)}</textarea>
@@ -5159,6 +5214,78 @@ detail.innerHTML = [
         e.preventDefault();
         e.stopPropagation();
         openContainerManager(ws, getBizTZ());
+      });
+    }
+
+    // + Non-VAS Lane — creates a consolidation lane outside the uploaded plan.
+    // Prompts for supplier, ticket, freight mode, units, PO list, then saves a
+    // stub lane and selects it so the user can fill in remaining transit details.
+    const nonvasBtn = detail.querySelector('#flow-nonvas-add');
+    if (nonvasBtn && !nonvasBtn.dataset.bound) {
+      nonvasBtn.dataset.bound = '1';
+      nonvasBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        try {
+          const supplier = (prompt('Non-VAS Lane — Supplier name:') || '').trim();
+          if (!supplier) return;
+          const ticket = (prompt('Ticket / Zendesk # (required):') || '').trim();
+          if (!ticket) { alert('Ticket is required.'); return; }
+          const freightIn = (prompt('Freight mode — type "Sea" or "Air":') || '').trim();
+          const freight = /^a(ir)?$/i.test(freightIn) ? 'Air' : 'Sea';
+          const unitsIn = Number(prompt('Units total (required):'));
+          if (!unitsIn || unitsIn <= 0) { alert('Units total must be a positive number.'); return; }
+          const poList = (prompt('PO numbers (comma-separated, required):') || '').trim();
+          if (!poList) { alert('PO list is required.'); return; }
+
+          const newKey = laneKey(normalizeSupplier(supplier), ticket, freight);
+
+          // Duplicate-warn: same key already exists OR a non-VAS lane with the
+          // same (freight, PO subset) already recorded for this week.
+          const existing = loadIntlLaneManual(ws, newKey);
+          if (existing && Object.keys(existing).length > 0) {
+            const proceed = confirm(`A lane with this supplier / ticket / freight already exists for this week.\n\nSave anyway (will update the existing lane)?`);
+            if (!proceed) return;
+          } else {
+            // Cross-lane overlap check: same freight + shared PO with another non-VAS lane
+            try {
+              const prefix = `flow:intl:${ws}:`;
+              const incomingPOs = new Set(poList.split(',').map(s => s.trim().toUpperCase()).filter(Boolean));
+              let overlapKey = null;
+              for (let i = 0; i < localStorage.length; i++) {
+                const sk = localStorage.key(i);
+                if (!sk || !sk.startsWith(prefix)) continue;
+                const lk = sk.slice(prefix.length);
+                if (lk === newKey) continue;
+                const parts = lk.split('||');
+                if ((parts[2] || '') !== freight) continue;
+                let other = {};
+                try { other = JSON.parse(localStorage.getItem(sk) || '{}') || {}; } catch {}
+                if (!other || !other.is_non_vas) continue;
+                const otherPOs = String(other.po_list || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+                if (otherPOs.some(po => incomingPOs.has(po))) { overlapKey = lk; break; }
+              }
+              if (overlapKey) {
+                const proceed = confirm(`A non-VAS ${freight} lane already exists this week with overlapping POs (${overlapKey}).\n\nSave anyway?`);
+                if (!proceed) return;
+              }
+            } catch { /* best-effort */ }
+          }
+
+          saveIntlLaneManual(ws, newKey, {
+            is_non_vas: true,
+            units_total: unitsIn,
+            po_list: poList,
+            ticket_ref: ticket,
+          });
+
+          // Select the new lane and re-render
+          UI.selection = { node: 'intl', sub: newKey };
+          refresh();
+        } catch (err) {
+          console.error('[nonvas-add] failed', err);
+          alert('Could not create non-VAS lane: ' + (err && err.message || err));
+        }
       });
     }
 
@@ -5245,6 +5372,27 @@ detail.innerHTML = [
 
         const hold = !!detail.querySelector('#flow-intl-hold')?.checked;
         const note = detail.querySelector('#flow-intl-note')?.value || '';
+
+        // Non-VAS fields (only present when the selected lane is_non_vas)
+        const unitsTotalEl = detail.querySelector('#flow-intl-units-total');
+        const poListEl = detail.querySelector('#flow-intl-po-list');
+        const ticketRefEl = detail.querySelector('#flow-intl-ticket-ref');
+        const isNonVas = !!unitsTotalEl; // fields only render for non-VAS lanes
+
+        if (isNonVas) {
+          const unitsVal = Number(unitsTotalEl.value);
+          const poVal = String(poListEl?.value || '').trim();
+          const ticketVal = String(ticketRefEl?.value || '').trim();
+          if (!unitsVal || unitsVal <= 0 || !poVal || !ticketVal) {
+            const msg = detail.querySelector('#flow-intl-save-msg');
+            if (msg) {
+              msg.textContent = 'Units, PO List, and Ticket # are required for non-VAS lanes';
+              msg.style.color = '#D92D20';
+            }
+            return;
+          }
+        }
+
         const obj = {
           packing_list_ready_at: safeISO(pack),
           origin_customs_cleared_at: safeISO(originClr),
@@ -5256,6 +5404,12 @@ detail.innerHTML = [
           customs_hold: hold,
           note: String(note || ''),
         };
+        if (isNonVas) {
+          obj.is_non_vas = true;
+          obj.units_total = Number(unitsTotalEl.value) || 0;
+          obj.po_list = String(poListEl?.value || '').trim();
+          obj.ticket_ref = String(ticketRefEl?.value || '').trim();
+        }
         saveIntlLaneManual(ws, key, obj);
         const msg = detail.querySelector('#flow-intl-save-msg');
         if (msg) { msg.textContent = 'Saved ✓'; msg.style.color = '#6E6E73'; }
