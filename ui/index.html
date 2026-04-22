@@ -1412,11 +1412,13 @@ function buildShipmentSummary(plan = [], records = [], bins = []) {
   }
 
   const binWeight = new Map();
+  const binCbm = new Map();
   for (const b of bins || []) {
     const mb = String(b.mobile_bin ?? b.bin ?? '').trim();
     if (!mb) continue;
     const w = Number(b.gross_weight ?? b.weight ?? b.weight_kg ?? 0) || 0;
     binWeight.set(mb, w);
+    binCbm.set(mb, cbmPerCarton(b.carton_length_cm, b.carton_width_cm, b.carton_height_cm));
   }
 
   const norm = (v) => {
@@ -1448,6 +1450,8 @@ function buildShipmentSummary(plan = [], records = [], bins = []) {
         'Facility Name': facility,
         _poSet: new Set(),
         _binSet: new Set(),
+        _cbmTotal: 0,
+        _binsMissingDims: 0,
         'Total Units Applied': 0,
         'Gross Weight': 0
       });
@@ -1465,6 +1469,9 @@ function buildShipmentSummary(plan = [], records = [], bins = []) {
       if (!binAssignedGroup.has(mb)) {
         binAssignedGroup.set(mb, gkey);
         g['Gross Weight'] += w;
+        const bcbm = binCbm.get(mb);
+        if (bcbm == null) g._binsMissingDims += 1;
+        else g._cbmTotal += bcbm;
       }
     }
   }
@@ -1472,7 +1479,7 @@ function buildShipmentSummary(plan = [], records = [], bins = []) {
   const out = [];
   for (const g of groups.values()) {
     const binCount = g._binSet.size;
-    out.push({
+    const row = {
       'Supplier Name': g['Supplier Name'],
       'Zendesk Ticket #': g['Zendesk Ticket #'],
       'Freight Type': g['Freight Type'],
@@ -1481,8 +1488,10 @@ function buildShipmentSummary(plan = [], records = [], bins = []) {
       'Total Units Applied': g['Total Units Applied'],
       'Total Mobile Bins': binCount,
       'Gross Weight': round2(g['Gross Weight']),
-      'CBM': round3(binCount * 0.046)
-    });
+      'CBM': (binCount > 0 && binCount === g._binsMissingDims) ? null : round3(g._cbmTotal)
+    };
+    if (g._binsMissingDims > 0) row['Bins Missing Dimensions'] = g._binsMissingDims;
+    out.push(row);
   }
 
   out.sort((a, b) =>
@@ -1507,11 +1516,13 @@ function buildShipmentDetail(plan = [], records = [], bins = []) {
   }
 
   const binWeight = new Map();
+  const binCbm = new Map();
   for (const b of bins || []) {
     const mb = String(b.mobile_bin ?? b.bin ?? '').trim();
     if (!mb) continue;
     const w = Number(b.gross_weight ?? b.weight ?? b.weight_kg ?? 0) || 0;
     binWeight.set(mb, w);
+    binCbm.set(mb, cbmPerCarton(b.carton_length_cm, b.carton_width_cm, b.carton_height_cm));
   }
 
   const norm = (v) => {
@@ -1543,6 +1554,8 @@ function buildShipmentDetail(plan = [], records = [], bins = []) {
         'Facility Name': facility,
         'PO': po,
         _binSet: new Set(),
+        _cbmTotal: 0,
+        _binsMissingDims: 0,
         'Total Units Applied': 0,
         'Gross Weight': 0
       });
@@ -1559,6 +1572,9 @@ function buildShipmentDetail(plan = [], records = [], bins = []) {
       if (!binAssignedGroup.has(mb)) {
         binAssignedGroup.set(mb, gkey);
         g['Gross Weight'] += w;
+        const bcbm = binCbm.get(mb);
+        if (bcbm == null) g._binsMissingDims += 1;
+        else g._cbmTotal += bcbm;
       } else if (binAssignedGroup.get(mb) === gkey) {
         // same group ok
       } else {
@@ -1570,7 +1586,7 @@ function buildShipmentDetail(plan = [], records = [], bins = []) {
   const out = [];
   for (const g of groups.values()) {
     const binCount = g._binSet.size;
-    out.push({
+    const row = {
       'Supplier Name': g['Supplier Name'],
       'Zendesk Ticket #': g['Zendesk Ticket #'],
       'Freight Type': g['Freight Type'],
@@ -1579,8 +1595,10 @@ function buildShipmentDetail(plan = [], records = [], bins = []) {
       'Total Units Applied': g['Total Units Applied'],
       'Total Mobile Bins': binCount,
       'Gross Weight': round2(g['Gross Weight']),
-      'CBM': round3(binCount * 0.046)
-    });
+      'CBM': (binCount > 0 && binCount === g._binsMissingDims) ? null : round3(g._cbmTotal)
+    };
+    if (g._binsMissingDims > 0) row['Bins Missing Dimensions'] = g._binsMissingDims;
+    out.push(row);
   }
 
   out.sort((a, b) =>
@@ -1596,6 +1614,15 @@ function buildShipmentDetail(plan = [], records = [], bins = []) {
 
 function round2(n){ return Math.round((Number(n)||0) * 100) / 100; }
 function round3(n){ return Math.round((Number(n)||0) * 1000) / 1000; }
+
+// Returns CBM for ONE carton/bin given L/W/H in cm.
+// Returns null if any dimension is missing, non-finite, or non-positive.
+function cbmPerCarton(l_cm, w_cm, h_cm){
+  const L = Number(l_cm), W = Number(w_cm), H = Number(h_cm);
+  if (!Number.isFinite(L) || !Number.isFinite(W) || !Number.isFinite(H)) return null;
+  if (L <= 0 || W <= 0 || H <= 0) return null;
+  return (L * W * H) / 1000000;
+}
 
 
 async function downloadAppliedWeek() {
@@ -3035,10 +3062,25 @@ const cartonsOutUse = cartonsOutFinal;
     setTxt('#ops-week-units-applied', appliedTotal2.toLocaleString());
     setTxt('#ops-week-cartons-in', cartonsInUse.toLocaleString());
     setTxt('#ops-week-cartons-out', cartonsOutUse.toLocaleString());
-        const cbmIn = (Number(cartonsInUse)||0) * 0.046;
-    const cbmOut = (Number(cartonsOutUse)||0) * 0.046;
-    setTxt('#ops-week-cbm-in', cbmIn.toFixed(3));
-    setTxt('#ops-week-cbm-out', cbmOut.toFixed(3));
+        // CBM in: sum over receiving rows of (cartons_received × per-carton CBM).
+        // CBM out: sum over bins (one bin = one carton) of per-bin CBM.
+        // Legacy rows (missing dims) contribute 0. If nothing has dims, show dash.
+        let cbmIn = 0, cbmInHasDims = false;
+        for (const r of (state.receiving || [])) {
+          const per = cbmPerCarton(r.carton_length_cm, r.carton_width_cm, r.carton_height_cm);
+          if (per == null) continue;
+          cbmInHasDims = true;
+          cbmIn += per * (Number(r.cartons_received) || 0);
+        }
+        let cbmOut = 0, cbmOutHasDims = false;
+        for (const b of (state.bins || [])) {
+          const per = cbmPerCarton(b.carton_length_cm, b.carton_width_cm, b.carton_height_cm);
+          if (per == null) continue;
+          cbmOutHasDims = true;
+          cbmOut += per;
+        }
+        setTxt('#ops-week-cbm-in',  cbmInHasDims  ? cbmIn.toFixed(3)  : '—');
+        setTxt('#ops-week-cbm-out', cbmOutHasDims ? cbmOut.toFixed(3) : '—');
     // Approximate containers (planning units as volume basis)
     const unitsForShip = Number(plannedTotal||0) || 0;
     const full40 = Math.floor(unitsForShip/16000);
@@ -3496,11 +3538,25 @@ window.downloadMobileBins = async function downloadMobileBins(){
       const mobileBin = String(b.mobile_bin || b.mobileBin || '').trim();
       const weight = Number(b.weight_kg ?? b.weight ?? 0) || 0;
       const units  = Number(b.total_units ?? b.units ?? 0) || 0;
+      const L = (b.carton_length_cm != null) ? Number(b.carton_length_cm) : null;
+      const W = (b.carton_width_cm  != null) ? Number(b.carton_width_cm)  : null;
+      const H = (b.carton_height_cm != null) ? Number(b.carton_height_cm) : null;
+      const cbm = cbmPerCarton(L, W, H);
       if(!mobileBin) continue;
-      rows.push({Supplier:supplier, PO:po, Mobile_Bin_Number:mobileBin, Weight_kg:weight, Units:units});
+      rows.push({
+        Supplier: supplier,
+        PO: po,
+        Mobile_Bin_Number: mobileBin,
+        Weight_kg: weight,
+        Units: units,
+        Carton_Length_cm: L != null ? L : '',
+        Carton_Width_cm:  W != null ? W : '',
+        Carton_Height_cm: H != null ? H : '',
+        CBM: cbm != null ? round3(cbm) : ''
+      });
     }
     rows.sort((a,b)=> (a.Supplier||'').localeCompare(b.Supplier||'') || (a.PO||'').localeCompare(b.PO||'') || (a.Mobile_Bin_Number||'').localeCompare(b.Mobile_Bin_Number||''));
-    const headers = ['Supplier','PO','Mobile_Bin_Number','Weight_kg','Units'];
+    const headers = ['Supplier','PO','Mobile_Bin_Number','Weight_kg','Units','Carton_Length_cm','Carton_Width_cm','Carton_Height_cm','CBM'];
     const csv = toCSV(headers, rows);
     const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
     const a = document.createElement('a');
@@ -4480,12 +4536,46 @@ async function renderOpsInsights(view){
       poCartonsOut.set(po, toNum(o?.cartons_out || 0));
     }
 
-    const CBM_PER_CARTON = 0.046;
+    // Per-PO CBM maps: "In" from receiving (cartons × per-carton CBM),
+    // "Ready" from bins (1 bin = 1 carton). Legacy rows missing dims are
+    // tracked separately so we can show partial-data notices.
+    const poCbmIn = new Map();       // po -> CBM from receiving dims
+    const poCbmInMissing = new Set();// POs with receiving but no dims
+    for (const r of (state.receiving || [])) {
+      const po = norm(r.po_number || r.po);
+      if (!po) continue;
+      const per = cbmPerCarton(r.carton_length_cm, r.carton_width_cm, r.carton_height_cm);
+      const cartons = Number(r.cartons_received) || 0;
+      if (per == null) { if (cartons > 0) poCbmInMissing.add(po); continue; }
+      poCbmIn.set(po, (poCbmIn.get(po) || 0) + per * cartons);
+    }
+    // Bin → PO join for "Ready" CBM. Bins table doesn't carry PO, so we use
+    // records to map bin → PO, then sum per-bin CBM by PO.
+    const binToPO = new Map();
+    for (const rec of (state.records || [])) {
+      const mb = String(rec.mobile_bin || rec.bin || '').trim();
+      const po = norm(rec.po_number || rec.po);
+      if (!mb || !po) continue;
+      if (!binToPO.has(mb)) binToPO.set(mb, po);
+    }
+    const poCbmReady = new Map();
+    const poCbmReadyMissing = new Set();
+    const binsSeen = new Set();
+    for (const b of (state.bins || [])) {
+      const mb = String(b.mobile_bin || '').trim();
+      if (!mb || binsSeen.has(mb)) continue;
+      binsSeen.add(mb);
+      const po = binToPO.get(mb);
+      if (!po) continue;
+      const per = cbmPerCarton(b.carton_length_cm, b.carton_width_cm, b.carton_height_cm);
+      if (per == null) { poCbmReadyMissing.add(po); continue; }
+      poCbmReady.set(po, (poCbmReady.get(po) || 0) + per);
+    }
 
     const buckets = new Map([
-      ['Air',   {k:'Air',   icon:'✈️', planned:0, applied:0, cartonsIn:0, cartonsReady:0, pos:new Set(), suppliers:new Set()}],
-      ['Sea',   {k:'Sea',   icon:'🚢', planned:0, applied:0, cartonsIn:0, cartonsReady:0, pos:new Set(), suppliers:new Set()}],
-      ['Other', {k:'Other', icon:'📦', planned:0, applied:0, cartonsIn:0, cartonsReady:0, pos:new Set(), suppliers:new Set()}],
+      ['Air',   {k:'Air',   icon:'✈️', planned:0, applied:0, cartonsIn:0, cartonsReady:0, cbmIn:0, cbmReady:0, missingDims:false, pos:new Set(), suppliers:new Set()}],
+      ['Sea',   {k:'Sea',   icon:'🚢', planned:0, applied:0, cartonsIn:0, cartonsReady:0, cbmIn:0, cbmReady:0, missingDims:false, pos:new Set(), suppliers:new Set()}],
+      ['Other', {k:'Other', icon:'📦', planned:0, applied:0, cartonsIn:0, cartonsReady:0, cbmIn:0, cbmReady:0, missingDims:false, pos:new Set(), suppliers:new Set()}],
     ]);
 
     for(const r of rows){
@@ -4502,6 +4592,9 @@ async function renderOpsInsights(view){
       b.applied += applied;
       b.cartonsIn += cartonsIn;
       b.cartonsReady += (poCartonsOut.get(po) || 0);
+      b.cbmIn    += (poCbmIn.get(po) || 0);
+      b.cbmReady += (poCbmReady.get(po) || 0);
+      if (poCbmInMissing.has(po) || poCbmReadyMissing.has(po)) b.missingDims = true;
 
       if(po) b.pos.add(po);
       if(r.supplier && r.supplier!=='Unspecified') b.suppliers.add(r.supplier);
@@ -4512,7 +4605,7 @@ async function renderOpsInsights(view){
     const maxPlanned = Math.max(1, ...arr.map(x=>x.planned||0));
     const maxApplied = Math.max(1, ...arr.map(x=>x.applied||0));
     const maxCartons = Math.max(1, ...arr.map(x=>Math.max(x.cartonsIn||0, x.cartonsReady||0)));
-    const maxCbm = Math.max(1, ...arr.map(x=>Math.max((x.cartonsIn||0)*CBM_PER_CARTON, (x.cartonsReady||0)*CBM_PER_CARTON)));
+    const maxCbm = Math.max(1, ...arr.map(x=>Math.max(x.cbmIn||0, x.cbmReady||0)));
 
     const barPair = (title, aLabel, aVal, bLabel, bVal, maxVal, fmtFn) => {
       const aH = Math.round(64 * (maxVal>0 ? (aVal/maxVal) : 0));
@@ -4550,8 +4643,6 @@ async function renderOpsInsights(view){
     root.innerHTML = `
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
         ${arr.map(b=>{
-          const cbmIn = (b.cartonsIn||0) * CBM_PER_CARTON;
-          const cbmReady = (b.cartonsReady||0) * CBM_PER_CARTON;
           return `
             <div class="bg-gray-50 rounded-2xl border p-3">
               <div class="flex items-center justify-between">
@@ -4571,11 +4662,11 @@ async function renderOpsInsights(view){
               <div class="mt-3 grid grid-cols-1 gap-2">
                 ${barPair('Units', 'Planned', b.planned, 'Applied', b.applied, Math.max(maxPlanned, maxApplied), fmt0)}
                 ${barPair('Cartons', 'In', b.cartonsIn, 'Ready', b.cartonsReady, maxCartons, fmt0)}
-                ${barPair('CBM', 'In', cbmIn, 'Ready', cbmReady, maxCbm, fmt2)}
+                ${barPair('CBM', 'In', b.cbmIn, 'Ready', b.cbmReady, maxCbm, fmt2)}
               </div>
 
               <div class="text-[11px] text-gray-500 mt-2">
-                CBM = 0.046 × cartons. “Ready” uses cartons_out from records summary when available.
+                CBM computed from actual carton L×W×H / 1,000,000 per row.${b.missingDims ? ' Some rows lack dimensions and were excluded.' : ''} "Ready" uses cartons_out from records summary when available.
               </div>
             </div>
           `;
