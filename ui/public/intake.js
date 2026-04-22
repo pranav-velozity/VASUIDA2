@@ -386,12 +386,23 @@
       const unitsRaw = pick('total_units', 'units', 'qty', 'quantity');
       const weightRaw= pick('weight_kg', 'weight', 'kg');
       const dateRaw  = pick('date', 'date_local', 'created_at');
+      const lenRaw   = pick('carton_length_cm', 'length_cm', 'l_cm', 'length', 'l');
+      const widRaw   = pick('carton_width_cm',  'width_cm',  'w_cm', 'width',  'w');
+      const hgtRaw   = pick('carton_height_cm', 'height_cm', 'h_cm', 'height', 'h');
+
+      const toPositiveOrNull = (v) => {
+        const n = toNumberOrNull(v);
+        return (n != null && n > 0) ? n : null;
+      };
 
       return {
         mobile_bin:  id,
         total_units: toNumberOrNull(unitsRaw),
         weight_kg:   toNumberOrNull(weightRaw),
-        date_local:  toISODate(dateRaw) || todayInTZ()
+        date_local:  toISODate(dateRaw) || todayInTZ(),
+        carton_length_cm: toPositiveOrNull(lenRaw),
+        carton_width_cm:  toPositiveOrNull(widRaw),
+        carton_height_cm: toPositiveOrNull(hgtRaw)
       };
     }
 
