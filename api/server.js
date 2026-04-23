@@ -3086,14 +3086,26 @@ function buildReceivingRows(ws, planRows, summary) {
   const mondayNoon = new Date(`${ws}T04:00:00.000Z`);
   const pastDue = now > addBusinessDays(mondayNoon, EMAIL_GRACE_BUSINESS_DAYS);
 
+  // Pre-aggregate target_qty per PO across all SKU rows. A plan is PO × SKU,
+  // so a single PO can have multiple rows — summing across them gives the
+  // true PO-level target. Previously we took only the first row's target_qty,
+  // which surfaced a single SKU's quantity as if it were the whole PO.
+  const targetByPo = new Map();
+  const firstRowByPo = new Map();
   for (const p of planRows) {
     const po = String(p?.po_number || '').trim().toUpperCase();
-    if (!po || seen.has(po)) continue;
+    if (!po) continue;
+    targetByPo.set(po, (targetByPo.get(po) || 0) + (Number(p?.target_qty || 0)));
+    if (!firstRowByPo.has(po)) firstRowByPo.set(po, p);
+  }
+
+  for (const [po, p] of firstRowByPo.entries()) {
+    if (seen.has(po)) continue;
     seen.add(po);
 
     const recv = recvByPo[po];
     const received = recv && (recv.cartons_received > 0);
-    const target = Number(p?.target_qty || 0);
+    const target = targetByPo.get(po) || 0;
     const supplier = String(p?.supplier_name || p?.supplier || 'Unknown').trim();
 
     let status;
