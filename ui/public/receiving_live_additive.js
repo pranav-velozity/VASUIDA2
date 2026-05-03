@@ -999,7 +999,7 @@ function computeSummaryAll(planRows, receivingRows) {
         : (Number(r.cartons_out || r.mobile_bin_count || r.mobile_bin_counts || r.mobile_bins || r.mobile_bins_count || r.mobile_bin_total || r.mobile_bin_total_count || 0) || 0);
 
       return `
-<tr class="border-t">
+<tr class="border-t" data-po="${esc(x.po)}">
   <td class="py-2 px-2">
     <input class="recv-row-check" type="checkbox" data-po="${esc(x.po)}" />
   </td>
