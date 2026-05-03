@@ -886,9 +886,16 @@ function computeSummaryAll(planRows, receivingRows) {
 
     function currentPayload() {
       const facility_name = (facilityInput?.value || planFacility || '').trim();
-      const receivedLocal = (receivedInput?.value || '').trim(); // datetime-local value
-      const received_at_local = receivedLocal;
-      const received_at_utc = receivedLocal ? new Date(receivedLocal).toISOString() : '';
+      // This row template has no inline received-at input (received timestamps
+      // are set by the top-bar "Receive Selected" or CSV upload workflows). So
+      // we preserve whatever the server already has on `existing` rather than
+      // sending '' which would overwrite the stored timestamp (the receiving
+      // UPSERT does NOT coalesce received_at_*).
+      const receivedLocal = (receivedInput?.value || '').trim();
+      const received_at_local = receivedLocal || String(existing?.received_at_local || '').trim();
+      const received_at_utc   = receivedLocal
+        ? new Date(receivedLocal).toISOString()
+        : String(existing?.received_at_utc || '').trim();
       return {
         po_number: po,
         supplier_name: supplier,
