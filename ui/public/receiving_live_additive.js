@@ -1427,8 +1427,85 @@ if (checkAll) {
 	  };
 	}
 
+	// Builds the password-protected "Carton Replacement Charges" page appended
+	// to the Supplier PDF. One row per supplier; charge = replaced × $1.10 USD,
+	// GST = subtotal × 10%, Total = subtotal + GST. A grand-total row is
+	// rendered at the bottom. Suppliers with zero replaced cartons are omitted.
+	function buildChargesPage(suppliers, bySupplier, ws, generatedAtLocal) {
+	  const RATE_USD = 1.10;
+	  const GST_RATE = 0.10;
+	  const fmt2 = (n) => Number(n || 0).toFixed(2);
+	  const fmtInt = (n) => Number(n || 0).toLocaleString();
+
+	  const lines = [];
+	  let totalReplaced = 0, totalSubtotal = 0, totalGst = 0, totalTotal = 0;
+	  for (const supplier of suppliers) {
+	    const rs = bySupplier.get(supplier) || [];
+	    const replaced = rs.reduce((a, x) => a + (Number(x.replaced) || 0), 0);
+	    if (replaced <= 0) continue;
+	    const subtotal = replaced * RATE_USD;
+	    const gst = subtotal * GST_RATE;
+	    const total = subtotal + gst;
+	    totalReplaced += replaced;
+	    totalSubtotal += subtotal;
+	    totalGst += gst;
+	    totalTotal += total;
+	    lines.push({ supplier, replaced, subtotal, gst, total });
+	  }
+
+	  const rowsHtml = lines.length
+	    ? lines.map(l => `
+	        <tr>
+	          <td>${esc(l.supplier)}</td>
+	          <td class="right">${fmtInt(l.replaced)}</td>
+	          <td class="right">$${fmt2(RATE_USD)}</td>
+	          <td class="right">$${fmt2(l.subtotal)}</td>
+	          <td class="right">$${fmt2(l.gst)}</td>
+	          <td class="right"><b>$${fmt2(l.total)}</b></td>
+	        </tr>
+	      `).join('')
+	    : `<tr><td colspan="6" class="muted">No replaced cartons recorded for this week.</td></tr>`;
+
+	  const totalsRow = lines.length ? `
+	    <tr style="background:#f9fafb;font-weight:700;">
+	      <td>TOTAL</td>
+	      <td class="right">${fmtInt(totalReplaced)}</td>
+	      <td class="right">—</td>
+	      <td class="right">$${fmt2(totalSubtotal)}</td>
+	      <td class="right">$${fmt2(totalGst)}</td>
+	      <td class="right">$${fmt2(totalTotal)}</td>
+	    </tr>
+	  ` : '';
+
+	  return `
+	    <div class="page">
+	      <h2>Carton Replacement Charges</h2>
+	      <div class="meta">
+	        Generated: ${esc(generatedAtLocal)}<br/>
+	        Week: ${esc(ws)} • Rate: $${fmt2(RATE_USD)} USD per replaced carton • GST: ${(GST_RATE * 100).toFixed(0)}%
+	      </div>
+	      <table>
+	        <thead>
+	          <tr>
+	            <th>Supplier</th>
+	            <th class="right">Cartons Replaced</th>
+	            <th class="right">Rate (USD)</th>
+	            <th class="right">Subtotal (USD)</th>
+	            <th class="right">GST 10% (USD)</th>
+	            <th class="right">Total (USD)</th>
+	          </tr>
+	        </thead>
+	        <tbody>${rowsHtml}${totalsRow}</tbody>
+	      </table>
+	      <div class="meta" style="margin-top:10px;">
+	        Confidential — internal financial summary. Distribute only to authorised recipients.
+	      </div>
+	    </div>
+	  `;
+	}
+
 	if (btnPdf) {
-	  btnPdf.onclick = () => {
+	  btnPdf.onclick = async () => {
 	    const ws = getWeekStart();
 	    if (!ws) return;
 	    const rows = buildWeekExportRows(M.planRows, M.receivingRows, ws);
@@ -1441,6 +1518,39 @@ if (checkAll) {
 	    const suppliers = Array.from(bySupplier.keys()).sort((a,b)=>String(a).localeCompare(String(b)));
 	    const cutoffLocal = fmtLocalFromUtc(businessCutoffUtcISO(ws));
 	    const generatedAtLocal = new Date().toLocaleString();
+
+	    // Optional carton-replacement charges page. Reuses the Cost Report
+	    // password (server validates against COST_REPORT_PASSWORD). If the user
+	    // cancels or enters the wrong password, the PDF prints without this
+	    // page — the standard summary always works.
+	    let chargesPage = '';
+	    const enteredPwd = window.prompt(
+	      'Carton Replacement Charges page is password-protected.\n\n' +
+	      'Enter the Cost Report password to include it, or click Cancel to print the standard PDF without it.'
+	    );
+	    if (enteredPwd) {
+	      try {
+	        const _base = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/, '');
+	        let _bearer = null;
+	        if (window.Clerk?.session) { try { _bearer = await window.Clerk.session.getToken(); } catch(_){} }
+	        const authResp = await fetch(`${_base}/report/cost-utilisation/auth`, {
+	          method: 'POST',
+	          headers: {
+	            'Content-Type': 'application/json',
+	            ...(_bearer ? {'Authorization': 'Bearer ' + _bearer} : {})
+	          },
+	          body: JSON.stringify({ password: enteredPwd })
+	        });
+	        if (authResp.ok) {
+	          chargesPage = buildChargesPage(suppliers, bySupplier, ws, generatedAtLocal);
+	        } else {
+	          alert('Incorrect password — printing PDF without the Carton Replacement Charges page.');
+	        }
+	      } catch (e) {
+	        console.warn('[receiving] charges-page auth failed', e);
+	        alert('Could not verify password — printing PDF without the Carton Replacement Charges page.');
+	      }
+	    }
 
 	    // Exception summary (first page)
 	    const { items } = computeSupplierStats(M.planRows, M.receivingRows, ws);
@@ -1599,7 +1709,7 @@ if (checkAll) {
 	      <body>
 	        <h1>Receiving — Supplier Summary</h1>
 	        <div class="meta">Week: ${esc(ws)} • Business cutoff (local): ${esc(cutoffLocal || '')}</div>
-	        ${exceptionPage}${pages}
+	        ${exceptionPage}${pages}${chargesPage}
 	        <script>window.print();</script>
 	      </body></html>
 	    `;
