@@ -3836,7 +3836,11 @@ async function renderOpsInsights(view){
     }
     received = Math.round(received);
     const applied = poToApplied.get(po) || 0;
-    poDerived.set(po, {planned, received, applied, cartonsIn, plannedCartons, ...p});
+    // NOTE: include `po_number` on the row so downstream views (Insights/Freight)
+    // can use it as a join key. `poPlan` keeps the PO only as the map key, not
+    // as a field on the value, so without this the consumers see undefined and
+    // any per-PO lookup (e.g. poCbmIn.get(po)) silently returns 0.
+    poDerived.set(po, {planned, received, applied, cartonsIn, plannedCartons, ...p, po_number: po});
   }
 
   // Special carton view (kept)
