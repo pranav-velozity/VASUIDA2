@@ -4541,10 +4541,12 @@ async function renderOpsInsights(view){
     }
 
     // Per-PO CBM maps: "In" from receiving (cartons × per-carton CBM),
-    // "Ready" from bins (1 bin = 1 carton). Legacy rows missing dims are
-    // tracked separately so we can show partial-data notices.
+    // "Ready" from cartons_out × the same per-carton CBM (1 bin = 1 carton, and
+    // the dimensions for a PO are stored on the receiving row — there's no
+    // independent bin-level dim source we can rely on in summary mode).
     const poCbmIn = new Map();       // po -> CBM from receiving dims
     const poCbmInMissing = new Set();// POs with receiving but no dims
+    const poPerCarton = new Map();   // po -> per-carton CBM (m³)
     for (const r of (state.receiving || [])) {
       const po = norm(r.po_number || r.po);
       if (!po) continue;
@@ -4552,28 +4554,20 @@ async function renderOpsInsights(view){
       const cartons = Number(r.cartons_received) || 0;
       if (per == null) { if (cartons > 0) poCbmInMissing.add(po); continue; }
       poCbmIn.set(po, (poCbmIn.get(po) || 0) + per * cartons);
+      // First non-null per-carton wins; receiving has one row per (week, PO)
+      // by primary key, so this map ends up unique-keyed.
+      if (!poPerCarton.has(po)) poPerCarton.set(po, per);
     }
-    // Bin → PO join for "Ready" CBM. Bins table doesn't carry PO, so we use
-    // records to map bin → PO, then sum per-bin CBM by PO.
-    const binToPO = new Map();
-    for (const rec of (state.records || [])) {
-      const mb = String(rec.mobile_bin || rec.bin || '').trim();
-      const po = norm(rec.po_number || rec.po);
-      if (!mb || !po) continue;
-      if (!binToPO.has(mb)) binToPO.set(mb, po);
-    }
+
+    // Ready CBM = per-PO cartons_out × per-PO per-carton CBM. Falls back to
+    // missing-set when a PO has cartons_out but no recorded dims yet.
     const poCbmReady = new Map();
     const poCbmReadyMissing = new Set();
-    const binsSeen = new Set();
-    for (const b of (state.bins || [])) {
-      const mb = String(b.mobile_bin || '').trim();
-      if (!mb || binsSeen.has(mb)) continue;
-      binsSeen.add(mb);
-      const po = binToPO.get(mb);
-      if (!po) continue;
-      const per = cbmPerCarton(b.carton_length_cm, b.carton_width_cm, b.carton_height_cm);
+    for (const [po, cartonsOut] of poCartonsOut.entries()) {
+      if (!cartonsOut) continue;
+      const per = poPerCarton.get(po);
       if (per == null) { poCbmReadyMissing.add(po); continue; }
-      poCbmReady.set(po, (poCbmReady.get(po) || 0) + per);
+      poCbmReady.set(po, per * cartonsOut);
     }
 
     const buckets = new Map([
