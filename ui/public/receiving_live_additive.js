@@ -1352,6 +1352,19 @@ if (checkAll) {
 	        }
 	      }
 
+	      // Carton dimensions: pull from CSV if present; otherwise leave null so the
+	      // backend's COALESCE preserves any previously-stored value rather than
+	      // overwriting with 0/NaN. Keeps `cm` units — backend divides by 1e6.
+	      const dimOrNull = (keys) => {
+	        const raw = pick(r, keys);
+	        if (raw === '') return null;
+	        const n = Number(raw);
+	        return (Number.isFinite(n) && n > 0) ? n : null;
+	      };
+	      const carton_length_cm = dimOrNull(['carton_length_cm', 'length_cm', 'l_cm', 'length', 'l']);
+	      const carton_width_cm  = dimOrNull(['carton_width_cm',  'width_cm',  'w_cm', 'width',  'w']);
+	      const carton_height_cm = dimOrNull(['carton_height_cm', 'height_cm', 'h_cm', 'height', 'h']);
+
 	      payload.push({
 	        po_number: po,
 	        supplier_name: supplier,
@@ -1362,7 +1375,10 @@ if (checkAll) {
 	        cartons_received,
 	        cartons_damaged,
 	        cartons_noncompliant,
-	        cartons_replaced
+	        cartons_replaced,
+	        carton_length_cm,
+	        carton_width_cm,
+	        carton_height_cm
 	      });
 	    }
 
