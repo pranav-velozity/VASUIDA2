@@ -842,17 +842,23 @@ function computeSummaryAll(planRows, receivingRows) {
     const row = document.querySelector(`tr[data-po="${CSS.escape(po)}"]`);
     if (!row) return;
 
-    const facilityInput = row.querySelector('input[data-f="facility"]');
-    const receivedInput = row.querySelector('input[data-f="received_at"]');
-    const cartonsInput = row.querySelector('input[data-f="cartons_received"]');
-    const damagedInput = row.querySelector('input[data-f="cartons_damaged"]');
-    const noncInput = row.querySelector('input[data-f="cartons_noncompliant"]');
-    const replInput = row.querySelector('input[data-f="cartons_replaced"]');
+    // Selectors match the row template above:
+    //  - facility uses `.recv-facility` class
+    //  - all numeric/dim inputs use `data-field="<column_name>"`
+    //  - this row template has no inline "received at" input or "receive" button
+    //    (those are driven by the top-bar "Receive Selected" workflow), so leave
+    //    those refs null and let downstream null-guards handle them.
+    const facilityInput = row.querySelector('input.recv-facility');
+    const receivedInput = null;
+    const cartonsInput = row.querySelector('input[data-field="cartons_received"]');
+    const damagedInput = row.querySelector('input[data-field="cartons_damaged"]');
+    const noncInput = row.querySelector('input[data-field="cartons_noncompliant"]');
+    const replInput = row.querySelector('input[data-field="cartons_replaced"]');
     const lengthInput = row.querySelector('input[data-field="carton_length_cm"]');
     const widthInput  = row.querySelector('input[data-field="carton_width_cm"]');
     const heightInput = row.querySelector('input[data-field="carton_height_cm"]');
     const cbmCell = row.querySelector('.recv-cbm-cell');
-    const receiveBtn = row.querySelector('button[data-act="receive"]');
+    const receiveBtn = null;
 
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
 
