@@ -8463,6 +8463,742 @@ function _printWhenReady() {
 });
 
 
+// ====================================================================
+// MONTHLY CLIENT REPORT — Shipping Data + VAS Dashboard
+// Two separate XLSX reports, one row per container, calendar-month grain.
+// Shared resolver → projects to either column set.
+// Admin-only, gated by the same password mechanism as cost-utilisation.
+// ====================================================================
+
+// POST /report/monthly-client/auth — validate password, return token
+app.post('/report/monthly-client/auth',
+  authenticateRequest,
+  (req, res) => {
+  const { password } = req.body || {};
+  const expected = process.env.COST_REPORT_PASSWORD || 'velozity2026';
+  if (!password || password !== expected) {
+    return res.status(403).json({ error: 'Invalid password' });
+  }
+  _cleanReportTokens();
+  const token = randomUUID();
+  _reportTokens.set(token, Date.now());
+  res.json({ token });
+});
+
+// Format helpers used throughout the monthly client report
+function _mcrFmtDateDMY(iso) {
+  // Convert an ISO date/datetime string to a Date object for ExcelJS native-date cells
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  return d;
+}
+
+function _mcrMondayOfWeekStart(ws) {
+  // week_start is already a Monday (yyyy-mm-dd); just return a Date
+  if (!ws) return null;
+  const d = new Date(`${ws}T00:00:00Z`);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function _mcrAddDays(d, days) {
+  if (!d) return null;
+  const out = new Date(d.getTime());
+  out.setUTCDate(out.getUTCDate() + days);
+  return out;
+}
+
+function _mcrDaysBetween(a, b) {
+  if (!a || !b) return null;
+  const ms = new Date(b).getTime() - new Date(a).getTime();
+  if (isNaN(ms)) return null;
+  return Math.round(ms / 86400000);
+}
+
+// Supplier truncation — first 2 words
+function _mcrFirstTwoWords(s) {
+  if (!s) return '';
+  const parts = String(s).trim().split(/\s+/);
+  return parts.slice(0, 2).join(' ');
+}
+
+// Pickup city based on facility prefix
+function _mcrPickupFromFacility(facility) {
+  const f = String(facility || '').toUpperCase();
+  if (f.startsWith('VOZ')) return { name: 'VelOzity Shenzhen', city: 'Shenzhen' };
+  if (f.startsWith('VOS')) return { name: 'VelOzity Shanghai', city: 'Shanghai' };
+  return { name: 'VelOzity Shenzhen', city: 'Shenzhen' }; // safe default
+}
+
+// Build the "Week N — PO-001, PO-002, ..." order-number string
+function _mcrOrderNumberStr(weekStart, poList) {
+  if (!weekStart) return '';
+  const d = new Date(`${weekStart}T00:00:00Z`);
+  if (isNaN(d.getTime())) return '';
+  // ISO week of year
+  const tmp = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  tmp.setUTCDate(tmp.getUTCDate() + 4 - (tmp.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(tmp.getUTCFullYear(), 0, 1));
+  const wNum = Math.ceil((((tmp - yearStart) / 86400000) + 1) / 7);
+  const pos = Array.isArray(poList) ? poList.filter(Boolean) : [];
+  if (pos.length === 0) return `Week ${wNum}`;
+  if (pos.length <= 10) return `Week ${wNum} — ${pos.join(', ')}`;
+  return `Week ${wNum} — ${pos.slice(0, 10).join(', ')} (+${pos.length - 10} more)`;
+}
+
+// Derive lane-key from a plan row (mirrors emailPlanRowLaneKey)
+function _mcrLaneKey(supplier, zendesk, mode) {
+  const s = String(supplier || '').trim() || 'Unknown';
+  const z = String(zendesk || '').trim() || 'NO_TICKET';
+  const m = /air/i.test(mode) ? 'Air' : 'Sea';
+  return `${s}||${z}||${m}`;
+}
+
+// ---- Shared data resolver ----
+// Returns an array of "container rows" — one per container in the month,
+// each carrying every piece of data we need for both Shipping Data and VAS Dashboard.
+// month is "YYYY-MM".
+function _mcrBuildContainerRows(month, fxRate) {
+  // 1. Enumerate weeks in the month
+  const [yStr, mStr] = month.split('-');
+  const y = Number(yStr), m = Number(mStr);
+  const monthStart = new Date(Date.UTC(y, m - 1, 1));
+  const monthEnd = new Date(Date.UTC(y, m, 0)); // last day
+  const monthStartISO = monthStart.toISOString().slice(0, 10);
+  const monthEndISO = monthEnd.toISOString().slice(0, 10);
+
+  // 2. Plan weeks with week_start in this calendar month
+  const planWeeks = db.prepare(`
+    SELECT week_start, data FROM plans
+    WHERE week_start >= ? AND week_start <= ?
+    ORDER BY week_start
+  `).all(monthStartISO, monthEndISO);
+
+  if (!planWeeks.length) return [];
+
+  // 3. Load lane baselines once (facility + mode → total days)
+  const baselineRows = db.prepare(`SELECT * FROM lane_baselines`).all();
+  const baselineByFacMode = new Map();
+  for (const b of baselineRows) {
+    const totalDays =
+      (Number(b.vas_to_packing_days) || 0) +
+      (Number(b.packing_to_origin_cleared_days) || 0) +
+      (Number(b.origin_cleared_to_departed_days) || 0) +
+      (Number(b.departed_to_arrived_days) || 0) +
+      (Number(b.arrived_to_dest_cleared_days) || 0) +
+      (Number(b.dest_cleared_to_fc_days) || 0);
+    baselineByFacMode.set(`${b.facility}||${b.freight_mode}`, totalDays);
+  }
+
+  // 4. For each week, collect containers
+  const rows = [];
+
+  for (const pw of planWeeks) {
+    const ws = pw.week_start;
+    const planRows = safeJsonParse(pw.data, []) || [];
+
+    // Build PO → plan-row aggregate (supplier, facility, zendesk, mode)
+    const poMeta = new Map();
+    for (const p of planRows) {
+      const po = String(p.po_number || '').trim();
+      if (!po || poMeta.has(po)) continue;
+      poMeta.set(po, {
+        supplier: String(p.supplier_name || p.supplier || '').trim(),
+        zendesk: String(p.zendesk_ticket || p.zendesk || '').trim(),
+        facility: String(p.facility_name || p.facility || '').trim(),
+        mode: String(p.freight_type || p.freight || '').trim(),
+      });
+    }
+
+    // Load all flow_week rows (multiple facilities possible) and merge
+    const flowRows = db.prepare(`SELECT facility, data FROM flow_week WHERE week_start = ?`).all(ws);
+    const mergedLanes = {}; // lane_key → lane manual
+    const mergedContainers = [];
+    const mergedLastmile = {};
+    for (const fr of flowRows) {
+      const d = safeJsonParse(fr.data, {}) || {};
+      if (d.intl_lanes && typeof d.intl_lanes === 'object') {
+        Object.assign(mergedLanes, d.intl_lanes);
+      }
+      const wc = d.intl_weekcontainers;
+      const contArr = Array.isArray(wc) ? wc : (Array.isArray(wc?.containers) ? wc.containers : []);
+      for (const c of contArr) {
+        if (!c || !(c.container_id || c.container)) continue;
+        mergedContainers.push(Object.assign({}, c, { _facility: fr.facility }));
+      }
+      if (d.lastmile_receipts && typeof d.lastmile_receipts === 'object') {
+        Object.assign(mergedLastmile, d.lastmile_receipts);
+      }
+    }
+
+    // Lane snapshots + actuals for this week, indexed by lane_key
+    const snapshots = db.prepare(`SELECT * FROM lane_planned_snapshots WHERE week_start = ?`).all(ws);
+    const snapByLane = Object.fromEntries(snapshots.map(s => [s.lane_key, s]));
+    const actuals = db.prepare(`SELECT * FROM lane_actual_dates WHERE week_start = ?`).all(ws);
+    const actualsByLaneStage = {};
+    for (const a of actuals) {
+      if (!actualsByLaneStage[a.lane_key]) actualsByLaneStage[a.lane_key] = {};
+      actualsByLaneStage[a.lane_key][a.stage] = a.actual_at;
+    }
+
+    // Receiving for this week: PO → row (for "Goods received at Export warehouse")
+    const receivingRows = db.prepare(`
+      SELECT po_number, received_at_utc FROM receiving WHERE week_start = ?
+    `).all(ws);
+    const recvByPO = new Map();
+    for (const r of receivingRows) {
+      const po = String(r.po_number || '').trim().toUpperCase();
+      if (po) recvByPO.set(po, r.received_at_utc || null);
+    }
+
+    // Bins for this week — bins table has dims & weight
+    const binRows = db.prepare(`
+      SELECT mobile_bin, weight_kg, carton_length_cm, carton_width_cm, carton_height_cm
+      FROM bins WHERE week_start = ?
+    `).all(ws);
+    const binByMB = new Map();
+    for (const b of binRows) {
+      const mb = String(b.mobile_bin || '').trim();
+      if (mb && !binByMB.has(mb)) binByMB.set(mb, b);
+    }
+    // bin → PO via records (primary PO by scan count)
+    const we = (() => {
+      const d = new Date(`${ws}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + 6);
+      return d.toISOString().slice(0, 10);
+    })();
+    const binPORows = db.prepare(`
+      SELECT TRIM(mobile_bin) AS mobile_bin, po_number, COUNT(*) AS scan_count
+      FROM records
+      WHERE date_local >= ? AND date_local <= ?
+        AND mobile_bin IS NOT NULL AND mobile_bin != ''
+        AND po_number IS NOT NULL AND po_number != ''
+      GROUP BY TRIM(mobile_bin), po_number
+    `).all(ws, we);
+    const binToPO = new Map();
+    for (const r of binPORows) {
+      const mb = String(r.mobile_bin || '').trim();
+      if (!mb) continue;
+      const existing = binToPO.get(mb);
+      if (!existing || r.scan_count > existing.scan_count) {
+        binToPO.set(mb, { po: String(r.po_number || '').trim().toUpperCase(), scan_count: r.scan_count });
+      }
+    }
+
+    // VAS unit allocation prep — units applied per PO from records (status=complete)
+    const planPOs = Array.from(poMeta.keys()).map(p => p.toUpperCase());
+    const vasUnitsByPO = new Map();
+    if (planPOs.length) {
+      const placeholders = planPOs.map(() => '?').join(',');
+      const vUnits = db.prepare(`
+        SELECT po_number, COUNT(*) AS n FROM records
+        WHERE status='complete' AND po_number IN (${placeholders})
+      `).all(...planPOs);
+      for (const r of vUnits) {
+        vasUnitsByPO.set(String(r.po_number || '').trim().toUpperCase(), Number(r.n) || 0);
+      }
+    }
+    const totalVasUnitsThisWeek = Array.from(vasUnitsByPO.values()).reduce((s, n) => s + n, 0);
+
+    // ---- Iterate containers for this week ----
+    for (const c of mergedContainers) {
+      const cid = String(c.container_id || c.container || '').trim();
+      if (!cid) continue;
+      const isAir = String(c.size_ft || '').toUpperCase() === 'AIR' || /^air/i.test(String(c.vessel || '')) || String(c.freight || c.mode || '').match(/air/i);
+      // Resolve POs on this container
+      const containerPOs = String(c.pos || '').split(',').map(p => p.trim().toUpperCase()).filter(Boolean);
+      // Resolve lanes on this container
+      const laneKeys = Array.isArray(c.lane_keys) ? c.lane_keys : [];
+      // Pick the primary lane (first one) — most container-level fields are per-lane
+      const primaryLaneKey = laneKeys[0] || null;
+      const primaryLane = primaryLaneKey ? mergedLanes[primaryLaneKey] : null;
+      // Transport mode from lane_key split[2]
+      let mode = 'Sea';
+      if (primaryLaneKey) {
+        const parts = primaryLaneKey.split('||');
+        if (parts[2]) mode = /air/i.test(parts[2]) ? 'Air' : 'Sea';
+      } else if (isAir) mode = 'Air';
+
+      // Determine facility from the primary lane (or first PO's facility)
+      const facility = (primaryLane && primaryLane.facility) || (() => {
+        for (const po of containerPOs) {
+          const meta = poMeta.get(po);
+          if (meta && meta.facility) return meta.facility;
+        }
+        return '';
+      })();
+
+      const pickup = _mcrPickupFromFacility(facility);
+
+      // Lane snapshot + actual dates
+      const snap = primaryLaneKey ? snapByLane[primaryLaneKey] : null;
+      const act = primaryLaneKey ? (actualsByLaneStage[primaryLaneKey] || {}) : {};
+
+      // Planned dates
+      const plannedPickup = _mcrAddDays(_mcrMondayOfWeekStart(ws), 7); // Monday after VAS-due Friday
+      const etd = snap ? snap.planned_departed_at : null;
+      const eta = snap ? snap.planned_dest_cleared_at : null; // deliberate: ETA = planned dest cleared
+      const plannedDelivery = snap && snap.planned_dest_cleared_at
+        ? _mcrAddDays(new Date(snap.planned_dest_cleared_at), 4)
+        : null;
+
+      // Actual dates
+      const actualPickup = act.packing_list_ready || null;
+      const actualDeparture = act.departed || null;
+      const actualArrive = act.dest_cleared || null;
+      // Actual Delivery from lastmile receipt for this container
+      const lmReceipt = mergedLastmile[cid] || mergedLastmile[c.container_uid || ''] || null;
+      const actualDelivery = lmReceipt && (lmReceipt.delivered_at || lmReceipt.delivered_date) || null;
+
+      // Supplier / consignor from primary lane key OR primary PO
+      let supplierName = '';
+      if (primaryLaneKey) {
+        supplierName = primaryLaneKey.split('||')[0] || '';
+      }
+      if (!supplierName && containerPOs.length) {
+        const meta = poMeta.get(containerPOs[0]);
+        supplierName = meta ? meta.supplier : '';
+      }
+
+      // Agreed lead time (days) = baseline + 4 days buffer (for dest_cleared → delivery)
+      const baseDays = baselineByFacMode.get(`${facility}||${mode}`) || null;
+      const agreedLeadDays = baseDays != null ? (baseDays + 4) : null;
+
+      // Agreed vs Actual
+      let agreedVsActual = null;
+      if (actualPickup && actualDelivery && agreedLeadDays != null) {
+        const actualDays = _mcrDaysBetween(actualPickup, actualDelivery);
+        if (actualDays != null) agreedVsActual = actualDays - agreedLeadDays;
+      }
+
+      // On time
+      let onTime = '';
+      if (actualDelivery && plannedDelivery) {
+        onTime = new Date(actualDelivery).getTime() <= new Date(plannedDelivery).getTime() ? 'Yes' : 'No';
+      }
+
+      // Weight & Volume from bins
+      let actualWeight = 0;
+      let actualVolume = 0;
+      let hasBins = false;
+      for (const [mb, entry] of binToPO.entries()) {
+        if (containerPOs.includes(entry.po)) {
+          const b = binByMB.get(mb);
+          if (!b) continue;
+          hasBins = true;
+          actualWeight += Number(b.weight_kg) || 0;
+          const L = Number(b.carton_length_cm), W = Number(b.carton_width_cm), H = Number(b.carton_height_cm);
+          if (Number.isFinite(L) && Number.isFinite(W) && Number.isFinite(H) && L > 0 && W > 0 && H > 0) {
+            actualVolume += (L * W * H) / 1000000;
+          }
+        }
+      }
+
+      // Chargeable weight: max(actual, volumetric); DIM: Sea 1000, Air 167
+      const DIM = mode === 'Air' ? 167 : 1000;
+      const volumetricWeight = actualVolume * DIM;
+      const chargeableWeight = hasBins ? Math.max(actualWeight, volumetricWeight) : null;
+
+      // Volume utilization (Sea only): capacity 20ft=28, 40ft=58
+      let volUtilPct = null;
+      if (mode === 'Sea' && hasBins) {
+        const size = String(c.size_ft || '40');
+        const capacity = size.startsWith('20') ? 28 : 58;
+        if (actualVolume > 0 && capacity > 0) volUtilPct = (actualVolume / capacity) * 100;
+      }
+
+      // Goods received at export warehouse = latest receiving date across POs
+      let goodsRecvMax = null;
+      for (const po of containerPOs) {
+        const t = recvByPO.get(po);
+        if (t) {
+          const d = new Date(t);
+          if (!isNaN(d.getTime())) {
+            if (!goodsRecvMax || d > goodsRecvMax) goodsRecvMax = d;
+          }
+        }
+      }
+
+      // VAS units for this container (sum across its POs)
+      let vasUnitsForContainer = 0;
+      for (const po of containerPOs) {
+        vasUnitsForContainer += vasUnitsByPO.get(po) || 0;
+      }
+
+      // Non-VAS lane handling: if primary lane is non-VAS, use lane.po_list and units_total
+      if (primaryLane && primaryLane.is_non_vas) {
+        const nvPOs = String(primaryLane.po_list || '').split(',').map(p => p.trim().toUpperCase()).filter(Boolean);
+        for (const po of nvPOs) {
+          if (!containerPOs.includes(po)) containerPOs.push(po);
+        }
+        // VAS units stay 0 for non-VAS lane (correct — no VAS charge)
+      }
+
+      // Build the normalized container row (both projections read from this)
+      rows.push({
+        // Context
+        _week_start: ws,
+        _facility: facility,
+        _mode: mode,
+        _isAir: mode === 'Air',
+        _container_id: cid,
+        _container_size: String(c.size_ft || ''),
+        _vessel_name: String(c.vessel || ''),
+        _awb: isAir ? cid : null,
+        _lane_key: primaryLaneKey,
+        _lane: primaryLane,
+        _pos: containerPOs,
+        _vas_units_in_container: vasUnitsForContainer,
+        _total_vas_units_this_week: totalVasUnitsThisWeek,
+
+        // Derived display values (Shipping Data columns)
+        year: new Date(`${ws}T00:00:00Z`).getUTCFullYear(),
+        month: new Date(`${ws}T00:00:00Z`).getUTCMonth() + 1,
+        shipment_no: (primaryLane && primaryLane.shipmentNumber) || '',
+        transport_mode: mode,
+        container_mode: mode === 'Sea' ? 'FCL' : 'Pallets',
+        hbl: (primaryLane && primaryLane.hbl) || '',
+        mbl: (primaryLane && primaryLane.mbl) || '',
+        voyage_flight: String(c.vessel || ''),
+        vessel: String(c.vessel || ''),
+        order_number: _mcrOrderNumberStr(ws, containerPOs),
+        container_numbers: cid || 'To-be assigned',
+        container_types: mode === 'Sea' ? String(c.size_ft || '') : (isAir ? cid : ''),
+        carrier_name: String(c.vessel || ''),
+        booking_date: (() => {
+          const d = _mcrMondayOfWeekStart(ws);
+          if (!d) return '';
+          // Monday — already is Monday
+          return d;
+        })(),
+        pickup_party_name: pickup.name,
+        pickup_party_address: pickup.city,
+        pickup_party_city: pickup.city,
+        consignor_name: _mcrFirstTwoWords(supplierName),
+        consignor_address: '',
+        consignor_city: '',
+        consignee_name: 'The Iconic',
+        consignee_city: 'Sydney',
+        delivery_party_name: 'VelOzity',
+        delivery_party_city: 'Sydney',
+        origin_country: 'China',
+        origin_city: pickup.city,
+        destination_country: 'Australia',
+        destination_city: 'Sydney',
+        incoterms: 'FOB',
+        planned_pickup: plannedPickup,
+        actual_pickup: _mcrFmtDateDMY(actualPickup),
+        etd: _mcrFmtDateDMY(etd),
+        actual_departure: _mcrFmtDateDMY(actualDeparture),
+        eta: _mcrFmtDateDMY(eta),
+        actual_arrive: _mcrFmtDateDMY(actualArrive),
+        planned_delivery: plannedDelivery,
+        actual_delivery: _mcrFmtDateDMY(actualDelivery),
+        leadtime_service: mode === 'Sea' ? 'Standard' : 'Express',
+        agreed_lead_time: agreedLeadDays,
+        agreed_vs_actual_leadtime: agreedVsActual,
+        on_time: onTime,
+        deviation_code: '',
+        reason_code: '',
+        deviation_text: (primaryLane && primaryLane.note) || '',
+        deviation_created_date: null,
+        debtor_gid: '',
+        debtor_name: 'The Iconic',
+        teu: mode === 'Sea' ? (String(c.size_ft || '').startsWith('20') ? 1 : 2) : null,
+        container_20ft: mode === 'Sea' ? (String(c.size_ft || '').startsWith('20') ? 1 : 0) : null,
+        container_40ft: mode === 'Sea' ? (String(c.size_ft || '').startsWith('40') ? 1 : 0) : null,
+        actual_weight: hasBins ? actualWeight : null,
+        actual_volume: hasBins ? actualVolume : null,
+        chargeable_weight: chargeableWeight,
+        measurement: hasBins ? actualVolume : null,
+        volume_utilization_pct: volUtilPct,
+        weight_utilization_pct: null, // blank v1
+        goods_received_export: goodsRecvMax,
+      });
+    }
+  }
+
+  // Allocate invoice amounts after all container rows are built
+  _mcrAllocateInvoiceAmounts(rows, month, fxRate);
+
+  return rows;
+}
+
+// Allocate invoice amounts to container rows
+function _mcrAllocateInvoiceAmounts(rows, month, fxRate) {
+  if (!rows.length) return;
+
+  // Load invoices for this month (all types)
+  const invoices = db.prepare(`
+    SELECT * FROM fin_invoices
+    WHERE substr(week_start, 1, 7) = ?
+  `).all(month);
+
+  // Group rows by week_start + mode → set of container rows
+  const rowsByWeekMode = new Map();
+  for (const r of rows) {
+    const key = `${r._week_start}||${r._mode}`;
+    if (!rowsByWeekMode.has(key)) rowsByWeekMode.set(key, []);
+    rowsByWeekMode.get(key).push(r);
+  }
+
+  const rowsByWeek = new Map(); // for VAS (weekly, not mode-split)
+  for (const r of rows) {
+    if (!rowsByWeek.has(r._week_start)) rowsByWeek.set(r._week_start, []);
+    rowsByWeek.get(r._week_start).push(r);
+  }
+
+  for (const inv of invoices) {
+    const invType = String(inv.type || '').toUpperCase();
+    const invLines = db.prepare(`SELECT * FROM fin_invoice_lines WHERE invoice_id = ? ORDER BY sort_order`).all(inv.id);
+
+    if (invType === 'SEA' || invType === 'AIR') {
+      // Freight / Duty-GST / Total ex-GST allocation
+      const matchMode = invType === 'SEA' ? 'Sea' : 'Air';
+      const rowsForWeekMode = rowsByWeekMode.get(`${inv.week_start}||${matchMode}`) || [];
+      if (!rowsForWeekMode.length) continue;
+
+      // Classify each line into exactly one bucket: per-container / customs / misc
+      const perContainer = new Map(); // container_id → total
+      let customsTotal = 0;
+      let miscTotal = 0;
+
+      for (const l of invLines) {
+        const desc = String(l.description || '');
+        const total = Number(l.total) || 0;
+        const isCustoms = /customs/i.test(desc) && (l.gst_free === 1 || l.gst_free === '1');
+        const containerMatch = desc.match(/Container\s+(\S+)/i);
+
+        if (containerMatch && containerMatch[1]) {
+          const cid = containerMatch[1].trim();
+          perContainer.set(cid, (perContainer.get(cid) || 0) + total);
+        } else if (isCustoms) {
+          customsTotal += total;
+        } else {
+          // everything else (fuel surcharges, handling, misc fees) → equal split
+          miscTotal += total;
+        }
+      }
+
+      const containerCount = rowsForWeekMode.length;
+      const miscSplit = containerCount > 0 ? miscTotal / containerCount : 0;
+      const customsSplit = containerCount > 0 ? customsTotal / containerCount : 0;
+
+      for (const r of rowsForWeekMode) {
+        const freightLine = perContainer.get(r._container_id) || 0;
+        const freightSpend = (freightLine + miscSplit) * (fxRate || 1);
+        const dutyGst = customsSplit * (fxRate || 1);
+        const totalExGst = freightSpend; // freight + misc; customs shown separately in Duty/GST
+        r.freight_spend_aud = freightSpend || null;
+        r.duty_gst = dutyGst || null;
+        r.total_excluding_gst_duty = totalExGst || null;
+        r.invoice_no = inv.ref_number || '';
+        r.first_invoice_date = _mcrFmtDateDMY(inv.invoice_date);
+      }
+    } else if (invType === 'VAS') {
+      // VAS allocation by unit share
+      const rowsForWeek = rowsByWeek.get(inv.week_start) || [];
+      if (!rowsForWeek.length) continue;
+
+      // Subtotal excl. carton replacement: sum all lines where description is NOT carton replacement
+      let vasSubtotalExclCarton = 0;
+      for (const l of invLines) {
+        if (/carton\s*replacement/i.test(String(l.description || ''))) continue;
+        vasSubtotalExclCarton += Number(l.total) || 0;
+      }
+
+      // Total VAS units this week (from one of the rows; they all share it)
+      const totalUnits = rowsForWeek[0]?._total_vas_units_this_week || 0;
+      const ratePerUnit = totalUnits > 0 ? vasSubtotalExclCarton / totalUnits : 0;
+
+      for (const r of rowsForWeek) {
+        const units = r._vas_units_in_container || 0;
+        const vasCharge = units * ratePerUnit * (fxRate || 1);
+        r.vas_charges_total = vasCharge || 0;
+        r.vas_invoice_no = inv.ref_number || '';
+        r.vas_first_invoice_date = _mcrFmtDateDMY(inv.invoice_date);
+      }
+    }
+  }
+
+  // Fill in missing invoice fields with empty strings (no invoice for a week+mode)
+  for (const r of rows) {
+    if (r.freight_spend_aud === undefined) r.freight_spend_aud = null;
+    if (r.duty_gst === undefined) r.duty_gst = null;
+    if (r.total_excluding_gst_duty === undefined) r.total_excluding_gst_duty = null;
+    if (r.invoice_no === undefined) r.invoice_no = '';
+    if (r.first_invoice_date === undefined) r.first_invoice_date = null;
+    if (r.vas_charges_total === undefined) r.vas_charges_total = 0;
+    if (r.vas_invoice_no === undefined) r.vas_invoice_no = '';
+    if (r.vas_first_invoice_date === undefined) r.vas_first_invoice_date = null;
+  }
+}
+
+// ---- Column definitions ----
+const MCR_SHIPPING_COLUMNS = [
+  { header: 'Year', key: 'year', width: 8 },
+  { header: 'Month', key: 'month', width: 8 },
+  { header: 'Shipment No', key: 'shipment_no', width: 16 },
+  { header: 'Transport Mode', key: 'transport_mode', width: 14 },
+  { header: 'Container Mode', key: 'container_mode', width: 14 },
+  { header: 'House Bill', key: 'hbl', width: 16 },
+  { header: 'Master Bill', key: 'mbl', width: 16 },
+  { header: 'Voyage Flight', key: 'voyage_flight', width: 16 },
+  { header: 'Vessel', key: 'vessel', width: 16 },
+  { header: 'Order Number', key: 'order_number', width: 40 },
+  { header: 'Container Numbers', key: 'container_numbers', width: 18 },
+  { header: 'ContainerTypes', key: 'container_types', width: 14 },
+  { header: 'Carrier Name', key: 'carrier_name', width: 16 },
+  { header: 'Booking Date', key: 'booking_date', width: 12, isDate: true },
+  { header: 'Pick up Party Name', key: 'pickup_party_name', width: 20 },
+  { header: 'Pickup Party Address', key: 'pickup_party_address', width: 20 },
+  { header: 'Pick up Party City', key: 'pickup_party_city', width: 18 },
+  { header: 'Consignor Name', key: 'consignor_name', width: 20 },
+  { header: 'Consignor Address', key: 'consignor_address', width: 18 },
+  { header: 'Consignor City', key: 'consignor_city', width: 14 },
+  { header: 'Consignee Name', key: 'consignee_name', width: 18 },
+  { header: 'Consignee City', key: 'consignee_city', width: 14 },
+  { header: 'Delivery Party Name', key: 'delivery_party_name', width: 18 },
+  { header: 'Delivery Party City', key: 'delivery_party_city', width: 18 },
+  { header: 'Origin Country', key: 'origin_country', width: 14 },
+  { header: 'Origin City', key: 'origin_city', width: 14 },
+  { header: 'Destination Country', key: 'destination_country', width: 18 },
+  { header: 'Destination City', key: 'destination_city', width: 16 },
+  { header: 'IncoTerms', key: 'incoterms', width: 12 },
+  { header: 'Planned Pickup', key: 'planned_pickup', width: 14, isDate: true },
+  { header: 'Actual Pick-up', key: 'actual_pickup', width: 14, isDate: true },
+  { header: 'ETD', key: 'etd', width: 14, isDate: true },
+  { header: 'Actual Departure', key: 'actual_departure', width: 14, isDate: true },
+  { header: 'ETA', key: 'eta', width: 14, isDate: true },
+  { header: 'Actual Arrive', key: 'actual_arrive', width: 14, isDate: true },
+  { header: 'Planned Delivery', key: 'planned_delivery', width: 14, isDate: true },
+  { header: 'Actual Delivery', key: 'actual_delivery', width: 14, isDate: true },
+  { header: 'Leadtime Service', key: 'leadtime_service', width: 14 },
+  { header: 'Agreed Lead time', key: 'agreed_lead_time', width: 14 },
+  { header: 'Agreed Vs Actual Leadtime', key: 'agreed_vs_actual_leadtime', width: 14 },
+  { header: 'On time', key: 'on_time', width: 10 },
+  { header: 'Deviation Code', key: 'deviation_code', width: 14 },
+  { header: 'Reason Code', key: 'reason_code', width: 14 },
+  { header: 'Deviation Text', key: 'deviation_text', width: 30 },
+  { header: 'Deviation Created Date', key: 'deviation_created_date', width: 14, isDate: true },
+  { header: 'Debtor GID', key: 'debtor_gid', width: 12 },
+  { header: 'Debtor Name', key: 'debtor_name', width: 14 },
+  { header: 'InvoiceNo', key: 'invoice_no', width: 18 },
+  { header: 'First Invoice Date', key: 'first_invoice_date', width: 14, isDate: true },
+  { header: 'Currency Code', key: 'currency_code', width: 10 },
+  { header: 'Teu', key: 'teu', width: 8 },
+  { header: 'Container 20ft', key: 'container_20ft', width: 12 },
+  { header: 'Container 40ft', key: 'container_40ft', width: 12 },
+  { header: 'Actual Weight', key: 'actual_weight', width: 14 },
+  { header: 'Actual Volume', key: 'actual_volume', width: 14 },
+  { header: 'Chargeable Weight', key: 'chargeable_weight', width: 14 },
+  { header: 'measurement', key: 'measurement', width: 14 },
+  { header: 'Volume Utilization%', key: 'volume_utilization_pct', width: 14 },
+  { header: 'Weight Utilization%', key: 'weight_utilization_pct', width: 14 },
+  { header: 'Freight Spend AUD', key: 'freight_spend_aud', width: 14 },
+  { header: 'Total Fuel lcl trans AUD', key: 'total_fuel_lcl', width: 16 },
+  { header: 'BAF', key: 'baf', width: 10 },
+  { header: 'Duty / GST ', key: 'duty_gst', width: 12 },
+  { header: 'FOB Value', key: 'fob_value', width: 12 },
+  { header: 'Total excluding Gst/ duty', key: 'total_excluding_gst_duty', width: 18 },
+  { header: 'Goods received at Export warehouse', key: 'goods_received_export', width: 20, isDate: true },
+];
+
+const MCR_VAS_COLUMNS = [
+  { header: 'Year', key: 'year', width: 8 },
+  { header: 'Month', key: 'month', width: 8 },
+  { header: 'Shipment No', key: 'shipment_no', width: 16 },
+  { header: 'Transport Mode', key: 'transport_mode', width: 14 },
+  { header: 'Container Mode', key: 'container_mode', width: 14 },
+  { header: 'House Bill', key: 'hbl', width: 16 },
+  { header: 'Master Bill', key: 'mbl', width: 16 },
+  { header: 'Voyage Flight', key: 'voyage_flight', width: 16 },
+  { header: 'Vessel', key: 'vessel', width: 16 },
+  { header: 'Order Number', key: 'order_number', width: 40 },
+  { header: 'Container Numbers', key: 'container_numbers', width: 18 },
+  { header: 'ContainerTypes', key: 'container_types', width: 14 },
+  { header: 'Carrier Name', key: 'carrier_name', width: 16 },
+  { header: 'InvoiceNo', key: 'vas_invoice_no', width: 18 },
+  { header: 'First Invoice Date', key: 'vas_first_invoice_date', width: 14, isDate: true },
+  { header: 'Currency Code', key: 'currency_code', width: 10 },
+  { header: 'VAS CHARGES TOTAL', key: 'vas_charges_total', width: 16 },
+];
+
+// GET /report/monthly-client?type=shipping|vas&month=YYYY-MM&currency=USD|AUD&token=...
+app.get('/report/monthly-client',
+  (req, res, next) => {
+    _cleanReportTokens();
+    const reportToken = req.query.token;
+    if (reportToken && _reportTokens.has(reportToken)) return next();
+    return authenticateRequest(req, res, next);
+  },
+  auditLog('download_monthly_client'),
+  async (req, res) => {
+  try {
+    const type = String(req.query.type || 'shipping').toLowerCase();
+    const month = String(req.query.month || '');
+    const currency = String(req.query.currency || 'AUD').toUpperCase();
+
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ error: 'month required (YYYY-MM)' });
+    }
+    if (!['shipping', 'vas'].includes(type)) {
+      return res.status(400).json({ error: 'type must be "shipping" or "vas"' });
+    }
+    if (!['USD', 'AUD'].includes(currency)) {
+      return res.status(400).json({ error: 'currency must be USD or AUD' });
+    }
+
+    // FX rate
+    let fxRate = 1;
+    if (currency === 'AUD') {
+      const fx = db.prepare(`SELECT rate FROM fin_fx_rates WHERE from_curr='USD' AND to_curr='AUD'`).get();
+      if (fx) fxRate = fx.rate;
+    }
+
+    const rows = _mcrBuildContainerRows(month, fxRate);
+
+    // Stamp currency code on every row
+    for (const r of rows) {
+      r.currency_code = currency;
+    }
+
+    // Select column set + filename
+    const cols = type === 'shipping' ? MCR_SHIPPING_COLUMNS : MCR_VAS_COLUMNS;
+    const filename = (type === 'shipping' ? 'Shipping_Data' : 'VAS_Dashboard') + `_${month}.xlsx`;
+
+    // Build workbook
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet(type === 'shipping' ? 'Shipping Data' : 'VAS Dashbaord');
+    ws.columns = cols.map(c => ({ header: c.header, key: c.key, width: c.width }));
+
+    // Header style
+    ws.getRow(1).font = { bold: true };
+    ws.getRow(1).alignment = { vertical: 'middle', horizontal: 'left' };
+
+    // Add rows; apply date format where needed
+    for (const r of rows) {
+      const row = ws.addRow(r);
+      cols.forEach((c, i) => {
+        if (c.isDate) {
+          const cell = row.getCell(i + 1);
+          cell.numFmt = 'dd.mm.yyyy';
+        }
+      });
+    }
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (e) {
+    console.error('GET /report/monthly-client failed:', e);
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+
+
 // ── GET /report/cost-utilisation/insights — debug only
 app.get('/report/cost-utilisation/insights', (req, res) => {
   res.json({ ok: true, message: 'POST to this endpoint with { section, data }' });
