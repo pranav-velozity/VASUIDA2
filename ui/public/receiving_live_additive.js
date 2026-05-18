@@ -3,7 +3,7 @@
    - Binds to global week selector (#week-start / window.state.weekStart)
    - Loads plan + receiving rows for selected week
    - Allows per-PO edits and saves to backend (/receiving/weeks/:ws)
-   - Displays viewer-local time; SLA cutoff uses Asia/Shanghai Monday 12:00 (UTC+8)
+   - Displays timestamps in business TZ (Asia/Shanghai, UTC+8); SLA cutoff uses Monday 12:00 in the same zone
 */
 
 (function () {
@@ -58,13 +58,17 @@
     return `${yyyy}-${mm}-${dd}`;
   }
 
+  // Display timestamps in the business timezone (Asia/Shanghai / Shenzhen, UTC+8)
+  // rather than the viewer's local timezone, so every user sees the same wall-clock
+  // time the receiving operator actually entered.
   function fmtLocalFromUtc(isoUtc) {
     if (!isoUtc) return '';
     const d = new Date(isoUtc);
     if (Number.isNaN(d.getTime())) return '';
     return new Intl.DateTimeFormat(undefined, {
       year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit'
+      hour: '2-digit', minute: '2-digit',
+      timeZone: BUSINESS_TZ
     }).format(d);
   }
 
@@ -473,7 +477,7 @@ function computeCartonsOutByPOFromRecords(records) {
               <button id="recv-next-week" class="cmd cmd--ghost" title="Next week">Next →</button>
             </div>
           </div>
-          <div class="text-xs text-gray-500">TZ: viewer local (business: ${esc(BUSINESS_TZ)})</div>
+          <div class="text-xs text-gray-500">TZ: ${esc(BUSINESS_TZ)} (business)</div>
         </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-12 gap-3">
