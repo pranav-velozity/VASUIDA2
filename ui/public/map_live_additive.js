@@ -439,8 +439,21 @@
           <span style="font-size:11px;font-weight:500;color:#1C1C1E;">Total applied</span>
           <span style="font-size:11px;font-weight:500;color:#1C1C1E;">${totalApplied.toLocaleString()} units</span>
         </div>`:''}
-      </div>`;
+      </div>
+      ${vg.zdentrys.length>0?`<button type="button" data-action="open-detail-modal" data-scope="vessel" data-vessel="${(vg.vessel||'').replace(/"/g,'&quot;')}" data-isair="${vg.isAir?'1':'0'}"
+        style="width:100%;margin-top:12px;background:#fff;color:#990033;border:1px solid rgba(153,0,51,0.3);border-radius:9px;padding:9px 12px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:6px;transition:background .15s;"
+        onmouseover="this.style.background='rgba(153,0,51,0.05)'"
+        onmouseout="this.style.background='#fff'">
+        View full detail (POs · SKUs · days)
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>`:''}`;
     panel.style.transform='translateX(0)';
+    // Wire the "View full detail" button
+    const vDetailLink = panel.querySelector('[data-action="open-detail-modal"]');
+    if(vDetailLink){
+      const zds = vg.zdentrys.map(z=>z.zendesk);
+      vDetailLink.addEventListener('click', ()=> openDetailModal({scope:'vessel', zendesks: zds, vessel: vg.vessel||'Unassigned'}));
+    }
   }
 
   // ── Location detail panel ──
@@ -501,8 +514,20 @@
           </div>
           ${totalPct!==null?`<div style="height:3px;background:rgba(0,0,0,0.08);border-radius:2px;overflow:hidden;"><div style="height:100%;width:${Math.min(totalPct,100)}%;background:${pctBarColor};border-radius:2px;"></div></div>`:''}
         </div>`:''}
-      </div>`;
+      </div>
+      ${entries.length>0?`<button type="button" data-action="open-detail-modal" data-scope="location" data-loc="${locKey}"
+        style="width:100%;margin-top:12px;background:#fff;color:#990033;border:1px solid rgba(153,0,51,0.3);border-radius:9px;padding:9px 12px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:6px;transition:background .15s;"
+        onmouseover="this.style.background='rgba(153,0,51,0.05)'"
+        onmouseout="this.style.background='#fff'">
+        View full detail (POs · SKUs · days)
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>`:''}`;
     panel.style.transform='translateX(0)';
+    // Wire the "View full detail" button (delegated since panel innerHTML resets)
+    const detailLink = panel.querySelector('[data-action="open-detail-modal"]');
+    if(detailLink){
+      detailLink.addEventListener('click', ()=> openDetailModal({scope:'location', locKey}));
+    }
   }
 
   // ── Ship and airplane SVG icons ──
@@ -976,6 +1001,13 @@
     </div>
     <div style="display:flex;align-items:center;gap:16px;">
       <div id="map-counter" style="font-size:11px;color:#6E6E73;"></div>
+      <button id="map-detail-btn" type="button"
+              style="font-size:11px;font-weight:500;color:#990033;background:#fff;border:1px solid rgba(153,0,51,0.3);border-radius:8px;padding:6px 12px;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:6px;transition:background .15s;"
+              onmouseover="this.style.background='rgba(153,0,51,0.05)'"
+              onmouseout="this.style.background='#fff'">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+        Detail view
+      </button>
       <div id="map-legend" style="display:flex;gap:10px;flex-wrap:wrap;"></div>
     </div>
   </div>
@@ -1165,6 +1197,10 @@
     try{
       const raw=await loadMapData();
       mapData=buildMapData(raw.lanes,raw.containers,raw.plan,raw.receiving,raw.appliedByPO);
+      // Stash for the Detail modal — it needs plan rows (for PO/SKU) and the
+      // built location/vessel groups (to derive stage + days-at-stage).
+      _modalCache.mapData = mapData;
+      _modalCache.planRows = raw.plan || [];
     }catch(e){ console.error('[Map] data failed',e); }
 
     if(mapData) renderMap(svgEl,mapData.vesselGroups,mapData.locationGroups,'');
@@ -1175,6 +1211,12 @@
       });
     }
 
+    // "Detail view" button — opens modal unscoped
+    const detailBtn = document.getElementById('map-detail-btn');
+    if(detailBtn){
+      detailBtn.addEventListener('click', ()=> openDetailModal({scope:'all'}));
+    }
+
     let resizeTimer;
     window.addEventListener('resize',()=>{
       clearTimeout(resizeTimer);
@@ -1182,6 +1224,475 @@
         try{ const dims=await drawWorldMap(canvas); _proj=dims.project; if(mapData) renderMap(svgEl,mapData.vesselGroups,mapData.locationGroups,searchInput?.value||''); }catch(e){}
       },300);
     });
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Live Map Detail Modal
+  //
+  // A full-screen modal that surfaces per-PO detail (Zendesk, Week, PO, Supplier,
+  // SKUs, Freight, Stage, Location, Days at stage, Applied/Planned, HBL).
+  //
+  // Opens from:
+  //   1. "Detail view" button on the map top bar (scope: all)
+  //   2. "View full detail" link in the location side panel (scope: that pin)
+  //   3. "View full detail" link in the vessel side panel (scope: that vessel's ZDs)
+  //
+  // Data sources (read from _modalCache, populated during initMap):
+  //   - mapData.locationGroups, mapData.vesselGroups → per-Zendesk stage info
+  //   - planRows → PO + SKU detail (one plan row = one PO×SKU×Zendesk)
+  // ─────────────────────────────────────────────────────────────────────
+  const _modalCache = { mapData: null, planRows: [] };
+
+  // Map stage key → field that holds the "entered this stage" date.
+  // 'at_supplier' has no real signal (it's the default), so we return null
+  // and show "—" in the table. Cheap call as agreed.
+  function _stageEntryDate(stage, manual){
+    if(!manual) return null;
+    switch(stage){
+      case 'last_mile':    return getDestClr(manual);
+      case 'customs_hold': return getArrived(manual); // hold has no own ts; arrived is best proxy
+      case 'clearing':     return getArrived(manual);
+      case 'transit':      return getDeparted(manual);
+      case 'origin_port':  return getPackingReady(manual);
+      case 'vas':          return null; // computed from earliest received_at per PO outside
+      case 'at_supplier':  return null; // no signal — show "—"
+      default:             return null;
+    }
+  }
+
+  function _daysSince(isoLike){
+    if(!isoLike) return null;
+    try{
+      const d = new Date(String(isoLike).slice(0,10) + 'T00:00:00Z');
+      if(Number.isNaN(d.getTime())) return null;
+      const diff = Date.now() - d.getTime();
+      const days = Math.floor(diff / (1000*60*60*24));
+      return days >= 0 ? days : null;
+    }catch{ return null; }
+  }
+
+  function _daysColor(days){
+    if(days==null) return '#AEAEB2';
+    if(days <= 3) return '#22C55E';
+    if(days <= 7) return '#F59E0B';
+    return '#DC2626';
+  }
+
+  function _stageLabel(stage){ return STAGE_LABEL[stage] || stage || '—'; }
+
+  // Build the flat per-PO row list from cache, filtered by scope.
+  // scope = {scope:'all'}                            → every row
+  //       = {scope:'location', locKey:'vas'}         → POs at that pin
+  //       = {scope:'vessel', zendesks:[...]}         → POs on that vessel
+  function _buildDetailRows(scope){
+    const md = _modalCache.mapData;
+    const planRows = _modalCache.planRows || [];
+    if(!md) return [];
+
+    // Map zendesk → {stage, manual, applied, planned, hbl, freight, supplier, weekLabel, isAir}
+    // Built from both locationGroups (static pins) and vesselGroups (in-transit).
+    const zdInfo = new Map();
+    for(const stage of Object.keys(md.locationGroups || {})){
+      for(const z of md.locationGroups[stage] || []){
+        zdInfo.set(String(z.zendesk).trim(), {
+          stage,
+          manual: z.manual || {},
+          applied: z.applied || 0,
+          planned: z.planned || 0,
+          hbl: z.hbl || '',
+          freight: z.isAir ? 'Air' : (z.freight || 'Sea'),
+          supplier: z.supplier || '',
+          weekLabel: z.weekLabel || '',
+        });
+      }
+    }
+    for(const vg of (md.vesselGroups || [])){
+      for(const z of vg.zdentrys || []){
+        zdInfo.set(String(z.zendesk).trim(), {
+          stage: 'transit',
+          manual: z.manual || {},
+          applied: z.applied || 0,
+          planned: z.planned || 0,
+          hbl: z.hbl || '',
+          freight: z.isAir ? 'Air' : (z.freight || 'Sea'),
+          supplier: z.supplier || '',
+          weekLabel: z.weekLabel || '',
+          vessel: vg.vessel || '',
+        });
+      }
+    }
+
+    // Scope filter on zendesks
+    let allowedZDs = null;
+    if(scope.scope === 'location'){
+      const stage = scope.locKey; // already a stage key like 'vas','customs_hold' etc.
+      allowedZDs = new Set((md.locationGroups[stage] || []).map(z => String(z.zendesk).trim()));
+    } else if(scope.scope === 'vessel'){
+      allowedZDs = new Set((scope.zendesks || []).map(z => String(z).trim()));
+    }
+    // scope.scope === 'all' → allowedZDs stays null (no filter)
+
+    // Group plan rows by (zendesk_ticket, po_number) — one PO can have many SKUs.
+    // Each group becomes one table row, with SKUs rolled up.
+    const poGroups = new Map(); // key: zd|po → {zd, po, supplier, freight, weekStart, plannedSum, skus[]}
+    for(const p of planRows){
+      const zd = String(p.zendesk_ticket || '').trim();
+      const po = String(p.po_number || '').trim();
+      if(!zd || !po) continue;
+      if(allowedZDs && !allowedZDs.has(zd)) continue;
+      // We only include zendesks that the map actually knows about — otherwise
+      // we have no stage info to display. This also strips delivered ZDs since
+      // they were filtered out by getLaneStage.
+      if(!zdInfo.has(zd)) continue;
+      const k = zd + '|' + po;
+      let g = poGroups.get(k);
+      if(!g){
+        g = {
+          zd, po,
+          supplier: String(p.supplier_name || '').trim() || zdInfo.get(zd).supplier,
+          freight: String(p.freight_type || '').trim() || zdInfo.get(zd).freight,
+          weekStart: String(p._week_start || '').trim() || zdInfo.get(zd).weekLabel || '',
+          plannedSum: 0,
+          skus: [],
+        };
+        poGroups.set(k, g);
+      }
+      g.plannedSum += Number(p.target_qty || 0) || 0;
+      const sku = String(p.sku_code || '').trim();
+      if(sku && !g.skus.includes(sku)) g.skus.push(sku);
+    }
+
+    // Build the final flat rows
+    const rows = [];
+    for(const g of poGroups.values()){
+      const info = zdInfo.get(g.zd);
+      const entryDate = _stageEntryDate(info.stage, info.manual);
+      const days = entryDate ? _daysSince(entryDate) : null;
+      rows.push({
+        zendesk: g.zd,
+        weekStart: g.weekStart,
+        po: g.po,
+        supplier: g.supplier,
+        skus: g.skus,
+        skuCount: g.skus.length,
+        freight: g.freight,
+        stage: info.stage,
+        stageLabel: _stageLabel(info.stage),
+        days,                      // null if at_supplier or stage has no date
+        applied: info.applied,
+        planned: info.planned || g.plannedSum,
+        hbl: info.hbl,
+        vessel: info.vessel || '',
+      });
+    }
+    return rows;
+  }
+
+  // ─── Modal state (per-instance) ───
+  const _modalState = {
+    rows: [],
+    sort: { col: 'days', dir: 'desc' },
+    filters: { stage:'', freight:'', supplier:'', week:'', q:'' },
+    scope: null,
+  };
+
+  function _applyFiltersAndSort(){
+    const f = _modalState.filters;
+    let rows = _modalState.rows.filter(r => {
+      if(f.stage && r.stage !== f.stage) return false;
+      if(f.freight && r.freight !== f.freight) return false;
+      if(f.supplier && r.supplier !== f.supplier) return false;
+      if(f.week && r.weekStart !== f.week) return false;
+      if(f.q){
+        const q = f.q.toLowerCase();
+        const hay = (r.zendesk + ' ' + r.po + ' ' + r.hbl + ' ' + r.skus.join(' ')).toLowerCase();
+        if(!hay.includes(q)) return false;
+      }
+      return true;
+    });
+    const {col, dir} = _modalState.sort;
+    const mul = dir === 'asc' ? 1 : -1;
+    rows.sort((a,b)=>{
+      let av = a[col], bv = b[col];
+      // Nulls last regardless of direction
+      if(av==null && bv==null) return 0;
+      if(av==null) return 1;
+      if(bv==null) return -1;
+      if(typeof av === 'number' && typeof bv === 'number') return (av-bv)*mul;
+      return String(av).localeCompare(String(bv)) * mul;
+    });
+    return rows;
+  }
+
+  function _renderModalTable(){
+    const tbody = document.getElementById('mdm-tbody');
+    const countEl = document.getElementById('mdm-count');
+    if(!tbody) return;
+    const rows = _applyFiltersAndSort();
+    if(countEl){
+      const zdCount = new Set(rows.map(r=>r.zendesk)).size;
+      countEl.textContent = `Showing ${rows.length} PO${rows.length!==1?'s':''} across ${zdCount} Zendesk${zdCount!==1?'s':''}`;
+    }
+    if(!rows.length){
+      tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;padding:32px;color:#AEAEB2;font-size:12px;">No shipments match these filters.</td></tr>`;
+      return;
+    }
+    const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    tbody.innerHTML = rows.map(r => {
+      const skuCell = r.skus.length === 0
+        ? '<span style="color:#AEAEB2;">—</span>'
+        : r.skus.length === 1
+          ? esc(r.skus[0])
+          : `<span title="${esc(r.skus.join(', '))}" style="cursor:help;border-bottom:1px dotted #AEAEB2;">${r.skus.length} SKUs</span>`;
+      const daysCell = r.days == null
+        ? '<span style="color:#AEAEB2;">—</span>'
+        : `<span style="color:${_daysColor(r.days)};font-weight:500;">${r.days}d</span>`;
+      const appliedPlanned = r.planned > 0
+        ? `${r.applied.toLocaleString()} / ${r.planned.toLocaleString()}`
+        : `${r.applied.toLocaleString()}`;
+      const stageColor = STAGE_COLOR[r.stage] || '#6E6E73';
+      return `<tr style="border-top:0.5px solid rgba(0,0,0,0.06);">
+        <td style="padding:8px 10px;font-size:11px;font-weight:500;color:#1C1C1E;">#${esc(r.zendesk)}</td>
+        <td style="padding:8px 10px;font-size:11px;color:#6E6E73;">${esc(r.weekStart || '—')}</td>
+        <td style="padding:8px 10px;font-size:11px;color:#1C1C1E;font-family:ui-monospace,Menlo,monospace;">${esc(r.po)}</td>
+        <td style="padding:8px 10px;font-size:11px;color:#6E6E73;">${esc(r.supplier)}</td>
+        <td style="padding:8px 10px;font-size:11px;color:#6E6E73;">${skuCell}</td>
+        <td style="padding:8px 10px;font-size:11px;color:#6E6E73;">${esc(r.freight)}</td>
+        <td style="padding:8px 10px;font-size:11px;">
+          <span style="display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:5px;background:${stageColor}18;color:${stageColor};font-weight:500;">
+            <span style="width:5px;height:5px;border-radius:50%;background:${stageColor};"></span>${esc(r.stageLabel)}
+          </span>
+        </td>
+        <td style="padding:8px 10px;font-size:11px;text-align:right;">${daysCell}</td>
+        <td style="padding:8px 10px;font-size:11px;color:#1C1C1E;text-align:right;tabular-nums:auto;">${esc(appliedPlanned)}</td>
+        <td style="padding:8px 10px;font-size:11px;color:#6E6E73;">${esc(r.hbl || '—')}</td>
+        <td style="padding:8px 10px;font-size:11px;color:#6E6E73;">${esc(r.vessel || '—')}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // Build the list of options for a select dropdown from current rows (unfiltered)
+  function _uniqueValues(rows, key){
+    const s = new Set();
+    for(const r of rows){
+      const v = r[key];
+      if(v == null || v === '') continue;
+      s.add(v);
+    }
+    return Array.from(s).sort();
+  }
+
+  function _exportXlsx(){
+    if(typeof window.XLSX === 'undefined'){
+      alert('Excel export library not loaded. Please refresh the page.');
+      return;
+    }
+    // Export honours current filters but goes to SKU grain (more useful in Excel).
+    const rows = _applyFiltersAndSort();
+    const sheetData = [];
+    for(const r of rows){
+      const skus = r.skus.length ? r.skus : [''];
+      for(const sku of skus){
+        sheetData.push({
+          Zendesk: r.zendesk,
+          'Week Start': r.weekStart || '',
+          PO: r.po,
+          SKU: sku,
+          Supplier: r.supplier || '',
+          Freight: r.freight || '',
+          Stage: r.stageLabel,
+          'Days at stage': r.days == null ? '' : r.days,
+          Applied: r.applied || 0,
+          Planned: r.planned || 0,
+          HBL: r.hbl || '',
+          Vessel: r.vessel || '',
+        });
+      }
+    }
+    if(!sheetData.length){
+      alert('Nothing to export with current filters.');
+      return;
+    }
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(sheetData);
+    // Sensible default column widths
+    ws['!cols'] = [
+      {wch:10}, {wch:12}, {wch:14}, {wch:14}, {wch:30}, {wch:8},
+      {wch:18}, {wch:14}, {wch:10}, {wch:10}, {wch:16}, {wch:18},
+    ];
+    XLSX.utils.book_append_sheet(wb, ws, 'Live Shipments');
+    const now = new Date();
+    const stamp = now.toISOString().slice(0,10);
+    const scopeName = _modalState.scope?.scope === 'location'
+      ? '_' + (_modalState.scope.locKey || 'loc')
+      : _modalState.scope?.scope === 'vessel'
+        ? '_vessel'
+        : '';
+    XLSX.writeFile(wb, `live_shipments${scopeName}_${stamp}.xlsx`);
+  }
+
+  function openDetailModal(scope){
+    // scope: {scope:'all'} | {scope:'location', locKey} | {scope:'vessel', zendesks, vessel}
+    if(!_modalCache.mapData){
+      // Probably still loading — be quiet, not loud.
+      console.warn('[Map] detail modal: data not ready yet');
+      return;
+    }
+    // Drop any existing modal first
+    const existing = document.getElementById('map-detail-modal');
+    if(existing) existing.remove();
+
+    _modalState.rows = _buildDetailRows(scope);
+    _modalState.scope = scope;
+    _modalState.filters = { stage:'', freight:'', supplier:'', week:'', q:'' };
+    _modalState.sort = { col: 'days', dir: 'desc' };
+
+    const stages   = _uniqueValues(_modalState.rows, 'stage');
+    const freights = _uniqueValues(_modalState.rows, 'freight');
+    const suppliers = _uniqueValues(_modalState.rows, 'supplier');
+    const weeks    = _uniqueValues(_modalState.rows, 'weekStart');
+
+    const title = scope.scope === 'location'
+      ? `Live Shipments — ${STAGE_LABEL[scope.locKey] || 'Location'}`
+      : scope.scope === 'vessel'
+        ? `Live Shipments — ${scope.vessel || 'Vessel'}`
+        : 'Live Shipments — All';
+
+    const overlay = document.createElement('div');
+    overlay.id = 'map-detail-modal';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;font-family:inherit;';
+
+    const stageOpts = `<option value="">All stages</option>` +
+      stages.map(s => `<option value="${s}">${STAGE_LABEL[s]||s}</option>`).join('');
+    const freightOpts = `<option value="">All freight</option>` +
+      freights.map(s => `<option value="${s}">${s}</option>`).join('');
+    const supplierOpts = `<option value="">All suppliers</option>` +
+      suppliers.map(s => `<option value="${s.replace(/"/g,'&quot;')}">${s}</option>`).join('');
+    const weekOpts = `<option value="">All weeks</option>` +
+      weeks.map(s => `<option value="${s}">${s}</option>`).join('');
+
+    const headerCell = (col, label, align) => {
+      const isActive = _modalState.sort.col === col;
+      const arrow = isActive ? (_modalState.sort.dir === 'asc' ? ' ↑' : ' ↓') : '';
+      const algn = align === 'right' ? 'text-align:right;' : '';
+      return `<th data-sort-col="${col}" style="padding:10px;font-size:10px;font-weight:600;color:#6E6E73;text-transform:uppercase;letter-spacing:.05em;cursor:pointer;user-select:none;background:#FAFAFA;border-bottom:0.5px solid rgba(0,0,0,0.08);${algn}">${label}${arrow}</th>`;
+    };
+
+    overlay.innerHTML = `
+      <div style="background:#fff;border-radius:16px;width:min(95vw,1280px);max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.2);overflow:hidden;">
+        <!-- Header -->
+        <div style="padding:20px 24px;border-bottom:0.5px solid rgba(0,0,0,0.08);display:flex;align-items:center;justify-content:space-between;gap:16px;flex-shrink:0;">
+          <div>
+            <div style="font-size:15px;font-weight:600;color:#1C1C1E;">${title}</div>
+            <div id="mdm-count" style="font-size:11px;color:#6E6E73;margin-top:2px;">Loading…</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <button id="mdm-export" type="button" style="display:flex;align-items:center;gap:6px;background:#990033;color:#fff;border:none;border-radius:9px;padding:9px 16px;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Download XLSX
+            </button>
+            <button id="mdm-close" type="button" style="width:32px;height:32px;border-radius:8px;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);cursor:pointer;font-size:14px;color:#6E6E73;display:flex;align-items:center;justify-content:center;font-family:inherit;">✕</button>
+          </div>
+        </div>
+
+        <!-- Filters -->
+        <div style="padding:14px 24px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;gap:10px;flex-wrap:wrap;flex-shrink:0;background:#FCFCFD;">
+          <select id="mdm-f-stage" style="font-size:12px;padding:7px 10px;border:0.5px solid rgba(0,0,0,0.15);border-radius:7px;font-family:inherit;outline:none;background:#fff;">${stageOpts}</select>
+          <select id="mdm-f-freight" style="font-size:12px;padding:7px 10px;border:0.5px solid rgba(0,0,0,0.15);border-radius:7px;font-family:inherit;outline:none;background:#fff;">${freightOpts}</select>
+          <select id="mdm-f-supplier" style="font-size:12px;padding:7px 10px;border:0.5px solid rgba(0,0,0,0.15);border-radius:7px;font-family:inherit;outline:none;background:#fff;max-width:240px;">${supplierOpts}</select>
+          <select id="mdm-f-week" style="font-size:12px;padding:7px 10px;border:0.5px solid rgba(0,0,0,0.15);border-radius:7px;font-family:inherit;outline:none;background:#fff;">${weekOpts}</select>
+          <input id="mdm-f-q" type="text" placeholder="Search Zendesk / PO / SKU / HBL…" style="flex:1;min-width:200px;font-size:12px;padding:7px 10px;border:0.5px solid rgba(0,0,0,0.15);border-radius:7px;font-family:inherit;outline:none;background:#fff;"/>
+          <button id="mdm-clear" type="button" style="font-size:11px;color:#6E6E73;background:transparent;border:none;cursor:pointer;font-family:inherit;padding:7px 8px;">Clear</button>
+        </div>
+
+        <!-- Table -->
+        <div style="flex:1;overflow:auto;">
+          <table style="width:100%;border-collapse:collapse;">
+            <thead style="position:sticky;top:0;z-index:1;">
+              <tr>
+                ${headerCell('zendesk','Zendesk')}
+                ${headerCell('weekStart','Week')}
+                ${headerCell('po','PO')}
+                ${headerCell('supplier','Supplier')}
+                ${headerCell('skuCount','SKUs')}
+                ${headerCell('freight','Freight')}
+                ${headerCell('stageLabel','Stage')}
+                ${headerCell('days','Days', 'right')}
+                ${headerCell('applied','Applied / Planned', 'right')}
+                ${headerCell('hbl','HBL')}
+                ${headerCell('vessel','Vessel')}
+              </tr>
+            </thead>
+            <tbody id="mdm-tbody"></tbody>
+          </table>
+        </div>
+
+        <!-- Footer -->
+        <div style="padding:10px 24px;border-top:0.5px solid rgba(0,0,0,0.06);font-size:10px;color:#AEAEB2;flex-shrink:0;background:#FAFAFA;">
+          Days at stage colour: <span style="color:#22C55E;">green ≤3d</span> · <span style="color:#F59E0B;">amber 4–7d</span> · <span style="color:#DC2626;">red &gt;7d</span> · At Supplier shows "—" (no event date)
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    // Wire close (✕, backdrop click, Escape)
+    const closeFn = ()=>{
+      overlay.remove();
+      document.removeEventListener('keydown', escFn);
+    };
+    const escFn = e => { if(e.key === 'Escape') closeFn(); };
+    document.addEventListener('keydown', escFn);
+    overlay.querySelector('#mdm-close').addEventListener('click', closeFn);
+    overlay.addEventListener('click', e => { if(e.target === overlay) closeFn(); });
+
+    // Wire filters
+    const f = overlay.querySelector('#mdm-f-stage');
+    f.addEventListener('change', ()=>{ _modalState.filters.stage = f.value; _renderModalTable(); });
+    const fF = overlay.querySelector('#mdm-f-freight');
+    fF.addEventListener('change', ()=>{ _modalState.filters.freight = fF.value; _renderModalTable(); });
+    const fS = overlay.querySelector('#mdm-f-supplier');
+    fS.addEventListener('change', ()=>{ _modalState.filters.supplier = fS.value; _renderModalTable(); });
+    const fW = overlay.querySelector('#mdm-f-week');
+    fW.addEventListener('change', ()=>{ _modalState.filters.week = fW.value; _renderModalTable(); });
+    const fQ = overlay.querySelector('#mdm-f-q');
+    let qTimer;
+    fQ.addEventListener('input', ()=>{
+      clearTimeout(qTimer);
+      qTimer = setTimeout(()=>{ _modalState.filters.q = fQ.value.trim(); _renderModalTable(); }, 120);
+    });
+    overlay.querySelector('#mdm-clear').addEventListener('click', ()=>{
+      _modalState.filters = { stage:'', freight:'', supplier:'', week:'', q:'' };
+      f.value = ''; fF.value = ''; fS.value = ''; fW.value = ''; fQ.value = '';
+      _renderModalTable();
+    });
+
+    // Wire sort headers (click to toggle direction; click new column to switch)
+    overlay.querySelectorAll('[data-sort-col]').forEach(th => {
+      th.addEventListener('click', ()=>{
+        const col = th.getAttribute('data-sort-col');
+        if(_modalState.sort.col === col){
+          _modalState.sort.dir = _modalState.sort.dir === 'asc' ? 'desc' : 'asc';
+        } else {
+          _modalState.sort.col = col;
+          _modalState.sort.dir = (col === 'days' || col === 'applied') ? 'desc' : 'asc';
+        }
+        // Re-render arrows by rebuilding the header row — easiest path
+        overlay.querySelectorAll('[data-sort-col]').forEach(t => {
+          const c = t.getAttribute('data-sort-col');
+          const arrow = c === _modalState.sort.col
+            ? (_modalState.sort.dir === 'asc' ? ' ↑' : ' ↓') : '';
+          // Strip any existing arrow then re-add
+          t.innerHTML = t.innerHTML.replace(/\s*[↑↓]\s*$/,'') + arrow;
+        });
+        _renderModalTable();
+      });
+    });
+
+    // Wire XLSX export
+    overlay.querySelector('#mdm-export').addEventListener('click', _exportXlsx);
+
+    _renderModalTable();
   }
 
   window.showMapPage=function(){
