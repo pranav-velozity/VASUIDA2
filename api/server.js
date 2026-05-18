@@ -1385,10 +1385,35 @@ app.get('/exec/summary',
     const count_40ft = cont40.length;
 
     const etaFcDate = etaDates.sort().pop() || null;
+    // Last-mile delivery dates live in flowData.lastmile_receipts (canonical source),
+    // keyed by container_uid. The container record itself rarely carries delivery_local —
+    // that field is written by the Last Mile panel into the separate receipts store.
+    // Match the lookup pattern used by emailLastMileStatus() / emailLaneIsDelivered().
+    // Only count containers that are actually Delivered (status === 'Delivered'/'Complete'
+    // or pod_received true, with a delivery_local timestamp). Scheduled-but-not-delivered
+    // containers are excluded.
+    const lastmileReceipts = (flowData.lastmile_receipts && typeof flowData.lastmile_receipts === 'object')
+      ? flowData.lastmile_receipts : {};
     for (const c of containers) {
-      // Last mile delivery date stored as delivery_local or delivered_at
-      const delivDate = c.delivery_local || c.delivered_at || c.delivery_date || null;
-      if (delivDate && etaFcDate) {
+      // Lookup receipt by container_uid (preferred) or container_id (fallback)
+      const uid = String(c.container_uid || c.uid || '').trim();
+      const cid = String(c.container_id || c.container || '').trim();
+      const receipt = (uid && lastmileReceipts[uid]) || (cid && lastmileReceipts[cid]) || null;
+
+      // Resolve delivery date: receipt is canonical, container record is fallback for legacy data
+      const receiptDate = receipt ? (receipt.delivery_local || receipt.delivered_at || receipt.delivered_local) : null;
+      const containerDate = c.delivery_local || c.delivered_at || c.delivery_date;
+      const delivDate = receiptDate || containerDate || null;
+
+      // Require actual delivery confirmation — not just a scheduled date
+      const receiptStatus = receipt ? String(receipt.status || '').toLowerCase() : '';
+      const containerStatus = String(c.status || '').toLowerCase();
+      const isDelivered = !!receiptDate
+        || receiptStatus === 'delivered' || receiptStatus === 'complete'
+        || containerStatus === 'delivered' || containerStatus === 'complete'
+        || (receipt && receipt.pod_received === true);
+
+      if (delivDate && etaFcDate && isDelivered) {
         try {
           const eta = new Date(String(etaFcDate).slice(0, 10) + 'T00:00:00Z');
           const del = new Date(String(delivDate).slice(0, 10) + 'T00:00:00Z');
