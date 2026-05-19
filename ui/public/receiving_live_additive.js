@@ -72,6 +72,47 @@
     }).format(d);
   }
 
+  // Interpret a datetime-local string (or "YYYY-MM-DD HH:MM") as Asia/Shanghai
+  // wall-clock time and return the correct UTC ISO. This is the inverse of
+  // fmtLocalFromUtc — used on save so every entered "08:28" is stored as
+  // 00:28 UTC regardless of where the data-entry user is sitting.
+  //
+  // Shanghai has no DST, so we just subtract a fixed offset. Returns '' if
+  // the input can't be parsed.
+  function shanghaiWallClockToUtcISO(s) {
+    const v = String(s || '').trim();
+    if (!v) return '';
+    // Accept both 'YYYY-MM-DDTHH:MM' (datetime-local) and 'YYYY-MM-DD HH:MM'
+    const m = v.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/);
+    if (!m) return '';
+    const [, Y, M, D, hh, mi, ss] = m;
+    // Build the UTC timestamp directly: take the wall-clock numbers, subtract
+    // the business offset to get UTC. Date.UTC avoids any local-TZ interpretation.
+    const utcMs = Date.UTC(
+      Number(Y), Number(M) - 1, Number(D),
+      Number(hh) - BUSINESS_UTC_OFFSET_HOURS, Number(mi), Number(ss || 0), 0
+    );
+    if (!Number.isFinite(utcMs)) return '';
+    return new Date(utcMs).toISOString();
+  }
+
+  // Returns the current moment as a 'YYYY-MM-DDTHH:MM' string in Asia/Shanghai
+  // wall-clock time, suitable for prefilling a datetime-local input. The Excel
+  // operator on the ground is in Shanghai; the input should reflect their clock,
+  // not the (possibly remote) viewer's.
+  function shanghaiWallClockNow() {
+    // Intl gives us the parts we need in any timezone
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: BUSINESS_TZ,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false
+    }).formatToParts(new Date());
+    const get = (t) => (parts.find(p => p.type === t) || {}).value || '';
+    let hh = get('hour');
+    if (hh === '24') hh = '00'; // Intl can emit "24" for midnight in some envs
+    return `${get('year')}-${get('month')}-${get('day')}T${hh}:${get('minute')}`;
+  }
+
 
   function weekEndISO(ws) {
     const d = new Date(ws);
@@ -143,30 +184,43 @@ function computeCartonsOutByPOFromRecords(records) {
 
 
   function toDateTimeLocalValue(isoUtc) {
-    // For <input type="datetime-local"> in viewer local time
+    // For <input type="datetime-local"> in Asia/Shanghai wall-clock time so
+    // that what the user edits matches what was stored, regardless of where
+    // the viewer is sitting. The save path uses shanghaiWallClockToUtcISO()
+    // to reverse this.
     if (!isoUtc) return '';
     const d = new Date(isoUtc);
     if (Number.isNaN(d.getTime())) return '';
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    const hh = String(d.getHours()).padStart(2, '0');
-    const mi = String(d.getMinutes()).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: BUSINESS_TZ,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false
+    }).formatToParts(d);
+    const get = (t) => (parts.find(p => p.type === t) || {}).value || '';
+    let hh = get('hour');
+    if (hh === '24') hh = '00';
+    return `${get('year')}-${get('month')}-${get('day')}T${hh}:${get('minute')}`;
   }
 
   // Format a UTC ISO timestamp into a simple, Excel-friendly local datetime string.
   // Output: YYYY-MM-DD HH:MM (viewer local)
+  // Returns 'YYYY-MM-DD HH:MM' in Asia/Shanghai wall-clock for a UTC ISO input.
+  // Used to prefill datetime-local inputs and to render received_at_local in
+  // bulk-import payloads. Matches the display behaviour of fmtLocalFromUtc and
+  // is the inverse of shanghaiWallClockToUtcISO.
   function fmtLocalYMDHMFromUtc(isoUtc) {
     if (!isoUtc) return '';
     const d = new Date(isoUtc);
     if (Number.isNaN(d.getTime())) return '';
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    const hh = String(d.getHours()).padStart(2, '0');
-    const mi = String(d.getMinutes()).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: BUSINESS_TZ,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false
+    }).formatToParts(d);
+    const get = (t) => (parts.find(p => p.type === t) || {}).value || '';
+    let hh = get('hour');
+    if (hh === '24') hh = '00';
+    return `${get('year')}-${get('month')}-${get('day')} ${hh}:${get('minute')}`;
   }
 
   // -------------------- CSV parsing & date normalization (upload) --------------------
@@ -864,7 +918,9 @@ function computeSummaryAll(planRows, receivingRows) {
     const cbmCell = row.querySelector('.recv-cbm-cell');
     const receiveBtn = null;
 
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    // The values we save are interpreted in business TZ (Asia/Shanghai), not
+    // viewer-local, so received_tz reflects that for traceability.
+    const tz = BUSINESS_TZ;
 
     function parseDim(el) {
       const raw = String(el?.value ?? '').trim();
@@ -897,8 +953,11 @@ function computeSummaryAll(planRows, receivingRows) {
       // UPSERT does NOT coalesce received_at_*).
       const receivedLocal = (receivedInput?.value || '').trim();
       const received_at_local = receivedLocal || String(existing?.received_at_local || '').trim();
+      // Interpret the entered datetime as Asia/Shanghai wall-clock time, not as
+      // viewer-local — receiving is a Shanghai-floor operation regardless of
+      // who is entering the data.
       const received_at_utc   = receivedLocal
-        ? new Date(receivedLocal).toISOString()
+        ? shanghaiWallClockToUtcISO(receivedLocal)
         : String(existing?.received_at_utc || '').trim();
       return {
         po_number: po,
@@ -1251,7 +1310,7 @@ const checkAll = document.getElementById('recv-check-all');
 	const upInput = document.getElementById('recv-ul-week-csv-input');
 	const btnPdf = document.getElementById('recv-dl-supplier-pdf');
 
-if (btnNow && batchDt) btnNow.onclick = () => { batchDt.value = dtLocalNow(); };
+if (btnNow && batchDt) btnNow.onclick = () => { batchDt.value = shanghaiWallClockNow(); };
 
 if (checkAll) {
   checkAll.onchange = () => {
@@ -1359,13 +1418,35 @@ if (checkAll) {
 	      let received_at_utc = String(existing.received_at_utc || '').trim();
 
 	      if (receivedLocal) {
-	        const d = parseLocalDateTimeToDate(receivedLocal);
-	        if (!d) {
-	          errors.push(`Row ${rowNum}: invalid received_at_local "${receivedLocal}"`);
+	        // Interpret the supplied received_at_local as Asia/Shanghai wall-clock.
+	        // shanghaiWallClockToUtcISO handles 'YYYY-MM-DD HH:MM', 'YYYY-MM-DDTHH:MM',
+	        // and the same with seconds. Other formats fall through to parseLocalDateTime
+	        // for backwards compatibility, but those are only ever produced by date
+	        // parsing on the operator's own machine — practically rare here.
+	        const direct = shanghaiWallClockToUtcISO(receivedLocal);
+	        if (direct) {
+	          received_at_utc = direct;
+	          received_at_local = fmtLocalYMDHMFromUtc(direct);
 	        } else {
-	          // store local string as provided, but normalize output in payload
-	          received_at_local = fmtLocalYMDHMFromUtc(d.toISOString());
-	          received_at_utc = d.toISOString();
+	          const d = parseLocalDateTimeToDate(receivedLocal);
+	          if (!d) {
+	            errors.push(`Row ${rowNum}: invalid received_at_local "${receivedLocal}"`);
+	          } else {
+	            // Legacy fallback: the parser builds Dates in viewer-local TZ. We
+	            // strip back to wall-clock numbers and reinterpret as Shanghai.
+	            const Y = d.getFullYear();
+	            const M = String(d.getMonth() + 1).padStart(2, '0');
+	            const D = String(d.getDate()).padStart(2, '0');
+	            const hh = String(d.getHours()).padStart(2, '0');
+	            const mi = String(d.getMinutes()).padStart(2, '0');
+	            const utc = shanghaiWallClockToUtcISO(`${Y}-${M}-${D}T${hh}:${mi}`);
+	            if (utc) {
+	              received_at_utc = utc;
+	              received_at_local = fmtLocalYMDHMFromUtc(utc);
+	            } else {
+	              errors.push(`Row ${rowNum}: invalid received_at_local "${receivedLocal}"`);
+	            }
+	          }
 	        }
 	      }
 
@@ -1388,7 +1469,7 @@ if (checkAll) {
 	        facility_name: facility,
 	        received_at_local: received_at_local,
 	        received_at_utc: received_at_utc,
-	        received_tz: 'viewer-local',
+	        received_tz: BUSINESS_TZ,
 	        cartons_received,
 	        cartons_damaged,
 	        cartons_noncompliant,
@@ -1750,8 +1831,9 @@ if (btnReceive) {
         return el ? (Number(el.value || 0) || 0) : 0;
       };
 
-      // Treat dtVal as local time entered by user; store utc ISO
-      const utcISO = new Date(dtVal).toISOString();
+      // Treat dtVal as Asia/Shanghai wall-clock time entered by user; store
+      // the corresponding UTC ISO so it's invariant to where the entry was made.
+      const utcISO = shanghaiWallClockToUtcISO(dtVal);
 
       return {
         po_number: po,
@@ -1759,7 +1841,7 @@ if (btnReceive) {
         facility_name: facility,
         received_at_utc: utcISO,
         received_at_local: dtVal,
-        received_tz: 'viewer-local',
+        received_tz: BUSINESS_TZ,
         cartons_received: getNum('cartons_received'),
         cartons_damaged: getNum('cartons_damaged'),
         cartons_noncompliant: getNum('cartons_noncompliant'),
@@ -1802,14 +1884,20 @@ if (btnReceive) {
     }
   }
 
+// Returns 'YYYY-MM-DDTHH:MM' for the current moment in Asia/Shanghai wall-clock.
+// (Renamed in intent — kept the dtLocalNow name for backwards compatibility with
+// existing call sites. All consumers of this string in the receiving module now
+// treat it as Shanghai-local on save.)
 function dtLocalNow() {
-  const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth()+1).padStart(2,'0');
-  const dd = String(d.getDate()).padStart(2,'0');
-  const hh = String(d.getHours()).padStart(2,'0');
-  const mi = String(d.getMinutes()).padStart(2,'0');
-  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: BUSINESS_TZ,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false
+  }).formatToParts(new Date());
+  const get = (t) => (parts.find(p => p.type === t) || {}).value || '';
+  let hh = get('hour');
+  if (hh === '24') hh = '00';
+  return `${get('year')}-${get('month')}-${get('day')}T${hh}:${get('minute')}`;
 }
 
 // Alias used in wireRowInputs receive button handler
