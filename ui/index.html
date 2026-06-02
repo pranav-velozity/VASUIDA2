@@ -7444,6 +7444,7 @@ function renderReportsPage(container){
             <div style="display:flex;gap:8px;margin-top:14px;">
               <button id="apo-generate-btn" onclick="apoGenerate()" style="flex:1;background:#990033;color:#fff;border:none;border-radius:8px;padding:9px 0;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Generate Output</button>
               <button id="apo-download-btn" onclick="apoDownload()" disabled style="flex:1;background:#F5F5F7;color:#AEAEB2;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:9px 0;font-size:12px;font-weight:600;cursor:not-allowed;font-family:inherit;">Download CSV</button>
+              <button id="apo-publish-btn" onclick="apoPublish()" disabled style="flex:1;background:#F5F5F7;color:#AEAEB2;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:9px 0;font-size:12px;font-weight:600;cursor:not-allowed;font-family:inherit;">Publish to ICONIC</button>
             </div>
             <div style="font-size:10px;color:#AEAEB2;margin-top:6px;">Output grain: PO + SKU + Mobile Bin &nbsp;•&nbsp; UIDs deduped and joined by ";"</div>
             <div id="apo-status" style="margin-top:8px;font-size:11px;min-height:16px;"></div>
@@ -7766,11 +7767,44 @@ function renderReportsPage(container){
     URL.revokeObjectURL(url);
   };
 
+  window.apoPublish = async function(){
+    if (!_apoCsv) return;
+    const ws = _apoWeek || window._reportsWeek || state.weekStart || 'week';
+    const filename = 'TIC_VOZ_' + ws + '_AdvancedPO.csv';
+    if (!window.confirm('Publish this PO file to THE ICONIC PRODUCTION SFTP?\n\nFile: ' + filename + '\n\nThis sends the file to THE ICONIC immediately.')) return;
+
+    const pubBtn = apoEl('apo-publish-btn');
+    if (pubBtn){ pubBtn.disabled = true; pubBtn.style.cursor = 'not-allowed'; pubBtn.textContent = 'Publishing…'; }
+    apoSetStatus('Publishing to THE ICONIC…', '#6E6E73');
+
+    try {
+      const base = (window.apiBase || document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/, '');
+      let token = null;
+      if (window.Clerk?.session){ try { token = await window.Clerk.session.getToken(); } catch(_){} }
+      const resp = await fetch(base + '/iconic/publish', {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { 'Authorization': 'Bearer ' + token } : {}),
+        body: JSON.stringify({ filename, csv: _apoCsv, week_start: ws }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+
+      apoSetStatus('✓ Published to THE ICONIC · ' + (data.remotePath || filename) + ' · ' + (data.bytes || 0) + ' bytes', '#16a34a');
+      if (pubBtn){ pubBtn.textContent = '✓ Published'; pubBtn.style.background = '#16a34a'; pubBtn.style.color = '#fff'; }
+    } catch(err){
+      console.error('[APO publish]', err);
+      apoSetStatus('✗ Publish FAILED — file NOT delivered: ' + (err.message || err), '#990033');
+      if (pubBtn){ pubBtn.disabled = false; pubBtn.style.cursor = 'pointer'; pubBtn.textContent = 'Retry Publish'; pubBtn.style.background = '#990033'; pubBtn.style.color = '#fff'; }
+    }
+  };
+
   window.apoGenerate = async function(){
     const genBtn = apoEl('apo-generate-btn');
     const dlBtn  = apoEl('apo-download-btn');
+    const pubBtn = apoEl('apo-publish-btn');
     if (genBtn) genBtn.disabled = true;
     if (dlBtn)  { dlBtn.disabled = true; dlBtn.style.color = '#AEAEB2'; dlBtn.style.cursor = 'not-allowed'; }
+    if (pubBtn) { pubBtn.disabled = true; pubBtn.style.color = '#AEAEB2'; pubBtn.style.background = '#F5F5F7'; pubBtn.style.cursor = 'not-allowed'; pubBtn.textContent = 'Publish to ICONIC'; }
     _apoCsv = null;
     apoSetStatus('Loading data…', '#6E6E73');
 
@@ -7993,6 +8027,14 @@ function renderReportsPage(container){
         dlBtn.style.color = '#1C1C1E';
         dlBtn.style.background = '#F5F5F7';
         dlBtn.style.cursor = 'pointer';
+      }
+      // Enable publish
+      if (pubBtn){
+        pubBtn.disabled = false;
+        pubBtn.style.color = '#fff';
+        pubBtn.style.background = '#990033';
+        pubBtn.style.cursor = 'pointer';
+        pubBtn.textContent = 'Publish to ICONIC';
       }
 
       if (!unmatched){
