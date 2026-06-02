@@ -25,7 +25,7 @@
     return res.json();
   }
 
-  let _weeks = [], _range = 8, _loading = false;
+  let _weeks = [], _range = 8, _loading = false, _facility = '', _from = '', _to = '';
   const _charts = {};
 
   const fmtN   = (n,d) => { d=d||0; if(n==null||isNaN(n)) return '—'; return Number(n).toLocaleString('en-AU',{minimumFractionDigits:d,maximumFractionDigits:d}); };
@@ -110,7 +110,7 @@
       </div>
     </div>
 
-    <!-- Row 3: Throughput (wide) + Receiving Health -->
+    <!-- Row 3: Throughput (wide) + On-Time Receiving -->
     <div style="display:grid;grid-template-columns:3fr 2fr;gap:16px;margin-bottom:16px;">
       <div class="exec-chart-card" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:20px;">
         <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:2px;">
@@ -121,10 +121,20 @@
         <div id="chart-throughput-svg" style="width:100%;"></div>
       </div>
       <div class="exec-chart-card" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:20px;">
-        <div style="font-size:13px;font-weight:600;color:#1C1C1E;margin-bottom:2px;">Receiving Health</div>
+        <div style="font-size:13px;font-weight:600;color:#1C1C1E;margin-bottom:2px;">On-Time Receiving</div>
         <div style="font-size:10px;color:#AEAEB2;margin-bottom:16px;">On-time % per week</div>
         <div id="chart-receiving-dots" style="width:100%;"></div>
       </div>
+    </div>
+
+    <!-- Row 3b: Planned vs Received POs — dumbbell (additive) -->
+    <div class="exec-chart-card" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;padding:20px;margin-bottom:16px;">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:2px;">
+        <div style="font-size:13px;font-weight:600;color:#1C1C1E;">Planned vs Received POs</div>
+        <div id="exec-po-summary" style="font-size:11px;color:#AEAEB2;"></div>
+      </div>
+      <div style="font-size:10px;color:#AEAEB2;margin-bottom:16px;">Receipt rate per week · received ÷ planned</div>
+      <div id="chart-po-dumbbell" style="width:100%;"></div>
     </div>
 
     <!-- Row 3: Air vs Sea (full width without pipeline since TTL replaces it) -->
@@ -182,6 +192,7 @@
       const facility = ((window.state?.plan)||[]).map(p=>String(p.facility_name||p.facility||'').trim()).find(Boolean)
         || String(window.state?.facility||'').trim() || '';
       if (!facility) { _renderError('No facility found. Please navigate to Week Hub and load a plan first.'); return; }
+      _facility = facility; _from = from; _to = to;
       const data = await _api(`/exec/summary?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&facility=${encodeURIComponent(facility)}`);
       _weeks = Array.isArray(data.weeks) ? data.weeks : [];
       const lbl = el('exec-range-label');
@@ -207,6 +218,12 @@
     _renderKPIs(baseline);
     _renderCharts(baseline);
     _renderInsights(); // async — calls Claude
+
+    // Expose a read-only snapshot of the current view for the PDF export module
+    try {
+      window.__execState = { weeks: _weeks, range: _range, facility: _facility, from: _from, to: _to, baseline };
+      window.dispatchEvent(new Event('exec:rendered'));
+    } catch (_) {}
   }
 
   // ── KPIs ──────────────────────────────────────────────────────
@@ -269,8 +286,11 @@
 
     _renderThroughputSVG(labels);
 
-    // Chart 2: Receiving Health — custom SVG dot chart (not Chart.js bar)
+    // Chart 2: On-Time Receiving — custom SVG dot chart (not Chart.js bar)
     _renderReceivingDots(baseline);
+
+    // Chart 2b: Planned vs Received POs — dumbbell (additive)
+    _renderPODumbbell(labels);
 
     // Container Utilisation — avg units per container by size
     const COL_20 = '#8B5CF6'; // violet — matches TTL seg2
@@ -590,6 +610,77 @@
 
     svg += '</svg>';
     container.innerHTML = svg;
+  }
+
+  // Planned vs Received POs: dumbbell (connected dots) with per-week receipt-rate %.
+  // Reads planned_pos / received_pos already present on each week from /exec/summary.
+  function _renderPODumbbell(labels) {
+    const container = el('chart-po-dumbbell'); if (!container) return;
+    const n = _weeks.length;
+    if (!n) { container.innerHTML = '<div style="font-size:11px;color:#AEAEB2;text-align:center;padding:32px 0;">No data</div>'; return; }
+
+    const planned  = _weeks.map(w => Number(w.planned_pos  || 0));
+    const received = _weeks.map(w => Number(w.received_pos || 0));
+    if (!planned.some(v=>v>0) && !received.some(v=>v>0)) {
+      container.innerHTML = '<div style="font-size:11px;color:#AEAEB2;text-align:center;padding:32px 0;">No PO data for this period</div>';
+      return;
+    }
+
+    const RED = '#D61A3C';        // matches receiving-dots low colour
+    const NEUTRAL = '#9A9A9F';
+    const health = p => p>=90?GREEN:p>=70?AMBER:RED;
+
+    const W = container.offsetWidth || 600, H = 200;
+    const pad = { t:28, b:28, l:30, r:14 };
+    const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b;
+    const rawMax = Math.max(1, ...planned, ...received);
+    const maxY = Math.max(5, Math.ceil((rawMax * 1.18) / 5) * 5); // headroom for % labels
+
+    const x = i => pad.l + (n>1 ? (i/(n-1))*cW : cW/2);
+    const y = v => pad.t + (1 - v/maxY) * cH;
+
+    let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`;
+
+    // Y gridlines (PO counts)
+    for (let g=0; g<=4; g++) {
+      const gv = Math.round(maxY*(1-g/4));
+      const gy = pad.t + (g/4)*cH;
+      svg += `<line x1="${pad.l}" y1="${gy}" x2="${W-pad.r}" y2="${gy}" stroke="rgba(0,0,0,0.05)" stroke-width="1"/>`;
+      svg += `<text x="${pad.l-6}" y="${gy+4}" font-size="9" fill="#AEAEB2" text-anchor="end">${gv}</text>`;
+    }
+
+    _weeks.forEach((w,i) => {
+      const pl = planned[i], rc = received[i];
+      const pct = pl>0 ? Math.round(rc/pl*100) : null;
+      const col = pct==null ? NEUTRAL : health(pct);
+      const cx = x(i);
+
+      // Connector planned↔received (quiet on healthy weeks, warning colour when short)
+      if (pl>0) {
+        const lineCol = (pct==null || pct>=90) ? NEUTRAL : col;
+        const lineW   = (pct!=null && pct<90) ? 2.5 : 2;
+        svg += `<line x1="${cx}" y1="${y(rc)}" x2="${cx}" y2="${y(pl)}" stroke="${lineCol}" stroke-width="${lineW}" stroke-linecap="round" opacity="${pl===rc?0:0.9}"/>`;
+      }
+      // Planned dot (hollow neutral ring)
+      if (pl>0) svg += `<circle cx="${cx}" cy="${y(pl)}" r="4.5" fill="#fff" stroke="${NEUTRAL}" stroke-width="2"/>`;
+      // Received dot (brand fill)
+      svg += `<circle cx="${cx}" cy="${y(rc)}" r="5.5" fill="${BRAND}"/>`;
+      // Receipt-rate % above the top dot
+      const topY = Math.min(y(pl>0?pl:rc), y(rc));
+      svg += `<text x="${cx}" y="${topY-10}" font-size="10" font-weight="700" fill="${col}" text-anchor="middle">${pct==null?'—':pct+'%'}</text>`;
+      // Week label
+      svg += `<text x="${cx}" y="${H-7}" font-size="9" fill="#AEAEB2" text-anchor="middle">${labels[i]}</text>`;
+    });
+
+    svg += '</svg>';
+    container.innerHTML = svg;
+
+    // Summary: totals + overall receipt rate
+    const totPl = planned.reduce((a,b)=>a+b,0);
+    const totRc = received.reduce((a,b)=>a+b,0);
+    const overall = totPl>0 ? Math.round(totRc/totPl*100) : null;
+    const sumEl = el('exec-po-summary');
+    if (sumEl) sumEl.textContent = `${fmtN(totRc)} received / ${fmtN(totPl)} planned · ${overall==null?'—':overall+'%'} overall`;
   }
 
   function _renderRadar(baseline) {
