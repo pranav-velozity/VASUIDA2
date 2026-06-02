@@ -222,18 +222,6 @@
   ];
 
   // ── Glossary ──────────────────────────────────────────────────────────────
-  const GLOSSARY = [
-    ['On-Time Receiving', '(POs received − received late) ÷ POs planned. The share of planned POs that arrived on or before their due date.'],
-    ['Receipt Rate', 'POs received ÷ POs planned. Whether planned POs arrived at all, regardless of timing.'],
-    ['VAS Throughput / Completion', 'Applied units ÷ planned units. How much of the planned VAS workload was completed.'],
-    ['Processing Speed', 'Average days from goods receipt to VAS completion (the Receiving → VAS segment).'],
-    ['Door-to-Door Time', 'Total average days across three segments: Receiving → VAS, VAS → ETA at FC, and ETA → final delivery.'],
-    ['Air vs Sea Mix', 'Unit volume split by freight mode. Air share = air units ÷ total units.'],
-    ['Container Utilisation', 'Average units shipped per sea container by size (20ft / 40ft). Air containers excluded.'],
-    ['Performance Radar', 'Five dimensions scored 0–100 against the best single week in the window (best week = 100).'],
-    ['Carton Consistency', 'Stability of average carton weight week to week; higher = more consistent packing.']
-  ];
-
   // ── Chart capture ──────────────────────────────────────────────────────────
   function captureSVG(id) {
     const host = document.getElementById(id);
@@ -245,19 +233,40 @@
     clone.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     clone.style.width = '100%';
     clone.style.height = 'auto';
-    clone.style.maxHeight = '118mm';
-    return '<div class="exec-pdf-chart">' + clone.outerHTML + '</div>';
+    clone.style.maxHeight = '100%';
+    clone.style.display = 'block';
+    return clone.outerHTML;
   }
-  function captureCanvas(id) {
+  function canvasImg(id) {
     const cv = document.getElementById(id);
-    if (!cv) return '<div class="exec-pdf-empty">No data rendered for this chart.</div>';
+    if (!cv) return '';
     let url = '';
     try {
       const ch = (window.Chart && window.Chart.getChart) ? window.Chart.getChart(cv) : null;
       url = ch ? ch.toBase64Image('image/png', 1) : cv.toDataURL('image/png');
     } catch (e) { try { url = cv.toDataURL('image/png'); } catch (_) { url = ''; } }
-    if (!url) return '<div class="exec-pdf-empty">No data rendered for this chart.</div>';
-    return '<div class="exec-pdf-chart"><img src="' + url + '" alt="" style="display:block;margin:0 auto;max-width:100%;max-height:118mm;width:auto;height:auto;"/></div>';
+    if (!url) return '';
+    return '<img src="' + url + '" alt="" style="display:block;margin:0 auto;max-width:100%;max-height:100%;width:auto;height:auto;"/>';
+  }
+  function captureCanvas(id) {
+    return canvasImg(id) || '<div class="exec-pdf-empty">No data rendered for this chart.</div>';
+  }
+  // Full radar = radar canvas + the score breakdown legend, mirroring the live page.
+  function radarComposite() {
+    const img = canvasImg('chart-radar');
+    const legend = document.getElementById('exec-radar-legend');
+    let legHTML = '';
+    if (legend) {
+      const clone = legend.cloneNode(true);
+      // Compact the cloned cards so the full breakdown fits the fixed stage height
+      Array.from(clone.children).forEach(ch => { if (ch.style) ch.style.padding = '7px 11px'; });
+      legHTML = clone.innerHTML;
+    }
+    if (!img && !legHTML) return '<div class="exec-pdf-empty">No data rendered for this chart.</div>';
+    return '<div class="exec-pdf-radar">'
+      + '<div class="exec-pdf-radar-chart">' + (img || '') + '</div>'
+      + '<div class="exec-pdf-radar-legend">' + legHTML + '</div>'
+      + '</div>';
   }
 
   // ── Page frame (header strip + footer + page number) ───────────────────────
@@ -269,7 +278,7 @@
   }
 
   function chartPageHTML(c, weeks, ctx, num, total, periodLabel) {
-    const body = c.kind === 'svg' ? captureSVG(c.id) : captureCanvas(c.id);
+    const body = c.id === 'chart-radar' ? radarComposite() : (c.kind === 'svg' ? captureSVG(c.id) : captureCanvas(c.id));
     const t = c.text(weeks, ctx);
     const f = frame(num, total, periodLabel);
     return `<div class="exec-pdf-page">
@@ -278,12 +287,10 @@
         <div><div class="exec-pdf-title">${esc(c.title)}</div></div>
         <div class="exec-pdf-badge">${esc(c.badge)}</div>
       </div>
-      ${body}
-      <div class="exec-pdf-notes">
-        <div class="exec-pdf-note"><strong>Definition</strong>${esc(c.def)}</div>
-        <div class="exec-pdf-note"><strong>What this shows</strong>${esc(t.narrative)}</div>
-        <div class="exec-pdf-note exec-pdf-note-insight"><strong>Insight</strong>${esc(t.insight)}</div>
-      </div>
+      <div class="exec-pdf-note"><strong>Definition</strong>${esc(c.def)}</div>
+      <div class="exec-pdf-note"><strong>Actuals / Trend</strong>${esc(t.narrative)}</div>
+      <div class="exec-pdf-stage">${body}</div>
+      <div class="exec-pdf-note exec-pdf-note-insight"><strong>Improvement Insights</strong>${esc(t.insight)}</div>
       ${f.foot}
     </div>`;
   }
@@ -308,18 +315,6 @@
       <div class="exec-pdf-sub">Cross-week snapshot · ${esc(periodLabel)}</div>
       <div class="exec-pdf-kpigrid">${cards}</div>
       <div class="exec-pdf-notes"><div class="exec-pdf-note"><strong>About this report</strong>All figures are computed from completed VAS records, weekly plans and receiving data for the selected facility and date range. Percentages are rounded. This report reflects the same data shown on the live Executive page at the time of export.</div></div>
-      ${f.foot}
-    </div>`;
-  }
-
-  function glossaryPageHTML(num, total, periodLabel) {
-    const f = frame(num, total, periodLabel);
-    const rows = GLOSSARY.map(([t, d]) => `<div class="exec-pdf-gloss"><div class="exec-pdf-gloss-term">${esc(t)}</div><div class="exec-pdf-gloss-def">${esc(d)}</div></div>`).join('');
-    return `<div class="exec-pdf-page">
-      ${f.head}
-      <div class="exec-pdf-sechead"><div class="exec-pdf-title">Definitions</div><div class="exec-pdf-badge">Glossary</div></div>
-      <div class="exec-pdf-sub">How each metric in this report is calculated</div>
-      <div class="exec-pdf-glossgrid">${rows}</div>
       ${f.foot}
     </div>`;
   }
@@ -376,14 +371,18 @@
     #exec-print-root .exec-pdf-sechead{ display:flex; align-items:center; justify-content:space-between; margin-bottom:2px; }
     #exec-print-root .exec-pdf-title{ font-family:'DM Serif Display',Georgia,serif; font-size:28px; color:${BRAND}; }
     #exec-print-root .exec-pdf-badge{ font-size:10px; font-weight:700; padding:4px 12px; border-radius:20px; letter-spacing:0.05em; text-transform:uppercase; background:rgba(153,0,51,0.1); color:${BRAND}; }
-    #exec-print-root .exec-pdf-sub{ font-size:11px; color:${MID}; margin-bottom:14px; }
-    #exec-print-root .exec-pdf-chart{ text-align:center; margin:8px 0 14px; }
-    #exec-print-root .exec-pdf-empty{ font-size:12px; color:${LIGHT}; text-align:center; padding:40px 0; }
-    #exec-print-root .exec-pdf-notes{ display:flex; flex-direction:column; gap:8px; margin-top:4px; }
-    #exec-print-root .exec-pdf-note{ background:#F5F5F7; border-radius:8px; padding:11px 15px; font-size:11px; color:${MID}; line-height:1.55; }
-    #exec-print-root .exec-pdf-note strong{ color:${DARK}; font-size:12px; display:block; margin-bottom:3px; }
+    #exec-print-root .exec-pdf-sub{ font-size:13px; color:${MID}; margin-bottom:14px; }
+    #exec-print-root .exec-pdf-stage{ height:82mm; display:flex; align-items:center; justify-content:center; overflow:hidden; margin:9px 0; }
+    #exec-print-root .exec-pdf-empty{ font-size:13px; color:${LIGHT}; text-align:center; padding:40px 0; }
+    #exec-print-root .exec-pdf-note{ background:#F5F5F7; border-radius:8px; padding:10px 16px; font-size:13.5px; color:${MID}; line-height:1.55; margin-bottom:8px; }
+    #exec-print-root .exec-pdf-note:last-of-type{ margin-bottom:0; }
+    #exec-print-root .exec-pdf-note strong{ color:${DARK}; font-size:14px; display:block; margin-bottom:3px; }
     #exec-print-root .exec-pdf-note-insight{ background:rgba(153,0,51,0.05); }
     #exec-print-root .exec-pdf-note-insight strong{ color:${BRAND}; }
+    #exec-print-root .exec-pdf-radar{ display:flex; gap:22px; align-items:center; width:100%; height:100%; }
+    #exec-print-root .exec-pdf-radar-chart{ flex:0 0 auto; height:100%; display:flex; align-items:center; justify-content:center; }
+    #exec-print-root .exec-pdf-radar-chart img{ max-height:100%; max-width:100%; width:auto; height:auto; }
+    #exec-print-root .exec-pdf-radar-legend{ flex:1 1 auto; max-height:100%; overflow:hidden; display:flex; flex-direction:column; gap:6px; }
     #exec-print-root .exec-pdf-kpigrid{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; margin:10px 0 18px; }
     #exec-print-root .exec-pdf-kpi{ border:0.5px solid rgba(0,0,0,0.08); border-radius:12px; padding:16px 18px; }
     #exec-print-root .exec-pdf-kpi-label{ font-size:10px; font-weight:600; color:${MID}; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:7px; }
@@ -395,12 +394,12 @@
     #exec-print-root .exec-pdf-insgrid{ display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:8px; }
     #exec-print-root .exec-pdf-ins{ background:#fff; border:0.5px solid rgba(0,0,0,0.08); border-radius:10px; padding:12px 14px; }
     #exec-print-root .exec-pdf-ins-head{ display:flex; justify-content:space-between; align-items:center; margin-bottom:5px; }
-    #exec-print-root .exec-pdf-ins-cat{ font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; color:${MID}; }
-    #exec-print-root .exec-pdf-ins-pri{ font-size:9px; font-weight:700; }
-    #exec-print-root .exec-pdf-ins-title{ font-size:12px; font-weight:600; color:${DARK}; margin-bottom:4px; line-height:1.3; }
-    #exec-print-root .exec-pdf-ins-body{ font-size:10px; color:${MID}; line-height:1.45; margin-bottom:5px; }
-    #exec-print-root .exec-pdf-ins-impact{ font-size:10px; color:${BRAND}; font-weight:500; margin-bottom:4px; }
-    #exec-print-root .exec-pdf-ins-action{ font-size:10px; color:${MID}; background:#F9F9FB; border-radius:6px; padding:6px 9px; line-height:1.45; }
+    #exec-print-root .exec-pdf-ins-cat{ font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; color:${MID}; }
+    #exec-print-root .exec-pdf-ins-pri{ font-size:10px; font-weight:700; }
+    #exec-print-root .exec-pdf-ins-title{ font-size:13px; font-weight:600; color:${DARK}; margin-bottom:4px; line-height:1.3; }
+    #exec-print-root .exec-pdf-ins-body{ font-size:11.5px; color:${MID}; line-height:1.45; margin-bottom:5px; }
+    #exec-print-root .exec-pdf-ins-impact{ font-size:11.5px; color:${BRAND}; font-weight:500; margin-bottom:4px; }
+    #exec-print-root .exec-pdf-ins-action{ font-size:11.5px; color:${MID}; background:#F9F9FB; border-radius:6px; padding:6px 9px; line-height:1.45; }
     #exec-print-root .exec-pdf-cover{ background:${COVER_BG}; color:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; }
     #exec-print-root .exec-pdf-cover-brand{ font-family:'DM Serif Display',Georgia,serif; font-size:48px; color:rgba(255,255,255,0.55); letter-spacing:-0.02em; }
     #exec-print-root .exec-pdf-cover-tag{ font-size:12px; color:rgba(255,255,255,0.5); letter-spacing:0.18em; text-transform:uppercase; margin:10px 0 40px; }
@@ -420,8 +419,7 @@
   }
 
   function periodLabelOf(st) {
-    const fac = st.facility ? st.facility + ' · ' : '';
-    return `${fac}${st.from || '?'} → ${st.to || '?'} · ${st.weeks.length} weeks`;
+    return `${st.from || '?'} → ${st.to || '?'} · ${st.weeks.length} weeks`;
   }
 
   let _building = false;
@@ -431,7 +429,7 @@
     const periodLabel = periodLabelOf(st);
 
     // Assemble page list to know the numbered total up front
-    const pages = [{ type: 'cover' }, { type: 'kpi' }, { type: 'glossary' }];
+    const pages = [{ type: 'cover' }, { type: 'kpi' }];
     CHART_ORDER.forEach(c => pages.push({ type: 'chart', chart: c }));
     const insChunks = (includeAI && aiInsights.length) ? chunk(aiInsights, 4) : [];
     insChunks.forEach((items, i) => pages.push({ type: 'insights', items, part: i + 1, parts: insChunks.length }));
@@ -445,7 +443,6 @@
       switch (p.type) {
         case 'cover': return coverHTML(periodLabel);
         case 'kpi': return kpiPageHTML(ctx, num, total, periodLabel);
-        case 'glossary': return glossaryPageHTML(num, total, periodLabel);
         case 'chart': return chartPageHTML(p.chart, weeks, ctx, num, total, periodLabel);
         case 'insights': return insightsPageHTML(p.items, p.part, p.parts, num, total, periodLabel);
         case 'closing': return closingHTML(num, total, periodLabel);
