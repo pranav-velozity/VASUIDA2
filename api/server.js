@@ -9270,6 +9270,188 @@ app.post('/report/cost-utilisation/insights', (req, res) => {
 
 // ── END COST UTILISATION REPORT MODULE ───────────────────────────
 
+// ════════════════════════════════════════════════════════════════
+// THE ICONIC — Advanced PO publish (SFTP push from Render egress IP)
+// ════════════════════════════════════════════════════════════════
+// Relay model: the frontend generates the CSV (identical bytes to the
+// "Download CSV" output the user reviewed) and POSTs it here. This route
+// runs on Render — the whitelisted outbound IP 74.220.48.242 — so THE
+// ICONIC's firewall accepts the SFTP connection. The push MUST originate
+// here, never from Netlify or the browser (no fixed outbound IP there).
+
+const ICONIC_SFTP = {
+  host:        process.env.ICONIC_SFTP_HOST     || 'ti-owms-prd-syd-sftp.zalora.net',
+  port:        Number(process.env.ICONIC_SFTP_PORT || 22),
+  username:    process.env.ICONIC_SFTP_USER     || 'vendor-prd-sftp',
+  remoteDir:  (process.env.ICONIC_SFTP_DIR      || '/upload').replace(/\/+$/, ''),
+  keyPath:     process.env.ICONIC_SFTP_KEY_PATH || '/etc/secrets/iconic_sftp',
+  fingerprint: process.env.ICONIC_SFTP_HOST_FINGERPRINT || '', // optional sha256 host-key pin
+};
+
+// Audit trail: one row per publish attempt (success or failure)
+db.exec(`
+CREATE TABLE IF NOT EXISTS iconic_push_log (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  pushed_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  filename     TEXT NOT NULL,
+  bytes        INTEGER,
+  week_start   TEXT,
+  remote_path  TEXT,
+  r2_key       TEXT,
+  status       TEXT NOT NULL,
+  error        TEXT,
+  user_id      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_iconic_push_at ON iconic_push_log(pushed_at);
+`);
+const _iconicLog = db.prepare(`
+  INSERT INTO iconic_push_log (filename, bytes, week_start, remote_path, r2_key, status, error, user_id)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`);
+function _iconicLogSafe(args) { try { _iconicLog.run(...args); } catch (e) { console.error('[iconic] log insert failed:', e.message || e); } }
+
+// Filenames must be a single safe segment ending in .csv — no path traversal
+function _iconicSafeFilename(name) {
+  const s = String(name || '').trim();
+  if (s.includes('..') || s.includes('/') || s.includes('\\')) return null;
+  if (!/^[A-Za-z0-9._-]+\.csv$/.test(s)) return null;
+  return s;
+}
+
+async function _iconicAlert(filename, errMsg) {
+  try {
+    const from = process.env.EXCEPTION_EMAIL_FROM;
+    const to   = parseEmailList(process.env.ICONIC_ALERT_TO || process.env.EXCEPTION_EMAIL_TO_INTERNAL);
+    if (!from || !to.length) return;
+    const when = new Date().toISOString();
+    await sendViaResend({
+      from, to,
+      subject: `⚠️ THE ICONIC PO publish FAILED — ${filename}`,
+      text: `The Advanced PO publish to THE ICONIC SFTP failed.\n\nFile: ${filename}\nError: ${errMsg}\nTime: ${when}\n\nThe file was NOT delivered. Investigate and retry.`,
+      html: `<p>The Advanced PO publish to THE ICONIC SFTP <strong>failed</strong>.</p>
+             <p><strong>File:</strong> ${escHtml(filename)}<br/>
+                <strong>Error:</strong> ${escHtml(errMsg)}<br/>
+                <strong>Time:</strong> ${escHtml(when)}</p>
+             <p>The file was <strong>not</strong> delivered. Investigate and retry.</p>`,
+    });
+  } catch (e) {
+    console.error('[iconic] failure-alert email failed:', e.message || e);
+  }
+}
+
+// POST /iconic/publish — push a generated PO CSV to THE ICONIC's SFTP /upload
+app.post('/iconic/publish',
+  authenticateRequest,
+  requireRole(['admin']),
+  writeOpLimiter,
+  auditLog('iconic_publish'),
+  async (req, res) => {
+    const filename  = _iconicSafeFilename(req.body && req.body.filename);
+    const csv       = (req.body && typeof req.body.csv === 'string') ? req.body.csv : '';
+    const weekStart = String((req.body && req.body.week_start) || '').trim() || null;
+    const userId    = (req.auth && req.auth.userId) || null;
+
+    if (!filename) return res.status(400).json({ ok: false, error: 'Invalid or missing filename (expected a single *.csv name with no path).' });
+    if (!csv.trim()) return res.status(400).json({ ok: false, error: 'Empty CSV — nothing to publish.' });
+
+    const buffer      = Buffer.from(csv, 'utf8');
+    const remoteFinal = `${ICONIC_SFTP.remoteDir}/${filename}`;
+    const remoteTmp   = `${remoteFinal}.tmp`;
+
+    // Read the SSH key from the read-only Render Secret File and pass the
+    // CONTENTS to ssh2 — avoids the 0600-permission problem of a key path.
+    let privateKey;
+    try {
+      privateKey = fs.readFileSync(ICONIC_SFTP.keyPath);
+    } catch (e) {
+      const msg = `SFTP private key not readable at ${ICONIC_SFTP.keyPath}: ${e.message || e}`;
+      console.error('[iconic/publish]', msg);
+      _iconicLogSafe([filename, buffer.length, weekStart, remoteFinal, null, 'failed', msg, userId]);
+      _iconicAlert(filename, msg);
+      return res.status(500).json({ ok: false, error: msg });
+    }
+
+    let SftpClient;
+    try { SftpClient = require('ssh2-sftp-client'); }
+    catch (e) {
+      const msg = 'ssh2-sftp-client is not installed on the server.';
+      console.error('[iconic/publish]', msg, e.message || e);
+      _iconicLogSafe([filename, buffer.length, weekStart, remoteFinal, null, 'failed', msg, userId]);
+      return res.status(500).json({ ok: false, error: msg });
+    }
+
+    const connectCfg = {
+      host: ICONIC_SFTP.host,
+      port: ICONIC_SFTP.port,
+      username: ICONIC_SFTP.username,
+      privateKey,
+      readyTimeout: 20000,
+    };
+    // Optional host-key pinning. Until Rohit provides the fingerprint we connect
+    // without verification (logged). When set, expect an sha256 hex fingerprint;
+    // confirm the format once received and adjust normalisation if needed.
+    if (ICONIC_SFTP.fingerprint) {
+      connectCfg.hostHash = 'sha256';
+      const norm = s => String(s || '').replace(/^sha256:/i, '').replace(/[:\s]/g, '').toLowerCase();
+      const want = norm(ICONIC_SFTP.fingerprint);
+      connectCfg.hostVerifier = (hashedKey) => norm(hashedKey) === want;
+    } else {
+      console.warn('[iconic/publish] connecting WITHOUT host-key verification — set ICONIC_SFTP_HOST_FINGERPRINT to harden.');
+    }
+
+    const sftp = new SftpClient();
+    try {
+      await sftp.connect(connectCfg);
+      // .tmp then rename so THE ICONIC never ingests a half-written file
+      await sftp.put(buffer, remoteTmp);
+      try { if (await sftp.exists(remoteFinal)) await sftp.delete(remoteFinal); } catch (_) {}
+      await sftp.rename(remoteTmp, remoteFinal);
+      await sftp.end();
+    } catch (e) {
+      try { await sftp.end(); } catch (_) {}
+      const msg = `SFTP push failed: ${e.message || e}`;
+      console.error('[iconic/publish]', msg);
+      _iconicLogSafe([filename, buffer.length, weekStart, remoteFinal, null, 'failed', msg, userId]);
+      _iconicAlert(filename, msg);
+      return res.status(502).json({ ok: false, error: msg });
+    }
+
+    // Durable archive to R2 (best-effort — the push already succeeded)
+    let r2Key = null;
+    try {
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      r2Key = `iconic-outbox/${weekStart || 'unknown-week'}/${ts}-${filename}`;
+      await r2Client.send(new PutObjectCommand({
+        Bucket: R2_BUCKET, Key: r2Key, Body: buffer, ContentType: 'text/csv',
+      }));
+    } catch (e) {
+      console.error('[iconic/publish] R2 archive failed (push still succeeded):', e.message || e);
+      r2Key = null;
+    }
+
+    _iconicLogSafe([filename, buffer.length, weekStart, remoteFinal, r2Key, 'success', null, userId]);
+    console.log(`[iconic/publish] OK ${remoteFinal} (${buffer.length} bytes) by ${userId}`);
+    return res.json({ ok: true, remotePath: remoteFinal, bytes: buffer.length, r2Key });
+  }
+);
+
+// GET /iconic/publish/log — recent publish attempts (admin)
+app.get('/iconic/publish/log',
+  authenticateRequest,
+  requireRole(['admin']),
+  (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 50, 500);
+      const rows = db.prepare(
+        'SELECT id, pushed_at, filename, bytes, week_start, remote_path, r2_key, status, error FROM iconic_push_log ORDER BY id DESC LIMIT ?'
+      ).all(limit);
+      res.json({ rows });
+    } catch (e) {
+      res.status(500).json({ error: String(e.message || e) });
+    }
+  }
+);
+
 // ---- Start ----
 app.listen(PORT, () => {
   console.log(`UID Ops backend listening on http://localhost:${PORT}`);
