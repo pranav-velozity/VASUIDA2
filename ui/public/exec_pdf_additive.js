@@ -132,20 +132,6 @@
       }
     },
     {
-      id: 'chart-throughput-svg', kind: 'svg', title: 'Weekly Throughput', badge: 'Units',
-      def: 'Planned units (from the weekly plan) versus applied units (completed VAS records) per week, with each week\u2019s completion rate. Completion % = applied ÷ planned.',
-      text: (w, c) => {
-        const bw = bestWorst(w, x => x.planned_units > 0 ? x.applied_units / x.planned_units * 100 : null);
-        const narrative = `${fmtN(c.totApU)} of ${fmtN(c.totPlU)} planned units were applied across the window — an overall completion of ${fmtPct(c.completion)}.`
-          + (bw.best && bw.worst ? ` Best week ${shortWk(bw.best.ws)} (${fmtPct(bw.best.v)}); weakest ${shortWk(bw.worst.ws)} (${fmtPct(bw.worst.v)}).` : '');
-        let insight;
-        if (c.completion == null) insight = 'Completion populates once plan and applied records are present for the period.';
-        else if (c.completion >= 95) insight = 'Throughput is tracking at or near plan — capacity is matched to demand.';
-        else insight = `Closing the gap to plan would process roughly ${fmtN(Math.max(0, c.totPlU - c.totApU))} additional units across the window.`;
-        return { narrative, insight };
-      }
-    },
-    {
       id: 'chart-receiving-dots', kind: 'svg', title: 'On-Time Receiving', badge: 'Timeliness',
       def: 'Share of planned POs that arrived on or before their due date each week. On-time % = (POs received − POs received late) ÷ POs planned. Distinct from receipt rate, which ignores timing.',
       text: (w, c) => {
