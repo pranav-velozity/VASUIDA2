@@ -9283,7 +9283,7 @@ const ICONIC_SFTP = {
   host:        process.env.ICONIC_SFTP_HOST     || 'ti-owms-prd-syd-sftp.zalora.net',
   port:        Number(process.env.ICONIC_SFTP_PORT || 22),
   username:    process.env.ICONIC_SFTP_USER     || 'vendor-prd-sftp',
-  remoteDir:  (process.env.ICONIC_SFTP_DIR      || '/upload').replace(/\/+$/, ''),
+  remoteDir:  (process.env.ICONIC_SFTP_DIR      || '/upload/inbox').replace(/\/+$/, ''),
   keyPath:     process.env.ICONIC_SFTP_KEY_PATH || '/etc/secrets/iconic_sftp',
   fingerprint: process.env.ICONIC_SFTP_HOST_FINGERPRINT || '', // optional sha256 host-key pin
 };
