@@ -7433,6 +7433,7 @@ function renderReportsPage(container){
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">shipping_type</div><input id="apo_shipping_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Warehouse"/></div>
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">logistic_type</div><input id="apo_logistic_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Delivered to Warehouse"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">logistic_eta</div><input id="apo_logistic_eta" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="11:00"/></div>
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">import_type</div><input id="apo_import_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="China import"/></div>
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">po_currency</div><input id="apo_po_currency" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="AUD"/></div>
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">payment_term</div><input id="apo_payment_term" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="30"/></div>
@@ -7845,6 +7846,7 @@ function renderReportsPage(container){
       const dflt = {
         shipping_type:  apoNorm(apoEl('apo_shipping_type')?.value  || 'Warehouse'),
         logistic_type:  apoNorm(apoEl('apo_logistic_type')?.value  || 'Delivered to Warehouse'),
+        logistic_eta:   apoNorm(apoEl('apo_logistic_eta')?.value   || '11:00'),
         import_type:    apoNorm(apoEl('apo_import_type')?.value    || 'China import'),
         po_currency:    apoNorm(apoEl('apo_po_currency')?.value    || 'AUD'),
         payment_term:   Number(apoEl('apo_payment_term')?.value    || 30),
@@ -8019,6 +8021,7 @@ function renderReportsPage(container){
         row['logistic_type']          = dflt.logistic_type;
         row['logistic_method']        = method;                 // SHIP / AIR / TBD
         row['logistic_date']          = logisticDateFor(method);// Friday + offset (yyyymmdd)
+        row['logistic_eta']           = dflt.logistic_eta;       // always 11:00 (override-able)
         row['inbound_tracking']       = cleanTicket(g.zendesk_ticket);
         row['supplier_contact_name']  = g.supplier_contact_name;
         row['supplier_contact_phone'] = g.supplier_contact_phone;
