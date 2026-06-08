@@ -2838,7 +2838,10 @@ try {
   return;
 }
 
-  alert(`Plan uploaded: ${items.length} rows`);
+  const __withCost = items.filter(r => Number.isFinite(Number(r.cost)) && Number(r.cost) > 0).length;
+  const __noCost   = items.length - __withCost;
+  alert(`Plan uploaded: ${items.length} rows\nWith cost: ${__withCost}\nMissing cost: ${__noCost}`
+    + (__noCost ? `\n\n⚠ ${__noCost} row(s) have no cost — these will export with blank cost in the Advanced PO.` : ''));
   setWeek(weekStart);
 });
   const __btnZeroPlan = $('#btn-zero-plan');
@@ -7430,7 +7433,7 @@ function renderReportsPage(container){
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">shipping_type</div><input id="apo_shipping_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Warehouse"/></div>
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">logistic_type</div><input id="apo_logistic_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Delivered to Warehouse"/></div>
-              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">import_type</div><input id="apo_import_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="China Import"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">import_type</div><input id="apo_import_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="China import"/></div>
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">po_currency</div><input id="apo_po_currency" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="AUD"/></div>
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">payment_term</div><input id="apo_payment_term" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="30"/></div>
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">note</div><input id="apo_note" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="China_3PL"/></div>
@@ -7439,7 +7442,9 @@ function renderReportsPage(container){
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">payment_type</div><input id="apo_payment_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Relabel"/></div>
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">qty_tolerance</div><input id="apo_qty_tolerance" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="5"/></div>
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">item_tax_rate (%)</div><input id="apo_tax_rate" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="10"/></div>
-              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">product</div><input id="apo_product" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="0"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">shipping_cost</div><input id="apo_shipping_cost" type="number" step="0.01" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="1.1"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">air_lead_days</div><input id="apo_air_lead_days" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="12"/></div>
+              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">sea_lead_days</div><input id="apo_sea_lead_days" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="30"/></div>
             </div>
             <div style="display:flex;gap:8px;margin-top:14px;">
               <button id="apo-generate-btn" onclick="apoGenerate()" style="flex:1;background:#990033;color:#fff;border:none;border-radius:8px;padding:9px 0;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Generate Output</button>
@@ -7631,14 +7636,15 @@ function renderReportsPage(container){
 (function(){
   'use strict';
 
+  // Exact column order required by THE ICONIC OWMS (Advance_PO_-_Required_Headers).
   const APO_OUTPUT_COLUMNS = [
     'supplier','shipping_type','agreement','po_number','grand_total','tax_amount',
     'shipping_cost','note','reverse','logistic_type','logistic_method','logistic_date',
     'logistic_eta','inbound_tracking','supplier_contact_name','supplier_contact_phone',
-    'supplier_contact_email','payment_type','payment_term','contract_type','po_type',
-    'vendor_order_number','sku','measurement','initiator','production','qty_tolerance',
-    'id_excess','country_quantity','quantity','import_type','po_currency',
-    'estimated_landed_cost','item_tax_amount','product','volumes_to_collect',
+    'supplier_contact_email','po_type','contract_type','payment_term','payment_type',
+    'vendor_order_number','sku','cost','estimated_landed_cost','item_tax_amount',
+    'quantity','production','po_currency','initiator','measurement','po_master',
+    'qty_tolerance','id_excess','import_type','country_quantity','volumes_to_collect',
     'pickup_info','source_supplier_cost','source_supplier_currency','uid',
     'invoice_nr','master_carton_number'
   ];
@@ -7839,7 +7845,7 @@ function renderReportsPage(container){
       const dflt = {
         shipping_type:  apoNorm(apoEl('apo_shipping_type')?.value  || 'Warehouse'),
         logistic_type:  apoNorm(apoEl('apo_logistic_type')?.value  || 'Delivered to Warehouse'),
-        import_type:    apoNorm(apoEl('apo_import_type')?.value    || 'China Import'),
+        import_type:    apoNorm(apoEl('apo_import_type')?.value    || 'China import'),
         po_currency:    apoNorm(apoEl('apo_po_currency')?.value    || 'AUD'),
         payment_term:   Number(apoEl('apo_payment_term')?.value    || 30),
         note:           apoNorm(apoEl('apo_note')?.value           || 'China_3PL'),
@@ -7848,7 +7854,9 @@ function renderReportsPage(container){
         payment_type:   apoNorm(apoEl('apo_payment_type')?.value   || 'Relabel'),
         qty_tolerance:  Number(apoEl('apo_qty_tolerance')?.value   || 5),
         tax_rate:       Number(apoEl('apo_tax_rate')?.value        || 10) / 100,
-        product:        Number(apoEl('apo_product')?.value         || 0),
+        shipping_cost:  Number(apoEl('apo_shipping_cost')?.value   || 1.1),
+        air_lead_days:  Number(apoEl('apo_air_lead_days')?.value   || 12),
+        sea_lead_days:  Number(apoEl('apo_sea_lead_days')?.value   || 30),
       };
 
       // ── Build plan map: key = PO||sku_code_numeric ──
@@ -7871,9 +7879,11 @@ function renderReportsPage(container){
             supplier_contact_name:  apoNorm(p.supplier_contact || p.supplier_name || ''),
             supplier_contact_email: apoNorm(p.supplier_contact_email || ''),
             supplier_contact_phone: apoNorm(p.supplier_contact_phone || ''),
-            vendor_order_number:    apoNorm(p.vendor_item_no  || ''),
+            vendor_order_number:    apoNorm(p.vendor_code     || ''),
             initiator:              apoNorm(p.brand_name      || ''),
             cost:                   p.cost,
+            freight_type:           apoNorm(p.freight_type    || ''),
+            zendesk_ticket:         apoNorm(p.zendesk_ticket  || ''),
             sku_full:               style ? (style + '-' + core) : core,
           });
         }
@@ -7934,6 +7944,9 @@ function renderReportsPage(container){
             vendor_order_number:    pl?.vendor_order_number    ?? '',
             initiator:              pl?.initiator              ?? '',
             cost:                   pl?.cost                   ?? '',
+            freight_type:           pl?.freight_type           ?? '',
+            zendesk_ticket:         pl?.zendesk_ticket         ?? '',
+            matched:                !!pl,
             sku_full_plan:          pl?.sku_full               ?? '',
             sku_full_ship:          s.sku_full                 ?? '',
           });
@@ -7951,12 +7964,49 @@ function renderReportsPage(container){
       // ── Build output rows ──
       const rowsOut = [];
       let mappedUidTotal = 0;
+      let excludedUnmatched = 0;
+      let rowsMissingCost = 0;
+      let rowsTbd = 0;
+
+      // Friday of the processing week (Monday + 4), in UTC
+      const friday = new Date(ws + 'T00:00:00Z');
+      friday.setUTCDate(friday.getUTCDate() + 4);
+      const fmtYmd = (d) => '' + d.getUTCFullYear()
+        + String(d.getUTCMonth() + 1).padStart(2, '0')
+        + String(d.getUTCDate()).padStart(2, '0');
+      const methodFor = (ft) => {
+        const f = String(ft || '').trim().toLowerCase();
+        if (f === 'air') return 'AIR';
+        if (f === 'sea') return 'SHIP';
+        return 'TBD';
+      };
+      const logisticDateFor = (method) => {
+        let off = null;
+        if (method === 'AIR') off = dflt.air_lead_days;
+        else if (method === 'SHIP') off = dflt.sea_lead_days;
+        if (off == null || !Number.isFinite(off)) return ''; // TBD → blank
+        const d = new Date(friday.getTime());
+        d.setUTCDate(d.getUTCDate() + off);
+        return fmtYmd(d);
+      };
+      const cleanTicket = (t) => {
+        const s = String(t || '').trim();
+        if (!s) return '';
+        if (/^#?n\/?a$/i.test(s) || /^#(ref|value|name|null|num|div)/i.test(s)) return '';
+        return s;
+      };
 
       for (const g of groups.values()){
+        if (!g.matched){ excludedUnmatched++; continue; }   // exclude unmatched UID rows
+
         const costNum = Number.isFinite(Number(g.cost)) ? Number(g.cost) : NaN;
+        const hasCost = Number.isFinite(costNum);
+        if (!hasCost) rowsMissingCost++;
         const qty     = g.uidList.length;
         mappedUidTotal += qty;
         const skuOut  = g.sku_full_plan || g.sku_full_ship || g.sku_core;
+        const method  = methodFor(g.freight_type);
+        if (method === 'TBD') rowsTbd++;
 
         const row = {};
         for (const c of APO_OUTPUT_COLUMNS) row[c] = '';
@@ -7964,26 +8014,32 @@ function renderReportsPage(container){
         row['supplier']               = g.supplier;
         row['shipping_type']          = dflt.shipping_type;
         row['po_number']              = g.po_number;
+        row['shipping_cost']          = dflt.shipping_cost;
         row['note']                   = dflt.note;
         row['logistic_type']          = dflt.logistic_type;
+        row['logistic_method']        = method;                 // SHIP / AIR / TBD
+        row['logistic_date']          = logisticDateFor(method);// Friday + offset (yyyymmdd)
+        row['inbound_tracking']       = cleanTicket(g.zendesk_ticket);
         row['supplier_contact_name']  = g.supplier_contact_name;
         row['supplier_contact_phone'] = g.supplier_contact_phone;
         row['supplier_contact_email'] = g.supplier_contact_email;
-        row['payment_type']           = dflt.payment_type;
-        row['payment_term']           = dflt.payment_term;
-        row['contract_type']          = dflt.contract_type;
         row['po_type']                = dflt.po_type;
-        row['vendor_order_number']    = g.vendor_order_number;
+        row['contract_type']          = dflt.contract_type;
+        row['payment_term']           = dflt.payment_term;
+        row['payment_type']           = dflt.payment_type;
+        row['vendor_order_number']    = g.vendor_order_number;  // = plan vendor_code
         row['sku']                    = skuOut;
-        row['initiator']              = g.initiator;
-        row['qty_tolerance']          = dflt.qty_tolerance;
-        row['country_quantity']       = qty;
+        row['cost']                   = hasCost ? costNum : '';                       // unit cost (pass-through)
+        row['estimated_landed_cost']  = hasCost ? (costNum + dflt.shipping_cost) : ''; // unit cost + shipping
+        row['item_tax_amount']        = hasCost ? (costNum * dflt.tax_rate) : '';     // per-unit tax
         row['quantity']               = qty;
-        row['import_type']            = dflt.import_type;
         row['po_currency']            = dflt.po_currency;
-        row['item_tax_amount']        = Number.isFinite(costNum) ? (costNum * dflt.tax_rate) : '';
-        row['product']                = dflt.product;
-        row['source_supplier_cost']   = Number.isFinite(costNum) ? costNum : '';
+        row['initiator']              = '';                     // blank per spec
+        row['po_master']              = g.po_number;            // = PO number
+        row['qty_tolerance']          = dflt.qty_tolerance;
+        row['import_type']            = dflt.import_type;
+        row['country_quantity']       = '';                     // blank per spec
+        row['source_supplier_cost']   = hasCost ? costNum : ''; // unit cost
         row['source_supplier_currency'] = dflt.po_currency;
         row['uid']                    = g.uidList.join(';');
         row['master_carton_number']   = g.master_carton_number;
@@ -8009,6 +8065,9 @@ function renderReportsPage(container){
         'Dropped missing UID':                  droppedMissingUID,
         'Dropped missing Mobile Bin':           droppedMissingBin,
         'Unmatched UID rows (no Plan match)':   unmatched,
+        'Rows excluded (unmatched, dropped)':   excludedUnmatched,
+        'Rows missing cost (cost left blank)':  rowsMissingCost,
+        'Logistic method = TBD (no mode)':      rowsTbd,
         'Duplicate UID occurrences removed':    dupRemoved,
         'Grouped output rows':                  rowsOut.length,
         'Total mapped UIDs in output':          mappedUidTotal,
@@ -8037,7 +8096,13 @@ function renderReportsPage(container){
         pubBtn.textContent = 'Publish to ICONIC';
       }
 
-      if (!unmatched){
+      const warn = [];
+      if (rowsMissingCost)  warn.push(rowsMissingCost + ' missing cost');
+      if (rowsTbd)          warn.push(rowsTbd + ' TBD mode');
+      if (excludedUnmatched) warn.push(excludedUnmatched + ' unmatched excluded');
+      if (warn.length){
+        apoSetStatus('⚠ Generated ' + rowsOut.length + ' rows · ' + mappedUidTotal + ' UIDs · week ' + ws + ' — review: ' + warn.join(', '), '#B45309');
+      } else {
         apoSetStatus('✓ Generated ' + rowsOut.length + ' rows · ' + mappedUidTotal + ' UIDs · week ' + ws, '#16a34a');
       }
 
