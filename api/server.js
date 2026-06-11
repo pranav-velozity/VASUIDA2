@@ -7758,10 +7758,10 @@ function buildReport(D) {
 
   // ── PAGE 2: CONTENTS ──────────────────────────────────────────
   const sections = [
-    { num:'01', label:'Executive Summary',        desc:'Unit cost KPIs across VAS, Sea and Air freight with MoM trends', color: '#990033' },
+    { num:'01', label:'Executive Summary',        desc:'Unit cost KPIs across VAS and fully landed (D2D) Sea/Air freight, with MoM trends', color: '#990033' },
     { num:'02', label:'Freight Mix',              desc:'Air vs Sea volume split and 4-month trend analysis', color: '#0EA5E9' },
-    { num:'03', label:'Sea Freight Utilisation',  desc:'Container throughput, unit cost and supplier breakdown', color: '#0EA5E9' },
-    { num:'04', label:'Air Freight Utilisation',  desc:'AWB throughput, unit cost and supplier breakdown', color: '#F59E0B' },
+    { num:'03', label:'Fully Landed with Sea Freight',  desc:'Door-to-door cost, container throughput, unit cost and supplier breakdown', color: '#0EA5E9' },
+    { num:'04', label:'Fully Landed with Air Freight',  desc:'Door-to-door cost, AWB throughput, unit cost and supplier breakdown', color: '#F59E0B' },
     { num:'05', label:'VAS Processing',           desc:'Applied units, unit cost trend and supplier heatmap', color: '#990033' },
     { num:'06', label:'Carton Replacement',       desc:'Replacement volumes, billed cost and top 3 suppliers', color: '#8B5CF6' },
   ];
@@ -7791,6 +7791,8 @@ function buildReport(D) {
           All monetary values are in <strong>\${CURR} (\${D.fx_note})</strong>, excluding GST.
           Unit costs are calculated using completed records for POs in the same operational week as each invoice. Weeks are assigned to months by their Monday start date.
           Carton replacement is reported separately and excluded from VAS unit cost calculations.
+          <br><br>
+          <strong>Sea and Air freight figures are fully landed (door-to-door, "D2D") costs</strong> — the total cost to move units by that mode, not the freight leg alone. Fully landed cost includes inland transport in China, customs clearance at source and destination, and last-mile delivery. Air additionally includes special handling such as netting and palletisation.
         </div>
       </div>
     </div>
@@ -7839,25 +7841,23 @@ function buildReport(D) {
           </div>
 
           <div class="kpi-card sea">
-            <div class="kpi-label">Sea Freight Cost / Unit</div>
+            <div class="kpi-label">Fully Landed with Sea Freight · Cost / Unit</div>
             <div class="kpi-value">\${fmtC(seaD.unit_revenue)}</div>
             <div class="kpi-sub">\${fmtU(seaD.applied_units)} sea units · \${D.sea_containers.ft20} × 20ft + \${D.sea_containers.ft40} × 40ft</div>
             \${delta(seaD.unit_revenue, seaPrev.unit_revenue)}
             <div class="kpi-desc">
-              Sea freight expense per applied unit shipped by sea. Container count reflects \${fmtMonth(sel)} only.
-              Air containers are excluded from this metric.
+              Fully landed (door-to-door) cost per applied unit shipped by sea — incl. inland transport in China, customs clearance at source &amp; destination, and last-mile delivery. Not the freight leg alone. Container count reflects \${fmtMonth(sel)} only.
             </div>
             \${sparkbars(months.map(m=>D.sea[m]?.unit_revenue), 'rgba(14,165,233,0.4)')}
           </div>
 
           <div class="kpi-card air">
-            <div class="kpi-label">Air Freight Cost / Unit</div>
+            <div class="kpi-label">Fully Landed with Air Freight · Cost / Unit</div>
             <div class="kpi-value">\${fmtC(airD.unit_revenue)}</div>
             <div class="kpi-sub">\${fmtU(airD.applied_units)} air units</div>
             \${delta(airD.unit_revenue, airPrev.unit_revenue)}
             <div class="kpi-desc">
-              Air freight expense per applied unit shipped by air.
-              Higher per-unit cost vs sea reflects speed premium. Monitor ratio to sea cost.
+              Fully landed (door-to-door) cost per applied unit shipped by air — incl. inland transport in China, customs clearance at source &amp; destination, last-mile delivery, and special handling (netting &amp; palletisation). Higher per-unit cost vs sea reflects the speed premium.
             </div>
             \${sparkbars(months.map(m=>D.air[m]?.unit_revenue), 'rgba(245,158,11,0.4)')}
           </div>
@@ -7872,8 +7872,8 @@ function buildReport(D) {
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:12px;">
           \${[
             {label:'VAS Cost/Unit',val:vasD.unit_revenue,units:vasD.applied_units,ul:'units',color:'#990033'},
-            {label:'Sea Cost/Unit',val:seaD.unit_revenue,units:seaD.applied_units,ul:'sea units',color:'#0EA5E9'},
-            {label:'Air Cost/Unit',val:airD.unit_revenue,units:airD.applied_units,ul:'air units',color:'#F59E0B'},
+            {label:'D2D Sea $/Unit',val:seaD.unit_revenue,units:seaD.applied_units,ul:'sea units',color:'#0EA5E9'},
+            {label:'D2D Air $/Unit',val:airD.unit_revenue,units:airD.applied_units,ul:'air units',color:'#F59E0B'},
           ].map(k=>'<div style="padding:10px 14px;border-radius:8px;border:0.5px solid rgba(0,0,0,0.08);border-top:2px solid '+k.color+';">'
             +'<div style="font-size:9px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">'+k.label+'</div>'
             +'<div style="font-size:20px;font-weight:700;color:#1C1C1E;">'+fmtC(k.val)+'</div>'
@@ -7886,8 +7886,8 @@ function buildReport(D) {
           const hdrs = '<th>Channel</th>'+mLabels.map((l,i)=>'<th class="num"'+(i===3?' style="font-weight:700;color:#1C1C1E;"':'')+'>'+l+(i===3?' ★':'')+' </th>').join('')+'<th class="num">MoM Δ</th>';
           const compRows = [
             {label:'VAS Cost/Unit',key:'unit_revenue',src:'vas',color:'#990033'},
-            {label:'Sea Cost/Unit',key:'unit_revenue',src:'sea',color:'#0EA5E9'},
-            {label:'Air Cost/Unit',key:'unit_revenue',src:'air',color:'#F59E0B'},
+            {label:'D2D Sea $/Unit',key:'unit_revenue',src:'sea',color:'#0EA5E9'},
+            {label:'D2D Air $/Unit',key:'unit_revenue',src:'air',color:'#F59E0B'},
           ].map(row=>{
             const vals=months.map(m=>D[row.src][m]?.[row.key]);
             const prev=vals[2],curr=vals[3];
@@ -7908,7 +7908,7 @@ function buildReport(D) {
       <div class="method-footer">
         <strong>Methodology:</strong>
         VAS Cost/Unit = VAS invoice lines (excl. Carton Replacement) ÷ applied units, by invoice_date month.
-        Sea/Air Cost/Unit = invoice totals (type=SEA/AIR) grouped by invoice week_start month ÷ applied units filtered by freight type on plan rows.
+        Sea/Air Cost/Unit = fully landed (door-to-door) invoice totals (type=SEA/AIR) grouped by invoice week_start month ÷ applied units filtered by freight type on plan rows.
         All invoices included regardless of status. Carton Replacement excluded from VAS totals.
         All values in \${D.fx_note}. MoM compares selected month to prior month.
       </div>
@@ -7946,11 +7946,11 @@ function buildReport(D) {
               <div style="font-size:11px;color:#AEAEB2;margin-top:2px;">\${D.freight_mix[sel]?.air_pct||0}% of total</div>
             </div>
             <div style="padding:12px;border-radius:8px;background:#F0F9FF;border:0.5px solid rgba(14,165,233,0.1);">
-              <div style="font-size:9px;font-weight:600;color:#0EA5E9;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Sea Cost/Unit</div>
+              <div style="font-size:9px;font-weight:600;color:#0EA5E9;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">D2D Sea $/Unit</div>
               <div style="font-size:20px;font-weight:700;color:#1C1C1E;">\${fmtC(D.sea[sel]?.unit_revenue)}</div>
             </div>
             <div style="padding:12px;border-radius:8px;background:#FFFBEB;border:0.5px solid rgba(245,158,11,0.1);">
-              <div style="font-size:9px;font-weight:600;color:#F59E0B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Air Cost/Unit</div>
+              <div style="font-size:9px;font-weight:600;color:#F59E0B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">D2D Air $/Unit</div>
               <div style="font-size:20px;font-weight:700;color:#1C1C1E;">\${fmtC(D.air[sel]?.unit_revenue)}</div>
             </div>
           </div>
@@ -7962,7 +7962,7 @@ function buildReport(D) {
             <div><div class="chart-title">Mix by Mode</div><div class="chart-wrap" style="height:130px;"><canvas id="chart-mix-bar"></canvas></div></div>
             <div><div class="chart-title">Cost/Unit Trend</div><div class="chart-wrap" style="height:130px;"><canvas id="chart-mix-cost"></canvas></div></div>
           </div>
-          <table class="data-table"><thead><tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">Sea $/U</th><th class="num">Air $/U</th></tr></thead><tbody>\${months.map((mk,i)=>\`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td><td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td><td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td><td class="num">\${fmtC(D.sea[mk]?.unit_revenue)}</td><td class="num">\${fmtC(D.air[mk]?.unit_revenue)}</td></tr>\`).join('')}</tbody></table>
+          <table class="data-table"><thead><tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">D2D Sea $/U</th><th class="num">D2D Air $/U</th></tr></thead><tbody>\${months.map((mk,i)=>\`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td><td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td><td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td><td class="num">\${fmtC(D.sea[mk]?.unit_revenue)}</td><td class="num">\${fmtC(D.air[mk]?.unit_revenue)}</td></tr>\`).join('')}</tbody></table>
         </div>
       </div>
       <div class="method-footer">
@@ -7979,17 +7979,21 @@ function buildReport(D) {
       \${pageNum(5, 8)}
       <div class="section-header">
         <div>
-          <div class="section-title">Sea Freight Utilisation</div>
-          <div class="section-subtitle">Container throughput and unit cost — \${fmtMonth(sel)}</div>
+          <div class="section-title">Fully Landed with Sea Freight</div>
+          <div class="section-subtitle">Door-to-door cost, container throughput and unit cost — \${fmtMonth(sel)}</div>
         </div>
-        <span class="section-badge" style="background:rgba(14,165,233,0.1);color:#0EA5E9;">Sea</span>
+        <span class="section-badge" style="background:rgba(14,165,233,0.1);color:#0EA5E9;">D2D Sea</span>
       </div>
       <div class="section-body">
+        <div style="margin-bottom:16px;padding:10px 14px;background:rgba(14,165,233,0.06);border:0.5px solid rgba(14,165,233,0.18);border-radius:8px;font-size:10px;color:var(--mid);line-height:1.6;">
+          <strong style="color:#0EA5E9;">Fully landed (door-to-door) — what's included:</strong>
+          inland transport in China · customs clearance at source &amp; destination · last-mile delivery. This is the total cost to land units by sea, not the ocean-freight leg alone.
+        </div>
         <div class="three-col" style="margin-bottom:20px;">
           <div class="kpi-card sea" style="padding:14px 16px;">
             <div class="kpi-label">Total Cost</div>
             <div class="kpi-value" style="font-size:22px;">\${fmt(seaD.revenue)}</div>
-            <div class="kpi-sub">Sea freight invoices</div>
+            <div class="kpi-sub">Fully landed invoices (sea)</div>
           </div>
           <div class="kpi-card sea" style="padding:14px 16px;">
             <div class="kpi-label">Units Shipped</div>
@@ -8046,7 +8050,7 @@ function buildReport(D) {
       </div>
       <div class="method-footer">
         <strong>Methodology:</strong>
-        Cost = fin_invoices subtotal (ex-GST), type=SEA, grouped by week_start month (all statuses including draft).
+        Cost = fully landed (door-to-door) fin_invoices subtotal (ex-GST), type=SEA, grouped by week_start month (all statuses including draft).
         Expense = fin_expenses category='Sea Freight Cost', by month_key.
         Units = completed VAS records for POs on plan weeks with week_start in this month, plus any consolidated non-VAS units declared on lanes (is_non_vas=true) for the same weeks.
         Cost/Unit = Invoice total ÷ total units. Container counts from flow_week data for weeks in selected month (Air containers excluded).
@@ -8060,17 +8064,21 @@ function buildReport(D) {
       \${pageNum(6, 8)}
       <div class="section-header">
         <div>
-          <div class="section-title">Air Freight Utilisation</div>
-          <div class="section-subtitle">Airfreight throughput and unit cost — \${fmtMonth(sel)}</div>
+          <div class="section-title">Fully Landed with Air Freight</div>
+          <div class="section-subtitle">Door-to-door cost, airfreight throughput and unit cost — \${fmtMonth(sel)}</div>
         </div>
-        <span class="section-badge" style="background:rgba(245,158,11,0.1);color:#F59E0B;">Air</span>
+        <span class="section-badge" style="background:rgba(245,158,11,0.1);color:#F59E0B;">D2D Air</span>
       </div>
       <div class="section-body">
+        <div style="margin-bottom:16px;padding:10px 14px;background:rgba(245,158,11,0.06);border:0.5px solid rgba(245,158,11,0.18);border-radius:8px;font-size:10px;color:var(--mid);line-height:1.6;">
+          <strong style="color:#F59E0B;">Fully landed (door-to-door) — what's included:</strong>
+          inland transport in China · customs clearance at source &amp; destination · last-mile delivery · special handling (netting &amp; palletisation). This is the total cost to land units by air, not the air-freight leg alone.
+        </div>
         <div class="three-col" style="margin-bottom:20px;">
           <div class="kpi-card air" style="padding:14px 16px;">
             <div class="kpi-label">Total Cost</div>
             <div class="kpi-value" style="font-size:22px;">\${fmt(airD.revenue)}</div>
-            <div class="kpi-sub">Air freight invoices</div>
+            <div class="kpi-sub">Fully landed invoices (air)</div>
           </div>
           <div class="kpi-card air" style="padding:14px 16px;">
             <div class="kpi-label">Units Shipped</div>
@@ -8112,7 +8120,7 @@ function buildReport(D) {
       </div>
       <div class="method-footer">
         <strong>Methodology:</strong>
-        Cost = fin_invoices subtotal (ex-GST), type=AIR, grouped by week_start month (all statuses including draft).
+        Cost = fully landed (door-to-door) fin_invoices subtotal (ex-GST), type=AIR, grouped by week_start month (all statuses including draft).
         Expense = fin_expenses category='Air Freight Cost', by month_key.
         Units = completed VAS records for POs on plan weeks with week_start in this month, plus any consolidated non-VAS units declared on lanes (is_non_vas=true) for the same weeks.
         Cost/Unit = Invoice total ÷ total units.
