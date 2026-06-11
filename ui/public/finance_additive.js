@@ -677,13 +677,13 @@ async function renderPLTab(){
           <!-- ── Unit Economics: 4-channel cards in one row ── -->
           <div style="background:#fff;border-radius:14px;padding:18px 20px;margin-bottom:18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.02em;">Unit Economics</div>
+              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.02em;">Unit Economics <span style="font-size:9px;font-weight:500;color:#AEAEB2;">· D2D = fully landed (door-to-door): inland China, customs both ends, last-mile (air also incl. netting/palletisation)</span></div>
               <div style="font-size:10px;color:#8e8e93;">Revenue · Cost · Margin per unit processed</div>
             </div>
             <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;" id="fin-ue-strip">
               ${apoUnitCard('VAS', ytd.vas_rev_pu, ytd.vas_cost_pu, ytd.rev_vas, ytd.exp_labour, ytd.units_vas)}
-              ${apoUnitCard('Sea', ytd.sea_rev_pu, ytd.sea_cost_pu, ytd.rev_sea, ytd.exp_freight_sea||0, ytd.units_sea)}
-              ${apoUnitCard('Air', ytd.air_rev_pu, ytd.air_cost_pu, ytd.rev_air, ytd.exp_freight_air||0, ytd.units_air)}
+              ${apoUnitCard('D2D Sea', ytd.sea_rev_pu, ytd.sea_cost_pu, ytd.rev_sea, ytd.exp_freight_sea||0, ytd.units_sea)}
+              ${apoUnitCard('D2D Air', ytd.air_rev_pu, ytd.air_cost_pu, ytd.rev_air, ytd.exp_freight_air||0, ytd.units_air)}
               ${apoUnitCard('Blended', ytd.blended_rev_pu, ytd.blended_cost_pu, ytd.revenue, ytd.expenses, ytd.units_vas)}
             </div>
           </div>
@@ -920,7 +920,7 @@ async function renderPLTab(){
             <div>
               <div class="fin-label">Expenses <button onclick="window._finAddExpense('${mk}')" style="background:none;border:none;color:${BRAND};cursor:pointer;font-size:10px;font-weight:600;margin-left:6px;">+ Add</button></div>
               ${exps.length?exps.map(e=>`<div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;padding:5px 0;border-bottom:0.5px solid rgba(0,0,0,0.05);">
-                <div><span style="color:${DARK};">${esc(e.description)}</span><span style="color:${LIGHT};margin-left:5px;font-size:9px;">${esc(e.category)}</span>${e.is_recurring?`<span style="color:${BLUE};font-size:9px;margin-left:3px;">↻</span>`:''}</div>
+                <div><span style="color:${DARK};">${esc(e.description)}</span><span style="color:${LIGHT};margin-left:5px;font-size:9px;">${esc(catLabel(e.category))}</span>${e.is_recurring?`<span style="color:${BLUE};font-size:9px;margin-left:3px;">↻</span>`:''}</div>
                 <div style="display:flex;align-items:center;gap:8px;">
                   <span style="font-weight:600;color:${AMBER};">${fmtUSD(e.amount)}</span>
                   <button onclick="window._finEditExpense('${e.id}')" style="background:none;border:none;color:${LIGHT};cursor:pointer;font-size:11px;">✎</button>
@@ -932,8 +932,8 @@ async function renderPLTab(){
               <div class="fin-label">Unit Economics</div>
               ${[
                 ['⚙️ VAS', m?.vas_rev_pu, m?.vas_cost_pu, m?.units_vas, m?.rev_vas, m?.exp_labour],
-                ['🚢 Sea', m?.sea_rev_pu, m?.sea_cost_pu, m?.units_sea, m?.rev_sea, m?.exp_freight_sea],
-                ['✈️ Air', m?.air_rev_pu, m?.air_cost_pu, m?.units_air, m?.rev_air, m?.exp_freight_air],
+                ['🚢 D2D Sea', m?.sea_rev_pu, m?.sea_cost_pu, m?.units_sea, m?.rev_sea, m?.exp_freight_sea],
+                ['✈️ D2D Air', m?.air_rev_pu, m?.air_cost_pu, m?.units_air, m?.rev_air, m?.exp_freight_air],
               ].map(([label,rev,cost,units,totRev,totCost])=>`<div style="padding:6px 0;border-bottom:0.5px solid rgba(0,0,0,0.05);">
                 <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:2px;">
                   <span style="color:${MID};font-weight:500;">${label} <span style="font-size:9px;font-weight:400;">(${(units||0).toLocaleString()}u)</span></span>
@@ -1247,7 +1247,7 @@ async function renderExpensesTab(){
     <div style="display:flex;gap:8px;align-items:center;">
       <select id="exp-filter-cat" class="fin-input" style="width:200px;" onchange="window._finExpFilter()">
         <option value="">All categories</option>
-        ${Object.entries(EXPENSE_CAT_GROUPS).map(([g,cats])=>`<optgroup label="${g}">${cats.map(c=>`<option value="${c}">${c}</option>`).join('')}</optgroup>`).join('')}
+        ${Object.entries(EXPENSE_CAT_GROUPS).map(([g,cats])=>`<optgroup label="${g}">${cats.map(c=>`<option value="${c}">${esc(catLabel(c))}</option>`).join('')}</optgroup>`).join('')}
       </select>
       <select id="exp-filter-period" class="fin-input" style="width:160px;" onchange="window._finExpFilter()">
         <option value="">All periods</option>
@@ -1338,7 +1338,7 @@ function renderExpTable(exps){
           </tr></thead>
           <tbody>${rows.map(e=>`<tr>
             <td style="font-weight:500;">${esc(e.description)}</td>
-            <td><span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:600;background:${catColor(e.category,0.12)};color:${catColor(e.category,1)};">${esc(e.category)}</span></td>
+            <td><span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:600;background:${catColor(e.category,0.12)};color:${catColor(e.category,1)};">${esc(catLabel(e.category))}</span></td>
             <td style="color:${MID};font-size:11px;">${fmtDate(e.expense_date)}</td>
             <td style="text-align:right;font-weight:600;color:${AMBER};">${fmtUSD(e.amount)}</td>
             <td>${e.is_recurring?`<span style="color:${BLUE};font-size:10px;font-weight:600;">↻ ${e.recur_freq||'monthly'}</span>`:'—'}</td>
@@ -1353,6 +1353,12 @@ function renderExpTable(exps){
   }).join('');
 }
 
+// Display-only label map. Data/category keys are unchanged; this only affects what users see.
+function catLabel(cat){
+  if(cat==='Sea Freight Cost')return 'Fully Landed with Sea Freight';
+  if(cat==='Air Freight Cost')return 'Fully Landed with Air Freight';
+  return cat;
+}
 function catColor(cat,alpha){
   if(cat==='VAS Cost')return alpha<1?`rgba(124,58,237,${alpha})`:'#7c3aed';
   if(cat==='Sea Freight Cost')return alpha<1?`rgba(59,130,246,${alpha})`:'#3b82f6';
@@ -1367,7 +1373,7 @@ function renderExpList(exps){
   if(!exps.length){c.innerHTML=`<div style="font-size:11px;color:${LIGHT};padding:12px 0;">No expenses yet.</div>`;return;}
   c.innerHTML=`<table class="fin-tbl"><thead><tr><th>Description</th><th>Category</th><th>Date</th><th>Amount</th><th>Recurring</th><th></th></tr></thead>
   <tbody>${exps.map(e=>`<tr>
-    <td style="font-weight:500;">${esc(e.description)}</td><td style="color:${MID};">${esc(e.category)}</td>
+    <td style="font-weight:500;">${esc(e.description)}</td><td style="color:${MID};">${esc(catLabel(e.category))}</td>
     <td style="color:${MID};font-size:11px;">${fmtDate(e.expense_date)}</td>
     <td style="font-weight:600;color:${AMBER};">${fmtUSD(e.amount)}</td>
     <td>${e.is_recurring?`<span style="color:${BLUE};font-size:10px;font-weight:600;">↻ ${e.recur_freq||'monthly'}</span>`:'—'}</td>
@@ -1390,7 +1396,7 @@ function renderExpEditor(exp){
       <div style="font-size:15px;font-weight:700;color:${DARK};">${isNew?'New Expense':'Edit Expense'}</div>
       <button onclick="window._finClosePanel()" style="width:28px;height:28px;border-radius:8px;border:none;background:${BG};color:${MID};font-size:14px;cursor:pointer;">✕</button>
     </div>
-    <div style="margin-bottom:12px;"><span class="fin-label">Category</span><select id="exp-cat" class="fin-input">${Object.entries(EXPENSE_CAT_GROUPS).map(([g,cats])=>`<optgroup label="${g}">${cats.map(c=>`<option value="${c}" ${c===exp.category?'selected':''}>${c}</option>`).join('')}</optgroup>`).join('')}</select></div>
+    <div style="margin-bottom:12px;"><span class="fin-label">Category</span><select id="exp-cat" class="fin-input">${Object.entries(EXPENSE_CAT_GROUPS).map(([g,cats])=>`<optgroup label="${g}">${cats.map(c=>`<option value="${c}" ${c===exp.category?'selected':''}>${esc(catLabel(c))}</option>`).join('')}</optgroup>`).join('')}</select></div>
     <div style="margin-bottom:12px;"><span class="fin-label">Description</span><input id="exp-desc" class="fin-input" value="${esc(exp.description)}" placeholder="e.g. COSCO sea freight"/></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
       <div><span class="fin-label">Amount</span><input id="exp-amount" type="number" step="0.01" class="fin-input" value="${exp.amount||0}"/></div>
