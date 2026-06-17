@@ -22,6 +22,8 @@ services:
         value: /opt/render/project/src/data/uid_ops.sqlite
       - key: TZ
         value: America/Chicago
+      - key: CLAUDE_MODEL
+        value: claude-sonnet-4-6
     healthCheckPath: /health
     disk:
       name: uid-ops-data
