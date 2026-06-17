@@ -32,6 +32,8 @@ const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*'; // set to your fronten
 const DB_DIR = process.env.DB_DIR || path.join(__dirname, 'data');
 fs.mkdirSync(DB_DIR, { recursive: true });
 const DB_FILE = process.env.DB_FILE || path.join(DB_DIR, 'uid_ops.sqlite');
+// Claude model — overridable via Render env (CLAUDE_MODEL); fallback kept current in code.
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-6';
 
 // ---- App ----
 const app = express();
@@ -983,7 +985,7 @@ app.post('/pulse/chat',
 
     const anthropic = getAnthropic();
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: CLAUDE_MODEL,
       max_tokens: 800,
       system: [
         // Static ops data — cached for the session (content identical across turns)
@@ -1096,7 +1098,7 @@ app.post('/ai/pulse',
 
     const anthropic = getAnthropic();
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: CLAUDE_MODEL,
       max_tokens: 1200,
       messages: [
         {
@@ -3405,7 +3407,7 @@ Write only the bullet points, nothing else.`;
     const timeout = setTimeout(() => controller.abort(), EMAIL_PULSE_TIMEOUT_MS);
     const client = getAnthropic();
     const resp = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: CLAUDE_MODEL,
       max_tokens: 400,
       messages: [{ role: 'user', content: prompt }],
     }, { signal: controller.signal });
@@ -6582,7 +6584,7 @@ app.post('/finance/insights', authenticateRequest, requireRole(['admin']), aiLim
     if (!pl_data) return res.status(400).json({ error: 'pl_data required' });
     const anthropic = getAnthropic();
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: CLAUDE_MODEL,
       max_tokens: 1200,
       system: 'You are a financial analyst for VelOzity, a 3PL/VAS company. Revenue channels: VAS (warehouse labelling/processing, billed per unit, Labour=direct VAS cost), Sea Freight, Air Freight, Overhead (Software/Office/Storage/Marketing/Other). Analyse P&L and return exactly 5 specific actionable insights. Use real numbers. Return ONLY a valid JSON array, no markdown. Each object: title (3-5 words), insight (1-2 sentences with numbers), action (one concrete next step), impact (High/Medium/Low), channel (VAS/Sea/Air/Overall).',
       messages: [{ role: 'user', content: 'Analyse this P&L and return 5 insights as JSON array:\n' + JSON.stringify(pl_data) }]
@@ -6784,7 +6786,7 @@ async function pulseReplyToThread(threadId, contextSnippet, question) {
       : `A new collaboration thread has just been started. Provide a brief, specific summary of the relevant operational data you can see above, and highlight anything noteworthy.`;
 
     const resp = await getAnthropic().messages.create({
-      model:      'claude-sonnet-4-20250514',
+      model:      CLAUDE_MODEL,
       max_tokens: 600,
       system:     opsLines.join('\n'),
       messages:   [{ role: 'user', content: userMsg }],
@@ -9258,7 +9260,7 @@ app.post('/report/cost-utilisation/insights', (req, res) => {
     const userMsg = 'Data: ' + dataStr + '\n\nReturn ONLY a JSON array with exactly 3 objects, no markdown:\n[{"title":"short headline","finding":"1-2 sentences with numbers","action":"concrete next step","impact":"High|Medium|Low"}]';
 
     const resp = await getAnthropic().messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: CLAUDE_MODEL,
       max_tokens: 800,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMsg }],
