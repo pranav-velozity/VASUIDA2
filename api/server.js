@@ -4920,12 +4920,12 @@ app.get('/report/stock-status',
         }
       }
 
-      // Status cascade: Delivered (to client FC) > Not-Received (planned 0) > On-site (not departed) > In Transit
+      // Status cascade: Delivered (to client FC) > In Transit (departed origin) > On-site (received, not departed) > Not-Received
       let status;
-      if (delivDate)                       status = 'Delivered';
-      else if (!(Number(item.planned) > 0)) status = 'Not-Received';
-      else if (!departedDate)              status = 'On-site';
-      else                                 status = 'In Transit';
+      if (delivDate)               status = 'Delivered';
+      else if (departedDate)       status = 'In Transit';
+      else if (actualReceived > 0) status = 'On-site';
+      else                         status = 'Not-Received';
 
       rows.push({
         week_start:       item.week_start,
