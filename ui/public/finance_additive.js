@@ -1253,6 +1253,7 @@ async function renderExpensesTab(){
         <option value="">All periods</option>
         ${(()=>{const opts=[];const now=new Date();for(let i=0;i<12;i++){const d=new Date(now.getUTCFullYear(),now.getUTCMonth()-i,1);const mk=d.toISOString().slice(0,7);const label=d.toLocaleDateString('en-AU',{month:'short',year:'numeric'});opts.push(`<option value="${mk}">${label}</option>`);}return opts.join('');})()}
       </select>
+      <button class="fin-btn fin-btn-ghost" onclick="window._finOpenDefaults()">⚙ Defaults</button>
       <button class="fin-btn fin-btn-primary" onclick="window._finAddExpense()">+ Add Expense</button>
     </div>
   </div>
@@ -1436,6 +1437,77 @@ window._finDeleteExpense=async function(id){
   if(!confirm('Delete this expense and any recurring copies?'))return;
   try{await api(`/finance/expenses/${id}`,{method:'DELETE'});window._finClosePanel();if(_finState.tab==='expenses')renderExpensesTab();if(_finState.tab==='pl')renderPLTab();renderKPIs();}
   catch(e){alert('Delete failed: '+e.message);}
+};
+
+// ── Invoice Defaults (password-gated editor under Expenses) ──
+window._finOpenDefaults=async function(){
+  const pw=prompt('Enter the Defaults password to edit invoice defaults:');
+  if(pw===null)return; // cancelled
+  let token;
+  try{
+    const r=await api('/finance/defaults/auth',{method:'POST',body:JSON.stringify({password:pw})});
+    token=r.token;
+  }catch(e){ alert('Incorrect password.'); return; }
+  let cfg;
+  try{ cfg=await api('/finance/defaults'); }
+  catch(e){ openPanel(`<div style="padding:20px;color:${BRAND};">Error loading defaults: ${esc(e.message)}</div>`); return; }
+  renderDefaultsEditor(cfg,token);
+};
+
+function renderDefaultsEditor(cfg,token){
+  const v=cfg.vas||{},s=cfg.sea||{},a=cfg.air||{};
+  const f=(label,path,val,step='0.01')=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;">
+    <span style="font-size:12px;color:${DARK};">${label}</span>
+    <input class="fin-input" style="width:120px;text-align:right;flex:none;" type="number" step="${step}" data-def="${path}" value="${val}"/>
+  </div>`;
+  const hdr=(t)=>`<div style="font-size:10px;font-weight:700;color:${LIGHT};text-transform:uppercase;letter-spacing:0.06em;margin:14px 0 8px;">${t}</div>`;
+  openPanel(`
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+      <div style="font-size:15px;font-weight:700;color:${DARK};">Invoice Defaults</div>
+      <button onclick="window._finClosePanel()" style="width:28px;height:28px;border-radius:8px;border:none;background:${BG};color:${MID};font-size:14px;cursor:pointer;">✕</button>
+    </div>
+    <div style="font-size:11px;color:${MID};margin-bottom:8px;">Values that prefill new invoices. Saved immediately and applied to the next invoice you create. All amounts USD.</div>
+    ${hdr('VAS — Rates')}
+    ${f('Base Processing / unit','vas.base_processing',v.base_processing)}
+    ${f('Outbound Activities / unit','vas.outbound',v.outbound)}
+    ${f('Additional Labelling / unit','vas.labelling',v.labelling)}
+    ${f('Polybagging / unit','vas.polybagging',v.polybagging)}
+    ${f('Storage post-processing / unit/day','vas.storage',v.storage)}
+    ${f('Carton Replacement / carton','vas.carton_replacement',v.carton_replacement)}
+    ${hdr('VAS — Multipliers')}
+    ${f('Labelling multiplier (× units)','vas.labelling_multiplier',v.labelling_multiplier,'1')}
+    ${f('Carton Replacement multiplier (× carton delta)','vas.carton_multiplier',v.carton_multiplier,'1')}
+    ${hdr('Sea')}
+    ${f('Freight rate / container (default)','sea.freight_rate',s.freight_rate,'1')}
+    ${f('Freight rate / 20ft container','sea.freight_rate_20ft',s.freight_rate_20ft,'1')}
+    ${f('Customs clearance / container','sea.customs_clearance',s.customs_clearance,'1')}
+    ${f('Safety net / container','sea.safety_net',s.safety_net,'1')}
+    ${hdr('Air')}
+    ${f('Customs processing (flat fee)','air.customs_processing',a.customs_processing,'1')}
+    ${hdr('Shared')}
+    ${f('GST %','gst_pct',cfg.gst_pct,'0.1')}
+    <div style="display:flex;gap:8px;margin-top:20px;">
+      <button class="fin-btn fin-btn-primary" style="flex:1;" onclick="window._finSaveDefaults('${token}')">Save defaults</button>
+      <button class="fin-btn fin-btn-ghost" onclick="window._finClosePanel()">Cancel</button>
+    </div>
+    <div style="font-size:10px;color:${LIGHT};margin-top:10px;">Note: the 20ft rate is stored for reference — sea freight defaults to the universal rate and you apply 20ft manually on the line.</div>
+  `);
+}
+
+window._finSaveDefaults=async function(token){
+  const config={vas:{},sea:{},air:{}};
+  document.querySelectorAll('[data-def]').forEach(inp=>{
+    const path=inp.getAttribute('data-def');
+    const val=parseFloat(inp.value);
+    const num=isNaN(val)?0:val;
+    if(path.indexOf('.')>-1){const parts=path.split('.');config[parts[0]][parts[1]]=num;}
+    else config[path]=num;
+  });
+  try{
+    await api('/finance/defaults',{method:'PUT',body:JSON.stringify({token,config})});
+    window._finClosePanel();
+    alert('Defaults saved. They apply to the next invoice you create.');
+  }catch(e){ alert('Save failed: '+(e.message||e)); }
 };
 
 window.showFinancePage=async function(){
