@@ -439,6 +439,13 @@ CREATE TABLE IF NOT EXISTS fin_fx_rates (
   fetched_at  TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(from_curr, to_curr)
 );
+
+CREATE TABLE IF NOT EXISTS fin_defaults (
+  id          TEXT PRIMARY KEY,
+  config      TEXT NOT NULL,
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_by  TEXT
+);
 `);
 
 
@@ -5767,6 +5774,46 @@ app.get('/admin/audit-logs',
 
 const { v4: uuidv4 } = require('uuid');
 
+// ── Finance invoice defaults (editable via /finance/defaults; seeded here as the in-code fallback) ──
+const FINANCE_DEFAULTS_SEED = {
+  gst_pct: 10,
+  vas: {
+    base_processing: 0.21,
+    outbound: 0.05,
+    labelling: 0.01,
+    polybagging: 0.05,
+    storage: 0.01,
+    carton_replacement: 1.10,
+    labelling_multiplier: 3,
+    carton_multiplier: 2,
+  },
+  sea: {
+    freight_rate: 5833,       // universal per-container default
+    freight_rate_20ft: 3896,  // stored; applied manually on 20ft containers
+    customs_clearance: 177,
+    safety_net: 25,
+  },
+  air: {
+    customs_processing: 177,
+  },
+};
+// Returns the effective config: stored values merged over the seed (so new keys added in code still appear).
+function getFinanceDefaults() {
+  try {
+    const row = db.prepare("SELECT config FROM fin_defaults WHERE id = 'finance'").get();
+    if (row && row.config) {
+      const s = JSON.parse(row.config) || {};
+      return {
+        gst_pct: Number(s.gst_pct ?? FINANCE_DEFAULTS_SEED.gst_pct),
+        vas: { ...FINANCE_DEFAULTS_SEED.vas, ...(s.vas || {}) },
+        sea: { ...FINANCE_DEFAULTS_SEED.sea, ...(s.sea || {}) },
+        air: { ...FINANCE_DEFAULTS_SEED.air, ...(s.air || {}) },
+      };
+    }
+  } catch (e) { console.error('getFinanceDefaults failed:', e.message || e); }
+  return FINANCE_DEFAULTS_SEED;
+}
+
 // ── Helper: generate invoice reference number ──
 function genInvoiceRef(type, weekStart, existingCount) {
   const d = new Date(weekStart + 'T00:00:00Z');
@@ -5850,7 +5897,7 @@ app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), (req,
     // Calculate totals — exclude gst_free lines from taxable subtotal
     const taxableLines = lines.filter(l => !l.gst_free);
     const subtotal = taxableLines.reduce((s, l) => s + (parseFloat(l.total)||0), 0);
-    const gst = Math.round(subtotal * 0.10 * 100) / 100;
+    const gst = Math.round(subtotal * (getFinanceDefaults().gst_pct/100) * 100) / 100;
     const customsAmt = parseFloat(customs) || 0;
     const miscAmt = parseFloat(misc_total) || 0;
     // misc lines are already included in subtotal (taxableLines includes is_misc lines)
@@ -5888,7 +5935,7 @@ app.patch('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), 
           VALUES (?,?,?,?,?,?,?,?,?,?)`).run(uuidv4(), inv.id, i, l.description||'', l.unit_label||'', parseFloat(l.rate)||0, parseFloat(l.quantity)||0, parseFloat(l.total)||0, l.gst_free?1:0, l.is_misc?1:0);
       });
       const subtotal = lines.filter(l=>!l.gst_free).reduce((s, l) => s + (parseFloat(l.total)||0), 0);
-      const gst = Math.round(subtotal * 0.10 * 100) / 100;
+      const gst = Math.round(subtotal * (getFinanceDefaults().gst_pct/100) * 100) / 100;
       const customsAmt = customs !== undefined ? parseFloat(customs)||0 : inv.customs;
       const miscAmt = misc_total !== undefined ? parseFloat(misc_total)||0 : inv.misc_total;
       // misc lines already in subtotal — don't add miscAmt to total again
@@ -5937,21 +5984,24 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
       const recvRows = db.prepare(`SELECT SUM(cartons_received) as total FROM receiving WHERE week_start = ?`).get(week_start);
       const cartonsIn = recvRows?.total || 0;
       const cartonDelta = Math.max(0, cartonsOut - cartonsIn);
-      // Standard VAS rates
+      // Standard VAS rates (editable via /finance/defaults)
+      const D = getFinanceDefaults();
+      const v = D.vas;
+      const r2 = (x) => Math.round(x * 100) / 100;
       const lines = [
-        { sort_order:0, description:'VAS Base Processing',         unit_label:'Per Unit',        rate:0.21, quantity:units,              total:Math.round(0.21*units*100)/100,              gst_free:0, is_misc:0 },
-        { sort_order:1, description:'Outbound Activities',         unit_label:'Per Unit',        rate:0.05, quantity:units,              total:Math.round(0.05*units*100)/100,              gst_free:0, is_misc:0 },
-        { sort_order:2, description:'Additional Labelling',        unit_label:'Per Unit',        rate:0.01, quantity:units*3,            total:Math.round(0.01*units*3*100)/100,            gst_free:0, is_misc:0 },
-        { sort_order:3, description:'Polybagging',                 unit_label:'Per Unit',        rate:0.05, quantity:0,                 total:0,                                           gst_free:0, is_misc:0 },
-        { sort_order:4, description:'Storage post-processing',     unit_label:'Per Unit Per Day', rate:0.01, quantity:0,                 total:0,                                           gst_free:0, is_misc:0 },
-        { sort_order:5, description:'Carton Replacement - labour only', unit_label:'Per Carton', rate:1.10, quantity:cartonDelta*2,      total:Math.round(1.10*cartonDelta*2*100)/100,      gst_free:0, is_misc:0 },
+        { sort_order:0, description:'VAS Base Processing',         unit_label:'Per Unit',        rate:v.base_processing,    quantity:units,                           total:r2(v.base_processing*units),                             gst_free:0, is_misc:0 },
+        { sort_order:1, description:'Outbound Activities',         unit_label:'Per Unit',        rate:v.outbound,           quantity:units,                           total:r2(v.outbound*units),                                    gst_free:0, is_misc:0 },
+        { sort_order:2, description:'Additional Labelling',        unit_label:'Per Unit',        rate:v.labelling,          quantity:units*v.labelling_multiplier,    total:r2(v.labelling*units*v.labelling_multiplier),            gst_free:0, is_misc:0 },
+        { sort_order:3, description:'Polybagging',                 unit_label:'Per Unit',        rate:v.polybagging,        quantity:0,                               total:0,                                                       gst_free:0, is_misc:0 },
+        { sort_order:4, description:'Storage post-processing',     unit_label:'Per Unit Per Day', rate:v.storage,           quantity:0,                               total:0,                                                       gst_free:0, is_misc:0 },
+        { sort_order:5, description:'Carton Replacement - labour only', unit_label:'Per Carton', rate:v.carton_replacement, quantity:cartonDelta*v.carton_multiplier, total:r2(v.carton_replacement*cartonDelta*v.carton_multiplier), gst_free:0, is_misc:0 },
         { sort_order:6, description:'',                            unit_label:'',                rate:0,    quantity:0,                 total:0,                                           gst_free:0, is_misc:1 },
         { sort_order:7, description:'',                            unit_label:'',                rate:0,    quantity:0,                 total:0,                                           gst_free:0, is_misc:1 },
       ];
       const subtotal = lines.slice(0,6).reduce((s,l)=>s+l.total,0);
-      const gst = Math.round(subtotal*0.10*100)/100;
+      const gst = r2(subtotal * (D.gst_pct/100));
       const customs = 0; // VAS has no customs
-      const total = Math.round((subtotal+gst+customs)*100)/100;
+      const total = r2(subtotal+gst+customs);
       return res.json({ type:'VAS', week_start, units, cartonsIn, cartonsOut, cartonDelta, lines, subtotal, gst, customs, total });
     }
 
@@ -5990,7 +6040,10 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
         } catch {}
       }
       if (type === 'SEA') {
-        const lines = containers.map((c, i) => ({
+        const D = getFinanceDefaults();
+        const r2 = (x) => Math.round(x * 100) / 100;
+        const seaRate = D.sea.freight_rate; // universal default; 20ft rate applied manually on the line
+        const freightLines = containers.map((c, i) => ({
           sort_order: i,
           description: `Container ${c.container_id||'—'}`,
           unit_label: c.size_ft ? `${c.size_ft}' HC` : '40\' HC',
@@ -5998,31 +6051,49 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
           container_type: c.size_ft ? `${c.size_ft}' HC` : '40\' HC',
           vessel: c.vessel || '',
           zendesks: c.lane_keys ? c.lane_keys.map(k=>k.split('||')[1]).filter(Boolean) : [],
-          rate: 0, // User enters rate per container
+          rate: seaRate,
           quantity: 1,
-          total: 0,
+          total: r2(seaRate),
           gst_free: 0,
           is_misc: 0
         }));
-        // Add customs lines
+        // Safety net — one consolidated taxable line: rate/container × container count (counts toward pre-GST subtotal)
+        const containerCount = containers.length;
+        const safetyLines = containerCount > 0 ? [{
+          sort_order: freightLines.length,
+          description: 'Safety Net',
+          unit_label: 'Per Container',
+          rate: D.sea.safety_net,
+          quantity: containerCount,
+          total: r2(D.sea.safety_net * containerCount),
+          gst_free: 0,
+          is_misc: 0
+        }] : [];
+        // Customs clearance — GST-free, per container
         const customsLines = containers.map((c, i) => ({
-          sort_order: containers.length + i,
+          sort_order: freightLines.length + safetyLines.length + i,
           description: `Customs Clearance - ${c.container_id||'—'}`,
           unit_label: 'Flat Fee per Container',
           container_id: c.container_id || '',
-          rate: 158,
+          rate: D.sea.customs_clearance,
           quantity: 1,
-          total: 158,
+          total: D.sea.customs_clearance,
           gst_free: 1,
           is_misc: 0
         }));
         // Misc lines
-        lines.push({ sort_order: lines.length + customsLines.length, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
-        lines.push({ sort_order: lines.length + customsLines.length + 1, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
-        const customs = customsLines.reduce((s,l)=>s+l.total, 0);
-        return res.json({ type:'SEA', week_start, containers, lanes, lines: [...lines, ...customsLines], customs, subtotal:0, gst:0, total:customs });
+        const miscLines = [
+          { sort_order: freightLines.length + safetyLines.length + customsLines.length,     description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 },
+          { sort_order: freightLines.length + safetyLines.length + customsLines.length + 1, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 },
+        ];
+        const subtotal = [...freightLines, ...safetyLines].reduce((s,l)=>s+l.total, 0); // taxable
+        const gst = r2(subtotal * (D.gst_pct/100));
+        const customs = customsLines.reduce((s,l)=>s+l.total, 0); // GST-free
+        const total = r2(subtotal + gst + customs);
+        return res.json({ type:'SEA', week_start, containers, lanes, lines: [...freightLines, ...safetyLines, ...customsLines, ...miscLines], customs, subtotal, gst, total });
       }
       if (type === 'AIR') {
+        const D = getFinanceDefaults();
         // Group by zendesk
         const airLanes = lanes.filter(l => l.freight.toLowerCase() === 'air');
         const lines = airLanes.map((l, i) => ({
@@ -6037,15 +6108,83 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
           gst_free: 0,
           is_misc: 0
         }));
-        lines.push({ sort_order: lines.length, description:'Customs Processing', unit_label:'Flat Fee', rate:141, quantity:airLanes.length||1, total:141*(airLanes.length||1), gst_free:1, is_misc:0 });
+        const airCustomsRate = D.air.customs_processing;
+        const airCustomsQty = airLanes.length||1;
+        lines.push({ sort_order: lines.length, description:'Customs Processing', unit_label:'Flat Fee', rate:airCustomsRate, quantity:airCustomsQty, total:airCustomsRate*airCustomsQty, gst_free:1, is_misc:0 });
         lines.push({ sort_order: lines.length+1, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
         lines.push({ sort_order: lines.length+2, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
-        const customs = 141 * (airLanes.length||1);
+        const customs = airCustomsRate * airCustomsQty;
         return res.json({ type:'AIR', week_start, lanes: airLanes, lines, customs, subtotal:0, gst:0, total:customs });
       }
     }
     res.status(400).json({ error: 'Unknown type' });
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── Finance defaults editor (password-gated; mirrors the cost-report auth flow) ──
+const _finDefaultsTokens = new Map();
+const _finDefaultsTokenTTL = 30 * 60 * 1000;
+function _cleanFinDefaultsTokens() {
+  const now = Date.now();
+  for (const [k, v] of _finDefaultsTokens.entries()) {
+    if (now - v > _finDefaultsTokenTTL) _finDefaultsTokens.delete(k);
+  }
+}
+
+// POST /finance/defaults/auth — validate password, return short-lived token
+app.post('/finance/defaults/auth', authenticateRequest, requireRole(['admin']), (req, res) => {
+  const { password } = req.body || {};
+  const expected = process.env.FINANCE_DEFAULTS_PASSWORD || '01130602';
+  if (!password || password !== expected) return res.status(403).json({ error: 'Invalid password' });
+  _cleanFinDefaultsTokens();
+  const token = randomUUID();
+  _finDefaultsTokens.set(token, Date.now());
+  res.json({ token });
+});
+
+// GET /finance/defaults — current effective config (stored over seed)
+app.get('/finance/defaults', authenticateRequest, requireRole(['admin']), (req, res) => {
+  res.json(getFinanceDefaults());
+});
+
+// PUT /finance/defaults — save edited config (admin + valid token)
+app.put('/finance/defaults', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    _cleanFinDefaultsTokens();
+    const token = req.body && req.body.token;
+    if (!token || !_finDefaultsTokens.has(token)) {
+      return res.status(403).json({ error: 'Invalid or expired session — re-enter the password' });
+    }
+    const inc = (req.body && req.body.config) || {};
+    const cur = getFinanceDefaults();
+    const n = (val, def) => { const x = parseFloat(val); return isNaN(x) ? def : x; };
+    const incV = inc.vas || {}, incS = inc.sea || {}, incA = inc.air || {};
+    const merged = {
+      gst_pct: n(inc.gst_pct, cur.gst_pct),
+      vas: {
+        base_processing:      n(incV.base_processing,      cur.vas.base_processing),
+        outbound:             n(incV.outbound,             cur.vas.outbound),
+        labelling:            n(incV.labelling,            cur.vas.labelling),
+        polybagging:          n(incV.polybagging,          cur.vas.polybagging),
+        storage:              n(incV.storage,              cur.vas.storage),
+        carton_replacement:   n(incV.carton_replacement,   cur.vas.carton_replacement),
+        labelling_multiplier: n(incV.labelling_multiplier, cur.vas.labelling_multiplier),
+        carton_multiplier:    n(incV.carton_multiplier,    cur.vas.carton_multiplier),
+      },
+      sea: {
+        freight_rate:      n(incS.freight_rate,      cur.sea.freight_rate),
+        freight_rate_20ft: n(incS.freight_rate_20ft, cur.sea.freight_rate_20ft),
+        customs_clearance: n(incS.customs_clearance, cur.sea.customs_clearance),
+        safety_net:        n(incS.safety_net,        cur.sea.safety_net),
+      },
+      air: {
+        customs_processing: n(incA.customs_processing, cur.air.customs_processing),
+      },
+    };
+    db.prepare(`INSERT INTO fin_defaults (id, config, updated_at) VALUES ('finance', ?, datetime('now'))
+      ON CONFLICT(id) DO UPDATE SET config=excluded.config, updated_at=datetime('now')`).run(JSON.stringify(merged));
+    res.json(merged);
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
 // ── GET /finance/invoice/:id/pdf — generate PDF (pure Node, no Python) ──
