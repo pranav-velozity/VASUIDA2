@@ -8125,10 +8125,12 @@ function renderReportsPage(container){
 // ── Stock Status Report ──────────────────────────────────────────────────────
 (function(){
   const STATUS_COLOR = {
-    'Delivered':   { bg:'rgba(52,199,89,0.12)',  color:'#166534' },
-    'In Transit':  { bg:'rgba(59,130,246,0.12)', color:'#1d4ed8' },
-    'In Stock':    { bg:'rgba(245,158,11,0.12)', color:'#b45309' },
-    'Not Started': { bg:'rgba(174,174,178,0.12)',color:'#6E6E73' },
+    'Delivered':    { bg:'rgba(52,199,89,0.12)',  color:'#166534' },
+    'In Transit':   { bg:'rgba(59,130,246,0.12)', color:'#1d4ed8' },
+    'On-site':      { bg:'rgba(20,184,166,0.12)', color:'#0f766e' },
+    'Not-Received': { bg:'rgba(255,59,48,0.12)',  color:'#b91c1c' },
+    'In Stock':     { bg:'rgba(245,158,11,0.12)', color:'#b45309' },
+    'Not Started':  { bg:'rgba(174,174,178,0.12)',color:'#6E6E73' },
   };
 
   function fmtD(s){ if(!s)return '—'; try{ return new Date(s.slice(0,10)+'T12:00:00Z').toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'2-digit'}); }catch{ return s; } }
