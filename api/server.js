@@ -4907,11 +4907,25 @@ app.get('/report/stock-status',
       const zd    = item.zendesk;
       const lane  = zd ? mergedLanes[zd] : null;
       const delivDate = zd ? deliveredByZendesk.get(zd) : null;
+      const departedDate = lane?.departed_at || null;
 
-      let status = 'Not Started';
-      if (delivDate)                                  status = 'Delivered';
-      else if (lane?.departed_at)                     status = 'In Transit';
-      else if (actualReceived > 0)                    status = 'In Stock';
+      // ETA FC: actual value wins; else baseline = departed + 15d (Sea) / 5d (Air); else none.
+      let etaFc = lane?.eta_fc || null;
+      if (!etaFc && departedDate) {
+        const addDays = (String(item.freight).trim().toLowerCase() === 'air') ? 5 : 15;
+        const base = new Date(String(departedDate).slice(0, 10) + 'T00:00:00Z');
+        if (!isNaN(base.getTime())) {
+          base.setUTCDate(base.getUTCDate() + addDays);
+          etaFc = base.toISOString().slice(0, 10);
+        }
+      }
+
+      // Status cascade: Delivered (to client FC) > Not-Received (planned 0) > On-site (not departed) > In Transit
+      let status;
+      if (delivDate)                       status = 'Delivered';
+      else if (!(Number(item.planned) > 0)) status = 'Not-Received';
+      else if (!departedDate)              status = 'On-site';
+      else                                 status = 'In Transit';
 
       rows.push({
         week_start:       item.week_start,
@@ -4926,8 +4940,8 @@ app.get('/report/stock-status',
         applied:          applied,
         actual_received:  actualReceived,
         received_date:    recvDate,
-        departed_date:    lane?.departed_at || null,
-        eta_fc:           lane?.eta_fc || null,
+        departed_date:    departedDate,
+        eta_fc:           etaFc,
         delivered_date:   delivDate || null,
         status,
       });
