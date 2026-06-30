@@ -406,7 +406,7 @@ window._finCreateInvoice=async function(type,weekStart){
   openPanel(`<div style="padding:20px;color:${LIGHT};font-size:12px;">Loading ${type} data…</div>`);
   try{
     const pf=await api(`/finance/prefill/${type}/${ws}`);
-    renderInvoiceEditor({id:null,type,week_start:ws,invoice_date:isoToday(),due_date:addDays(isoToday(),type==='VAS'?30:7),status:'draft',notes:'',subtotal:pf.subtotal||0,gst:pf.gst||0,customs:pf.customs||0,misc_total:0,total:pf.total||0,lines:pf.lines||[]});
+    renderInvoiceEditor({id:null,type,week_start:ws,invoice_date:isoToday(),due_date:addDays(isoToday(),type==='VAS'?30:7),status:'draft',notes:pf.notes||'',subtotal:pf.subtotal||0,gst:pf.gst||0,customs:pf.customs||0,misc_total:0,total:pf.total||0,lines:pf.lines||[]});
   }catch(e){openPanel(`<div style="padding:20px;color:${BRAND};">Error: ${esc(e.message)}</div>`);}
 };
 
@@ -444,7 +444,7 @@ function renderInvoiceEditor(inv){
 
   openPanel(`
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-      <div><div style="font-size:15px;font-weight:700;color:${DARK};">${typeIcon(type)} ${type} Invoice</div><div style="font-size:11px;color:${LIGHT};">${weekLabel(inv.week_start)}</div></div>
+      <div><div style="font-size:15px;font-weight:700;color:${DARK};">${typeIcon(type)} ${type==='AIR'?'Door-to-Door with Air Freight':type==='SEA'?'Door-to-Door with Sea Freight':'VAS Invoice'}</div><div style="font-size:11px;color:${LIGHT};">${weekLabel(inv.week_start)}</div></div>
       <button onclick="window._finClosePanel()" style="width:28px;height:28px;border-radius:8px;border:none;background:${BG};color:${MID};font-size:14px;cursor:pointer;">✕</button>
     </div>
     <div style="display:grid;grid-template-columns:1fr auto;gap:10px;margin-bottom:14px;">
