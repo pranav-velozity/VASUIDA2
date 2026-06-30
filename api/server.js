@@ -6109,9 +6109,19 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
         // One Air Freight line per zendesk
         const _seenAir = new Set();
         airLanes = airLanes.filter(l => { const z = l.zendesk || l.key; if (_seenAir.has(z)) return false; _seenAir.add(z); return true; });
+        // PO ↔ ticket map from the week's plan, for the notes block
+        const _planRows = _getPlanRowsForWeek(week_start);
+        const posByZendesk = new Map();
+        for (const p of _planRows) {
+          const z = String(p?.zendesk_ticket ?? p?.zendesk_ticket_number ?? p?.zendesk ?? '').trim();
+          const po = String(p?.po_number ?? '').trim();
+          if (!z || !po) continue;
+          if (!posByZendesk.has(z)) posByZendesk.set(z, new Set());
+          posByZendesk.get(z).add(po);
+        }
         const lines = airLanes.map((l, i) => ({
           sort_order: i,
-          description: `Air Freight - ${l.supplier||'—'}`,
+          description: `${l.zendesk||'—'} - ${l.supplier||'—'}`,
           unit_label: 'Per KG',
           zendesk: l.zendesk,
           supplier: l.supplier,
@@ -6127,7 +6137,15 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
         lines.push({ sort_order: lines.length+1, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
         lines.push({ sort_order: lines.length+2, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
         const customs = airCustomsRate * airCustomsQty;
-        return res.json({ type:'AIR', week_start, lanes: airLanes, lines, customs, subtotal:0, gst:0, total:customs });
+        // Notes: each air ticket with its associated POs
+        const _noteLines = airLanes.map(l => {
+          const z = l.zendesk || '—';
+          const sup = l.supplier || '—';
+          const pos = posByZendesk.has(z) ? Array.from(posByZendesk.get(z)).join(', ') : '—';
+          return `${z} (${sup}): PO ${pos}`;
+        });
+        const notes = airLanes.length ? `Air shipments — this invoice:\n${_noteLines.join('\n')}` : '';
+        return res.json({ type:'AIR', week_start, lanes: airLanes, lines, customs, subtotal:0, gst:0, total:customs, notes });
       }
     }
     res.status(400).json({ error: 'Unknown type' });
@@ -6260,6 +6278,8 @@ app.get('/finance/invoice/:id/pdf', async (req, res) => {
     doc.fontSize(22).font('Helvetica').fillColor('#3A3A3C').text('ity', { continued: true });
     doc.fontSize(16).font('Helvetica-Bold').fillColor(BRAND).text('»', { continued: false });
     doc.fontSize(16).font('Helvetica-Bold').fillColor(DARK).text('TAX INVOICE', 400, 50, { align: 'right', width: 145 });
+    const _typeLabel = inv.type === 'AIR' ? 'Door-to-Door with Air Freight' : inv.type === 'SEA' ? 'Door-to-Door with Sea Freight' : 'VAS Services';
+    doc.fontSize(8).font('Helvetica').fillColor(MID).text(_typeLabel, 400, 69, { align: 'right', width: 145 });
 
     // Rule
     doc.moveTo(50, 80).lineTo(545, 80).lineWidth(2).strokeColor(BRAND).stroke();
