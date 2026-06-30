@@ -6094,8 +6094,21 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
       }
       if (type === 'AIR') {
         const D = getFinanceDefaults();
-        // Group by zendesk
-        const airLanes = lanes.filter(l => l.freight.toLowerCase() === 'air');
+        // Air lanes derive from the air-detected containers (same heuristic as the Sea/Air split),
+        // NOT the freight token in the lane key — that token is unreliable and over-includes sea lanes.
+        const airZendesks = new Set();
+        for (const c of containers) {            // `containers` holds only air-detected containers here
+          for (const lk of (c.lane_keys || [])) {
+            const z = String(lk).split('||')[1];
+            if (z) airZendesks.add(z);
+          }
+        }
+        let airLanes = airZendesks.size
+          ? lanes.filter(l => airZendesks.has(l.zendesk))
+          : lanes.filter(l => String(l.freight).trim().toLowerCase() === 'air'); // fallback when containers carry no lane_keys
+        // One Air Freight line per zendesk
+        const _seenAir = new Set();
+        airLanes = airLanes.filter(l => { const z = l.zendesk || l.key; if (_seenAir.has(z)) return false; _seenAir.add(z); return true; });
         const lines = airLanes.map((l, i) => ({
           sort_order: i,
           description: `Air Freight - ${l.supplier||'—'}`,
