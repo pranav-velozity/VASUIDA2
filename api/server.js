@@ -9704,6 +9704,167 @@ app.post('/nc/recheck', authenticateRequest, writeOpLimiter, auditLog('recheck_n
   } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
 });
 
+// ═══════════════════ SUPPLIER DISCREPANCY REPORT (non-compliance) ═══════════════════
+const _ncReportTokens = new Map();               // token -> { ts, cost }
+const _NC_TOKEN_TTL = 30 * 60 * 1000;
+function _cleanNcTokens(){ const now = Date.now(); for (const [k, v] of _ncReportTokens) { if (now - v.ts > _NC_TOKEN_TTL) _ncReportTokens.delete(k); } }
+function _ncEh(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function _ncFmtWeek(ws){ try { const d = new Date(ws + 'T00:00:00Z'); return 'Week of ' + d.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }); } catch (e) { return ws; } }
+function _ncMoney(v){ return 'US$' + (Number(v) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+// Base report is open to any authed user; the password is only required to INCLUDE cost columns.
+app.post('/report/supplier-discrepancy/auth', authenticateRequest, (req, res) => {
+  const b = req.body || {}; let cost = false;
+  if (b.includeCost) {
+    const expected = process.env.COST_REPORT_PASSWORD || 'velozity2026';
+    if (!b.password || b.password !== expected) return res.status(403).json({ error: 'Invalid password' });
+    cost = true;
+  }
+  _cleanNcTokens();
+  const token = randomUUID();
+  _ncReportTokens.set(token, { ts: Date.now(), cost });
+  res.json({ token, cost });
+});
+
+app.get('/report/supplier-discrepancy',
+  (req, res, next) => {
+    _cleanNcTokens();
+    const t = _ncReportTokens.get(req.query.token);
+    if (!t) return res.status(403).send('<html><body style="font-family:sans-serif;padding:40px;"><h2>Access denied</h2><p>Invalid or expired token. Please request a new report link.</p></body></html>');
+    req._ncCost = !!t.cost; next();
+  },
+  (req, res) => {
+  try {
+    const week = String(req.query.week || '').trim();
+    const supplier = String(req.query.supplier || '').trim();  // '' = all suppliers (internal)
+    const showCost = req._ncCost;
+    if (!week) return res.status(400).send('week required');
+    const R2PUB = (process.env.R2_PUBLIC_URL || '').replace(/\/+$/, '');
+
+    const cats = new Map(); for (const c of db.prepare('SELECT * FROM nc_category').all()) cats.set(c.id, c);
+    const p = [week]; let sql = 'SELECT * FROM nc_incident WHERE week_start=?'; if (supplier) { sql += ' AND supplier=?'; p.push(supplier); } sql += ' ORDER BY supplier, po_number, created_at';
+    const incidents = db.prepare(sql).all(...p);
+    const ids = incidents.map(i => i.id); const imgBy = new Map();
+    if (ids.length) { const im = db.prepare('SELECT * FROM nc_incident_image WHERE incident_id IN (' + ids.map(() => '?').join(',') + ')').all(...ids); for (const x of im) { if (!imgBy.has(x.incident_id)) imgBy.set(x.incident_id, []); imgBy.get(x.incident_id).push(x); } }
+    const costOf = i => { const c = cats.get(i.category_id); return (c && c.rate != null) ? c.rate * i.qty : null; };
+    const labelOf = i => { const c = cats.get(i.category_id); return c ? c.label : i.category_id; };
+    const photosHtml = i => (imgBy.get(i.id) || []).slice(0, 3).map(x => `<img class="ph" src="${_ncEh(R2PUB + '/' + x.r2_key)}" alt="">`).join('');
+
+    let reworkUnits = 0, deliveryCartons = 0, totalCost = 0, haveCost = false;
+    for (const i of incidents) { if (i.grain === 'unit') reworkUnits += i.qty; else deliveryCartons += i.qty; const c = costOf(i); if (c != null) { totalCost += c; haveCost = true; } }
+
+    const bySup = new Map(); for (const i of incidents) { if (!bySup.has(i.supplier)) bySup.set(i.supplier, []); bySup.get(i.supplier).push(i); }
+    const byCat = new Map(); for (const i of incidents) { const k = i.category_id; if (!byCat.has(k)) byCat.set(k, { label: labelOf(i), grain: i.grain, qty: 0, count: 0, cost: 0, hasCost: false }); const o = byCat.get(k); o.qty += i.qty; o.count++; const c = costOf(i); if (c != null) { o.cost += c; o.hasCost = true; } }
+    let recon = ncCartonReconByPo(week); if (supplier) recon = recon.filter(r => r.supplier === supplier);
+    const reconTot = recon.reduce((a, r) => { a.legacy += r.legacy; a.categorized += r.categorized; a.uncategorized += r.uncategorized; return a; }, { legacy: 0, categorized: 0, uncategorized: 0 });
+
+    // cost-to-date + per-supplier summary across all weeks up to this one
+    const ctdP = [week]; let ctdSql = 'SELECT i.supplier, i.week_start, i.qty, c.rate FROM nc_incident i LEFT JOIN nc_category c ON c.id=i.category_id WHERE i.week_start<=?'; if (supplier) { ctdSql += ' AND i.supplier=?'; ctdP.push(supplier); }
+    const ctd = db.prepare(ctdSql).all(...ctdP);
+    const supAgg = new Map();
+    for (const r of ctd) { if (!supAgg.has(r.supplier)) supAgg.set(r.supplier, { count: 0, cost: 0, hasCost: false, weeks: new Set() }); const o = supAgg.get(r.supplier); o.count++; o.weeks.add(r.week_start); if (r.rate != null) { o.cost += r.rate * r.qty; o.hasCost = true; } }
+
+    const costHead = showCost ? '<th class="num">Cost</th>' : '';
+    const costCell = i => { if (!showCost) return ''; const c = costOf(i); return `<td class="num">${c == null ? '—' : _ncMoney(c)}</td>`; };
+
+    // ── sections ──
+    const scopeLabel = supplier ? `Prepared for ${_ncEh(supplier)}` : 'All suppliers · Internal';
+    const execSection = `
+      <div class="kpis">
+        <div class="kpi"><div class="kl">Incidents</div><div class="kv">${incidents.length}</div><div class="ks">${bySup.size} supplier(s)</div></div>
+        <div class="kpi"><div class="kl">Rework units</div><div class="kv">${reworkUnits.toLocaleString()}</div><div class="ks">per-unit categories</div></div>
+        <div class="kpi"><div class="kl">Delivery cartons</div><div class="kv">${deliveryCartons.toLocaleString()}</div><div class="ks">per-carton categories</div></div>
+        ${showCost ? `<div class="kpi"><div class="kl">Charge (this week)</div><div class="kv">${haveCost ? _ncMoney(totalCost) : '—'}</div><div class="ks">${haveCost ? '' : 'rates pending'}</div></div>` : ''}
+      </div>`;
+
+    let supSection = '';
+    if (!incidents.length) {
+      supSection = `<p class="empty">No non-compliance incidents logged for ${_ncEh(_ncFmtWeek(week))}${supplier ? ' for ' + _ncEh(supplier) : ''}.</p>`;
+    } else {
+      for (const [sup, list] of bySup) {
+        supSection += `<div class="sup"><div class="sup-h">${_ncEh(sup)} <span class="sup-n">${list.length} incident(s)</span></div>
+          <table><thead><tr><th>Category</th><th>PO</th><th>SKU</th><th class="num">Qty</th><th>Corrective action</th><th>Status</th><th>Evidence</th>${costHead}</tr></thead><tbody>
+          ${list.map(i => `<tr>
+            <td>${_ncEh(labelOf(i))}${i.needs_review ? ' <span class="rev">⚑ review</span>' : ''}</td>
+            <td>${_ncEh(i.po_number)}</td>
+            <td>${_ncEh(i.sku || '—')}</td>
+            <td class="num">${i.qty} ${i.grain === 'carton' ? 'ctn' : 'un'}</td>
+            <td>${_ncEh(i.corrective_action || '—')}</td>
+            <td>${_ncEh(i.status)}</td>
+            <td class="phc">${photosHtml(i) || '<span class="muted">—</span>'}</td>
+            ${costCell(i)}
+          </tr>`).join('')}
+          </tbody></table></div>`;
+      }
+    }
+
+    const catRows = Array.from(byCat.values()).sort((a, b) => b.count - a.count).map(o =>
+      `<tr><td>${_ncEh(o.label)}</td><td>${o.grain === 'carton' ? 'per carton' : 'per unit'}</td><td class="num">${o.count}</td><td class="num">${o.qty.toLocaleString()}</td>${showCost ? `<td class="num">${o.hasCost ? _ncMoney(o.cost) : '—'}</td>` : ''}</tr>`).join('');
+    const catSection = byCat.size ? `<table><thead><tr><th>Category</th><th>Grain</th><th class="num">Incidents</th><th class="num">Affected qty</th>${showCost ? '<th class="num">Cost</th>' : ''}</tr></thead><tbody>${catRows}</tbody></table>` : `<p class="empty">No categories to show.</p>`;
+
+    const reconRows = recon.filter(r => r.legacy > 0 || r.categorized > 0).map(r =>
+      `<tr><td>${_ncEh(r.po_number)}</td><td>${_ncEh(r.supplier || '—')}</td><td class="num">${r.legacy}</td><td class="num">${r.categorized}</td><td class="num ${r.uncategorized > 0 ? 'amber' : ''}">${r.uncategorized}</td>${r.over_categorized ? '<td class="amber">⚑ review</td>' : '<td></td>'}</tr>`).join('');
+    const reconSection = `<div class="note">Damaged/replaced cartons are anchored to the receiving count (the billing floor). This report shows how many of those replaced cartons have a categorised reason vs. the remaining <b>uncategorised</b> — reasons still to capture. The total never changes; only the breakdown.</div>
+      <table><thead><tr><th>PO</th><th>Supplier</th><th class="num">Replaced (legacy)</th><th class="num">Categorised</th><th class="num">Uncategorised</th><th></th></tr></thead>
+      <tbody>${reconRows || '<tr><td colspan="6" class="muted">No replaced cartons this week.</td></tr>'}</tbody>
+      <tfoot><tr><td colspan="2"><b>Total</b></td><td class="num"><b>${reconTot.legacy}</b></td><td class="num"><b>${reconTot.categorized}</b></td><td class="num"><b>${reconTot.uncategorized}</b></td><td></td></tr></tfoot></table>`;
+
+    const trendRows = Array.from(supAgg.entries()).sort((a, b) => b[1].count - a[1].count).map(([s, o]) =>
+      `<tr><td>${_ncEh(s)}</td><td class="num">${o.weeks.size}</td><td class="num">${o.count}</td>${showCost ? `<td class="num">${o.hasCost ? _ncMoney(o.cost) : '—'}</td>` : ''}</tr>`).join('');
+    const trendSection = supAgg.size ? `<div class="note">Per-supplier totals across all weeks up to and including this one — recurring vendors and running exposure.</div>
+      <table><thead><tr><th>Supplier</th><th class="num">Weeks with issues</th><th class="num">Incidents to date</th>${showCost ? '<th class="num">Cost to date</th>' : ''}</tr></thead><tbody>${trendRows}</tbody></table>` : `<p class="empty">No history yet.</p>`;
+
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VelOzity Pinpoint — Supplier Discrepancy Report</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&display=swap');
+*{box-sizing:border-box;} body{font-family:'DM Sans',system-ui,sans-serif;color:#1C1C1E;margin:0;background:#fff;font-size:12px;line-height:1.5;}
+.wrap{max-width:1000px;margin:0 auto;padding:40px;}
+h1,h2{font-family:'DM Serif Display',Georgia,serif;font-weight:400;color:#990033;}
+.cover{min-height:70vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;}
+.cover .logo{font-family:'DM Serif Display',serif;font-size:38px;} .cover .logo b{color:#990033;}
+.cover .sub{letter-spacing:.28em;font-size:10px;color:#AEAEB2;text-transform:uppercase;margin-top:6px;}
+.cover .rt{font-family:'DM Serif Display',serif;font-style:italic;font-size:26px;color:#6E6E73;margin-top:44px;}
+.cover .per{font-size:13px;color:#6E6E73;margin-top:8px;} .cover .meta{font-size:10px;color:#AEAEB2;letter-spacing:.08em;margin-top:26px;text-transform:uppercase;}
+.sec{margin:30px 0;} .sec-t{font-size:22px;margin:0 0 4px;} .sec-s{font-size:11px;color:#AEAEB2;margin-bottom:14px;}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;} .kpi{border:0.5px solid rgba(0,0,0,0.1);border-radius:10px;padding:14px;}
+.kl{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:#AEAEB2;} .kv{font-family:'DM Serif Display',serif;font-size:26px;margin:4px 0;} .ks{font-size:10px;color:#6E6E73;}
+table{width:100%;border-collapse:collapse;margin:8px 0;} th,td{text-align:left;padding:7px 9px;border-bottom:0.5px solid rgba(0,0,0,0.07);font-size:11px;vertical-align:top;}
+th{font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:#AEAEB2;font-weight:600;} td.num,th.num{text-align:right;} tfoot td{border-top:1px solid rgba(0,0,0,0.15);}
+.sup{margin:16px 0;} .sup-h{font-weight:700;font-size:13px;margin-bottom:4px;} .sup-n{font-weight:400;color:#AEAEB2;font-size:10px;margin-left:6px;}
+.ph{width:52px;height:52px;object-fit:cover;border-radius:6px;border:0.5px solid rgba(0,0,0,0.12);margin-right:4px;} .phc{white-space:nowrap;}
+.note{background:#F7F4F5;border:0.5px solid rgba(153,0,51,0.12);border-radius:8px;padding:10px 12px;font-size:10px;color:#6E6E73;margin-bottom:10px;}
+.rev,.amber{color:#C8860A;font-weight:600;} .muted{color:#AEAEB2;} .empty{color:#AEAEB2;text-align:center;padding:24px;}
+.about{border:0.5px solid rgba(0,0,0,0.08);border-radius:10px;padding:14px 16px;font-size:10px;color:#6E6E73;margin-top:16px;}
+.close{min-height:50vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:#AEAEB2;}
+.close .ct{font-family:'DM Serif Display',serif;font-size:34px;color:#C7C7CC;}
+@media print{.page{page-break-before:always;} .wrap{padding:24px;} }
+</style></head><body>
+<div class="wrap">
+  <div class="cover">
+    <div class="logo">Vel<b>O</b>zity Pinpoint</div>
+    <div class="sub">Supply Chain Intelligence</div>
+    <div class="rt">Supplier Discrepancy Report</div>
+    <div class="per">${_ncEh(_ncFmtWeek(week))}</div>
+    <div class="per" style="font-weight:600;color:#1C1C1E;">${scopeLabel}</div>
+    <div class="meta">Confidential · Generated ${_ncEh(new Date().toLocaleString('en-AU'))}</div>
+  </div>
+
+  <div class="page sec"><h2 class="sec-t">Executive Summary</h2><div class="sec-s">${_ncEh(_ncFmtWeek(week))} — ${scopeLabel}</div>${execSection}
+    <div class="about"><b>About this report.</b> Non-compliance identified by VelOzity at receiving/VAS, by vendor. Rework categories are counted <b>per affected unit</b>; delivery-failure categories <b>per affected carton</b>. ${showCost ? 'Cost columns reflect per-category charges (blank where a rate is not yet set).' : 'Cost columns are omitted from this copy.'} Replaced-carton reasons reconcile against the receiving count (see Carton Reconciliation).</div>
+  </div>
+
+  <div class="page sec"><h2 class="sec-t">By Supplier</h2><div class="sec-s">Incidents, affected quantity and photo evidence</div>${supSection}</div>
+  <div class="page sec"><h2 class="sec-t">By Category</h2><div class="sec-s">Where the issues cluster across suppliers</div>${catSection}</div>
+  <div class="page sec"><h2 class="sec-t">Carton Reconciliation</h2><div class="sec-s">Categorised vs uncategorised replaced cartons</div>${reconSection}</div>
+  <div class="page sec"><h2 class="sec-t">Trend &amp; Cost to Date</h2><div class="sec-s">Per-supplier running totals</div>${trendSection}</div>
+
+  <div class="page close"><div class="ct">Report created</div><div style="margin-top:10px;font-size:11px;">${_ncEh(new Date().toLocaleString('en-AU'))}</div><div style="margin-top:6px;font-size:10px;">VelOzity Pinpoint · Supplier Discrepancy · ${_ncEh(_ncFmtWeek(week))}</div></div>
+</div></body></html>`;
+    res.send(html);
+  } catch (e) { res.status(500).send('Report error: ' + _ncEh(String(e.message || e))); }
+});
+
 app.listen(PORT, () => {
   console.log(`UID Ops backend listening on http://localhost:${PORT}`);
   console.log(`DB file: ${DB_FILE}`);
