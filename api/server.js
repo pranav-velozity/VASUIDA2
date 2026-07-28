@@ -32,8 +32,6 @@ const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*'; // set to your fronten
 const DB_DIR = process.env.DB_DIR || path.join(__dirname, 'data');
 fs.mkdirSync(DB_DIR, { recursive: true });
 const DB_FILE = process.env.DB_FILE || path.join(DB_DIR, 'uid_ops.sqlite');
-// Claude model — overridable via Render env (CLAUDE_MODEL); fallback kept current in code.
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-6';
 
 // ---- App ----
 const app = express();
@@ -439,14 +437,74 @@ CREATE TABLE IF NOT EXISTS fin_fx_rates (
   fetched_at  TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(from_curr, to_curr)
 );
-
-CREATE TABLE IF NOT EXISTS fin_defaults (
-  id          TEXT PRIMARY KEY,
-  config      TEXT NOT NULL,
-  updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_by  TEXT
-);
 `);
+
+// ═══════════════════ NON-COMPLIANCE REPORTING — schema ═══════════════════
+db.exec(`
+CREATE TABLE IF NOT EXISTS nc_category (
+  id          TEXT PRIMARY KEY,
+  grp         TEXT NOT NULL,          -- 'rework' | 'delivery_failure'
+  label       TEXT NOT NULL,
+  grain       TEXT NOT NULL,          -- 'unit' | 'carton'
+  rate        REAL,                   -- dormant in Phase 1; NULL = no charge yet
+  active      INTEGER NOT NULL DEFAULT 1,
+  sort_order  INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS nc_incident (
+  id                 TEXT PRIMARY KEY,
+  week_start         TEXT NOT NULL,
+  facility           TEXT,
+  supplier           TEXT NOT NULL,
+  po_number          TEXT NOT NULL,
+  sku                TEXT,                          -- only for unit-grain
+  category_id        TEXT NOT NULL,
+  grain              TEXT NOT NULL,                 -- denormalised from category
+  qty                INTEGER NOT NULL DEFAULT 0,    -- units (unit-grain) or cartons (carton-grain)
+  corrective_action  TEXT,
+  status             TEXT NOT NULL DEFAULT 'open',  -- 'open' | 'resolved'
+  resolution_comment TEXT,
+  cost               REAL,                          -- computed in Phase 2 (rate*qty); NULL until then
+  needs_review       INTEGER NOT NULL DEFAULT 0,
+  created_by         TEXT,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_nc_incident_week ON nc_incident(week_start);
+CREATE INDEX IF NOT EXISTS idx_nc_incident_sup  ON nc_incident(week_start, supplier);
+CREATE INDEX IF NOT EXISTS idx_nc_incident_po   ON nc_incident(week_start, po_number);
+CREATE TABLE IF NOT EXISTS nc_incident_image (
+  id           TEXT PRIMARY KEY,
+  incident_id  TEXT NOT NULL,
+  r2_key       TEXT NOT NULL,
+  thumb_key    TEXT,                                -- generated at report time (Phase-1: NULL)
+  uploaded_via TEXT DEFAULT 'desktop',              -- 'desktop' | 'phone'
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_nc_image_incident ON nc_incident_image(incident_id);
+`);
+
+// Seed the category taxonomy (idempotent — INSERT OR IGNORE preserves any Phase-2 rate edits).
+(function seedNcCategories(){
+  const rows = [
+    // Rework — per affected unit
+    ['polybagging',        'rework','Polybagging','unit',10],
+    ['relabelling',        'rework','Re-labelling','unit',20],
+    ['tag_removal',        'rework','Tag Removal','unit',30],
+    ['reboxing',           'rework','Re-boxing','unit',40],
+    ['shoebox_lid',        'rework','Shoebox Lid Reattachment','unit',50],
+    // Delivery failure — per affected carton/pallet
+    ['carton_overweight',  'delivery_failure','Overweight / Oversized cartons','carton',110],
+    ['carton_damaged',     'delivery_failure','Damaged cartons','carton',120],
+    ['carton_mixed',       'delivery_failure','Mixed styles / SKUs','carton',130],
+    ['carton_underfilled', 'delivery_failure','Underfilled cartons','carton',140],
+    ['carton_incorrect',   'delivery_failure','Incorrect / Inappropriate cartons','carton',150],
+    ['carton_noncompliant','delivery_failure','Non-compliant product packing','carton',160],
+    ['carton_overfilled',  'delivery_failure','Overfilled cartons','carton',170],
+    ['carton_addlabels',   'delivery_failure','Additional carton labels','carton',180],
+  ];
+  const ins = db.prepare(`INSERT OR IGNORE INTO nc_category (id,grp,label,grain,rate,active,sort_order) VALUES (?,?,?,?,NULL,1,?)`);
+  db.transaction(()=>{ for(const r of rows) ins.run(r[0],r[1],r[2],r[3],r[4]); })();
+})();
 
 
 
@@ -992,7 +1050,7 @@ app.post('/pulse/chat',
 
     const anthropic = getAnthropic();
     const response = await anthropic.messages.create({
-      model: CLAUDE_MODEL,
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 800,
       system: [
         // Static ops data — cached for the session (content identical across turns)
@@ -1105,7 +1163,7 @@ app.post('/ai/pulse',
 
     const anthropic = getAnthropic();
     const response = await anthropic.messages.create({
-      model: CLAUDE_MODEL,
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 1200,
       messages: [
         {
@@ -3414,7 +3472,7 @@ Write only the bullet points, nothing else.`;
     const timeout = setTimeout(() => controller.abort(), EMAIL_PULSE_TIMEOUT_MS);
     const client = getAnthropic();
     const resp = await client.messages.create({
-      model: CLAUDE_MODEL,
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 400,
       messages: [{ role: 'user', content: prompt }],
     }, { signal: controller.signal });
@@ -4914,25 +4972,11 @@ app.get('/report/stock-status',
       const zd    = item.zendesk;
       const lane  = zd ? mergedLanes[zd] : null;
       const delivDate = zd ? deliveredByZendesk.get(zd) : null;
-      const departedDate = lane?.departed_at || null;
 
-      // ETA FC: actual value wins; else baseline = departed + 15d (Sea) / 5d (Air); else none.
-      let etaFc = lane?.eta_fc || null;
-      if (!etaFc && departedDate) {
-        const addDays = (String(item.freight).trim().toLowerCase() === 'air') ? 5 : 15;
-        const base = new Date(String(departedDate).slice(0, 10) + 'T00:00:00Z');
-        if (!isNaN(base.getTime())) {
-          base.setUTCDate(base.getUTCDate() + addDays);
-          etaFc = base.toISOString().slice(0, 10);
-        }
-      }
-
-      // Status cascade: Delivered (to client FC) > In Transit (departed origin) > On-site (received, not departed) > Not-Received
-      let status;
-      if (delivDate)               status = 'Delivered';
-      else if (departedDate)       status = 'In Transit';
-      else if (actualReceived > 0) status = 'On-site';
-      else                         status = 'Not-Received';
+      let status = 'Not Started';
+      if (delivDate)                                  status = 'Delivered';
+      else if (lane?.departed_at)                     status = 'In Transit';
+      else if (actualReceived > 0)                    status = 'In Stock';
 
       rows.push({
         week_start:       item.week_start,
@@ -4947,8 +4991,8 @@ app.get('/report/stock-status',
         applied:          applied,
         actual_received:  actualReceived,
         received_date:    recvDate,
-        departed_date:    departedDate,
-        eta_fc:           etaFc,
+        departed_date:    lane?.departed_at || null,
+        eta_fc:           lane?.eta_fc || null,
         delivered_date:   delivDate || null,
         status,
       });
@@ -5774,46 +5818,6 @@ app.get('/admin/audit-logs',
 
 const { v4: uuidv4 } = require('uuid');
 
-// ── Finance invoice defaults (editable via /finance/defaults; seeded here as the in-code fallback) ──
-const FINANCE_DEFAULTS_SEED = {
-  gst_pct: 10,
-  vas: {
-    base_processing: 0.21,
-    outbound: 0.05,
-    labelling: 0.01,
-    polybagging: 0.05,
-    storage: 0.01,
-    carton_replacement: 1.10,
-    labelling_multiplier: 3,
-    carton_multiplier: 2,
-  },
-  sea: {
-    freight_rate: 5833,       // universal per-container default
-    freight_rate_20ft: 3896,  // stored; applied manually on 20ft containers
-    customs_clearance: 177,
-    safety_net: 25,
-  },
-  air: {
-    customs_processing: 177,
-  },
-};
-// Returns the effective config: stored values merged over the seed (so new keys added in code still appear).
-function getFinanceDefaults() {
-  try {
-    const row = db.prepare("SELECT config FROM fin_defaults WHERE id = 'finance'").get();
-    if (row && row.config) {
-      const s = JSON.parse(row.config) || {};
-      return {
-        gst_pct: Number(s.gst_pct ?? FINANCE_DEFAULTS_SEED.gst_pct),
-        vas: { ...FINANCE_DEFAULTS_SEED.vas, ...(s.vas || {}) },
-        sea: { ...FINANCE_DEFAULTS_SEED.sea, ...(s.sea || {}) },
-        air: { ...FINANCE_DEFAULTS_SEED.air, ...(s.air || {}) },
-      };
-    }
-  } catch (e) { console.error('getFinanceDefaults failed:', e.message || e); }
-  return FINANCE_DEFAULTS_SEED;
-}
-
 // ── Helper: generate invoice reference number ──
 function genInvoiceRef(type, weekStart, existingCount) {
   const d = new Date(weekStart + 'T00:00:00Z');
@@ -5897,7 +5901,7 @@ app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), (req,
     // Calculate totals — exclude gst_free lines from taxable subtotal
     const taxableLines = lines.filter(l => !l.gst_free);
     const subtotal = taxableLines.reduce((s, l) => s + (parseFloat(l.total)||0), 0);
-    const gst = Math.round(subtotal * (getFinanceDefaults().gst_pct/100) * 100) / 100;
+    const gst = Math.round(subtotal * 0.10 * 100) / 100;
     const customsAmt = parseFloat(customs) || 0;
     const miscAmt = parseFloat(misc_total) || 0;
     // misc lines are already included in subtotal (taxableLines includes is_misc lines)
@@ -5935,7 +5939,7 @@ app.patch('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), 
           VALUES (?,?,?,?,?,?,?,?,?,?)`).run(uuidv4(), inv.id, i, l.description||'', l.unit_label||'', parseFloat(l.rate)||0, parseFloat(l.quantity)||0, parseFloat(l.total)||0, l.gst_free?1:0, l.is_misc?1:0);
       });
       const subtotal = lines.filter(l=>!l.gst_free).reduce((s, l) => s + (parseFloat(l.total)||0), 0);
-      const gst = Math.round(subtotal * (getFinanceDefaults().gst_pct/100) * 100) / 100;
+      const gst = Math.round(subtotal * 0.10 * 100) / 100;
       const customsAmt = customs !== undefined ? parseFloat(customs)||0 : inv.customs;
       const miscAmt = misc_total !== undefined ? parseFloat(misc_total)||0 : inv.misc_total;
       // misc lines already in subtotal — don't add miscAmt to total again
@@ -5984,24 +5988,21 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
       const recvRows = db.prepare(`SELECT SUM(cartons_received) as total FROM receiving WHERE week_start = ?`).get(week_start);
       const cartonsIn = recvRows?.total || 0;
       const cartonDelta = Math.max(0, cartonsOut - cartonsIn);
-      // Standard VAS rates (editable via /finance/defaults)
-      const D = getFinanceDefaults();
-      const v = D.vas;
-      const r2 = (x) => Math.round(x * 100) / 100;
+      // Standard VAS rates
       const lines = [
-        { sort_order:0, description:'VAS Base Processing',         unit_label:'Per Unit',        rate:v.base_processing,    quantity:units,                           total:r2(v.base_processing*units),                             gst_free:0, is_misc:0 },
-        { sort_order:1, description:'Outbound Activities',         unit_label:'Per Unit',        rate:v.outbound,           quantity:units,                           total:r2(v.outbound*units),                                    gst_free:0, is_misc:0 },
-        { sort_order:2, description:'Additional Labelling',        unit_label:'Per Unit',        rate:v.labelling,          quantity:units*v.labelling_multiplier,    total:r2(v.labelling*units*v.labelling_multiplier),            gst_free:0, is_misc:0 },
-        { sort_order:3, description:'Polybagging',                 unit_label:'Per Unit',        rate:v.polybagging,        quantity:0,                               total:0,                                                       gst_free:0, is_misc:0 },
-        { sort_order:4, description:'Storage post-processing',     unit_label:'Per Unit Per Day', rate:v.storage,           quantity:0,                               total:0,                                                       gst_free:0, is_misc:0 },
-        { sort_order:5, description:'Carton Replacement - labour only', unit_label:'Per Carton', rate:v.carton_replacement, quantity:cartonDelta*v.carton_multiplier, total:r2(v.carton_replacement*cartonDelta*v.carton_multiplier), gst_free:0, is_misc:0 },
+        { sort_order:0, description:'VAS Base Processing',         unit_label:'Per Unit',        rate:0.21, quantity:units,              total:Math.round(0.21*units*100)/100,              gst_free:0, is_misc:0 },
+        { sort_order:1, description:'Outbound Activities',         unit_label:'Per Unit',        rate:0.05, quantity:units,              total:Math.round(0.05*units*100)/100,              gst_free:0, is_misc:0 },
+        { sort_order:2, description:'Additional Labelling',        unit_label:'Per Unit',        rate:0.01, quantity:units*3,            total:Math.round(0.01*units*3*100)/100,            gst_free:0, is_misc:0 },
+        { sort_order:3, description:'Polybagging',                 unit_label:'Per Unit',        rate:0.05, quantity:0,                 total:0,                                           gst_free:0, is_misc:0 },
+        { sort_order:4, description:'Storage post-processing',     unit_label:'Per Unit Per Day', rate:0.01, quantity:0,                 total:0,                                           gst_free:0, is_misc:0 },
+        { sort_order:5, description:'Carton Replacement - labour only', unit_label:'Per Carton', rate:1.10, quantity:cartonDelta*2,      total:Math.round(1.10*cartonDelta*2*100)/100,      gst_free:0, is_misc:0 },
         { sort_order:6, description:'',                            unit_label:'',                rate:0,    quantity:0,                 total:0,                                           gst_free:0, is_misc:1 },
         { sort_order:7, description:'',                            unit_label:'',                rate:0,    quantity:0,                 total:0,                                           gst_free:0, is_misc:1 },
       ];
       const subtotal = lines.slice(0,6).reduce((s,l)=>s+l.total,0);
-      const gst = r2(subtotal * (D.gst_pct/100));
+      const gst = Math.round(subtotal*0.10*100)/100;
       const customs = 0; // VAS has no customs
-      const total = r2(subtotal+gst+customs);
+      const total = Math.round((subtotal+gst+customs)*100)/100;
       return res.json({ type:'VAS', week_start, units, cartonsIn, cartonsOut, cartonDelta, lines, subtotal, gst, customs, total });
     }
 
@@ -6040,10 +6041,7 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
         } catch {}
       }
       if (type === 'SEA') {
-        const D = getFinanceDefaults();
-        const r2 = (x) => Math.round(x * 100) / 100;
-        const seaRate = D.sea.freight_rate; // universal default; 20ft rate applied manually on the line
-        const freightLines = containers.map((c, i) => ({
+        const lines = containers.map((c, i) => ({
           sort_order: i,
           description: `Container ${c.container_id||'—'}`,
           unit_label: c.size_ft ? `${c.size_ft}' HC` : '40\' HC',
@@ -6051,77 +6049,36 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
           container_type: c.size_ft ? `${c.size_ft}' HC` : '40\' HC',
           vessel: c.vessel || '',
           zendesks: c.lane_keys ? c.lane_keys.map(k=>k.split('||')[1]).filter(Boolean) : [],
-          rate: seaRate,
+          rate: 0, // User enters rate per container
           quantity: 1,
-          total: r2(seaRate),
+          total: 0,
           gst_free: 0,
           is_misc: 0
         }));
-        // Safety net — one consolidated taxable line: rate/container × container count (counts toward pre-GST subtotal)
-        const containerCount = containers.length;
-        const safetyLines = containerCount > 0 ? [{
-          sort_order: freightLines.length,
-          description: 'Safety Net',
-          unit_label: 'Per Container',
-          rate: D.sea.safety_net,
-          quantity: containerCount,
-          total: r2(D.sea.safety_net * containerCount),
-          gst_free: 0,
-          is_misc: 0
-        }] : [];
-        // Customs clearance — GST-free, per container
+        // Add customs lines
         const customsLines = containers.map((c, i) => ({
-          sort_order: freightLines.length + safetyLines.length + i,
+          sort_order: containers.length + i,
           description: `Customs Clearance - ${c.container_id||'—'}`,
           unit_label: 'Flat Fee per Container',
           container_id: c.container_id || '',
-          rate: D.sea.customs_clearance,
+          rate: 158,
           quantity: 1,
-          total: D.sea.customs_clearance,
+          total: 158,
           gst_free: 1,
           is_misc: 0
         }));
         // Misc lines
-        const miscLines = [
-          { sort_order: freightLines.length + safetyLines.length + customsLines.length,     description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 },
-          { sort_order: freightLines.length + safetyLines.length + customsLines.length + 1, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 },
-        ];
-        const subtotal = [...freightLines, ...safetyLines].reduce((s,l)=>s+l.total, 0); // taxable
-        const gst = r2(subtotal * (D.gst_pct/100));
-        const customs = customsLines.reduce((s,l)=>s+l.total, 0); // GST-free
-        const total = r2(subtotal + gst + customs);
-        return res.json({ type:'SEA', week_start, containers, lanes, lines: [...freightLines, ...safetyLines, ...customsLines, ...miscLines], customs, subtotal, gst, total });
+        lines.push({ sort_order: lines.length + customsLines.length, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
+        lines.push({ sort_order: lines.length + customsLines.length + 1, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
+        const customs = customsLines.reduce((s,l)=>s+l.total, 0);
+        return res.json({ type:'SEA', week_start, containers, lanes, lines: [...lines, ...customsLines], customs, subtotal:0, gst:0, total:customs });
       }
       if (type === 'AIR') {
-        const D = getFinanceDefaults();
-        // Air lanes derive from the air-detected containers (same heuristic as the Sea/Air split),
-        // NOT the freight token in the lane key — that token is unreliable and over-includes sea lanes.
-        const airZendesks = new Set();
-        for (const c of containers) {            // `containers` holds only air-detected containers here
-          for (const lk of (c.lane_keys || [])) {
-            const z = String(lk).split('||')[1];
-            if (z) airZendesks.add(z);
-          }
-        }
-        let airLanes = airZendesks.size
-          ? lanes.filter(l => airZendesks.has(l.zendesk))
-          : lanes.filter(l => String(l.freight).trim().toLowerCase() === 'air'); // fallback when containers carry no lane_keys
-        // One Air Freight line per zendesk
-        const _seenAir = new Set();
-        airLanes = airLanes.filter(l => { const z = l.zendesk || l.key; if (_seenAir.has(z)) return false; _seenAir.add(z); return true; });
-        // PO ↔ ticket map from the week's plan, for the notes block
-        const _planRows = _getPlanRowsForWeek(week_start);
-        const posByZendesk = new Map();
-        for (const p of _planRows) {
-          const z = String(p?.zendesk_ticket ?? p?.zendesk_ticket_number ?? p?.zendesk ?? '').trim();
-          const po = String(p?.po_number ?? '').trim();
-          if (!z || !po) continue;
-          if (!posByZendesk.has(z)) posByZendesk.set(z, new Set());
-          posByZendesk.get(z).add(po);
-        }
+        // Group by zendesk
+        const airLanes = lanes.filter(l => l.freight.toLowerCase() === 'air');
         const lines = airLanes.map((l, i) => ({
           sort_order: i,
-          description: `${l.zendesk||'—'} - ${l.supplier||'—'}`,
+          description: `Air Freight - ${l.supplier||'—'}`,
           unit_label: 'Per KG',
           zendesk: l.zendesk,
           supplier: l.supplier,
@@ -6131,91 +6088,15 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
           gst_free: 0,
           is_misc: 0
         }));
-        const airCustomsRate = D.air.customs_processing;
-        const airCustomsQty = airLanes.length||1;
-        lines.push({ sort_order: lines.length, description:'Customs Processing', unit_label:'Flat Fee', rate:airCustomsRate, quantity:airCustomsQty, total:airCustomsRate*airCustomsQty, gst_free:1, is_misc:0 });
+        lines.push({ sort_order: lines.length, description:'Customs Processing', unit_label:'Flat Fee', rate:141, quantity:airLanes.length||1, total:141*(airLanes.length||1), gst_free:1, is_misc:0 });
         lines.push({ sort_order: lines.length+1, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
         lines.push({ sort_order: lines.length+2, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
-        const customs = airCustomsRate * airCustomsQty;
-        // Notes: each air ticket with its associated POs
-        const _noteLines = airLanes.map(l => {
-          const z = l.zendesk || '—';
-          const sup = l.supplier || '—';
-          const pos = posByZendesk.has(z) ? Array.from(posByZendesk.get(z)).join(', ') : '—';
-          return `${z} (${sup}): PO ${pos}`;
-        });
-        const notes = airLanes.length ? `Air shipments — this invoice:\n${_noteLines.join('\n')}` : '';
-        return res.json({ type:'AIR', week_start, lanes: airLanes, lines, customs, subtotal:0, gst:0, total:customs, notes });
+        const customs = 141 * (airLanes.length||1);
+        return res.json({ type:'AIR', week_start, lanes: airLanes, lines, customs, subtotal:0, gst:0, total:customs });
       }
     }
     res.status(400).json({ error: 'Unknown type' });
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
-});
-
-// ── Finance defaults editor (password-gated; mirrors the cost-report auth flow) ──
-const _finDefaultsTokens = new Map();
-const _finDefaultsTokenTTL = 30 * 60 * 1000;
-function _cleanFinDefaultsTokens() {
-  const now = Date.now();
-  for (const [k, v] of _finDefaultsTokens.entries()) {
-    if (now - v > _finDefaultsTokenTTL) _finDefaultsTokens.delete(k);
-  }
-}
-
-// POST /finance/defaults/auth — validate password, return short-lived token
-app.post('/finance/defaults/auth', authenticateRequest, requireRole(['admin']), (req, res) => {
-  const { password } = req.body || {};
-  const expected = process.env.FINANCE_DEFAULTS_PASSWORD || '01130602';
-  if (!password || password !== expected) return res.status(403).json({ error: 'Invalid password' });
-  _cleanFinDefaultsTokens();
-  const token = randomUUID();
-  _finDefaultsTokens.set(token, Date.now());
-  res.json({ token });
-});
-
-// GET /finance/defaults — current effective config (stored over seed)
-app.get('/finance/defaults', authenticateRequest, requireRole(['admin']), (req, res) => {
-  res.json(getFinanceDefaults());
-});
-
-// PUT /finance/defaults — save edited config (admin + valid token)
-app.put('/finance/defaults', authenticateRequest, requireRole(['admin']), (req, res) => {
-  try {
-    _cleanFinDefaultsTokens();
-    const token = req.body && req.body.token;
-    if (!token || !_finDefaultsTokens.has(token)) {
-      return res.status(403).json({ error: 'Invalid or expired session — re-enter the password' });
-    }
-    const inc = (req.body && req.body.config) || {};
-    const cur = getFinanceDefaults();
-    const n = (val, def) => { const x = parseFloat(val); return isNaN(x) ? def : x; };
-    const incV = inc.vas || {}, incS = inc.sea || {}, incA = inc.air || {};
-    const merged = {
-      gst_pct: n(inc.gst_pct, cur.gst_pct),
-      vas: {
-        base_processing:      n(incV.base_processing,      cur.vas.base_processing),
-        outbound:             n(incV.outbound,             cur.vas.outbound),
-        labelling:            n(incV.labelling,            cur.vas.labelling),
-        polybagging:          n(incV.polybagging,          cur.vas.polybagging),
-        storage:              n(incV.storage,              cur.vas.storage),
-        carton_replacement:   n(incV.carton_replacement,   cur.vas.carton_replacement),
-        labelling_multiplier: n(incV.labelling_multiplier, cur.vas.labelling_multiplier),
-        carton_multiplier:    n(incV.carton_multiplier,    cur.vas.carton_multiplier),
-      },
-      sea: {
-        freight_rate:      n(incS.freight_rate,      cur.sea.freight_rate),
-        freight_rate_20ft: n(incS.freight_rate_20ft, cur.sea.freight_rate_20ft),
-        customs_clearance: n(incS.customs_clearance, cur.sea.customs_clearance),
-        safety_net:        n(incS.safety_net,        cur.sea.safety_net),
-      },
-      air: {
-        customs_processing: n(incA.customs_processing, cur.air.customs_processing),
-      },
-    };
-    db.prepare(`INSERT INTO fin_defaults (id, config, updated_at) VALUES ('finance', ?, datetime('now'))
-      ON CONFLICT(id) DO UPDATE SET config=excluded.config, updated_at=datetime('now')`).run(JSON.stringify(merged));
-    res.json(merged);
-  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
 // ── GET /finance/invoice/:id/pdf — generate PDF (pure Node, no Python) ──
@@ -6278,8 +6159,6 @@ app.get('/finance/invoice/:id/pdf', async (req, res) => {
     doc.fontSize(22).font('Helvetica').fillColor('#3A3A3C').text('ity', { continued: true });
     doc.fontSize(16).font('Helvetica-Bold').fillColor(BRAND).text('»', { continued: false });
     doc.fontSize(16).font('Helvetica-Bold').fillColor(DARK).text('TAX INVOICE', 400, 50, { align: 'right', width: 145 });
-    const _typeLabel = inv.type === 'AIR' ? 'Door-to-Door with Air Freight' : inv.type === 'SEA' ? 'Door-to-Door with Sea Freight' : 'VAS Services';
-    doc.fontSize(8).font('Helvetica').fillColor(MID).text(_typeLabel, 400, 69, { align: 'right', width: 145 });
 
     // Rule
     doc.moveTo(50, 80).lineTo(545, 80).lineWidth(2).strokeColor(BRAND).stroke();
@@ -6770,7 +6649,7 @@ app.post('/finance/insights', authenticateRequest, requireRole(['admin']), aiLim
     if (!pl_data) return res.status(400).json({ error: 'pl_data required' });
     const anthropic = getAnthropic();
     const response = await anthropic.messages.create({
-      model: CLAUDE_MODEL,
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 1200,
       system: 'You are a financial analyst for VelOzity, a 3PL/VAS company. Revenue channels: VAS (warehouse labelling/processing, billed per unit, Labour=direct VAS cost), Sea Freight, Air Freight, Overhead (Software/Office/Storage/Marketing/Other). Analyse P&L and return exactly 5 specific actionable insights. Use real numbers. Return ONLY a valid JSON array, no markdown. Each object: title (3-5 words), insight (1-2 sentences with numbers), action (one concrete next step), impact (High/Medium/Low), channel (VAS/Sea/Air/Overall).',
       messages: [{ role: 'user', content: 'Analyse this P&L and return 5 insights as JSON array:\n' + JSON.stringify(pl_data) }]
@@ -6972,7 +6851,7 @@ async function pulseReplyToThread(threadId, contextSnippet, question) {
       : `A new collaboration thread has just been started. Provide a brief, specific summary of the relevant operational data you can see above, and highlight anything noteworthy.`;
 
     const resp = await getAnthropic().messages.create({
-      model:      CLAUDE_MODEL,
+      model:      'claude-sonnet-4-20250514',
       max_tokens: 600,
       system:     opsLines.join('\n'),
       messages:   [{ role: 'user', content: userMsg }],
@@ -7946,10 +7825,10 @@ function buildReport(D) {
 
   // ── PAGE 2: CONTENTS ──────────────────────────────────────────
   const sections = [
-    { num:'01', label:'Executive Summary',        desc:'Unit cost KPIs across VAS and fully landed (D2D) Sea/Air freight, with MoM trends', color: '#990033' },
+    { num:'01', label:'Executive Summary',        desc:'Unit cost KPIs across VAS, Sea and Air freight with MoM trends', color: '#990033' },
     { num:'02', label:'Freight Mix',              desc:'Air vs Sea volume split and 4-month trend analysis', color: '#0EA5E9' },
-    { num:'03', label:'Fully Landed with Sea Freight',  desc:'Door-to-door cost, container throughput, unit cost and supplier breakdown', color: '#0EA5E9' },
-    { num:'04', label:'Fully Landed with Air Freight',  desc:'Door-to-door cost, AWB throughput, unit cost and supplier breakdown', color: '#F59E0B' },
+    { num:'03', label:'Sea Freight Utilisation',  desc:'Container throughput, unit cost and supplier breakdown', color: '#0EA5E9' },
+    { num:'04', label:'Air Freight Utilisation',  desc:'AWB throughput, unit cost and supplier breakdown', color: '#F59E0B' },
     { num:'05', label:'VAS Processing',           desc:'Applied units, unit cost trend and supplier heatmap', color: '#990033' },
     { num:'06', label:'Carton Replacement',       desc:'Replacement volumes, billed cost and top 3 suppliers', color: '#8B5CF6' },
   ];
@@ -7979,8 +7858,6 @@ function buildReport(D) {
           All monetary values are in <strong>\${CURR} (\${D.fx_note})</strong>, excluding GST.
           Unit costs are calculated using completed records for POs in the same operational week as each invoice. Weeks are assigned to months by their Monday start date.
           Carton replacement is reported separately and excluded from VAS unit cost calculations.
-          <br><br>
-          <strong>Sea and Air freight figures are fully landed (door-to-door, "D2D") costs</strong> — the total cost to move units by that mode, not the freight leg alone. Fully landed cost includes inland transport in China, customs clearance at source and destination, and last-mile delivery. Air additionally includes special handling such as netting and palletisation.
         </div>
       </div>
     </div>
@@ -8029,23 +7906,25 @@ function buildReport(D) {
           </div>
 
           <div class="kpi-card sea">
-            <div class="kpi-label">Fully Landed with Sea Freight · Cost / Unit</div>
+            <div class="kpi-label">Sea Freight Cost / Unit</div>
             <div class="kpi-value">\${fmtC(seaD.unit_revenue)}</div>
             <div class="kpi-sub">\${fmtU(seaD.applied_units)} sea units · \${D.sea_containers.ft20} × 20ft + \${D.sea_containers.ft40} × 40ft</div>
             \${delta(seaD.unit_revenue, seaPrev.unit_revenue)}
             <div class="kpi-desc">
-              Fully landed (door-to-door) cost per applied unit shipped by sea — incl. inland transport in China, customs clearance at source &amp; destination, and last-mile delivery. Not the freight leg alone. Container count reflects \${fmtMonth(sel)} only.
+              Sea freight expense per applied unit shipped by sea. Container count reflects \${fmtMonth(sel)} only.
+              Air containers are excluded from this metric.
             </div>
             \${sparkbars(months.map(m=>D.sea[m]?.unit_revenue), 'rgba(14,165,233,0.4)')}
           </div>
 
           <div class="kpi-card air">
-            <div class="kpi-label">Fully Landed with Air Freight · Cost / Unit</div>
+            <div class="kpi-label">Air Freight Cost / Unit</div>
             <div class="kpi-value">\${fmtC(airD.unit_revenue)}</div>
             <div class="kpi-sub">\${fmtU(airD.applied_units)} air units</div>
             \${delta(airD.unit_revenue, airPrev.unit_revenue)}
             <div class="kpi-desc">
-              Fully landed (door-to-door) cost per applied unit shipped by air — incl. inland transport in China, customs clearance at source &amp; destination, last-mile delivery, and special handling (netting &amp; palletisation). Higher per-unit cost vs sea reflects the speed premium.
+              Air freight expense per applied unit shipped by air.
+              Higher per-unit cost vs sea reflects speed premium. Monitor ratio to sea cost.
             </div>
             \${sparkbars(months.map(m=>D.air[m]?.unit_revenue), 'rgba(245,158,11,0.4)')}
           </div>
@@ -8060,8 +7939,8 @@ function buildReport(D) {
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:12px;">
           \${[
             {label:'VAS Cost/Unit',val:vasD.unit_revenue,units:vasD.applied_units,ul:'units',color:'#990033'},
-            {label:'D2D Sea $/Unit',val:seaD.unit_revenue,units:seaD.applied_units,ul:'sea units',color:'#0EA5E9'},
-            {label:'D2D Air $/Unit',val:airD.unit_revenue,units:airD.applied_units,ul:'air units',color:'#F59E0B'},
+            {label:'Sea Cost/Unit',val:seaD.unit_revenue,units:seaD.applied_units,ul:'sea units',color:'#0EA5E9'},
+            {label:'Air Cost/Unit',val:airD.unit_revenue,units:airD.applied_units,ul:'air units',color:'#F59E0B'},
           ].map(k=>'<div style="padding:10px 14px;border-radius:8px;border:0.5px solid rgba(0,0,0,0.08);border-top:2px solid '+k.color+';">'
             +'<div style="font-size:9px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">'+k.label+'</div>'
             +'<div style="font-size:20px;font-weight:700;color:#1C1C1E;">'+fmtC(k.val)+'</div>'
@@ -8074,8 +7953,8 @@ function buildReport(D) {
           const hdrs = '<th>Channel</th>'+mLabels.map((l,i)=>'<th class="num"'+(i===3?' style="font-weight:700;color:#1C1C1E;"':'')+'>'+l+(i===3?' ★':'')+' </th>').join('')+'<th class="num">MoM Δ</th>';
           const compRows = [
             {label:'VAS Cost/Unit',key:'unit_revenue',src:'vas',color:'#990033'},
-            {label:'D2D Sea $/Unit',key:'unit_revenue',src:'sea',color:'#0EA5E9'},
-            {label:'D2D Air $/Unit',key:'unit_revenue',src:'air',color:'#F59E0B'},
+            {label:'Sea Cost/Unit',key:'unit_revenue',src:'sea',color:'#0EA5E9'},
+            {label:'Air Cost/Unit',key:'unit_revenue',src:'air',color:'#F59E0B'},
           ].map(row=>{
             const vals=months.map(m=>D[row.src][m]?.[row.key]);
             const prev=vals[2],curr=vals[3];
@@ -8096,7 +7975,7 @@ function buildReport(D) {
       <div class="method-footer">
         <strong>Methodology:</strong>
         VAS Cost/Unit = VAS invoice lines (excl. Carton Replacement) ÷ applied units, by invoice_date month.
-        Sea/Air Cost/Unit = fully landed (door-to-door) invoice totals (type=SEA/AIR) grouped by invoice week_start month ÷ applied units filtered by freight type on plan rows.
+        Sea/Air Cost/Unit = invoice totals (type=SEA/AIR) grouped by invoice week_start month ÷ applied units filtered by freight type on plan rows.
         All invoices included regardless of status. Carton Replacement excluded from VAS totals.
         All values in \${D.fx_note}. MoM compares selected month to prior month.
       </div>
@@ -8134,11 +8013,11 @@ function buildReport(D) {
               <div style="font-size:11px;color:#AEAEB2;margin-top:2px;">\${D.freight_mix[sel]?.air_pct||0}% of total</div>
             </div>
             <div style="padding:12px;border-radius:8px;background:#F0F9FF;border:0.5px solid rgba(14,165,233,0.1);">
-              <div style="font-size:9px;font-weight:600;color:#0EA5E9;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">D2D Sea $/Unit</div>
+              <div style="font-size:9px;font-weight:600;color:#0EA5E9;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Sea Cost/Unit</div>
               <div style="font-size:20px;font-weight:700;color:#1C1C1E;">\${fmtC(D.sea[sel]?.unit_revenue)}</div>
             </div>
             <div style="padding:12px;border-radius:8px;background:#FFFBEB;border:0.5px solid rgba(245,158,11,0.1);">
-              <div style="font-size:9px;font-weight:600;color:#F59E0B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">D2D Air $/Unit</div>
+              <div style="font-size:9px;font-weight:600;color:#F59E0B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Air Cost/Unit</div>
               <div style="font-size:20px;font-weight:700;color:#1C1C1E;">\${fmtC(D.air[sel]?.unit_revenue)}</div>
             </div>
           </div>
@@ -8150,7 +8029,7 @@ function buildReport(D) {
             <div><div class="chart-title">Mix by Mode</div><div class="chart-wrap" style="height:130px;"><canvas id="chart-mix-bar"></canvas></div></div>
             <div><div class="chart-title">Cost/Unit Trend</div><div class="chart-wrap" style="height:130px;"><canvas id="chart-mix-cost"></canvas></div></div>
           </div>
-          <table class="data-table"><thead><tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">D2D Sea $/U</th><th class="num">D2D Air $/U</th></tr></thead><tbody>\${months.map((mk,i)=>\`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td><td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td><td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td><td class="num">\${fmtC(D.sea[mk]?.unit_revenue)}</td><td class="num">\${fmtC(D.air[mk]?.unit_revenue)}</td></tr>\`).join('')}</tbody></table>
+          <table class="data-table"><thead><tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">Sea $/U</th><th class="num">Air $/U</th></tr></thead><tbody>\${months.map((mk,i)=>\`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td><td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td><td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td><td class="num">\${fmtC(D.sea[mk]?.unit_revenue)}</td><td class="num">\${fmtC(D.air[mk]?.unit_revenue)}</td></tr>\`).join('')}</tbody></table>
         </div>
       </div>
       <div class="method-footer">
@@ -8167,21 +8046,17 @@ function buildReport(D) {
       \${pageNum(5, 8)}
       <div class="section-header">
         <div>
-          <div class="section-title">Fully Landed with Sea Freight</div>
-          <div class="section-subtitle">Door-to-door cost, container throughput and unit cost — \${fmtMonth(sel)}</div>
+          <div class="section-title">Sea Freight Utilisation</div>
+          <div class="section-subtitle">Container throughput and unit cost — \${fmtMonth(sel)}</div>
         </div>
-        <span class="section-badge" style="background:rgba(14,165,233,0.1);color:#0EA5E9;">D2D Sea</span>
+        <span class="section-badge" style="background:rgba(14,165,233,0.1);color:#0EA5E9;">Sea</span>
       </div>
       <div class="section-body">
-        <div style="margin-bottom:16px;padding:10px 14px;background:rgba(14,165,233,0.06);border:0.5px solid rgba(14,165,233,0.18);border-radius:8px;font-size:10px;color:var(--mid);line-height:1.6;">
-          <strong style="color:#0EA5E9;">Fully landed (door-to-door) — what's included:</strong>
-          inland transport in China · customs clearance at source &amp; destination · last-mile delivery. This is the total cost to land units by sea, not the ocean-freight leg alone.
-        </div>
         <div class="three-col" style="margin-bottom:20px;">
           <div class="kpi-card sea" style="padding:14px 16px;">
             <div class="kpi-label">Total Cost</div>
             <div class="kpi-value" style="font-size:22px;">\${fmt(seaD.revenue)}</div>
-            <div class="kpi-sub">Fully landed invoices (sea)</div>
+            <div class="kpi-sub">Sea freight invoices</div>
           </div>
           <div class="kpi-card sea" style="padding:14px 16px;">
             <div class="kpi-label">Units Shipped</div>
@@ -8238,7 +8113,7 @@ function buildReport(D) {
       </div>
       <div class="method-footer">
         <strong>Methodology:</strong>
-        Cost = fully landed (door-to-door) fin_invoices subtotal (ex-GST), type=SEA, grouped by week_start month (all statuses including draft).
+        Cost = fin_invoices subtotal (ex-GST), type=SEA, grouped by week_start month (all statuses including draft).
         Expense = fin_expenses category='Sea Freight Cost', by month_key.
         Units = completed VAS records for POs on plan weeks with week_start in this month, plus any consolidated non-VAS units declared on lanes (is_non_vas=true) for the same weeks.
         Cost/Unit = Invoice total ÷ total units. Container counts from flow_week data for weeks in selected month (Air containers excluded).
@@ -8252,21 +8127,17 @@ function buildReport(D) {
       \${pageNum(6, 8)}
       <div class="section-header">
         <div>
-          <div class="section-title">Fully Landed with Air Freight</div>
-          <div class="section-subtitle">Door-to-door cost, airfreight throughput and unit cost — \${fmtMonth(sel)}</div>
+          <div class="section-title">Air Freight Utilisation</div>
+          <div class="section-subtitle">Airfreight throughput and unit cost — \${fmtMonth(sel)}</div>
         </div>
-        <span class="section-badge" style="background:rgba(245,158,11,0.1);color:#F59E0B;">D2D Air</span>
+        <span class="section-badge" style="background:rgba(245,158,11,0.1);color:#F59E0B;">Air</span>
       </div>
       <div class="section-body">
-        <div style="margin-bottom:16px;padding:10px 14px;background:rgba(245,158,11,0.06);border:0.5px solid rgba(245,158,11,0.18);border-radius:8px;font-size:10px;color:var(--mid);line-height:1.6;">
-          <strong style="color:#F59E0B;">Fully landed (door-to-door) — what's included:</strong>
-          inland transport in China · customs clearance at source &amp; destination · last-mile delivery · special handling (netting &amp; palletisation). This is the total cost to land units by air, not the air-freight leg alone.
-        </div>
         <div class="three-col" style="margin-bottom:20px;">
           <div class="kpi-card air" style="padding:14px 16px;">
             <div class="kpi-label">Total Cost</div>
             <div class="kpi-value" style="font-size:22px;">\${fmt(airD.revenue)}</div>
-            <div class="kpi-sub">Fully landed invoices (air)</div>
+            <div class="kpi-sub">Air freight invoices</div>
           </div>
           <div class="kpi-card air" style="padding:14px 16px;">
             <div class="kpi-label">Units Shipped</div>
@@ -8308,7 +8179,7 @@ function buildReport(D) {
       </div>
       <div class="method-footer">
         <strong>Methodology:</strong>
-        Cost = fully landed (door-to-door) fin_invoices subtotal (ex-GST), type=AIR, grouped by week_start month (all statuses including draft).
+        Cost = fin_invoices subtotal (ex-GST), type=AIR, grouped by week_start month (all statuses including draft).
         Expense = fin_expenses category='Air Freight Cost', by month_key.
         Units = completed VAS records for POs on plan weeks with week_start in this month, plus any consolidated non-VAS units declared on lanes (is_non_vas=true) for the same weeks.
         Cost/Unit = Invoice total ÷ total units.
@@ -9446,7 +9317,7 @@ app.post('/report/cost-utilisation/insights', (req, res) => {
     const userMsg = 'Data: ' + dataStr + '\n\nReturn ONLY a JSON array with exactly 3 objects, no markdown:\n[{"title":"short headline","finding":"1-2 sentences with numbers","action":"concrete next step","impact":"High|Medium|Low"}]';
 
     const resp = await getAnthropic().messages.create({
-      model: CLAUDE_MODEL,
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 800,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMsg }],
@@ -9649,6 +9520,190 @@ app.get('/iconic/publish/log',
 );
 
 // ---- Start ----
+// ═══════════════════ NON-COMPLIANCE REPORTING — API ═══════════════════
+// Carton reconciliation model: the legacy receiving.cartons_replaced count is the
+// billing floor ("how many"); nc_incident carton-grain rows supply the reason
+// ("why") and can only reclassify WITHIN that count. Invariant per (week,PO):
+//     legacy_replaced = Σ categorized_cartons + uncategorized_remainder
+// Logging decrements uncategorized (never adds on top), so the total never moves.
+function ncLegacyReplaced(weekStart, po){
+  const row = db.prepare(`SELECT COALESCE(cartons_replaced,0) AS n FROM receiving WHERE week_start=? AND po_number=?`).get(weekStart, po);
+  return row ? row.n : 0;
+}
+function ncCategorizedCartons(weekStart, po, excludeIncidentId){
+  const row = db.prepare(
+    `SELECT COALESCE(SUM(qty),0) AS n FROM nc_incident
+     WHERE week_start=? AND po_number=? AND grain='carton' AND id != ?`
+  ).get(weekStart, po, excludeIncidentId || '');
+  return row.n || 0;
+}
+function ncCartonReconByPo(weekStart){
+  const legacy = db.prepare(
+    `SELECT po_number, supplier_name AS supplier, COALESCE(cartons_replaced,0) AS legacy
+     FROM receiving WHERE week_start=?`
+  ).all(weekStart);
+  const cat = db.prepare(
+    `SELECT po_number, COALESCE(SUM(qty),0) AS categorized
+     FROM nc_incident WHERE week_start=? AND grain='carton' GROUP BY po_number`
+  ).all(weekStart);
+  const catMap = new Map(cat.map(r => [r.po_number, r.categorized]));
+  return legacy.map(r => {
+    const categorized = catMap.get(r.po_number) || 0;
+    return {
+      po_number: r.po_number, supplier: r.supplier,
+      legacy: r.legacy, categorized,
+      uncategorized: Math.max(0, r.legacy - categorized),
+      over_categorized: categorized > r.legacy,   // cap makes this impossible on insert; true only if legacy was later revised down
+    };
+  });
+}
+function ncNewId(){ return 'nc_' + crypto.randomBytes(12).toString('hex'); }
+
+// ── GET /nc/categories — taxonomy for the capture form ──
+app.get('/nc/categories', authenticateRequest, (req, res) => {
+  try {
+    res.json({ categories: db.prepare('SELECT id,grp,label,grain,rate,sort_order FROM nc_category WHERE active=1 ORDER BY sort_order').all() });
+  } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── GET /nc/incidents?week_start=&supplier= — list with photos ──
+app.get('/nc/incidents', authenticateRequest, auditLog('view_nc_incidents'), (req, res) => {
+  try {
+    const week = String(req.query.week_start||'').trim();
+    if (!week) return res.status(400).json({ error: 'week_start required' });
+    const params = [week]; let sql = 'SELECT * FROM nc_incident WHERE week_start=?';
+    if (req.query.supplier) { sql += ' AND supplier=?'; params.push(String(req.query.supplier)); }
+    sql += ' ORDER BY supplier, po_number, created_at';
+    const incidents = db.prepare(sql).all(...params);
+    const imgs = db.prepare('SELECT * FROM nc_incident_image WHERE incident_id IN (SELECT id FROM nc_incident WHERE week_start=?)').all(week);
+    const byInc = new Map();
+    for (const im of imgs) {
+      if (!byInc.has(im.incident_id)) byInc.set(im.incident_id, []);
+      byInc.get(im.incident_id).push({ id: im.id, url: `${R2_PUBLIC}/${im.r2_key}`, key: im.r2_key, uploaded_via: im.uploaded_via });
+    }
+    res.json({ incidents: incidents.map(i => ({ ...i, images: byInc.get(i.id) || [] })) });
+  } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── POST /nc/incident — create (enforces the carton cap) ──
+app.post('/nc/incident', authenticateRequest, writeOpLimiter, auditLog('create_nc_incident'), (req, res) => {
+  try {
+    const b = req.body || {};
+    const cat = db.prepare('SELECT * FROM nc_category WHERE id=? AND active=1').get(b.category_id);
+    if (!cat) return res.status(400).json({ error: 'Unknown or inactive category' });
+    const grain = cat.grain;
+    const week = String(b.week_start||'').trim();
+    const supplier = String(b.supplier||'').trim();
+    const po = String(b.po_number||'').trim();
+    const qty = Math.max(0, parseInt(b.qty, 10) || 0);
+    if (!week || !supplier || !po) return res.status(400).json({ error: 'week_start, supplier and po_number are required' });
+    if (qty <= 0) return res.status(400).json({ error: 'qty must be > 0' });
+    const sku = grain === 'unit' ? String(b.sku||'').trim() : null;
+    if (grain === 'unit' && !sku) return res.status(400).json({ error: 'sku is required for unit-grain categories' });
+
+    if (grain === 'carton') {
+      const legacy = ncLegacyReplaced(week, po);
+      const already = ncCategorizedCartons(week, po, null);
+      if (already + qty > legacy) {
+        return res.status(409).json({
+          error: 'carton_cap_exceeded',
+          message: `Categorising ${already + qty} cartons exceeds the ${legacy} replaced cartons recorded for ${po}. Reasons can only be assigned within the replaced-carton count.`,
+          legacy, already, requested: qty,
+        });
+      }
+    }
+    const id = ncNewId();
+    db.prepare(`INSERT INTO nc_incident
+      (id,week_start,facility,supplier,po_number,sku,category_id,grain,qty,corrective_action,status,resolution_comment,cost,needs_review,created_by,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`)
+      .run(id, week, b.facility||null, supplier, po, sku, cat.id, grain, qty,
+           b.corrective_action||null, (b.status==='resolved'?'resolved':'open'), b.resolution_comment||null,
+           null, 0, b.created_by||null);
+    res.json(db.prepare('SELECT * FROM nc_incident WHERE id=?').get(id));
+  } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── PATCH /nc/incident/:id — status / resolution / qty (re-checks carton cap) ──
+app.patch('/nc/incident/:id', authenticateRequest, writeOpLimiter, auditLog('edit_nc_incident'), (req, res) => {
+  try {
+    const inc = db.prepare('SELECT * FROM nc_incident WHERE id=?').get(req.params.id);
+    if (!inc) return res.status(404).json({ error: 'Incident not found' });
+    const b = req.body || {}; const fields = []; const vals = [];
+    if (b.status !== undefined) {
+      if (!['open','resolved'].includes(b.status)) return res.status(400).json({ error: 'status must be open or resolved' });
+      fields.push('status=?'); vals.push(b.status);
+    }
+    if (b.resolution_comment !== undefined) { fields.push('resolution_comment=?'); vals.push(b.resolution_comment||null); }
+    if (b.corrective_action !== undefined)  { fields.push('corrective_action=?');  vals.push(b.corrective_action||null); }
+    if (b.qty !== undefined) {
+      const q = Math.max(0, parseInt(b.qty, 10) || 0);
+      if (q <= 0) return res.status(400).json({ error: 'qty must be > 0' });
+      if (inc.grain === 'carton') {
+        const legacy = ncLegacyReplaced(inc.week_start, inc.po_number);
+        const others = ncCategorizedCartons(inc.week_start, inc.po_number, inc.id);
+        if (others + q > legacy) return res.status(409).json({ error: 'carton_cap_exceeded', legacy, already: others, requested: q });
+      }
+      fields.push('qty=?'); vals.push(q);
+    }
+    if (!fields.length) return res.status(400).json({ error: 'no editable fields' });
+    fields.push(`updated_at=datetime('now')`);
+    db.prepare(`UPDATE nc_incident SET ${fields.join(',')} WHERE id=?`).run(...vals, req.params.id);
+    res.json(db.prepare('SELECT * FROM nc_incident WHERE id=?').get(req.params.id));
+  } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── POST /nc/incident/:id/image — upload photo to R2 (desktop or phone) ──
+app.post('/nc/incident/:id/image', authenticateRequest, upload.single('file'), async (req, res) => {
+  try {
+    const inc = db.prepare('SELECT id FROM nc_incident WHERE id=?').get(req.params.id);
+    if (!inc) return res.status(404).json({ error: 'Incident not found' });
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+    const ext = path.extname(req.file.originalname) || '';
+    const key = `nc/${req.params.id}/${Date.now()}-${crypto.randomBytes(6).toString('hex')}${ext}`;
+    await r2Client.send(new PutObjectCommand({ Bucket: R2_BUCKET, Key: key, Body: req.file.buffer, ContentType: req.file.mimetype }));
+    const via = (req.query.via === 'phone' || (req.body && req.body.via === 'phone')) ? 'phone' : 'desktop';
+    const imgId = ncNewId();
+    db.prepare(`INSERT INTO nc_incident_image (id,incident_id,r2_key,thumb_key,uploaded_via,created_at) VALUES (?,?,?,?,?,datetime('now'))`)
+      .run(imgId, req.params.id, key, null, via);
+    res.json({ id: imgId, url: `${R2_PUBLIC}/${key}`, key, uploaded_via: via });
+  } catch(e){ console.error('[nc/image]', e); res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── DELETE /nc/image/:id — remove a photo ──
+app.delete('/nc/image/:id', authenticateRequest, writeOpLimiter, auditLog('delete_nc_image'), async (req, res) => {
+  try {
+    const im = db.prepare('SELECT * FROM nc_incident_image WHERE id=?').get(req.params.id);
+    if (!im) return res.status(404).json({ error: 'Image not found' });
+    try { await r2Client.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: im.r2_key })); } catch(_){}
+    db.prepare('DELETE FROM nc_incident_image WHERE id=?').run(req.params.id);
+    res.json({ ok: true });
+  } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── GET /nc/reconciliation?week_start= — carton categorized vs uncategorized (legacy) ──
+app.get('/nc/reconciliation', authenticateRequest, auditLog('view_nc_reconciliation'), (req, res) => {
+  try {
+    const week = String(req.query.week_start||'').trim();
+    if (!week) return res.status(400).json({ error: 'week_start required' });
+    const rows = ncCartonReconByPo(week);
+    const totals = rows.reduce((a, r) => { a.legacy += r.legacy; a.categorized += r.categorized; a.uncategorized += r.uncategorized; return a; }, { legacy: 0, categorized: 0, uncategorized: 0 });
+    res.json({ week_start: week, by_po: rows, totals });
+  } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// ── POST /nc/recheck — re-flag incidents where a downward-revised legacy count now under-covers categorized cartons ──
+app.post('/nc/recheck', authenticateRequest, writeOpLimiter, auditLog('recheck_nc_review'), (req, res) => {
+  try {
+    const week = String((req.body && req.body.week_start) || req.query.week_start || '').trim();
+    if (!week) return res.status(400).json({ error: 'week_start required' });
+    db.prepare(`UPDATE nc_incident SET needs_review=0 WHERE week_start=? AND grain='carton'`).run(week);
+    const over = ncCartonReconByPo(week).filter(r => r.over_categorized);
+    const flag = db.prepare(`UPDATE nc_incident SET needs_review=1, updated_at=datetime('now') WHERE week_start=? AND po_number=? AND grain='carton'`);
+    db.transaction(() => { for (const r of over) flag.run(week, r.po_number); })();
+    res.json({ week_start: week, flagged_pos: over.map(r => r.po_number) });
+  } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
+});
+
 app.listen(PORT, () => {
   console.log(`UID Ops backend listening on http://localhost:${PORT}`);
   console.log(`DB file: ${DB_FILE}`);
