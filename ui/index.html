@@ -3728,6 +3728,74 @@ window._costReportSubmit = async function() {
   }
 };
 
+// ── Supplier Discrepancy Report modal ──
+window._supplierDiscrepancyOpenModal = function() {
+  const existing = document.getElementById('sd-report-modal');
+  if (existing) existing.remove();
+  const BRAND = '#990033';
+  const supSet = new Set();
+  const plan = (window.state && Array.isArray(window.state.plan)) ? window.state.plan : [];
+  for (const r of plan) { const s = String(r.supplier || r.supplier_name || r.brand_name || '').trim(); if (s) supSet.add(s); }
+  const suppliers = Array.from(supSet).sort();
+  const week = (window.state && window.state.weekStart) || '';
+  const overlay = document.createElement('div');
+  overlay.id = 'sd-report-modal';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:16px;padding:32px;width:min(92vw,440px);box-shadow:0 20px 60px rgba(0,0,0,0.2);font-family:inherit;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+        <div style="width:32px;height:32px;border-radius:9px;background:linear-gradient(135deg,#990033,#cc0044);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#fff;font-weight:800;font-size:13px;">⚑</div>
+        <div><div style="font-size:15px;font-weight:700;color:#1C1C1E;">Supplier Discrepancy Reporting</div>
+        <div style="font-size:11px;color:#6E6E73;">Weekly non-compliance by vendor — with photo evidence</div></div>
+      </div>
+      <div style="height:0.5px;background:rgba(0,0,0,0.08);margin:18px 0;"></div>
+      <div style="margin-bottom:14px;"><label style="display:block;font-size:10px;font-weight:600;color:#6E6E73;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;">Report week (Monday)</label>
+        <input type="date" id="sd-week" value="${week}" style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:9px;padding:9px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;"/></div>
+      <div style="margin-bottom:14px;"><label style="display:block;font-size:10px;font-weight:600;color:#6E6E73;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;">Supplier</label>
+        <select id="sd-supplier" style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:9px;padding:9px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;background:#fff;">
+          <option value="">All suppliers (internal)</option>
+          ${suppliers.map(s => `<option value="${s.replace(/"/g,'&quot;')}">${s.replace(/</g,'&lt;')} (share externally)</option>`).join('')}
+        </select>
+        <div style="font-size:10px;color:#AEAEB2;margin-top:4px;">Pick one supplier for a shareable, single-supplier copy.</div></div>
+      <div style="margin-bottom:14px;">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#1C1C1E;"><input type="checkbox" id="sd-cost" style="accent-color:${BRAND};"> Include cost columns (password required)</label>
+        <div id="sd-pw-wrap" style="display:none;margin-top:8px;"><input type="password" id="sd-password" placeholder="Report password" style="width:100%;border:0.5px solid rgba(0,0,0,0.15);border-radius:9px;padding:9px 12px;font-size:13px;font-family:inherit;outline:none;box-sizing:border-box;"/></div>
+        <div id="sd-error" style="display:none;font-size:11px;color:#EF4444;margin-top:6px;"></div></div>
+      <div style="display:flex;gap:10px;">
+        <button onclick="document.getElementById('sd-report-modal').remove()" style="flex:1;background:#F5F5F7;color:#6E6E73;border:none;border-radius:10px;padding:11px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">Cancel</button>
+        <button id="sd-submit-btn" onclick="window._supplierDiscrepancySubmit()" style="flex:2;background:${BRAND};color:#fff;border:none;border-radius:10px;padding:11px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">Generate Report →</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.getElementById('sd-cost').addEventListener('change', function(){ document.getElementById('sd-pw-wrap').style.display = this.checked ? 'block' : 'none'; });
+};
+
+window._supplierDiscrepancySubmit = async function() {
+  const week = document.getElementById('sd-week')?.value;
+  const supplier = document.getElementById('sd-supplier')?.value || '';
+  const includeCost = document.getElementById('sd-cost')?.checked || false;
+  const password = document.getElementById('sd-password')?.value || '';
+  const errEl = document.getElementById('sd-error');
+  const btn = document.getElementById('sd-submit-btn');
+  if (!week) { errEl.textContent = 'Please select the report week.'; errEl.style.display = 'block'; return; }
+  if (includeCost && !password) { errEl.textContent = 'Password required to include cost.'; errEl.style.display = 'block'; return; }
+  errEl.style.display = 'none'; btn.textContent = 'Generating…'; btn.disabled = true;
+  try {
+    const _base = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/, '');
+    let _token = null; if (window.Clerk?.session) { try { _token = await window.Clerk.session.getToken(); } catch(_){} }
+    const r = await fetch(`${_base}/report/supplier-discrepancy/auth`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(_token ? {'Authorization': 'Bearer ' + _token} : {}) },
+      body: JSON.stringify({ includeCost, password })
+    });
+    if (!r.ok) { const err = await r.json().catch(()=>({})); errEl.textContent = err.error || 'Could not authorise.'; errEl.style.display = 'block'; btn.textContent = 'Generate Report →'; btn.disabled = false; return; }
+    const { token } = await r.json();
+    document.getElementById('sd-report-modal').remove();
+    window.open(`${_base}/report/supplier-discrepancy?token=${token}&week=${encodeURIComponent(week)}&supplier=${encodeURIComponent(supplier)}`, '_blank');
+  } catch(e) { errEl.textContent = 'Request failed: ' + e.message; errEl.style.display = 'block'; btn.textContent = 'Generate Report →'; btn.disabled = false; }
+};
+
 // ==========================================================================
 // MONTHLY CLIENT REPORT — modal + submit
 // Downloads Shipping Data + VAS Dashboard as two XLSX files.
@@ -7404,7 +7472,7 @@ function renderReportsPage(container){
       <div style="padding:12px 18px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:space-between;">
         <div style="font-size:12px;font-weight:500;color:#1C1C1E;display:flex;align-items:center;gap:8px;">
           <span>Operations</span>
-          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">4 reports</span>
+          <span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">5 reports</span>
         </div>
         <span style="font-size:10px;color:#AEAEB2;">Weekly ops overview</span>
       </div>
@@ -7413,6 +7481,7 @@ function renderReportsPage(container){
         ${reportCard('Stock Status','Planned vs actual received vs in-transit status per PO × SKU across a week or date range.','XLSX','Admin · Client','__stock-status-direct__')}
         ${reportCard('Cost Utilisation Report','Monthly cost analysis — VAS, sea and air freight unit economics, carton replacement. 4-month trend.','PDF','Admin only','__cost-util-direct__')}
         ${reportCard('Monthly Client Report','Monthly client-facing XLSX: Shipping Data and VAS Dashboard — one row per container, with transit dates, utilization, and costs.','XLSX','Admin only','__monthly-client-direct__')}
+        ${reportCard('Supplier Discrepancy Reporting','Weekly vendor non-compliance — rework and delivery-failure categories, affected qty, photo evidence and carton reconciliation. Per-supplier shareable copy; cost columns password-gated.','PDF','Admin · Client','__supplier-discrepancy-direct__')}
       </div>
     </div>
 
@@ -7524,6 +7593,10 @@ function renderReportsPage(container){
       }
       if(proxyId === '__monthly-client-direct__'){
         window._monthlyClientOpenModal();
+        return;
+      }
+      if(proxyId === '__supplier-discrepancy-direct__'){
+        window._supplierDiscrepancyOpenModal();
         return;
       }
       const target = document.getElementById(proxyId);
