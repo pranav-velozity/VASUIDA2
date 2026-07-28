@@ -6189,9 +6189,10 @@ window.__openPrebookModal = function(){
 <script src="/public/lane_snapshot_additive.js?v=1" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 <script src="/public/map_live_additive.js?v=1" defer></script>
-  <script src="/public/finance_additive.js?v=16" defer></script>
+  <script src="/public/finance_additive.js?v=15" defer></script>
   <script src="/public/collaboration_additive.js?v=2" defer></script>
   <script src="/public/exec_pdf_additive.js?v=3" defer></script>
+  <script src="/public/noncompliance_additive.js?v=1" defer></script>
 
 
 <!-- ── Week Hub Split-Flap Insight Flipper ── -->
@@ -7433,7 +7434,6 @@ function renderReportsPage(container){
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">shipping_type</div><input id="apo_shipping_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Warehouse"/></div>
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">logistic_type</div><input id="apo_logistic_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="Delivered to Warehouse"/></div>
-              <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">logistic_eta</div><input id="apo_logistic_eta" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="11:00"/></div>
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">import_type</div><input id="apo_import_type" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="China import"/></div>
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">po_currency</div><input id="apo_po_currency" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="AUD"/></div>
               <div><div style="font-size:10px;color:#AEAEB2;margin-bottom:3px;">payment_term</div><input id="apo_payment_term" type="number" style="width:100%;border:0.5px solid rgba(0,0,0,0.12);border-radius:7px;padding:6px 9px;font-size:11px;font-family:inherit;color:#1C1C1E;outline:none;box-sizing:border-box;" value="30"/></div>
@@ -7846,7 +7846,6 @@ function renderReportsPage(container){
       const dflt = {
         shipping_type:  apoNorm(apoEl('apo_shipping_type')?.value  || 'Warehouse'),
         logistic_type:  apoNorm(apoEl('apo_logistic_type')?.value  || 'Delivered to Warehouse'),
-        logistic_eta:   apoNorm(apoEl('apo_logistic_eta')?.value   || '11:00'),
         import_type:    apoNorm(apoEl('apo_import_type')?.value    || 'China import'),
         po_currency:    apoNorm(apoEl('apo_po_currency')?.value    || 'AUD'),
         payment_term:   Number(apoEl('apo_payment_term')?.value    || 30),
@@ -8021,7 +8020,6 @@ function renderReportsPage(container){
         row['logistic_type']          = dflt.logistic_type;
         row['logistic_method']        = method;                 // SHIP / AIR / TBD
         row['logistic_date']          = logisticDateFor(method);// Friday + offset (yyyymmdd)
-        row['logistic_eta']           = dflt.logistic_eta;       // always 11:00 (override-able)
         row['inbound_tracking']       = cleanTicket(g.zendesk_ticket);
         row['supplier_contact_name']  = g.supplier_contact_name;
         row['supplier_contact_phone'] = g.supplier_contact_phone;
@@ -8125,12 +8123,10 @@ function renderReportsPage(container){
 // ── Stock Status Report ──────────────────────────────────────────────────────
 (function(){
   const STATUS_COLOR = {
-    'Delivered':    { bg:'rgba(52,199,89,0.12)',  color:'#166534' },
-    'In Transit':   { bg:'rgba(59,130,246,0.12)', color:'#1d4ed8' },
-    'On-site':      { bg:'rgba(20,184,166,0.12)', color:'#0f766e' },
-    'Not-Received': { bg:'rgba(255,59,48,0.12)',  color:'#b91c1c' },
-    'In Stock':     { bg:'rgba(245,158,11,0.12)', color:'#b45309' },
-    'Not Started':  { bg:'rgba(174,174,178,0.12)',color:'#6E6E73' },
+    'Delivered':   { bg:'rgba(52,199,89,0.12)',  color:'#166534' },
+    'In Transit':  { bg:'rgba(59,130,246,0.12)', color:'#1d4ed8' },
+    'In Stock':    { bg:'rgba(245,158,11,0.12)', color:'#b45309' },
+    'Not Started': { bg:'rgba(174,174,178,0.12)',color:'#6E6E73' },
   };
 
   function fmtD(s){ if(!s)return '—'; try{ return new Date(s.slice(0,10)+'T12:00:00Z').toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'2-digit'}); }catch{ return s; } }
