@@ -108,18 +108,28 @@
   }
 
   // ── FAB ──
+  let _fabWasVisible = false, _assertScheduled = false;
   function ensureFab() {
-    injectStyles();
     let fab = el('nc-fab');
     if (!fab) {
+      injectStyles();
       fab = document.createElement('button');
       fab.id = 'nc-fab';
       fab.innerHTML = '<span>⚑ Log non-compliance</span><span class="nc-badge" id="nc-badge">0</span>';
       fab.addEventListener('click', openNC);
       document.body.appendChild(fab);
     }
-    fab.style.display = onVasPage() ? 'flex' : 'none';
-    if (onVasPage()) refreshBadge();
+    const visible = onVasPage();
+    fab.style.display = visible ? 'flex' : 'none';
+    // Refresh the count only on transition INTO view — keeps the poll/observer network-free.
+    if (visible && !_fabWasVisible) refreshBadge();
+    _fabWasVisible = visible;
+  }
+  // Coalesce re-render bursts to one assert per animation frame.
+  function scheduleEnsureFab() {
+    if (_assertScheduled) return;
+    _assertScheduled = true;
+    requestAnimationFrame(() => { _assertScheduled = false; try { ensureFab(); } catch (e) {} });
   }
   async function refreshBadge() {
     try { await loadIncidents(); const b = el('nc-badge'); if (b) b.textContent = String(_nc.incidents.length); } catch (e) {}
@@ -333,11 +343,18 @@
     _apiBase = window.apiBase || '';
     injectStyles();
     ensureFab();
+    // Immediate triggers (best-effort — the app sometimes sets the hash silently and
+    // re-fires state:ready on week switches, so these can't be the only signal).
     window.addEventListener('hashchange', ensureFab);
     window.addEventListener('state:ready', () => { _apiBase = window.apiBase || _apiBase; ensureFab(); });
+    // Robust re-assert: the VAS Ops page rebuilds its DOM on week switches without a
+    // hashchange, so watch for any re-render and re-assert the button's presence/visibility.
+    try { new MutationObserver(scheduleEnsureFab).observe(document.body, { childList: true, subtree: true }); } catch (e) {}
+    // Backstop poll in case a re-render replaces body wholesale and the observer is lost.
+    setInterval(ensureFab, 700);
     // expose for a native button hook if the VAS Ops page wants one
     window.openNC = openNC;
-    console.log('[noncompliance] module v1 loaded');
+    console.log('[noncompliance] module v2 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
