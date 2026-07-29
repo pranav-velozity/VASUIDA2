@@ -87,11 +87,12 @@
     }
 
     // Client switcher — internal users only; others have exactly one client, shown read-only
-    if (r.org_type === 'internal' && (r.client_ids || []).length > 1) {
+    const pickable = (r.client_ids || []).filter(c => c !== 'VOZ');   // VOZ = internal placeholder, not an operating tenant
+    if (r.org_type === 'internal' && pickable.length > 1) {
       const active = window.pinpointClient || '';
       html += `<div class="tn-box"><span class="tn-lbl">Client</span><select class="tn-sel" id="tn-client">
         ${!active ? '<option value="">Select…</option>' : ''}
-        ${r.client_ids.map(c => `<option value="${c}" ${c === active ? 'selected' : ''}>${c}</option>`).join('')}
+        ${pickable.map(c => `<option value="${c}" ${c === active ? 'selected' : ''}>${c}</option>`).join('')}
       </select></div>`;
     } else if (r.client_ids && r.client_ids.length === 1) {
       html += `<div class="tn-box"><span class="tn-lbl">Client</span><select class="tn-sel" disabled><option>${r.client_ids[0]}</option></select></div>`;
@@ -132,7 +133,7 @@
         setActiveClient(null);
       }
       render();
-      console.log('[tenancy] org:', r.org_type, '| clients:', (r.client_ids || []).join(','), '| active:', window.pinpointClient || '(server-derived)');
+      console.log('[tenancy v2] org:', r.org_type, '| clients:', (r.client_ids || []).join(','), '| active:', window.pinpointClient || '(server-derived)');
     } catch (e) { /* diagnostics only — never block the app */ }
   }
 
