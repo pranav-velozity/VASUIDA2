@@ -183,6 +183,7 @@
               </div>
               <div style="display:flex;gap:6px;align-items:flex-start;">
                 ${i.needs_review ? `<span class="nc-chip nc-review">⚑ review</span>` : ''}
+                ${i.chargeable === 0 || i.chargeable === false ? `<span class="nc-chip" style="background:rgba(0,0,0,0.05);color:${MID};">no charge</span>` : ''}
                 <span class="nc-chip" style="background:${i.status === 'resolved' ? 'rgba(52,199,89,0.14)' : 'rgba(0,0,0,0.06)'};color:${i.status === 'resolved' ? GREEN : MID};">${esc(i.status)}</span>
               </div>
             </div>
@@ -245,6 +246,7 @@
         <div><div class="nc-lbl" id="nc-qty-lbl">Quantity</div><input class="nc-in" id="nc-qty" type="number" min="1" step="1" value="1"></div>
       </div>
       <div style="margin-bottom:12px;"><div class="nc-lbl">Corrective action / VAS done</div><textarea class="nc-ta" id="nc-action" placeholder="e.g. relabelled, transferred to mobile bin…"></textarea></div>
+      <div style="margin-bottom:12px;"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:${DARK};"><input type="checkbox" id="nc-chargeable" checked style="accent-color:${BRAND};"> Chargeable <span style="color:${LIGHT};font-size:10px;">— impacts invoice. Leave on unless this issue isn't billable.</span></label></div>
       <div style="margin-bottom:12px;"><div class="nc-lbl">Photos</div>
         <div class="nc-drop" id="nc-drop">Drag &amp; drop photos here, or click to choose. <span id="nc-staged" style="color:${BRAND};font-weight:600;"></span></div></div>
       <div style="display:flex;gap:8px;justify-content:flex-end;">
@@ -277,6 +279,7 @@
       const skus = (pos && pos.get(poSel.value)) ? Array.from(pos.get(poSel.value)).sort() : [];
       skuSel.disabled = !skus.length;
       skuSel.innerHTML = (skus.length ? '<option value="">Select SKU…</option>' : '<option value="">No SKUs on plan — enter manually</option>')
+        + '<option value="__all">ALL SKUs on this PO</option>'
         + skus.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('')
         + '<option value="__other">Other / not on plan…</option>';
     }
@@ -309,6 +312,7 @@
     if (grain === 'unit') {
       sku = el('nc-sku').value;
       if (sku === '__other') { sku = (prompt('Enter SKU (not on plan):') || '').trim(); }
+      else if (sku === '__all') { sku = 'ALL'; }
     }
     if (!supplier || !po) return showFormErr('Select a supplier and PO.');
     if (!catId) return showFormErr('Select a category.');
@@ -319,6 +323,7 @@
       week_start: currentWeek(), supplier, po_number: po, category_id: catId, qty,
       sku: grain === 'unit' ? sku : null,
       corrective_action: el('nc-action').value.trim() || null,
+      chargeable: el('nc-chargeable') ? el('nc-chargeable').checked : true,
       created_by: (window.state && window.state.userName) || null,
     };
     const saveBtn = el('nc-save'); if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
@@ -354,7 +359,7 @@
     setInterval(ensureFab, 700);
     // expose for a native button hook if the VAS Ops page wants one
     window.openNC = openNC;
-    console.log('[noncompliance] module v2 loaded');
+    console.log('[noncompliance] module v3 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
