@@ -19,6 +19,16 @@ const cors = require('cors');
 const ExcelJS = require('exceljs');
 const Database = require('better-sqlite3');
 const { randomUUID } = require('crypto');
+const { AsyncLocalStorage } = require('async_hooks');
+
+// Per-request tenant context. Lets module-level prepared statements tag writes
+// with the right client without plumbing `req` through every call site.
+const tenancyALS = new AsyncLocalStorage();
+function curClient() {
+  const s = tenancyALS.getStore();
+  // Fallback preserves today's single-tenant behaviour until Step 3C enforcement.
+  return (s && s.clientId) || 'ICONIC';
+}
 
 // 🔐 Security Middleware
 const { authenticateRequest, requireRole, autoFilterResponse, optionalAuth, authenticateApiKey } = require('./middleware/auth');
@@ -67,6 +77,17 @@ app.use(apiLimiter);
    /plan, /records, /bins, /flow/... without duplicating code.
    Place ABOVE all your app.get('/...') routes.
 */
+// Establish per-request tenant context for every request. Read-only in this batch:
+// it only supplies a client_id for write tagging; nothing is denied here.
+app.use((req, _res, next) => {
+  let clientId = null;
+  try {
+    const hdr = req.get('x-pinpoint-client');
+    if (hdr) clientId = String(hdr).trim();
+  } catch (e) { /* ignore */ }
+  tenancyALS.run({ clientId }, () => next());
+});
+
 app.use((req, _res, next) => {
   if (req.url === '/api' || req.url === '/api/') {
     req.url = '/';
@@ -740,8 +761,8 @@ const deleteBySkuUid = db.prepare('DELETE FROM records WHERE uid = ? AND sku_cod
 const deleteByUid = db.prepare('DELETE FROM records WHERE uid = ?');
 
 const upsertByComposite = db.prepare(`
-INSERT INTO records (id, date_local, mobile_bin, sscc_label, po_number, sku_code, uid, status, completed_at, sync_state)
-VALUES (@id, @date_local, @mobile_bin, @sscc_label, @po_number, @sku_code, @uid, @status, @completed_at, @sync_state)
+INSERT INTO records (id, date_local, mobile_bin, sscc_label, po_number, sku_code, uid, status, completed_at, sync_state, client_id)
+VALUES (@id, @date_local, @mobile_bin, @sscc_label, @po_number, @sku_code, @uid, @status, @completed_at, @sync_state, @client_id)
 ON CONFLICT(po_number, sku_code, uid) DO UPDATE SET
   date_local   = COALESCE(excluded.date_local, records.date_local),
   mobile_bin   = COALESCE(excluded.mobile_bin, records.mobile_bin),
@@ -1893,7 +1914,7 @@ app.post('/flow/week/:weekStart',
     return out;
   })(existing, patch);
 
-  flowWeekUpsert.run(facility, monday, JSON.stringify(merged));
+  flowWeekUpsert.run(facility, monday, JSON.stringify(merged), curClient());
 
   // Chunk 2 hook — if the patch touched intl_lanes, mirror any manual date
   // changes into lane_actual_dates and trigger recompute for downstream
@@ -2476,8 +2497,8 @@ function autoFillLookbackWeeks(nowDate) {
 
 const flow_week_get_raw = db.prepare(`SELECT data FROM flow_week WHERE facility = ? AND week_start = ?`);
 const flow_week_upsert_raw = db.prepare(`
-  INSERT INTO flow_week (facility, week_start, data, updated_at)
-  VALUES (?, ?, ?, datetime('now'))
+  INSERT INTO flow_week (facility, week_start, data, updated_at, client_id)
+  VALUES (?, ?, ?, datetime('now'), ?)
   ON CONFLICT(facility, week_start) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
 `);
 
@@ -2495,7 +2516,7 @@ function mirrorAutoFillToIntlLanes(facility, weekStart, laneKey, stage, actualIs
     laneBlob.__auto_fill_sources = { ...(laneBlob.__auto_fill_sources || {}), [field]: 'auto_filled' };
     intlLanes[laneKey] = laneBlob;
     blob.intl_lanes = intlLanes;
-    flow_week_upsert_raw.run(facility, weekStart, JSON.stringify(blob));
+    flow_week_upsert_raw.run(facility, weekStart, JSON.stringify(blob), curClient());
     return true;
   } catch (e) {
     console.error('[mirrorAutoFillToIntlLanes]', e.message || e);
@@ -4371,8 +4392,8 @@ app.patch('/records/:id',
   let row = selectRecordById.get(id);
   let createdNow = false;
   if (!row) {
-    db.prepare(`INSERT INTO records(id, date_local, status, sync_state) VALUES(?, ?, 'draft', 'pending')`)
-      .run(id, todayChicagoISO());
+    db.prepare(`INSERT INTO records(id, date_local, status, sync_state, client_id) VALUES(?, ?, 'draft', 'pending', ?)`)
+      .run(id, todayChicagoISO(), curClient());
     row = selectRecordById.get(id);
     createdNow = true;
   }
@@ -4438,7 +4459,7 @@ app.post('/records',
   }
 
   try {
-    upsertByComposite.run(rec);
+    upsertByComposite.run({ ...rec, client_id: curClient() });
     emitScan(new Date(rec.completed_at));
     const row = selectByComposite.get(rec.po_number, rec.sku_code, rec.uid);
     const saved = row ? selectRecordById.get(row.id) : selectRecordById.get(rec.id);
@@ -5548,8 +5569,8 @@ const flowWeekGet = db.prepare(`
 `);
 
 const flowWeekUpsert = db.prepare(`
-  INSERT INTO flow_week(facility, week_start, data, updated_at)
-  VALUES (?, ?, ?, datetime('now'))
+  INSERT INTO flow_week(facility, week_start, data, updated_at, client_id)
+  VALUES (?, ?, ?, datetime('now'), ?)
   ON CONFLICT(facility, week_start) DO UPDATE SET
     data = excluded.data,
     updated_at = excluded.updated_at
@@ -5642,10 +5663,10 @@ app.put('/plan/weeks/:mondayISO',
   const monday = String(req.params.mondayISO);
   const arr = normalizePlanArray(req.body, monday);
   db.prepare(`
-    INSERT INTO plans(week_start, data, updated_at)
-    VALUES(?, ?, datetime('now'))
+    INSERT INTO plans(week_start, data, updated_at, client_id)
+    VALUES(?, ?, datetime('now'), ?)
     ON CONFLICT(week_start) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
-  `).run(monday, JSON.stringify(arr));
+  `).run(monday, JSON.stringify(arr), curClient());
   // Lane engine hook — ensure planned-date snapshots exist for every lane
   // (supplier, ticket, mode) in the uploaded plan. Non-fatal: snapshot
   // creation failures log but never break the plan save.
@@ -5667,10 +5688,10 @@ app.post('/plan/weeks/:mondayISO/zero',
   (req, res) => {
   const monday = String(req.params.mondayISO);
   db.prepare(`
-    INSERT INTO plans(week_start, data, updated_at)
-    VALUES(?, '[]', datetime('now'))
+    INSERT INTO plans(week_start, data, updated_at, client_id)
+    VALUES(?, '[]', datetime('now'), ?)
     ON CONFLICT(week_start) DO UPDATE SET data='[]', updated_at=datetime('now')
-  `).run(monday);
+  `).run(monday, curClient());
   return res.json({ ok: true, week_start: monday, rows: 0 });
 });
 
@@ -5706,9 +5727,9 @@ const Bins = {
   upsertMany: db.transaction((rows) => {
     const stmt = db.prepare(`
       INSERT INTO bins (week_start, mobile_bin, total_units, weight_kg, date_local,
-                        carton_length_cm, carton_width_cm, carton_height_cm)
+                        carton_length_cm, carton_width_cm, carton_height_cm, client_id)
       VALUES (@week_start, @mobile_bin, @total_units, @weight_kg, @date_local,
-              @carton_length_cm, @carton_width_cm, @carton_height_cm)
+              @carton_length_cm, @carton_width_cm, @carton_height_cm, @client_id)
       ON CONFLICT(week_start, mobile_bin) DO UPDATE SET
         total_units = excluded.total_units,
         weight_kg   = excluded.weight_kg,
@@ -5795,6 +5816,7 @@ binsRouter.put('/weeks/:ws',
         carton_length_cm: lenCm,
         carton_width_cm:  widCm,
         carton_height_cm: hgtCm,
+        client_id: curClient(),
       });
     }
 
@@ -5904,6 +5926,7 @@ function normalizeReceivingArray(body, ws) {
     carton_width_cm:  numOrNull(r?.carton_width_cm  ?? r?.width_cm  ?? r?.W ?? r?.w),
     carton_height_cm: numOrNull(r?.carton_height_cm ?? r?.height_cm ?? r?.H ?? r?.h),
     updated_at: new Date().toISOString(),
+    client_id: curClient(),
   })).filter(x => x.po_number);
 }
 
@@ -5935,13 +5958,13 @@ receivingRouter.put('/weeks/:ws',
       received_at_utc, received_at_local, received_tz,
       cartons_received, cartons_damaged, cartons_noncompliant, cartons_replaced,
       carton_length_cm, carton_width_cm, carton_height_cm,
-      updated_at
+      updated_at, client_id
     ) VALUES (
       @week_start, @po_number, @supplier_name, @facility_name,
       @received_at_utc, @received_at_local, @received_tz,
       @cartons_received, @cartons_damaged, @cartons_noncompliant, @cartons_replaced,
       @carton_length_cm, @carton_width_cm, @carton_height_cm,
-      @updated_at
+      @updated_at, @client_id
     )
     ON CONFLICT(week_start, po_number) DO UPDATE SET
       supplier_name=excluded.supplier_name,
