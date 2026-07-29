@@ -10557,6 +10557,265 @@ app.get('/tenancy/writecontext', authenticateRequest, (req, res) => {
   catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ═══════════════════ EHP FULFILMENT DOMAIN — API ═══════════════════
+// Guard: the resolved client must actually have envelope fulfilment enabled. Stops an
+// internal user with ICONIC selected from writing EHP data tagged as ICONIC.
+function ehpClient(req) {
+  const c = curClient();
+  const ok = db.prepare(`SELECT 1 x FROM client_capability WHERE client_id=? AND capability=? AND enabled=1`)
+               .get(c, 'envelope_fulfilment');
+  return ok ? c : null;
+}
+function ehpGuard(req, res) {
+  const c = ehpClient(req);
+  if (!c) {
+    res.status(409).json({ error: 'client_not_enabled_for_fulfilment',
+      message: 'Select the EHP client before recording fulfilment activity.', resolved_client: curClient() });
+    return null;
+  }
+  return c;
+}
+
+// ── SKUs ──
+app.get('/ehp/skus', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const rows = db.prepare(`SELECT * FROM ehp_sku WHERE client_id=? AND active=1 ORDER BY sku`).all(c);
+    res.json({ client_id: c, skus: rows.map(r => ({ ...r, on_hand_each: ehpOnHand(c, r.sku) })) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.patch('/ehp/sku/:sku', authenticateRequest, writeOpLimiter, auditLog('edit_ehp_sku'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const b = req.body || {}; const f = []; const v = [];
+    for (const k of ['name','format','flavour','eaches_per_inner','inners_per_carton','cartons_per_pallet']) {
+      if (b[k] !== undefined) { f.push(`${k}=?`); v.push(b[k] === '' ? null : b[k]); }
+    }
+    if (!f.length) return res.status(400).json({ error: 'no editable fields' });
+    ehpEnsureSku(c, req.params.sku, { source: 'manual' });
+    db.prepare(`UPDATE ehp_sku SET ${f.join(',')} WHERE client_id=? AND sku=?`).run(...v, c, req.params.sku);
+    res.json(db.prepare('SELECT * FROM ehp_sku WHERE client_id=? AND sku=?').get(c, req.params.sku));
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Inbound receipts: pallets (billing) + lines (quantities) ──
+app.post('/ehp/receipt', authenticateRequest, writeOpLimiter, auditLog('create_ehp_receipt'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const b = req.body || {};
+    const pallets = Math.max(0, parseInt(b.pallets, 10) || 0);
+    const dateLocal = String(b.received_date_local || '').trim();
+    const facility = String(b.facility_code || 'VOZ_TX').trim();
+    if (!dateLocal) return res.status(400).json({ error: 'received_date_local required' });
+    const lines = Array.isArray(b.lines) ? b.lines : [];
+    if (!pallets && !lines.length) return res.status(400).json({ error: 'nothing to record' });
+
+    const id = ehpNewId('rcv'); const out = []; const warnings = [];
+    db.transaction(() => {
+      db.prepare(`INSERT INTO ehp_pallet_receipt
+        (id, client_id, facility_code, received_date_local, pallets, reference, notes, created_by)
+        VALUES (?,?,?,?,?,?,?,?)`)
+        .run(id, c, facility, dateLocal, pallets, b.reference || null, b.notes || null, b.created_by || null);
+      for (const l of lines) {
+        const sku = String(l.sku || '').trim(); if (!sku) continue;
+        ehpEnsureSku(c, sku, { flavour: l.flavour, format: l.format });
+        const conv = ehpToEaches(c, sku, l.qty, l.uom);
+        if (!conv.known) warnings.push({ sku, uom: l.uom, message: 'no pack conversion set — recorded at face value' });
+        const lid = ehpNewId('rl');
+        db.prepare(`INSERT INTO ehp_receipt_line
+          (id, receipt_id, client_id, sku, qty_entered, uom_entered, qty_each, lot_code, expiry_date, notes)
+          VALUES (?,?,?,?,?,?,?,?,?,?)`)
+          .run(lid, id, c, sku, Number(l.qty || 0), String(l.uom || 'each'), conv.qty_each,
+               l.lot_code || null, l.expiry_date || null, l.notes || null);
+        db.prepare(`INSERT INTO ehp_inventory_txn
+          (id, client_id, sku, qty_each, txn_type, ref_type, ref_id, lot_code, expiry_date)
+          VALUES (?,?,?,?, 'receipt', 'pallet_receipt', ?,?,?)`)
+          .run(ehpNewId('inv'), c, sku, conv.qty_each, id, l.lot_code || null, l.expiry_date || null);
+        out.push({ sku, qty_each: conv.qty_each, conversion_known: conv.known });
+      }
+    })();
+    res.json({ receipt_id: id, pallets, lines: out, warnings });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.get('/ehp/receipts', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const from = String(req.query.from || '').trim(), to = String(req.query.to || '').trim();
+    const p = [c]; let sql = `SELECT * FROM ehp_pallet_receipt WHERE client_id=?`;
+    if (from) { sql += ' AND received_date_local >= ?'; p.push(from); }
+    if (to)   { sql += ' AND received_date_local <= ?'; p.push(to); }
+    sql += ' ORDER BY received_date_local DESC, created_at DESC';
+    const receipts = db.prepare(sql).all(...p);
+    const lineStmt = db.prepare('SELECT * FROM ehp_receipt_line WHERE receipt_id=?');
+    res.json({ receipts: receipts.map(r => ({ ...r, lines: lineStmt.all(r.id) })) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Inventory ──
+app.get('/ehp/inventory', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const rows = db.prepare(`SELECT s.sku, s.name, s.flavour, s.format,
+        COALESCE((SELECT SUM(qty_each) FROM ehp_inventory_txn t WHERE t.client_id=s.client_id AND t.sku=s.sku),0) AS on_hand_each
+      FROM ehp_sku s WHERE s.client_id=? AND s.active=1 ORDER BY s.sku`).all(c);
+    res.json({ inventory: rows });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Assembly queue + batches ──
+app.get('/ehp/queue', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const q = db.prepare(`SELECT COUNT(*) orders, COALESCE(SUM(envelope_qty),0) envelopes
+                          FROM ehp_order WHERE client_id=? AND state='queued' AND batch_id IS NULL`).get(c);
+    const flagged = db.prepare(`SELECT COUNT(*) n FROM ehp_order
+                          WHERE client_id=? AND state='queued' AND flagged_high_qty=1`).get(c).n;
+    const recipe = ehpActiveRecipe(c);
+    res.json({ queued_orders: q.orders, queued_envelopes: q.envelopes, flagged_high_qty: flagged,
+               active_recipe: recipe ? { id: recipe.id, name: recipe.name, lines: recipe.lines } : null });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/ehp/batch', authenticateRequest, writeOpLimiter, auditLog('create_ehp_batch'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const b = req.body || {};
+    const r = ehpBuildBatch(c, b.facility_code || 'VOZ_TX', b.target_envelopes, b.created_by);
+    if (r.error) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.get('/ehp/batches', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const st = String(req.query.state || '').trim();
+    const p = [c]; let sql = 'SELECT * FROM ehp_assembly_batch WHERE client_id=?';
+    if (st) { sql += ' AND state=?'; p.push(st); }
+    sql += ' ORDER BY created_at DESC LIMIT 200';
+    res.json({ batches: db.prepare(sql).all(...p) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/ehp/batch/:id/assemble', authenticateRequest, writeOpLimiter, auditLog('assemble_ehp_batch'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const r = ehpAssembleBatch(c, req.params.id, (req.body || {}).by);
+    if (r.error) return res.status(409).json(r);
+    res.json(r);
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/ehp/batch/:id/dispatch', authenticateRequest, writeOpLimiter, auditLog('dispatch_ehp_batch'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const b = db.prepare('SELECT * FROM ehp_assembly_batch WHERE id=? AND client_id=?').get(req.params.id, c);
+    if (!b) return res.status(404).json({ error: 'batch_not_found' });
+    if (b.state !== 'assembled') return res.status(409).json({ error: 'batch_not_assembled', state: b.state });
+    db.transaction(() => {
+      db.prepare(`UPDATE ehp_assembly_batch SET state='dispatched', dispatched_at=datetime('now') WHERE id=?`).run(b.id);
+      db.prepare(`UPDATE ehp_order SET state='dispatched', fulfilled_at=datetime('now') WHERE batch_id=? AND client_id=?`).run(b.id, c);
+    })();
+    // Shopify fulfilment write-back happens in the integration increment.
+    res.json({ batch_id: b.id, envelopes: b.actual_envelopes, orders: b.order_count, state: 'dispatched',
+               shopify: 'pending_integration' });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Pick list — the only endpoint that exposes recipient addresses. Fulfilment roles only.
+app.get('/ehp/batch/:id/picklist', authenticateRequest, auditLog('view_ehp_picklist'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const orders = db.prepare(`SELECT order_number, envelope_qty, recipient_name, recipient_address,
+        recipient_city, recipient_state, recipient_postcode, recipient_country, flagged_high_qty
+      FROM ehp_order WHERE batch_id=? AND client_id=? ORDER BY order_number`).all(req.params.id, c);
+    res.json({ batch_id: req.params.id, orders });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Cycle count: variance posted as a visible adjustment ──
+app.post('/ehp/stock-count', authenticateRequest, writeOpLimiter, auditLog('ehp_stock_count'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const b = req.body || {};
+    const sku = String(b.sku || '').trim();
+    if (!sku) return res.status(400).json({ error: 'sku required' });
+    const counted = parseInt(b.counted_each, 10);
+    if (!Number.isFinite(counted)) return res.status(400).json({ error: 'counted_each required' });
+    const system = ehpOnHand(c, sku);
+    const variance = counted - system;
+    const id = ehpNewId('cnt');
+    db.transaction(() => {
+      db.prepare(`INSERT INTO ehp_stock_count (id, client_id, sku, counted_each, system_each, variance_each, counted_by, notes)
+                  VALUES (?,?,?,?,?,?,?,?)`).run(id, c, sku, counted, system, variance, b.counted_by || null, b.notes || null);
+      if (variance !== 0) {
+        db.prepare(`INSERT INTO ehp_inventory_txn (id, client_id, sku, qty_each, txn_type, ref_type, ref_id)
+                    VALUES (?,?,?,?, 'adjustment', 'stock_count', ?)`)
+          .run(ehpNewId('inv'), c, sku, variance, id);
+      }
+    })();
+    res.json({ count_id: id, sku, counted_each: counted, system_each: system, variance_each: variance,
+               on_hand_each: ehpOnHand(c, sku) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Kit recipe ──
+app.get('/ehp/recipe', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const active = ehpActiveRecipe(c);
+    const all = db.prepare('SELECT * FROM ehp_kit_recipe WHERE client_id=? ORDER BY effective_from DESC').all(c);
+    res.json({ active, history: all });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/ehp/recipe', authenticateRequest, writeOpLimiter, auditLog('create_ehp_recipe'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const b = req.body || {};
+    const lines = Array.isArray(b.lines) ? b.lines.filter(l => l && l.sku && Number(l.qty_per_envelope) > 0) : [];
+    if (!lines.length) return res.status(400).json({ error: 'at least one recipe line required' });
+    const from = String(b.effective_from || new Date().toISOString().slice(0, 10)).trim();
+    const id = ehpNewId('rec');
+    db.transaction(() => {
+      // close the previous open-ended recipe the day before this one starts
+      db.prepare(`UPDATE ehp_kit_recipe SET effective_to = date(?, '-1 day')
+                  WHERE client_id=? AND effective_to IS NULL AND effective_from < ?`).run(from, c, from);
+      db.prepare(`INSERT INTO ehp_kit_recipe (id, client_id, name, effective_from, notes) VALUES (?,?,?,?,?)`)
+        .run(id, c, b.name || ('Recipe ' + from), from, b.notes || null);
+      const ins = db.prepare(`INSERT INTO ehp_kit_recipe_line (recipe_id, client_id, sku, qty_per_envelope) VALUES (?,?,?,?)`);
+      for (const l of lines) { ehpEnsureSku(c, String(l.sku).trim(), {}); ins.run(id, c, String(l.sku).trim(), parseInt(l.qty_per_envelope, 10)); }
+    })();
+    res.json(ehpActiveRecipe(c) || { recipe_id: id });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Week Hub / reporting summary ──
+app.get('/ehp/summary', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const from = String(req.query.from || '').trim(), to = String(req.query.to || '').trim();
+    if (!from || !to) return res.status(400).json({ error: 'from and to required' });
+    const pal = db.prepare(`SELECT COALESCE(SUM(pallets),0) n FROM ehp_pallet_receipt
+                            WHERE client_id=? AND received_date_local BETWEEN ? AND ?`).get(c, from, to).n;
+    const ordersIn = db.prepare(`SELECT COUNT(*) orders, COALESCE(SUM(envelope_qty),0) envelopes
+                            FROM ehp_order WHERE client_id=? AND date(placed_at) BETWEEN ? AND ?`).get(c, from, to);
+    const asm = db.prepare(`SELECT COALESCE(SUM(actual_envelopes),0) n FROM ehp_assembly_batch
+                            WHERE client_id=? AND date(assembled_at) BETWEEN ? AND ?`).get(c, from, to).n;
+    const dis = db.prepare(`SELECT COALESCE(SUM(actual_envelopes),0) n FROM ehp_assembly_batch
+                            WHERE client_id=? AND date(dispatched_at) BETWEEN ? AND ?`).get(c, from, to).n;
+    const q = db.prepare(`SELECT COUNT(*) orders, COALESCE(SUM(envelope_qty),0) envelopes
+                          FROM ehp_order WHERE client_id=? AND state='queued'`).get(c);
+    res.json({ client_id: c, from, to,
+      pallets_received: pal,
+      orders_received: ordersIn.orders, envelopes_ordered: ordersIn.envelopes,
+      envelopes_assembled: asm, envelopes_dispatched: dis,
+      queued_orders: q.orders, queued_envelopes: q.envelopes });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 app.listen(PORT, () => {
   console.log(`UID Ops backend listening on http://localhost:${PORT}`);
   console.log(`DB file: ${DB_FILE}`);
