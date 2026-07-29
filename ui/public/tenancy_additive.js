@@ -132,12 +132,18 @@
         setActiveClient(null);
       }
       render();
-      console.log('[tenancy v3] org:', r.org_type, '| clients:', (r.client_ids || []).join(','), '| active:', window.pinpointClient || '(server-derived)');
+      console.log('[tenancy v4] org:', r.org_type, '| clients:', (r.client_ids || []).join(','), '| active:', window.pinpointClient || '(server-derived)');
     } catch (e) { /* diagnostics only — never block the app */ }
   }
 
   function init() {
-    load();
+    // Retry with backoff: a page loaded during an API restart must not stay dead all session.
+    let tries = 0;
+    (function attempt() {
+      load().then(() => {
+        if (!_who && tries < 6) { tries++; setTimeout(attempt, 1000 * tries); }
+      }).catch(() => { if (tries < 6) { tries++; setTimeout(attempt, 1000 * tries); } });
+    })();
     window.addEventListener('state:ready', load);
     // header can re-render on navigation — re-assert the switcher
     setInterval(() => { if (_who && !document.getElementById('tn-wrap')) render(); }, 1000);
