@@ -26,8 +26,17 @@ const { AsyncLocalStorage } = require('async_hooks');
 const tenancyALS = new AsyncLocalStorage();
 function curClient() {
   const s = tenancyALS.getStore();
-  // Fallback preserves today's single-tenant behaviour until Step 3C enforcement.
-  return (s && s.clientId) || 'ICONIC';
+  if (!s) return 'ICONIC';
+  if (s._resolved) return s._resolved;
+  let c = 'ICONIC';                       // fallback preserves single-tenant behaviour
+  try {
+    if (s.req && typeof tenancyWriteClient === 'function') {
+      const w = tenancyWriteClient(s.req);
+      if (w && w.client_id) c = w.client_id;
+    }
+  } catch (e) { /* keep fallback */ }
+  s._resolved = c;
+  return c;
 }
 
 // 🔐 Security Middleware
@@ -80,12 +89,7 @@ app.use(apiLimiter);
 // Establish per-request tenant context for every request. Read-only in this batch:
 // it only supplies a client_id for write tagging; nothing is denied here.
 app.use((req, _res, next) => {
-  let clientId = null;
-  try {
-    const hdr = req.get('x-pinpoint-client');
-    if (hdr) clientId = String(hdr).trim();
-  } catch (e) { /* ignore */ }
-  tenancyALS.run({ clientId }, () => next());
+  tenancyALS.run({ req }, () => next());
 });
 
 app.use((req, _res, next) => {
@@ -109,7 +113,8 @@ function _summaryKey(q) {
   const from = String(q.from || q.weekStart || '').trim();
   const to = String(q.to || q.weekEnd || '').trim();
   const status = String(q.status || 'complete').trim();
-  return `${from}|${to}|${status}`;
+  // Client must be part of the key, or a cached summary could be served across tenants.
+  return `${curClient()}|${from}|${to}|${status}`;
 }
 
 
@@ -776,6 +781,35 @@ function rebuildWithClientPk(table, keyCols) {
 rebuildWithClientPk('receiving', ['week_start', 'po_number']);
 rebuildWithClientPk('bins',      ['week_start', 'mobile_bin']);
 
+// Enforcement switch. Off by default: deploy inert, flip TENANCY_ENFORCE=true in Render,
+// revert in seconds without a redeploy.
+const TENANCY_ENFORCE = String(process.env.TENANCY_ENFORCE || '').toLowerCase() === 'true';
+
+// Client ids a READ may see. null = no filtering (flag off). [] = deny.
+function tenantReadIds(req) {
+  if (!TENANCY_ENFORCE) return null;
+  try {
+    const t = tenancyResolve(req.auth?.orgId, req.auth?.orgRole);
+    if (t.denied_reason) return [];
+    if (t.org_type === 'internal') {
+      const hdr = req.get('x-pinpoint-client');
+      return (hdr && t.client_ids.includes(hdr)) ? [hdr] : t.client_ids;
+    }
+    return t.client_ids;
+  } catch (e) { return []; }
+}
+// SQL fragment for a scoped read.
+function scopeSql(ids, col = 'client_id') {
+  if (!ids) return { clause: '', params: [] };
+  if (!ids.length) return { clause: ' AND 1=0', params: [] };
+  return { clause: ` AND ${col} IN (${ids.map(() => '?').join(',')})`, params: ids };
+}
+// Plan reads are keyed by week_start, which is no longer unique across clients.
+// Every plan read goes through here so it always resolves to one client's plan.
+function planDataFor(ws) {
+  return db.prepare('SELECT data FROM plans WHERE week_start = ? AND client_id = ?').get(ws, curClient());
+}
+
 // Resolve the single client a WRITE belongs to. Not enforced yet (Step 3).
 //   client/partner org -> derived (one client)
 //   internal org       -> must be chosen explicitly; default-deny when unset
@@ -946,7 +980,7 @@ app.get('/pulse/context',
       const we = weDate.toISOString().slice(0, 10);
 
       // ── Plan rows ──
-      const planRow = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(ws);
+      const planRow = planDataFor(ws);
       const planRows = safeJsonParse(planRow?.data, []) || [];
 
       // ── Applied by PO ──
@@ -1156,7 +1190,7 @@ app.get('/pulse/context',
 function buildOpsContext(facility, weekStart) {
   try {
     // Current week plan
-    const planRow = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(weekStart);
+    const planRow = planDataFor(weekStart);
     const planRows = planRow ? (safeJsonParse(planRow.data, []) || []) : [];
 
     const planned_units  = planRows.reduce((s,p) => s + (Number(p.target_qty)||0), 0);
@@ -1563,7 +1597,7 @@ app.get('/exec/summary',
     const we = weDate.toISOString().slice(0, 10);
 
     // ── 1. Plan rows (JSON blob) ──
-    const planRow = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(ws);
+    const planRow = planDataFor(ws);
     const planRows = planRow ? (safeJsonParse(planRow.data, []) || []) : [];
 
     let planned_units = 0;
@@ -2702,7 +2736,7 @@ app.post('/lanes/snapshot/ensure',
       const ws = String(req.query.weekStart || req.body?.weekStart || '').trim();
       if (!ws) return res.status(400).json({ error: 'weekStart required' });
       const queryFacility = normFacility(req.query.facility || req.body?.facility || '');
-      const row = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(ws);
+      const row = planDataFor(ws);
       if (!row) return res.status(404).json({ error: 'no plan found for weekStart' });
       const planRows = safeJsonParse(row.data, []) || [];
       const summary = createSnapshotsFromPlan(planRows, ws, queryFacility);
@@ -3280,7 +3314,7 @@ function buildReportForWeek(ws, currentWs, summary) {
   }
 
   // Pull plan rows for this week
-  const planRow = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(ws);
+  const planRow = planDataFor(ws);
   const planRows = planRow ? (safeJsonParse(planRow.data, []) || []) : [];
 
   // Pull facility-scoped flow_week blob(s) for intl_lanes manual data, containers, receipts.
@@ -4662,6 +4696,7 @@ app.get('/records',
 
   const params = [];
   let sql = 'SELECT * FROM records WHERE 1=1';
+  { const sc = scopeSql(tenantReadIds(req)); sql += sc.clause; params.push(...sc.params); }
   if (from)   { sql += ' AND date_local >= ?'; params.push(from); }
   if (to)     { sql += ' AND date_local <= ?'; params.push(to); }
   if (status) { sql += ' AND status = ?';      params.push(status); }
@@ -4842,6 +4877,7 @@ app.get('/records/summary',
 
     const params = [];
     let where = 'WHERE 1=1';
+    { const sc = scopeSql(tenantReadIds(req)); where += sc.clause; params.push(...sc.params); }
     if (from)   { where += ' AND date_local >= ?'; params.push(from); }
     if (to)     { where += ' AND date_local <= ?'; params.push(to); }
     if (status) { where += ' AND status = ?';      params.push(status); }
@@ -4983,7 +5019,7 @@ function _weekEndISO(ws) {
 }
 
 function _getPlanRowsForWeek(ws) {
-  const row = db.prepare(`SELECT data FROM plans WHERE week_start = ?`).get(ws);
+  const row = planDataFor(ws);
   if (!row?.data) return [];
   try {
     const parsed = JSON.parse(row.data);
@@ -5672,7 +5708,7 @@ app.get('/plan',
   const monday = mondayOfLoose(ws);
   if (!monday) return res.status(400).json({ error: 'invalid weekStart' });
 
-  const row = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(monday);
+  const row = planDataFor(monday);
   if (!row) return res.json([]);
   try { return res.json(JSON.parse(row.data) || []); }
   catch { return res.json([]); }
@@ -5720,7 +5756,7 @@ app.get('/plan/weeks/:mondayISO',
   auditLog('view_plan_week'),
   (req, res) => {
   const monday = String(req.params.mondayISO);
-  const row = db.prepare('SELECT data FROM plans WHERE week_start = ?').get(monday);
+  const row = planDataFor(monday);
   if (!row) return res.json([]);
   try {
     return res.json(JSON.parse(row.data) || []);
@@ -6012,7 +6048,8 @@ receivingRouter.get('/weeks/:ws',
   auditLog('view_receiving'),
   (req, res) => {
   const ws = req.params.ws;
-  const rows = db.prepare(`SELECT * FROM receiving WHERE week_start=? ORDER BY supplier_name, po_number`).all(ws);
+  const _sc = scopeSql(tenantReadIds(req));
+  const rows = db.prepare(`SELECT * FROM receiving WHERE week_start=?${_sc.clause} ORDER BY supplier_name, po_number`).all(ws, ..._sc.params);
   res.json(rows);
 });
 
@@ -6073,7 +6110,8 @@ receivingRouter.get('/',
   (req, res) => {
   const ws = String(req.query.weekStart || '').trim();
   if (!ws) return res.status(400).json({ error: 'weekStart required' });
-  const rows = db.prepare(`SELECT * FROM receiving WHERE week_start=? ORDER BY supplier_name, po_number`).all(ws);
+  const _sc = scopeSql(tenantReadIds(req));
+  const rows = db.prepare(`SELECT * FROM receiving WHERE week_start=?${_sc.clause} ORDER BY supplier_name, po_number`).all(ws, ..._sc.params);
   res.json(rows);
 });
 
@@ -7509,7 +7547,7 @@ app.get('/report/cost-utilisation/data',
 
       let appliedUnits = 0;
       for (const ws of vasWeekStarts) {
-        const planRow = db.prepare('SELECT data FROM plans WHERE week_start=?').get(ws);
+        const planRow = planDataFor(ws);
         if (!planRow) continue;
         const planRows = safeJsonParse(planRow.data, []);
         const pos = planRows
@@ -7580,7 +7618,7 @@ app.get('/report/cost-utilisation/data',
 
         let vasUnits = 0;
         for (const ws of weekStarts) {
-          const planRow = db.prepare('SELECT data FROM plans WHERE week_start=?').get(ws);
+          const planRow = planDataFor(ws);
           if (!planRow) continue;
           const planRows = safeJsonParse(planRow.data, []);
           const freight = type === 'SEA' ? ['sea','SEA','Sea'] : ['air','AIR','Air'];
