@@ -464,6 +464,7 @@ CREATE TABLE IF NOT EXISTS nc_incident (
   status             TEXT NOT NULL DEFAULT 'open',  -- 'open' | 'resolved'
   resolution_comment TEXT,
   cost               REAL,                          -- computed in Phase 2 (rate*qty); NULL until then
+  chargeable         INTEGER NOT NULL DEFAULT 1,    -- does this incident impact the invoice (default yes)
   needs_review       INTEGER NOT NULL DEFAULT 0,
   created_by         TEXT,
   created_at         TEXT NOT NULL DEFAULT (datetime('now')),
@@ -482,6 +483,12 @@ CREATE TABLE IF NOT EXISTS nc_incident_image (
 );
 CREATE INDEX IF NOT EXISTS idx_nc_image_incident ON nc_incident_image(incident_id);
 `);
+
+// Migration: add chargeable to an already-existing nc_incident table (idempotent — safe on prod).
+try {
+  const _ncCols = db.prepare("PRAGMA table_info(nc_incident)").all().map(c => c.name);
+  if (!_ncCols.includes('chargeable')) db.exec("ALTER TABLE nc_incident ADD COLUMN chargeable INTEGER NOT NULL DEFAULT 1");
+} catch (e) { console.error('[nc] chargeable migration:', e.message); }
 
 // Seed the category taxonomy (idempotent — INSERT OR IGNORE preserves any Phase-2 rate edits).
 (function seedNcCategories(){
@@ -9613,12 +9620,13 @@ app.post('/nc/incident', authenticateRequest, writeOpLimiter, auditLog('create_n
       }
     }
     const id = ncNewId();
+    const chargeable = (b.chargeable === false || b.chargeable === 0 || b.chargeable === 'false') ? 0 : 1;
     db.prepare(`INSERT INTO nc_incident
-      (id,week_start,facility,supplier,po_number,sku,category_id,grain,qty,corrective_action,status,resolution_comment,cost,needs_review,created_by,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`)
+      (id,week_start,facility,supplier,po_number,sku,category_id,grain,qty,corrective_action,status,resolution_comment,cost,chargeable,needs_review,created_by,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`)
       .run(id, week, b.facility||null, supplier, po, sku, cat.id, grain, qty,
            b.corrective_action||null, (b.status==='resolved'?'resolved':'open'), b.resolution_comment||null,
-           null, 0, b.created_by||null);
+           null, chargeable, 0, b.created_by||null);
     res.json(db.prepare('SELECT * FROM nc_incident WHERE id=?').get(id));
   } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
 });
@@ -9635,6 +9643,7 @@ app.patch('/nc/incident/:id', authenticateRequest, writeOpLimiter, auditLog('edi
     }
     if (b.resolution_comment !== undefined) { fields.push('resolution_comment=?'); vals.push(b.resolution_comment||null); }
     if (b.corrective_action !== undefined)  { fields.push('corrective_action=?');  vals.push(b.corrective_action||null); }
+    if (b.chargeable !== undefined) { fields.push('chargeable=?'); vals.push((b.chargeable === false || b.chargeable === 0 || b.chargeable === 'false') ? 0 : 1); }
     if (b.qty !== undefined) {
       const q = Math.max(0, parseInt(b.qty, 10) || 0);
       if (q <= 0) return res.status(400).json({ error: 'qty must be > 0' });
@@ -9746,26 +9755,27 @@ app.get('/report/supplier-discrepancy',
     const incidents = db.prepare(sql).all(...p);
     const ids = incidents.map(i => i.id); const imgBy = new Map();
     if (ids.length) { const im = db.prepare('SELECT * FROM nc_incident_image WHERE incident_id IN (' + ids.map(() => '?').join(',') + ')').all(...ids); for (const x of im) { if (!imgBy.has(x.incident_id)) imgBy.set(x.incident_id, []); imgBy.get(x.incident_id).push(x); } }
-    const costOf = i => { const c = cats.get(i.category_id); return (c && c.rate != null) ? c.rate * i.qty : null; };
+    const costOf = i => { if (!i.chargeable) return 0; const c = cats.get(i.category_id); return (c && c.rate != null) ? c.rate * i.qty : null; };
+    const hasChargeableRate = i => !!i.chargeable && (cats.get(i.category_id) || {}).rate != null;
     const labelOf = i => { const c = cats.get(i.category_id); return c ? c.label : i.category_id; };
     const photosHtml = i => (imgBy.get(i.id) || []).slice(0, 3).map(x => `<img class="ph" src="${_ncEh(R2PUB + '/' + x.r2_key)}" alt="">`).join('');
 
     let reworkUnits = 0, deliveryCartons = 0, totalCost = 0, haveCost = false;
-    for (const i of incidents) { if (i.grain === 'unit') reworkUnits += i.qty; else deliveryCartons += i.qty; const c = costOf(i); if (c != null) { totalCost += c; haveCost = true; } }
+    for (const i of incidents) { if (i.grain === 'unit') reworkUnits += i.qty; else deliveryCartons += i.qty; const c = costOf(i); if (c != null) totalCost += c; if (hasChargeableRate(i)) haveCost = true; }
 
     const bySup = new Map(); for (const i of incidents) { if (!bySup.has(i.supplier)) bySup.set(i.supplier, []); bySup.get(i.supplier).push(i); }
-    const byCat = new Map(); for (const i of incidents) { const k = i.category_id; if (!byCat.has(k)) byCat.set(k, { label: labelOf(i), grain: i.grain, qty: 0, count: 0, cost: 0, hasCost: false }); const o = byCat.get(k); o.qty += i.qty; o.count++; const c = costOf(i); if (c != null) { o.cost += c; o.hasCost = true; } }
+    const byCat = new Map(); for (const i of incidents) { const k = i.category_id; if (!byCat.has(k)) byCat.set(k, { label: labelOf(i), grain: i.grain, qty: 0, count: 0, cost: 0, hasCost: false }); const o = byCat.get(k); o.qty += i.qty; o.count++; const c = costOf(i); if (c != null) o.cost += c; if (hasChargeableRate(i)) o.hasCost = true; }
     let recon = ncCartonReconByPo(week); if (supplier) recon = recon.filter(r => r.supplier === supplier);
     const reconTot = recon.reduce((a, r) => { a.legacy += r.legacy; a.categorized += r.categorized; a.uncategorized += r.uncategorized; return a; }, { legacy: 0, categorized: 0, uncategorized: 0 });
 
     // cost-to-date + per-supplier summary across all weeks up to this one
-    const ctdP = [week]; let ctdSql = 'SELECT i.supplier, i.week_start, i.qty, c.rate FROM nc_incident i LEFT JOIN nc_category c ON c.id=i.category_id WHERE i.week_start<=?'; if (supplier) { ctdSql += ' AND i.supplier=?'; ctdP.push(supplier); }
+    const ctdP = [week]; let ctdSql = 'SELECT i.supplier, i.week_start, i.qty, i.chargeable, c.rate FROM nc_incident i LEFT JOIN nc_category c ON c.id=i.category_id WHERE i.week_start<=?'; if (supplier) { ctdSql += ' AND i.supplier=?'; ctdP.push(supplier); }
     const ctd = db.prepare(ctdSql).all(...ctdP);
     const supAgg = new Map();
-    for (const r of ctd) { if (!supAgg.has(r.supplier)) supAgg.set(r.supplier, { count: 0, cost: 0, hasCost: false, weeks: new Set() }); const o = supAgg.get(r.supplier); o.count++; o.weeks.add(r.week_start); if (r.rate != null) { o.cost += r.rate * r.qty; o.hasCost = true; } }
+    for (const r of ctd) { if (!supAgg.has(r.supplier)) supAgg.set(r.supplier, { count: 0, cost: 0, hasCost: false, weeks: new Set() }); const o = supAgg.get(r.supplier); o.count++; o.weeks.add(r.week_start); if (r.chargeable && r.rate != null) { o.cost += r.rate * r.qty; o.hasCost = true; } }
 
     const costHead = showCost ? '<th class="num">Cost</th>' : '';
-    const costCell = i => { if (!showCost) return ''; const c = costOf(i); return `<td class="num">${c == null ? '—' : _ncMoney(c)}</td>`; };
+    const costCell = i => { if (!showCost) return ''; if (!i.chargeable) return '<td class="num muted">no charge</td>'; const c = costOf(i); return `<td class="num">${c == null ? '—' : _ncMoney(c)}</td>`; };
 
     // ── sections ──
     const scopeLabel = supplier ? `Prepared for ${_ncEh(supplier)}` : 'All suppliers · Internal';
