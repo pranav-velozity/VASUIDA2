@@ -484,6 +484,150 @@ CREATE TABLE IF NOT EXISTS nc_incident_image (
 CREATE INDEX IF NOT EXISTS idx_nc_image_incident ON nc_incident_image(incident_id);
 `);
 
+// ═══════════════════ TENANCY FOUNDATION (Step 1 — schema + seed only) ═══════════════════
+// Nothing reads these tables yet. Isolation is switched on in Step 3.
+db.exec(`
+CREATE TABLE IF NOT EXISTS client (
+  id          TEXT PRIMARY KEY,              -- 'ICONIC' | 'EHP' | 'VOZ'
+  name        TEXT NOT NULL,
+  kind        TEXT NOT NULL DEFAULT 'client',-- 'client' | 'internal'
+  active      INTEGER NOT NULL DEFAULT 1,
+  sort_order  INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS facility (
+  code        TEXT PRIMARY KEY,              -- 'VOZ_KY' | 'VOZ_TX'
+  name        TEXT NOT NULL,
+  country     TEXT,
+  timezone    TEXT NOT NULL,                 -- IANA tz — drives date_local, week boundaries, business-day SLAs
+  active      INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS client_facility (
+  client_id     TEXT NOT NULL,
+  facility_code TEXT NOT NULL,
+  PRIMARY KEY (client_id, facility_code)
+);
+-- Clerk org -> what it means in Pinpoint. Org identity is the tenancy key.
+CREATE TABLE IF NOT EXISTS org_map (
+  clerk_org_id TEXT PRIMARY KEY,
+  org_name     TEXT,
+  org_type     TEXT NOT NULL,                -- 'internal' | 'client' | 'partner'
+  client_id    TEXT,                         -- set when org_type='client'
+  active       INTEGER NOT NULL DEFAULT 1
+);
+-- Partner orgs are facility-scoped; their client scope is derived from client_facility.
+CREATE TABLE IF NOT EXISTS org_facility (
+  clerk_org_id  TEXT NOT NULL,
+  facility_code TEXT NOT NULL,
+  PRIMARY KEY (clerk_org_id, facility_code)
+);
+CREATE TABLE IF NOT EXISTS client_capability (
+  client_id  TEXT NOT NULL,
+  capability TEXT NOT NULL,
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (client_id, capability)
+);
+CREATE TABLE IF NOT EXISTS role_permission (
+  role       TEXT NOT NULL,                  -- 'admin' | 'ops' | 'viewer' | 'api'
+  permission TEXT NOT NULL,
+  PRIMARY KEY (role, permission)
+);
+-- Clerk role string -> canonical role (lets old and new names coexist through the transition).
+CREATE TABLE IF NOT EXISTS role_alias (
+  clerk_role TEXT PRIMARY KEY,
+  role       TEXT NOT NULL
+);
+`);
+
+(function seedTenancy(){
+  const ins = (sql, rows) => { const st = db.prepare(sql); db.transaction(() => { for (const r of rows) st.run(...r); })(); };
+
+  ins(`INSERT OR IGNORE INTO client (id,name,kind,sort_order) VALUES (?,?,?,?)`, [
+    ['ICONIC','THE ICONIC','client',10],
+    ['EHP','EHP Labs','client',20],
+    ['VOZ','VelOzity','internal',0],
+  ]);
+
+  ins(`INSERT OR IGNORE INTO facility (code,name,country,timezone) VALUES (?,?,?,?)`, [
+    ['VOZ_KY','Kerry Yantian, Shenzhen','CN','Asia/Shanghai'],
+    ['VOZ_TX','Brookshire, TX','US','America/Chicago'],
+  ]);
+
+  ins(`INSERT OR IGNORE INTO client_facility (client_id,facility_code) VALUES (?,?)`, [
+    ['ICONIC','VOZ_KY'],
+    ['EHP','VOZ_TX'],
+  ]);
+
+  // Org IDs confirmed from Clerk. EHP + the VOZ_TX partner org are added when created.
+  ins(`INSERT OR IGNORE INTO org_map (clerk_org_id,org_name,org_type,client_id) VALUES (?,?,?,?)`, [
+    ['org_3AUQCg5rZXL5yMBcZDyKJPYdZLw','VelOzity','internal',null],
+    ['org_3AUSk9RwVgri6akIEVvLwNvhxtA','The Iconic','client','ICONIC'],
+    ['org_3Bo9qoGuEL72hCnbOUuff4PdiOT','Kerry Logistics Shenzhen','partner',null],
+  ]);
+  ins(`INSERT OR IGNORE INTO org_facility (clerk_org_id,facility_code) VALUES (?,?)`, [
+    ['org_3Bo9qoGuEL72hCnbOUuff4PdiOT','VOZ_KY'],
+  ]);
+
+  const capRows = [];
+  const ICONIC_CAPS = ['week_hub','receiving_ops','vas_ops','apo_generator','iconic_sftp','transit_clearing','freight_lanes','non_compliance','executive','reports','finance'];
+  const EHP_CAPS    = ['week_hub','receiving_ops','vas_ops','inbound_pallets','envelope_fulfilment','shopify_orders','executive','reports','finance'];
+  for (const c of ICONIC_CAPS) capRows.push(['ICONIC', c]);
+  for (const c of EHP_CAPS)    capRows.push(['EHP', c]);
+  for (const c of new Set([...ICONIC_CAPS, ...EHP_CAPS])) capRows.push(['VOZ', c]);
+  ins(`INSERT OR IGNORE INTO client_capability (client_id,capability) VALUES (?,?)`, capRows);
+
+  const perms = {
+    admin:  ['finance.view','finance.write','vas.read','vas.write','receiving.read','receiving.write','weekhub.read','executive.view','reports.view','noncompliance.view','noncompliance.capture','admin.manage'],
+    ops:    ['vas.read','vas.write','receiving.read','receiving.write','weekhub.read','executive.view','reports.view','noncompliance.view','noncompliance.capture'],
+    viewer: ['weekhub.read','receiving.read','executive.view','reports.view','noncompliance.view'],
+    api:    ['records.write','receiving.write','weekhub.read'],
+  };
+  const permRows = [];
+  for (const [role, list] of Object.entries(perms)) for (const p of list) permRows.push([role, p]);
+  ins(`INSERT OR IGNORE INTO role_permission (role,permission) VALUES (?,?)`, permRows);
+
+  ins(`INSERT OR IGNORE INTO role_alias (clerk_role,role) VALUES (?,?)`, [
+    ['org:admin_auth','admin'],
+    ['org:member','ops'],          // legacy 'member'
+    ['org:client_auth','viewer'],  // legacy 'client'
+    ['org:supplier_auth','viewer'],// retired role — least privilege if anyone still holds it
+    ['org:api_auth','api'],
+  ]);
+})();
+
+// Resolve an authenticated user's tenancy. Read-only in Step 1 — nothing enforces this yet.
+function tenancyResolve(orgId, clerkRole) {
+  const out = { org_id: orgId || null, org_type: null, org_name: null, role: null,
+                client_ids: [], facility_codes: [], permissions: [], capabilities: {}, denied_reason: null };
+  if (!orgId) { out.denied_reason = 'no_active_org'; return out; }
+  const org = db.prepare('SELECT * FROM org_map WHERE clerk_org_id=? AND active=1').get(orgId);
+  if (!org) { out.denied_reason = 'org_not_mapped'; return out; }
+  out.org_type = org.org_type; out.org_name = org.org_name;
+
+  const alias = db.prepare('SELECT role FROM role_alias WHERE clerk_role=?').get(clerkRole || '');
+  out.role = alias ? alias.role : null;
+  if (!out.role) out.denied_reason = 'role_not_mapped';
+
+  if (org.org_type === 'internal') {
+    out.client_ids     = db.prepare('SELECT id FROM client WHERE active=1 ORDER BY sort_order').all().map(r => r.id);
+    out.facility_codes = db.prepare('SELECT code FROM facility WHERE active=1').all().map(r => r.code);
+  } else if (org.org_type === 'client') {
+    out.client_ids     = org.client_id ? [org.client_id] : [];
+    out.facility_codes = db.prepare('SELECT facility_code FROM client_facility WHERE client_id=?').all(org.client_id || '').map(r => r.facility_code);
+  } else if (org.org_type === 'partner') {
+    out.facility_codes = db.prepare('SELECT facility_code FROM org_facility WHERE clerk_org_id=?').all(orgId).map(r => r.facility_code);
+    if (out.facility_codes.length) {
+      const ph = out.facility_codes.map(() => '?').join(',');
+      out.client_ids = db.prepare(`SELECT DISTINCT client_id FROM client_facility WHERE facility_code IN (${ph})`).all(...out.facility_codes).map(r => r.client_id);
+    }
+  }
+
+  if (out.role) out.permissions = db.prepare('SELECT permission FROM role_permission WHERE role=?').all(out.role).map(r => r.permission);
+  for (const cid of out.client_ids) {
+    out.capabilities[cid] = db.prepare('SELECT capability FROM client_capability WHERE client_id=? AND enabled=1').all(cid).map(r => r.capability);
+  }
+  return out;
+}
+
 // Migration: add chargeable to an already-existing nc_incident table (idempotent — safe on prod).
 try {
   const _ncCols = db.prepare("PRAGMA table_info(nc_incident)").all().map(c => c.name);
@@ -9873,6 +10017,36 @@ th{font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:#AEAEB2;fon
 </div></body></html>`;
     res.send(html);
   } catch (e) { res.status(500).send('Report error: ' + _ncEh(String(e.message || e))); }
+});
+
+// ── Tenancy diagnostics (READ-ONLY — Step 1). Verifies resolution before Step 3 enforces it. ──
+app.get('/tenancy/whoami', authenticateRequest, (req, res) => {
+  try {
+    const r = tenancyResolve(req.auth?.orgId, req.auth?.orgRole);
+    res.json({
+      user_id: req.auth?.userId || null,
+      clerk_org_id: req.auth?.orgId || null,
+      clerk_org_role: req.auth?.orgRole || null,
+      resolved: r,
+      note: 'Read-only diagnostic. No isolation is enforced yet (Step 3).',
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Full tenancy config — lets us eyeball the seeded model without a DB shell.
+app.get('/tenancy/config', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    res.json({
+      clients:    db.prepare('SELECT * FROM client ORDER BY sort_order').all(),
+      facilities: db.prepare('SELECT * FROM facility ORDER BY code').all(),
+      client_facility: db.prepare('SELECT * FROM client_facility').all(),
+      orgs:       db.prepare('SELECT * FROM org_map').all(),
+      org_facility: db.prepare('SELECT * FROM org_facility').all(),
+      capabilities: db.prepare('SELECT * FROM client_capability WHERE enabled=1 ORDER BY client_id, capability').all(),
+      role_permissions: db.prepare('SELECT * FROM role_permission ORDER BY role, permission').all(),
+      role_aliases: db.prepare('SELECT * FROM role_alias').all(),
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
 app.listen(PORT, () => {
