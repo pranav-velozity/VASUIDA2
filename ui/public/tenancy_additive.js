@@ -94,9 +94,8 @@
         ${!active ? '<option value="">Select…</option>' : ''}
         ${pickable.map(c => `<option value="${c}" ${c === active ? 'selected' : ''}>${c}</option>`).join('')}
       </select></div>`;
-    } else if (r.client_ids && r.client_ids.length === 1) {
-      html += `<div class="tn-box"><span class="tn-lbl">Client</span><select class="tn-sel" disabled><option>${r.client_ids[0]}</option></select></div>`;
     }
+    // Client/partner users have exactly one client, derived server-side — show them nothing.
 
     wrap.innerHTML = html;
 
@@ -133,7 +132,7 @@
         setActiveClient(null);
       }
       render();
-      console.log('[tenancy v2] org:', r.org_type, '| clients:', (r.client_ids || []).join(','), '| active:', window.pinpointClient || '(server-derived)');
+      console.log('[tenancy v3] org:', r.org_type, '| clients:', (r.client_ids || []).join(','), '| active:', window.pinpointClient || '(server-derived)');
     } catch (e) { /* diagnostics only — never block the app */ }
   }
 
