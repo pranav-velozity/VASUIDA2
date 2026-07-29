@@ -743,6 +743,39 @@ const TENANT_TABLES = [
   } catch (e) { console.error('[migrate:records]', e.message); }
 })();
 
+// Generic PK rebuild: preserves every existing column (including ones added by
+// later _addColumnIfMissing calls) and replays the table's indexes.
+function rebuildWithClientPk(table, keyCols) {
+  try {
+    const info = db.prepare(`PRAGMA table_info("${table}")`).all();
+    if (!info.length) return;                                                    // not created yet — next boot
+    const cols = info.map(c => c.name);
+    if (!cols.includes('client_id')) return;                                     // Step 2 hasn't reached it yet
+    if (info.filter(c => c.pk > 0).map(c => c.name).includes('client_id')) return; // already migrated
+    const before = db.prepare(`SELECT COUNT(*) n FROM "${table}"`).get().n;
+    const idx = db.prepare(`SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL`).all(table);
+    const defs = info.map(c => {
+      if (c.name === 'client_id') return `"client_id" TEXT NOT NULL DEFAULT 'ICONIC'`;
+      let d = `"${c.name}" ${c.type || 'TEXT'}`;
+      if (c.notnull) d += ' NOT NULL';
+      if (c.dflt_value !== null && c.dflt_value !== undefined) d += ` DEFAULT ${c.dflt_value}`;
+      return d;
+    });
+    const selectList = cols.map(c => c === 'client_id' ? `COALESCE("client_id",'ICONIC')` : `"${c}"`).join(',');
+    const colList = cols.map(c => `"${c}"`).join(',');
+    const pk = ['client_id', ...keyCols].map(c => `"${c}"`).join(',');
+    db.exec(`CREATE TABLE "${table}__new" (${defs.join(', ')}, PRIMARY KEY (${pk}));`);
+    db.exec(`INSERT INTO "${table}__new" (${colList}) SELECT ${selectList} FROM "${table}";`);
+    db.exec(`DROP TABLE "${table}"; ALTER TABLE "${table}__new" RENAME TO "${table}";`);
+    for (const i of idx) { try { db.exec(i.sql); } catch (e) { /* index may already exist */ } }
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_client ON "${table}"(client_id);`);
+    const after = db.prepare(`SELECT COUNT(*) n FROM "${table}"`).get().n;
+    console.log(`[migrate:${table}] PK -> (client_id, ${keyCols.join(', ')}); rows ${before} -> ${after}` + (before === after ? ' OK' : ' \u26a0 COUNT MISMATCH'));
+  } catch (e) { console.error(`[migrate:${table}]`, e.message); }
+}
+rebuildWithClientPk('receiving', ['week_start', 'po_number']);
+rebuildWithClientPk('bins',      ['week_start', 'mobile_bin']);
+
 // Resolve the single client a WRITE belongs to. Not enforced yet (Step 3).
 //   client/partner org -> derived (one client)
 //   internal org       -> must be chosen explicitly; default-deny when unset
@@ -5772,7 +5805,7 @@ const Bins = {
                         carton_length_cm, carton_width_cm, carton_height_cm, client_id)
       VALUES (@week_start, @mobile_bin, @total_units, @weight_kg, @date_local,
               @carton_length_cm, @carton_width_cm, @carton_height_cm, @client_id)
-      ON CONFLICT(week_start, mobile_bin) DO UPDATE SET
+      ON CONFLICT(client_id, week_start, mobile_bin) DO UPDATE SET
         total_units = excluded.total_units,
         weight_kg   = excluded.weight_kg,
         date_local  = excluded.date_local,
@@ -6008,7 +6041,7 @@ receivingRouter.put('/weeks/:ws',
       @carton_length_cm, @carton_width_cm, @carton_height_cm,
       @updated_at, @client_id
     )
-    ON CONFLICT(week_start, po_number) DO UPDATE SET
+    ON CONFLICT(client_id, week_start, po_number) DO UPDATE SET
       supplier_name=excluded.supplier_name,
       facility_name=excluded.facility_name,
       received_at_utc=excluded.received_at_utc,
