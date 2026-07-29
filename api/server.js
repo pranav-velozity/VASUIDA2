@@ -658,6 +658,48 @@ function tenancyResolve(orgId, clerkRole) {
   return out;
 }
 
+// ═══════════════════ STEP 2 — client_id on tenant tables (additive, idempotent) ═══════════════════
+// Adds a nullable column and fills it where unset. No drops, no renames, no deletes.
+// Config tables (client, facility, org_map, role_*, nc_category, fin_fx_rates) stay global.
+const TENANT_TABLES = [
+  'records','receiving','plans','bins','flow_week','zendesk_completions',
+  'lane_actual_dates','lane_baselines','lane_planned_snapshots',
+  'fin_invoices','fin_invoice_lines','fin_expenses',
+  'collab_threads','collab_messages','nc_incident','iconic_push_log','email_send_log',
+];
+(function step2AddClientId(){
+  for (const t of TENANT_TABLES) {
+    try {
+      const cols = db.prepare(`PRAGMA table_info(${t})`).all().map(c => c.name);
+      if (!cols.length) continue;                                   // table not present — skip
+      if (!cols.includes('client_id')) db.exec(`ALTER TABLE ${t} ADD COLUMN client_id TEXT`);
+      // All pre-existing data belongs to ICONIC.
+      db.exec(`UPDATE ${t} SET client_id='ICONIC' WHERE client_id IS NULL`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_${t}_client ON ${t}(client_id)`);
+    } catch (e) { console.error('[step2:client_id]', t, e.message); }
+  }
+})();
+
+// Resolve the single client a WRITE belongs to. Not enforced yet (Step 3).
+//   client/partner org -> derived (one client)
+//   internal org       -> must be chosen explicitly; default-deny when unset
+function tenancyWriteClient(req, explicit) {
+  const t = tenancyResolve(req.auth?.orgId, req.auth?.orgRole);
+  if (t.denied_reason) return { client_id: null, reason: t.denied_reason, org_type: t.org_type };
+  const want = explicit || req.get('x-pinpoint-client') || req.query.client_id || null;
+  if (t.org_type === 'internal') {
+    if (!want) return { client_id: null, reason: 'internal_client_not_selected', org_type: t.org_type };
+    if (!t.client_ids.includes(want)) return { client_id: null, reason: 'client_not_in_scope', org_type: t.org_type };
+    return { client_id: want, reason: null, org_type: t.org_type };
+  }
+  if (t.client_ids.length === 1) return { client_id: t.client_ids[0], reason: null, org_type: t.org_type };
+  if (t.client_ids.length > 1) {
+    if (want && t.client_ids.includes(want)) return { client_id: want, reason: null, org_type: t.org_type };
+    return { client_id: null, reason: 'ambiguous_client', org_type: t.org_type };
+  }
+  return { client_id: null, reason: 'no_client_scope', org_type: t.org_type };
+}
+
 // Migration: add chargeable to an already-existing nc_incident table (idempotent — safe on prod).
 try {
   const _ncCols = db.prepare("PRAGMA table_info(nc_incident)").all().map(c => c.name);
@@ -10109,6 +10151,31 @@ app.get('/tenancy/matrix', authenticateRequest, requireRole(['admin']), (req, re
     }
     res.json({ matrix: rows });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Backfill verification — row counts per client_id for every tenant table.
+app.get('/tenancy/coverage', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const out = [];
+    for (const t of TENANT_TABLES) {
+      try {
+        const cols = db.prepare(`PRAGMA table_info(${t})`).all().map(c => c.name);
+        if (!cols.length) { out.push({ table: t, status: 'missing' }); continue; }
+        if (!cols.includes('client_id')) { out.push({ table: t, status: 'NO client_id COLUMN' }); continue; }
+        const total  = db.prepare(`SELECT COUNT(*) n FROM ${t}`).get().n;
+        const unset  = db.prepare(`SELECT COUNT(*) n FROM ${t} WHERE client_id IS NULL`).get().n;
+        const byCli  = db.prepare(`SELECT client_id, COUNT(*) n FROM ${t} GROUP BY client_id`).all();
+        out.push({ table: t, total, unset, by_client: byCli, status: unset === 0 ? 'ok' : 'UNSET ROWS' });
+      } catch (e) { out.push({ table: t, status: 'error: ' + e.message }); }
+    }
+    res.json({ tables: out, all_backfilled: out.every(r => r.status === 'ok' || r.status === 'missing') });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// What client would a write from this caller be tagged with? Read-only.
+app.get('/tenancy/writecontext', authenticateRequest, (req, res) => {
+  try { res.json({ write_context: tenancyWriteClient(req), note: 'Not enforced yet (Step 3).' }); }
+  catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
 app.listen(PORT, () => {
