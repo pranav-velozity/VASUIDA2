@@ -531,6 +531,13 @@ CREATE TABLE IF NOT EXISTS role_permission (
   permission TEXT NOT NULL,
   PRIMARY KEY (role, permission)
 );
+-- Ceiling by org type. Effective permissions = role_permission ∩ org_type_permission.
+-- Stops a partner/client 'admin' inheriting VelOzity-internal reach (e.g. Finance).
+CREATE TABLE IF NOT EXISTS org_type_permission (
+  org_type   TEXT NOT NULL,                  -- 'internal' | 'client' | 'partner'
+  permission TEXT NOT NULL,
+  PRIMARY KEY (org_type, permission)
+);
 -- Clerk role string -> canonical role (lets old and new names coexist through the transition).
 CREATE TABLE IF NOT EXISTS role_alias (
   clerk_role TEXT PRIMARY KEY,
@@ -557,14 +564,17 @@ CREATE TABLE IF NOT EXISTS role_alias (
     ['EHP','VOZ_TX'],
   ]);
 
-  // Org IDs confirmed from Clerk. EHP + the VOZ_TX partner org are added when created.
+  // Org IDs confirmed from Clerk.
   ins(`INSERT OR IGNORE INTO org_map (clerk_org_id,org_name,org_type,client_id) VALUES (?,?,?,?)`, [
     ['org_3AUQCg5rZXL5yMBcZDyKJPYdZLw','VelOzity','internal',null],
     ['org_3AUSk9RwVgri6akIEVvLwNvhxtA','The Iconic','client','ICONIC'],
+    ['org_3HBc5VFGgnJwzjb0S9IwOJD8L9T','EHP Labs','client','EHP'],
     ['org_3Bo9qoGuEL72hCnbOUuff4PdiOT','Kerry Logistics Shenzhen','partner',null],
+    ['org_3HBc8cTjFvr2wDwJuLOUegPKu08','Kerry Logistics US','partner',null],
   ]);
   ins(`INSERT OR IGNORE INTO org_facility (clerk_org_id,facility_code) VALUES (?,?)`, [
     ['org_3Bo9qoGuEL72hCnbOUuff4PdiOT','VOZ_KY'],
+    ['org_3HBc8cTjFvr2wDwJuLOUegPKu08','VOZ_TX'],
   ]);
 
   const capRows = [];
@@ -585,6 +595,20 @@ CREATE TABLE IF NOT EXISTS role_alias (
   for (const [role, list] of Object.entries(perms)) for (const p of list) permRows.push([role, p]);
   ins(`INSERT OR IGNORE INTO role_permission (role,permission) VALUES (?,?)`, permRows);
 
+  // Ceilings. A client/partner 'admin' is an admin of THEIR scope only.
+  const ALL_PERMS = [...new Set(permRows.map(r => r[1]))];
+  const ceilings = {
+    internal: ALL_PERMS,
+    // Finance is VelOzity's own P&L — not client data. admin.manage stays internal.
+    client:  ALL_PERMS.filter(p => !p.startsWith('finance.') && p !== 'admin.manage'),
+    // Partners run the floor: ops + capture + their facility's exec/reports. No Finance.
+    partner: ['weekhub.read','receiving.read','receiving.write','vas.read','vas.write',
+              'noncompliance.view','noncompliance.capture','executive.view','reports.view'],
+  };
+  const ceilRows = [];
+  for (const [t, list] of Object.entries(ceilings)) for (const p of list) ceilRows.push([t, p]);
+  ins(`INSERT OR IGNORE INTO org_type_permission (org_type,permission) VALUES (?,?)`, ceilRows);
+
   ins(`INSERT OR IGNORE INTO role_alias (clerk_role,role) VALUES (?,?)`, [
     ['org:admin_auth','admin'],
     ['org:member','ops'],          // legacy 'member'
@@ -597,7 +621,7 @@ CREATE TABLE IF NOT EXISTS role_alias (
 // Resolve an authenticated user's tenancy. Read-only in Step 1 — nothing enforces this yet.
 function tenancyResolve(orgId, clerkRole) {
   const out = { org_id: orgId || null, org_type: null, org_name: null, role: null,
-                client_ids: [], facility_codes: [], permissions: [], capabilities: {}, denied_reason: null };
+                client_ids: [], facility_codes: [], permissions: [], role_permissions: [], capped: [], capabilities: {}, denied_reason: null };
   if (!orgId) { out.denied_reason = 'no_active_org'; return out; }
   const org = db.prepare('SELECT * FROM org_map WHERE clerk_org_id=? AND active=1').get(orgId);
   if (!org) { out.denied_reason = 'org_not_mapped'; return out; }
@@ -621,7 +645,13 @@ function tenancyResolve(orgId, clerkRole) {
     }
   }
 
-  if (out.role) out.permissions = db.prepare('SELECT permission FROM role_permission WHERE role=?').all(out.role).map(r => r.permission);
+  if (out.role) {
+    const rolePerms = db.prepare('SELECT permission FROM role_permission WHERE role=?').all(out.role).map(r => r.permission);
+    const ceiling = new Set(db.prepare('SELECT permission FROM org_type_permission WHERE org_type=?').all(org.org_type).map(r => r.permission));
+    out.role_permissions = rolePerms;                                  // what the role grants
+    out.permissions = rolePerms.filter(p => ceiling.has(p));           // effective = role ∩ org-type ceiling
+    out.capped = rolePerms.filter(p => !ceiling.has(p));               // removed by the ceiling (visibility)
+  }
   for (const cid of out.client_ids) {
     out.capabilities[cid] = db.prepare('SELECT capability FROM client_capability WHERE client_id=? AND enabled=1').all(cid).map(r => r.capability);
   }
@@ -10044,6 +10074,7 @@ app.get('/tenancy/config', authenticateRequest, requireRole(['admin']), (req, re
       org_facility: db.prepare('SELECT * FROM org_facility').all(),
       capabilities: db.prepare('SELECT * FROM client_capability WHERE enabled=1 ORDER BY client_id, capability').all(),
       role_permissions: db.prepare('SELECT * FROM role_permission ORDER BY role, permission').all(),
+      org_type_permissions: db.prepare('SELECT * FROM org_type_permission ORDER BY org_type, permission').all(),
       role_aliases: db.prepare('SELECT * FROM role_alias').all(),
     });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
