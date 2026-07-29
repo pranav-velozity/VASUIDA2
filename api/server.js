@@ -4651,7 +4651,8 @@ app.post('/records/import',
     }
 
     const trx = db.transaction(rows => {
-      for (const r of rows) upsertByComposite.run(r);
+      const _cid = curClient();
+      for (const r of rows) upsertByComposite.run({ ...r, client_id: _cid });
     });
     trx(payload);
 
