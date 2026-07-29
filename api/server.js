@@ -179,7 +179,7 @@ CREATE INDEX IF NOT EXISTS idx_records_po_status ON records(po_number, status);
 CREATE INDEX IF NOT EXISTS idx_records_po_mobile_bin ON records(po_number, mobile_bin);
 CREATE INDEX IF NOT EXISTS idx_records_sku ON records(sku_code);
 CREATE INDEX IF NOT EXISTS idx_records_uid ON records(uid);
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_po_sku_uid ON records(po_number, sku_code, uid);
+-- uniq_po_sku_uid is replaced by uniq_client_po_sku_uid (see key migration below).
 
 CREATE TABLE IF NOT EXISTS plans (
   week_start TEXT PRIMARY KEY,
@@ -701,6 +701,48 @@ const TENANT_TABLES = [
   }
 })();
 
+// ═══════════ KEY MIGRATIONS — make tenant rows able to coexist ═══════════
+// Without these, a second client silently overwrites the first (plans) or merges
+// into its rows (records). Must run before any non-ICONIC data exists.
+(function fixPlansPrimaryKey(){
+  try {
+    const info = db.prepare("PRAGMA table_info(plans)").all();
+    if (!info.length) return;
+    if (info.filter(c => c.pk > 0).map(c => c.name).includes('client_id')) return;  // already migrated
+    const before = db.prepare('SELECT COUNT(*) n FROM plans').get().n;
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS plans_new (
+        week_start TEXT NOT NULL,
+        data       TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        client_id  TEXT NOT NULL DEFAULT 'ICONIC',
+        PRIMARY KEY (client_id, week_start)
+      );
+      INSERT INTO plans_new (week_start, data, updated_at, client_id)
+        SELECT week_start, data, updated_at, COALESCE(client_id,'ICONIC') FROM plans;
+      DROP TABLE plans;
+      ALTER TABLE plans_new RENAME TO plans;
+      CREATE INDEX IF NOT EXISTS idx_plans_client ON plans(client_id);
+    `);
+    const after = db.prepare('SELECT COUNT(*) n FROM plans').get().n;
+    console.log(`[migrate:plans] PK -> (client_id, week_start); rows ${before} -> ${after}` + (before === after ? ' OK' : ' ⚠ COUNT MISMATCH'));
+  } catch (e) { console.error('[migrate:plans]', e.message); }
+})();
+
+(function fixRecordsUniqueIndex(){
+  try {
+    const cols = db.prepare('PRAGMA table_info(records)').all().map(c => c.name);
+    if (!cols.includes('client_id')) return;              // Step 2 must have run first
+    const cur = db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='uniq_client_po_sku_uid'").get();
+    if (cur) { db.exec('DROP INDEX IF EXISTS uniq_po_sku_uid;'); return; }   // already migrated
+    db.exec(`
+      DROP INDEX IF EXISTS uniq_po_sku_uid;
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_client_po_sku_uid ON records(client_id, po_number, sku_code, uid);
+    `);
+    console.log('[migrate:records] unique index now (client_id, po_number, sku_code, uid)');
+  } catch (e) { console.error('[migrate:records]', e.message); }
+})();
+
 // Resolve the single client a WRITE belongs to. Not enforced yet (Step 3).
 //   client/partner org -> derived (one client)
 //   internal org       -> must be chosen explicitly; default-deny when unset
@@ -763,7 +805,7 @@ const deleteByUid = db.prepare('DELETE FROM records WHERE uid = ?');
 const upsertByComposite = db.prepare(`
 INSERT INTO records (id, date_local, mobile_bin, sscc_label, po_number, sku_code, uid, status, completed_at, sync_state, client_id)
 VALUES (@id, @date_local, @mobile_bin, @sscc_label, @po_number, @sku_code, @uid, @status, @completed_at, @sync_state, @client_id)
-ON CONFLICT(po_number, sku_code, uid) DO UPDATE SET
+ON CONFLICT(client_id, po_number, sku_code, uid) DO UPDATE SET
   date_local   = COALESCE(excluded.date_local, records.date_local),
   mobile_bin   = COALESCE(excluded.mobile_bin, records.mobile_bin),
   sscc_label   = COALESCE(excluded.sscc_label, records.sscc_label),
