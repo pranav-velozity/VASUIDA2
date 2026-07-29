@@ -975,11 +975,27 @@ function createHeart(size=24, color=BRAND, bpm=40){
       headers['Authorization'] = `Bearer ${token}`;
     }
 
-    const r = await fetch(`${apiBase}${path}`, {
-      method: opts.method || 'GET',
-      headers,
-      body: opts.body ? JSON.stringify(opts.body) : undefined
-    });
+    // Retry transient failures (cold API, restart window, brief network blip).
+    // Only GETs are retried — never a write, which could double-apply.
+    const _method = opts.method || 'GET';
+    const _isGet = String(_method).toUpperCase() === 'GET';
+    let r, _lastErr = null;
+    for (let attempt = 0; attempt < (_isGet ? 4 : 1); attempt++) {
+      if (attempt) await new Promise(res => setTimeout(res, 400 * Math.pow(2, attempt - 1)));  // 400/800/1600ms
+      try {
+        r = await fetch(`${apiBase}${path}`, {
+          method: _method,
+          headers,
+          body: opts.body ? JSON.stringify(opts.body) : undefined
+        });
+        _lastErr = null;
+        if (_isGet && (r.status === 502 || r.status === 503 || r.status === 504)) { _lastErr = new Error('HTTP ' + r.status); continue; }
+        break;
+      } catch (e) {
+        _lastErr = e;   // network-level failure (cold start / restart) — retry
+      }
+    }
+    if (_lastErr) { console.error('[API] failed after retries:', path, _lastErr.message); throw _lastErr; }
     
     // Handle 401 - do NOT auto sign-out.
     // A 401 during init is a race condition (token not ready yet), not a real session expiry.
