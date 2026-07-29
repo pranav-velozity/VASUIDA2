@@ -10065,6 +10065,249 @@ app.post('/nc/recheck', authenticateRequest, writeOpLimiter, auditLog('recheck_n
   } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
 });
 
+// ═══════════════════ EHP FULFILMENT DOMAIN — schema ═══════════════════
+// Client-scoped from the first line. Grain is order/envelope (continuous), not
+// PO/SKU/UID (weekly) — see /areas notes. Inventory is a perpetual ledger.
+db.exec(`
+-- Thin SKU registry: auto-created as SKUs appear. Holds only what nothing else supplies.
+CREATE TABLE IF NOT EXISTS ehp_sku (
+  client_id         TEXT NOT NULL,
+  sku               TEXT NOT NULL,
+  name              TEXT,
+  format            TEXT,                       -- stick | tub | gummies | bundle | other
+  flavour           TEXT,
+  eaches_per_inner  INTEGER,                    -- conversions; NULL until known
+  inners_per_carton INTEGER,
+  cartons_per_pallet INTEGER,
+  source            TEXT DEFAULT 'auto',        -- auto | shopify | manual
+  active            INTEGER NOT NULL DEFAULT 1,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (client_id, sku)
+);
+
+-- Pallets in. Billing unit ($35/pallet); a partial pallet bills as one. Independent of contents.
+CREATE TABLE IF NOT EXISTS ehp_pallet_receipt (
+  id                 TEXT PRIMARY KEY,
+  client_id          TEXT NOT NULL,
+  facility_code      TEXT NOT NULL,
+  received_date_local TEXT NOT NULL,            -- facility-local date (SLA + billing period)
+  received_at_utc    TEXT NOT NULL DEFAULT (datetime('now')),
+  pallets            INTEGER NOT NULL DEFAULT 0,
+  reference          TEXT,
+  notes              TEXT,
+  created_by         TEXT,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ehp_receipt_client ON ehp_pallet_receipt(client_id, received_date_local);
+
+-- Product quantities on a receipt. Recorded in whatever UoM the paperwork used.
+CREATE TABLE IF NOT EXISTS ehp_receipt_line (
+  id           TEXT PRIMARY KEY,
+  receipt_id   TEXT NOT NULL,
+  client_id    TEXT NOT NULL,
+  sku          TEXT NOT NULL,
+  qty_entered  REAL NOT NULL,
+  uom_entered  TEXT NOT NULL,                   -- each | inner | carton | pallet
+  qty_each     INTEGER NOT NULL,                -- normalised
+  lot_code     TEXT,                            -- optional, never blocking
+  expiry_date  TEXT,                            -- optional, never blocking
+  notes        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ehp_rline_receipt ON ehp_receipt_line(receipt_id);
+CREATE INDEX IF NOT EXISTS idx_ehp_rline_sku ON ehp_receipt_line(client_id, sku);
+
+-- Versioned kit recipe (e.g. 2+2+1). Consumption is derived from this, never hand-counted.
+CREATE TABLE IF NOT EXISTS ehp_kit_recipe (
+  id             TEXT PRIMARY KEY,
+  client_id      TEXT NOT NULL,
+  name           TEXT NOT NULL,
+  effective_from TEXT NOT NULL,
+  effective_to   TEXT,
+  active         INTEGER NOT NULL DEFAULT 1,
+  notes          TEXT,
+  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS ehp_kit_recipe_line (
+  recipe_id        TEXT NOT NULL,
+  client_id        TEXT NOT NULL,
+  sku              TEXT NOT NULL,
+  qty_per_envelope INTEGER NOT NULL,
+  PRIMARY KEY (recipe_id, sku)
+);
+
+-- Orders from Shopify. envelope_qty is the billing driver (free product, paid shipping —
+-- a customer may order several).
+CREATE TABLE IF NOT EXISTS ehp_order (
+  id                   TEXT PRIMARY KEY,
+  client_id            TEXT NOT NULL,
+  shopify_order_id     TEXT,
+  order_number         TEXT,
+  placed_at            TEXT,
+  envelope_qty         INTEGER NOT NULL DEFAULT 1,
+  recipient_name       TEXT,
+  recipient_address    TEXT,                    -- consumer PII: excluded from AI context
+  recipient_city       TEXT,
+  recipient_state      TEXT,
+  recipient_postcode   TEXT,
+  recipient_country    TEXT DEFAULT 'US',
+  state                TEXT NOT NULL DEFAULT 'queued',   -- queued|assembled|dispatched|cancelled
+  batch_id             TEXT,
+  flagged_high_qty     INTEGER NOT NULL DEFAULT 0,       -- flag only; never blocks processing
+  fulfilled_at         TEXT,
+  shopify_fulfilment_id TEXT,
+  undeliverable_at     TEXT,                    -- reserved (out of scope for now)
+  undeliverable_reason TEXT,
+  created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_ehp_order_shopify ON ehp_order(client_id, shopify_order_id);
+CREATE INDEX IF NOT EXISTS idx_ehp_order_state ON ehp_order(client_id, state);
+CREATE INDEX IF NOT EXISTS idx_ehp_order_batch ON ehp_order(batch_id);
+
+-- Batch sized by envelope count. Whole orders only, so actual may exceed the target.
+CREATE TABLE IF NOT EXISTS ehp_assembly_batch (
+  id                TEXT PRIMARY KEY,
+  client_id         TEXT NOT NULL,
+  facility_code     TEXT NOT NULL,
+  target_envelopes  INTEGER NOT NULL,
+  actual_envelopes  INTEGER NOT NULL DEFAULT 0,
+  order_count       INTEGER NOT NULL DEFAULT 0,
+  recipe_id         TEXT,
+  state             TEXT NOT NULL DEFAULT 'queued',      -- queued|assembled|dispatched
+  assembled_at      TEXT,
+  dispatched_at     TEXT,
+  created_by        TEXT,
+  created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ehp_batch_state ON ehp_assembly_batch(client_id, state);
+
+-- Perpetual inventory ledger. On-hand is the sum; every movement is explainable.
+CREATE TABLE IF NOT EXISTS ehp_inventory_txn (
+  id          TEXT PRIMARY KEY,
+  client_id   TEXT NOT NULL,
+  sku         TEXT NOT NULL,
+  qty_each    INTEGER NOT NULL,                 -- signed: + receipt, - consumption, +/- adjustment
+  txn_type    TEXT NOT NULL,                    -- receipt | consumption | adjustment
+  ref_type    TEXT,
+  ref_id      TEXT,
+  lot_code    TEXT,
+  expiry_date TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ehp_inv_sku ON ehp_inventory_txn(client_id, sku);
+
+-- Cycle counts. Variance is posted as a visible adjustment, never a silent overwrite.
+CREATE TABLE IF NOT EXISTS ehp_stock_count (
+  id            TEXT PRIMARY KEY,
+  client_id     TEXT NOT NULL,
+  sku           TEXT NOT NULL,
+  counted_each  INTEGER NOT NULL,
+  system_each   INTEGER NOT NULL,
+  variance_each INTEGER NOT NULL,
+  counted_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  counted_by    TEXT,
+  notes         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ehp_count_sku ON ehp_stock_count(client_id, sku);
+`);
+
+// Flag (not a block) when a single order asks for an unusual number of envelopes.
+const EHP_ENVELOPE_ALERT_QTY = Number(process.env.EHP_ENVELOPE_ALERT_QTY || 5);
+
+function ehpNewId(p) { return (p || 'ehp') + '_' + crypto.randomBytes(10).toString('hex'); }
+
+// Auto-create a SKU on first sighting; never overwrite existing conversions.
+function ehpEnsureSku(clientId, sku, extra) {
+  if (!sku) return null;
+  const e = extra || {};
+  db.prepare(`INSERT OR IGNORE INTO ehp_sku (client_id, sku, name, format, flavour, source)
+              VALUES (?,?,?,?,?,?)`)
+    .run(clientId, sku, e.name || null, e.format || null, e.flavour || null, e.source || 'auto');
+  return db.prepare('SELECT * FROM ehp_sku WHERE client_id=? AND sku=?').get(clientId, sku);
+}
+
+// Convert an entered quantity to eaches using the SKU's pack hierarchy.
+// Unknown factors fall back to 1 so a receipt is never blocked — surfaced as needs_conversion.
+function ehpToEaches(clientId, sku, qty, uom) {
+  const r = db.prepare('SELECT * FROM ehp_sku WHERE client_id=? AND sku=?').get(clientId, sku) || {};
+  const ei = r.eaches_per_inner || null, ic = r.inners_per_carton || null, cp = r.cartons_per_pallet || null;
+  const u = String(uom || 'each').toLowerCase();
+  let mult = 1, known = true;
+  if (u === 'each')   mult = 1;
+  else if (u === 'inner')  { mult = ei || 1; known = !!ei; }
+  else if (u === 'carton') { mult = (ei || 1) * (ic || 1); known = !!(ei && ic); }
+  else if (u === 'pallet') { mult = (ei || 1) * (ic || 1) * (cp || 1); known = !!(ei && ic && cp); }
+  return { qty_each: Math.round(Number(qty || 0) * mult), known };
+}
+
+function ehpOnHand(clientId, sku) {
+  return db.prepare('SELECT COALESCE(SUM(qty_each),0) n FROM ehp_inventory_txn WHERE client_id=? AND sku=?')
+           .get(clientId, sku).n;
+}
+
+function ehpActiveRecipe(clientId, onDate) {
+  const d = onDate || new Date().toISOString().slice(0, 10);
+  const r = db.prepare(`SELECT * FROM ehp_kit_recipe WHERE client_id=? AND active=1
+                        AND effective_from <= ? AND (effective_to IS NULL OR effective_to >= ?)
+                        ORDER BY effective_from DESC LIMIT 1`).get(clientId, d, d);
+  if (!r) return null;
+  r.lines = db.prepare('SELECT sku, qty_per_envelope FROM ehp_kit_recipe_line WHERE recipe_id=?').all(r.id);
+  return r;
+}
+
+// Build a batch from queued orders. Whole orders only, so hitting a 500 target with a
+// 3-envelope order at the boundary yields 502 — the target is a floor, not a cap.
+function ehpBuildBatch(clientId, facility, targetEnvelopes, createdBy) {
+  const target = Math.max(1, parseInt(targetEnvelopes, 10) || 0);
+  const queued = db.prepare(`SELECT id, envelope_qty FROM ehp_order
+                             WHERE client_id=? AND state='queued' AND batch_id IS NULL
+                             ORDER BY placed_at, created_at`).all(clientId);
+  if (!queued.length) return { error: 'no_queued_orders' };
+  const picked = []; let env = 0;
+  for (const o of queued) {
+    if (env >= target) break;
+    picked.push(o.id); env += (o.envelope_qty || 1);      // never split an order
+  }
+  const batchId = ehpNewId('bat');
+  const recipe = ehpActiveRecipe(clientId);
+  db.transaction(() => {
+    db.prepare(`INSERT INTO ehp_assembly_batch
+      (id, client_id, facility_code, target_envelopes, actual_envelopes, order_count, recipe_id, state, created_by)
+      VALUES (?,?,?,?,?,?,?, 'queued', ?)`)
+      .run(batchId, clientId, facility || null, target, env, picked.length, recipe ? recipe.id : null, createdBy || null);
+    const upd = db.prepare(`UPDATE ehp_order SET batch_id=? WHERE id=? AND client_id=?`);
+    for (const id of picked) upd.run(batchId, id, clientId);
+  })();
+  return { batch_id: batchId, target_envelopes: target, actual_envelopes: env, order_count: picked.length,
+           recipe_id: recipe ? recipe.id : null };
+}
+
+// Mark assembled: explode the recipe and consume inventory.
+function ehpAssembleBatch(clientId, batchId, by) {
+  const b = db.prepare('SELECT * FROM ehp_assembly_batch WHERE id=? AND client_id=?').get(batchId, clientId);
+  if (!b) return { error: 'batch_not_found' };
+  if (b.state !== 'queued') return { error: 'batch_not_queued', state: b.state };
+  const recipe = b.recipe_id
+    ? (() => { const r = db.prepare('SELECT * FROM ehp_kit_recipe WHERE id=?').get(b.recipe_id);
+               if (r) r.lines = db.prepare('SELECT sku, qty_per_envelope FROM ehp_kit_recipe_line WHERE recipe_id=?').all(r.id);
+               return r; })()
+    : ehpActiveRecipe(clientId);
+  if (!recipe || !recipe.lines.length) return { error: 'no_active_recipe' };
+  const consumed = [];
+  db.transaction(() => {
+    for (const l of recipe.lines) {
+      const qty = (b.actual_envelopes || 0) * (l.qty_per_envelope || 0);
+      if (!qty) continue;
+      db.prepare(`INSERT INTO ehp_inventory_txn (id, client_id, sku, qty_each, txn_type, ref_type, ref_id)
+                  VALUES (?,?,?,?, 'consumption', 'assembly_batch', ?)`)
+        .run(ehpNewId('inv'), clientId, l.sku, -qty, batchId);
+      consumed.push({ sku: l.sku, qty_each: -qty, on_hand_after: ehpOnHand(clientId, l.sku) });
+    }
+    db.prepare(`UPDATE ehp_assembly_batch SET state='assembled', assembled_at=datetime('now') WHERE id=?`).run(batchId);
+    db.prepare(`UPDATE ehp_order SET state='assembled' WHERE batch_id=? AND client_id=?`).run(batchId, clientId);
+  })();
+  return { batch_id: batchId, envelopes: b.actual_envelopes, consumed };
+}
+
 // ═══════════════════ SUPPLIER DISCREPANCY REPORT (non-compliance) ═══════════════════
 const _ncReportTokens = new Map();               // token -> { ts, cost }
 const _NC_TOKEN_TTL = 30 * 60 * 1000;
