@@ -10080,6 +10080,37 @@ app.get('/tenancy/config', authenticateRequest, requireRole(['admin']), (req, re
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// Simulate any org/role combination without needing that user to sign in. Read-only.
+app.get('/tenancy/simulate', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const orgId = String(req.query.org_id || '').trim();
+    const role  = String(req.query.role || 'org:admin_auth').trim();
+    if (!orgId) return res.status(400).json({ error: 'org_id required' });
+    res.json({ simulated: { clerk_org_id: orgId, clerk_org_role: role }, resolved: tenancyResolve(orgId, role) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Full org × role matrix — one call to eyeball everyone's effective access.
+app.get('/tenancy/matrix', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const orgs  = db.prepare('SELECT * FROM org_map WHERE active=1').all();
+    const roles = db.prepare('SELECT clerk_role, role FROM role_alias ORDER BY clerk_role').all();
+    const rows = [];
+    for (const o of orgs) for (const r of roles) {
+      const t = tenancyResolve(o.clerk_org_id, r.clerk_role);
+      rows.push({
+        org: o.org_name, org_type: o.org_type, clerk_role: r.clerk_role, role: t.role,
+        clients: t.client_ids.join(','), facilities: t.facility_codes.join(','),
+        finance: t.permissions.includes('finance.view'),
+        executive: t.permissions.includes('executive.view'),
+        vas_write: t.permissions.includes('vas.write'),
+        perms: t.permissions.length, capped: t.capped,
+      });
+    }
+    res.json({ matrix: rows });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 app.listen(PORT, () => {
   console.log(`UID Ops backend listening on http://localhost:${PORT}`);
   console.log(`DB file: ${DB_FILE}`);
