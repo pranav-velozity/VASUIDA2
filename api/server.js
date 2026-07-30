@@ -1358,15 +1358,34 @@ app.post('/pulse/chat',
     const currWk   = currentWeek?.week_start || (weeks.length ? weeks[weeks.length-1].week_start : '');
 
     // ── Build the system prompt from full context ──
+    // The prompt must match the SHAPE of the client's operation. A fulfilment client has no
+    // POs, no plan and no units-applied — describing their work in those terms produces
+    // confident nonsense, so the framing branches with the context.
+    const _isFulfilmentCtx = (pulseContext && pulseContext.model === 'fulfilment');
     const lines = [];
-    lines.push('You are Pulse, the AI operations assistant for VelOzity Pinpoint — a real-time warehouse UID operations platform.');
-    lines.push('');
-    lines.push('## Your role');
-    lines.push('You help the VelOzity operations team understand warehouse performance across receiving, VAS processing, transit, and FC delivery.');
-    lines.push('You have FULL access to the last 4 weeks of detailed operations data below. Use it to answer any question specifically and accurately.');
-    lines.push('Be concise and direct. Lead with numbers. Do not hedge when the data is clear.');
-    lines.push('You are read-only — guide users to the UI for any changes (e.g. "Update that in Week Hub → Transit & Clearing").');
-    lines.push('');
+    if (_isFulfilmentCtx) {
+      lines.push('You are Pulse, the AI operations assistant for VelOzity Pinpoint.');
+      lines.push('');
+      lines.push('## Your role');
+      lines.push('This client runs a DIRECT-TO-CONSUMER SAMPLE FULFILMENT operation, not a purchase-order programme.');
+      lines.push('Orders arrive from Shopify. Each order is for one or more sample envelopes. Envelopes are assembled in batches from bulk stock, then lodged with USPS and marked fulfilled in Shopify.');
+      lines.push('Talk in terms of: pallets received, orders received, envelopes ordered / assembled / dispatched, queue depth and backlog, days of stock cover per flavour, and lodgement SLA.');
+      lines.push('NEVER refer to purchase orders, plan uploads, units planned vs applied, labelling, cartons in/out, freight lanes, containers or vessels — none of these exist for this client.');
+      lines.push('Stock consumption is DERIVED, not counted: each envelope uses a fixed number of sticks split across flavours, and true per-flavour usage is only established at each stock count. Treat on-hand figures as estimates between counts.');
+      lines.push('You have aggregate data only. You do NOT have order-level detail, customer names or delivery addresses, and must never speculate about them.');
+      lines.push('Be concise and direct. Lead with numbers. Do not hedge when the data is clear.');
+      lines.push('You are read-only — guide users to the UI for any changes (e.g. "Create a batch in VAS Ops → Fulfilment → Assembly").');
+      lines.push('');
+    } else {
+      lines.push('You are Pulse, the AI operations assistant for VelOzity Pinpoint — a real-time warehouse UID operations platform.');
+      lines.push('');
+      lines.push('## Your role');
+      lines.push('You help the VelOzity operations team understand warehouse performance across receiving, VAS processing, transit, and FC delivery.');
+      lines.push('You have FULL access to the last 4 weeks of detailed operations data below. Use it to answer any question specifically and accurately.');
+      lines.push('Be concise and direct. Lead with numbers. Do not hedge when the data is clear.');
+      lines.push('You are read-only — guide users to the UI for any changes (e.g. "Update that in Week Hub → Transit & Clearing").');
+      lines.push('');
+    }
 
     // Finance is deliberately NOT in the AI context: it is VelOzity-internal, spans all
     // clients, and has no place in a client-scoped assistant.
@@ -1377,7 +1396,47 @@ app.post('/pulse/chat',
     lines.push('- Currently viewing week: ' + (currWk || 'not set'));
     lines.push('');
 
-    if (weeks.length > 0) {
+    if (_isFulfilmentCtx) {
+      // Fulfilment-shaped data block. Aggregates only — no order or recipient detail.
+      if (weeks.length > 0) {
+        lines.push('## Fulfilment data — last ' + weeks.length + ' weeks');
+        lines.push('');
+        for (const w of weeks) {
+          lines.push('### Week ' + w.week_start);
+          lines.push('Pallets received: ' + (w.pallets_received || 0)
+            + ' | Orders received: ' + (w.orders_received || 0)
+            + ' | Envelopes ordered: ' + (w.envelopes_ordered || 0)
+            + ' | Assembled: ' + (w.envelopes_assembled || 0)
+            + ' | Dispatched (lodged with USPS): ' + (w.envelopes_dispatched || 0));
+          lines.push('');
+        }
+      }
+      const pq = pulseContext.queue || {};
+      lines.push('## Current queue');
+      lines.push('- ' + (pq.orders || 0) + ' order(s) awaiting a batch, totalling ' + (pq.envelopes || 0) + ' envelope(s).');
+      lines.push('');
+      if (pulseContext.recipe) {
+        lines.push('## Envelope structure');
+        lines.push('- ' + pulseContext.recipe.sticks_per_envelope + ' sticks per envelope across '
+          + pulseContext.recipe.distinct_flavours + ' distinct flavours, split ' + (pulseContext.recipe.split_pattern || '')
+          + '. Which flavour fills which slot is decided on the floor and is not tracked per envelope.');
+        lines.push('');
+      }
+      if (Array.isArray(pulseContext.stock) && pulseContext.stock.length) {
+        lines.push('## Estimated stock on hand (sticks, per flavour)');
+        for (const st of pulseContext.stock) lines.push('- ' + st.sku + ': ' + (st.estimated_on_hand || 0));
+        lines.push('(Estimates between stock counts, derived from envelopes assembled.)');
+        lines.push('');
+      }
+      if (pulseContext.settings) {
+        const cs = pulseContext.settings;
+        lines.push('## Operating thresholds');
+        lines.push('- Replenishment lead time: ' + cs.replenishment_lead_days + ' days');
+        lines.push('- Stock cover: critical under ' + cs.cover_critical_days + ' days, warning under ' + cs.cover_warning_days);
+        lines.push('- SLA: receive and put away within ' + cs.sla_inbound_days + ' business day(s); lodge within ' + cs.sla_lodge_days + ' business day(s) of the order');
+        lines.push('');
+      }
+    } else if (weeks.length > 0) {
       lines.push('## Operations data — last ' + weeks.length + ' weeks (' + weeks[0].week_start + ' to ' + weeks[weeks.length-1].week_start + ') [most recent 4 weeks]');
       lines.push('');
 
