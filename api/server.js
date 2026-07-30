@@ -649,6 +649,14 @@ CREATE TABLE IF NOT EXISTS role_alias (
       setCap.run('EHP', c, 0);
     db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled) VALUES ('__meta','caps_v2',1)`).run();
   }
+  // v3 — Executive is ICONIC-shaped; EHP does not need it yet. Marker-guarded so a
+  // later manual re-enable is never overwritten.
+  const capsV3 = db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability='caps_v3'`).get();
+  if (!capsV3) {
+    db.prepare(`INSERT INTO client_capability (client_id, capability, enabled) VALUES ('EHP','executive',0)
+                ON CONFLICT(client_id, capability) DO UPDATE SET enabled=0`).run();
+    db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled) VALUES ('__meta','caps_v3',1)`).run();
+  }
 
   ins(`INSERT OR IGNORE INTO role_alias (clerk_role,role) VALUES (?,?)`, [
     ['org:admin_auth','admin'],
