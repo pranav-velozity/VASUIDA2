@@ -796,6 +796,10 @@ function rebuildWithClientPk(table, keyCols) {
 rebuildWithClientPk('receiving', ['week_start', 'po_number']);
 rebuildWithClientPk('bins',      ['week_start', 'mobile_bin']);
 
+// Report routes authenticate by token, not Clerk, and open in a new tab with no
+// x-pinpoint-client header — so the client must be baked into the token and replayed here.
+function setRequestClient(c) { const st = tenancyALS.getStore(); if (st && c) st._resolved = c; }
+
 // Enforcement switch. Off by default: deploy inert, flip TENANCY_ENFORCE=true in Render,
 // revert in seconds without a redeploy.
 const TENANCY_ENFORCE = String(process.env.TENANCY_ENFORCE || '').toLowerCase() === 'true';
@@ -7475,7 +7479,7 @@ const _reportTokenTTL = 30 * 60 * 1000;
 function _cleanReportTokens() {
   const now = Date.now();
   for (const [k, v] of _reportTokens.entries()) {
-    if (now - v > _reportTokenTTL) _reportTokens.delete(k);
+    if (now - ((v && v.ts) || v) > _reportTokenTTL) _reportTokens.delete(k);
   }
 }
 
@@ -7490,7 +7494,7 @@ app.post('/report/cost-utilisation/auth',
   }
   _cleanReportTokens();
   const token = randomUUID();
-  _reportTokens.set(token, Date.now());
+  _reportTokens.set(token, { ts: Date.now(), client: curClient() });
   res.json({ token });
 });
 
@@ -7500,7 +7504,10 @@ app.get('/report/cost-utilisation/data',
     // Accept either a report token (query param) or a Clerk Bearer token
     _cleanReportTokens();
     const reportToken = req.query.token;
-    if (reportToken && _reportTokens.has(reportToken)) { return next(); }
+    if (reportToken && _reportTokens.has(reportToken)) {
+      const _t = _reportTokens.get(reportToken); setRequestClient(_t && _t.client);
+      return next();
+    }
     // Fall back to Clerk auth
     authenticateRequest(req, res, next);
   },
@@ -7756,6 +7763,7 @@ app.get('/report/cost-utilisation',
   (req, res, next) => {
     _cleanReportTokens();
     const { token } = req.query;
+    if (token && _reportTokens.has(token)) { const _t = _reportTokens.get(token); setRequestClient(_t && _t.client); }
     if (!token || !_reportTokens.has(token)) {
       return res.status(403).send('<html><body style="font-family:sans-serif;padding:40px;"><h2>Access denied</h2><p>Invalid or expired token. Please request a new report link.</p></body></html>');
     }
@@ -8949,7 +8957,7 @@ app.post('/report/monthly-client/auth',
   }
   _cleanReportTokens();
   const token = randomUUID();
-  _reportTokens.set(token, Date.now());
+  _reportTokens.set(token, { ts: Date.now(), client: curClient() });
   res.json({ token });
 });
 
@@ -9597,7 +9605,10 @@ app.get('/report/monthly-client',
   (req, res, next) => {
     _cleanReportTokens();
     const reportToken = req.query.token;
-    if (reportToken && _reportTokens.has(reportToken)) return next();
+    if (reportToken && _reportTokens.has(reportToken)) {
+      const _t = _reportTokens.get(reportToken); setRequestClient(_t && _t.client);
+      return next();
+    }
     return authenticateRequest(req, res, next);
   },
   auditLog('download_monthly_client'),
@@ -10429,7 +10440,7 @@ app.post('/report/supplier-discrepancy/auth', authenticateRequest, (req, res) =>
   }
   _cleanNcTokens();
   const token = randomUUID();
-  _ncReportTokens.set(token, { ts: Date.now(), cost });
+  _ncReportTokens.set(token, { ts: Date.now(), cost, client: curClient() });
   res.json({ token, cost });
 });
 
@@ -10438,7 +10449,7 @@ app.get('/report/supplier-discrepancy',
     _cleanNcTokens();
     const t = _ncReportTokens.get(req.query.token);
     if (!t) return res.status(403).send('<html><body style="font-family:sans-serif;padding:40px;"><h2>Access denied</h2><p>Invalid or expired token. Please request a new report link.</p></body></html>');
-    req._ncCost = !!t.cost; next();
+    req._ncCost = !!t.cost; setRequestClient(t.client); next();
   },
   (req, res) => {
   try {
