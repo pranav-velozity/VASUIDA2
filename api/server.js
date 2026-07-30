@@ -11068,6 +11068,65 @@ app.get('/finance/fulfilment-billing', authenticateRequest, requireRole(['admin'
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Daily timeseries for the Week Hub charts ──
+app.get('/ehp/timeseries', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const from = String(req.query.from || '').trim(), to = String(req.query.to || '').trim();
+    if (!from || !to) return res.status(400).json({ error: 'from and to required' });
+
+    const days = [];
+    for (let d = new Date(from + 'T00:00:00Z'); d <= new Date(to + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1))
+      days.push(d.toISOString().slice(0, 10));
+
+    const ordersBy = {}, asmBy = {}, disBy = {};
+    for (const r of db.prepare(`SELECT date(placed_at) d, COUNT(*) o, COALESCE(SUM(envelope_qty),0) e
+        FROM ehp_order WHERE client_id=? AND date(placed_at) BETWEEN ? AND ? GROUP BY date(placed_at)`).all(c, from, to))
+      ordersBy[r.d] = { orders: r.o, envelopes: r.e };
+    for (const r of db.prepare(`SELECT date(assembled_at) d, COALESCE(SUM(actual_envelopes),0) e
+        FROM ehp_assembly_batch WHERE client_id=? AND assembled_at IS NOT NULL AND date(assembled_at) BETWEEN ? AND ? GROUP BY date(assembled_at)`).all(c, from, to))
+      asmBy[r.d] = r.e;
+    for (const r of db.prepare(`SELECT date(dispatched_at) d, COALESCE(SUM(actual_envelopes),0) e
+        FROM ehp_assembly_batch WHERE client_id=? AND dispatched_at IS NOT NULL AND date(dispatched_at) BETWEEN ? AND ? GROUP BY date(dispatched_at)`).all(c, from, to))
+      disBy[r.d] = r.e;
+
+    const series = days.map(d => ({
+      date: d,
+      orders: (ordersBy[d] || {}).orders || 0,
+      envelopes_ordered: (ordersBy[d] || {}).envelopes || 0,
+      envelopes_assembled: asmBy[d] || 0,
+      envelopes_dispatched: disBy[d] || 0,
+    }));
+
+    // Stock burn-down per component: receipts to date minus estimated usage to date.
+    const recipe = ehpActiveRecipe(c);
+    const perFlavour = recipe ? (recipe.sticks_per_envelope || 5) / Math.max(1, recipe.distinct_flavours || 3) : 0;
+    const comps = db.prepare(`SELECT sku FROM ehp_sku WHERE client_id=? AND active=1 AND is_component=1 ORDER BY sku`).all(c);
+    const inventory = comps.map(({ sku }) => {
+      const recBy = {};
+      for (const r of db.prepare(`SELECT date(created_at) d, COALESCE(SUM(qty_each),0) q FROM ehp_inventory_txn
+          WHERE client_id=? AND sku=? GROUP BY date(created_at)`).all(c, sku)) recBy[r.d] = r.q;
+      const opening = db.prepare(`SELECT COALESCE(SUM(qty_each),0) q FROM ehp_inventory_txn
+          WHERE client_id=? AND sku=? AND date(created_at) < ?`).get(c, sku, from).q;
+      let bal = opening, cumEnv = 0;
+      const points = days.map(d => {
+        bal += (recBy[d] || 0);
+        cumEnv += (asmBy[d] || 0);
+        return { date: d, on_hand: Math.round(bal - cumEnv * perFlavour) };
+      });
+      // Days of cover at the recent average burn rate.
+      const totalEnv = days.reduce((a, d) => a + (asmBy[d] || 0), 0);
+      const perDay = totalEnv / Math.max(1, days.length) * perFlavour;
+      const last = points.length ? points[points.length - 1].on_hand : 0;
+      return { sku, points, on_hand: last, daily_burn: Math.round(perDay),
+               days_cover: perDay > 0 ? Math.floor(last / perDay) : null };
+    });
+
+    res.json({ from, to, series, inventory,
+               per_flavour_per_envelope: Math.round(perFlavour * 100) / 100 });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Week Hub / reporting summary ──
 app.get('/ehp/summary', authenticateRequest, (req, res) => {
   try {
