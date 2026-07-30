@@ -10826,7 +10826,14 @@ app.get('/ehp/batches', authenticateRequest, (req, res) => {
     const p = [c]; let sql = 'SELECT * FROM ehp_assembly_batch WHERE client_id=?';
     if (st) { sql += ' AND state=?'; p.push(st); }
     sql += ' ORDER BY created_at DESC LIMIT 200';
-    res.json({ batches: db.prepare(sql).all(...p) });
+    const batches = db.prepare(sql).all(...p);
+    // Per-batch fulfilment outcome, so a partial write-back is visible rather than buried.
+    const stat = db.prepare(`SELECT
+        SUM(CASE WHEN shopify_fulfilment_id IS NOT NULL THEN 1 ELSE 0 END) AS fulfilled,
+        SUM(CASE WHEN shopify_fulfilment_id IS NULL AND fulfil_error IS NOT NULL THEN 1 ELSE 0 END) AS not_fulfilled,
+        COUNT(*) AS total
+      FROM ehp_order WHERE batch_id=? AND client_id=?`);
+    res.json({ batches: batches.map(b => ({ ...b, fulfilment: stat.get(b.id, c) })) });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -10865,6 +10872,21 @@ app.get('/ehp/batch/:id/picklist', authenticateRequest, auditLog('view_ehp_pickl
         recipient_city, recipient_state, recipient_postcode, recipient_country, flagged_high_qty
       FROM ehp_order WHERE batch_id=? AND client_id=? ORDER BY order_number`).all(req.params.id, c);
     res.json({ batch_id: req.params.id, orders });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Which orders in a batch fulfilled, and why the others didn't ──
+app.get('/ehp/batch/:id/orders', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const rows = db.prepare(`SELECT order_number, shopify_order_id, envelope_qty, state,
+        shopify_fulfilment_id, fulfil_error FROM ehp_order WHERE batch_id=? AND client_id=? ORDER BY order_number`)
+      .all(req.params.id, c);
+    res.json({ batch_id: req.params.id,
+      fulfilled: rows.filter(r => r.shopify_fulfilment_id).map(r => r.order_number),
+      not_fulfilled: rows.filter(r => !r.shopify_fulfilment_id)
+        .map(r => ({ order_number: r.order_number, reason: r.fulfil_error || 'not attempted' })),
+      orders: rows });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -10918,9 +10940,13 @@ app.post('/ehp/recipe', authenticateRequest, writeOpLimiter, auditLog('create_eh
     const from = String(b.effective_from || new Date().toISOString().slice(0, 10)).trim();
     const id = ehpNewId('rec');
     db.transaction(() => {
-      // close the previous open-ended recipe the day before this one starts
+      // Close every currently-open recipe. Previously this only matched recipes starting
+      // strictly BEFORE the new one, so a same-day replacement left both open.
       db.prepare(`UPDATE ehp_kit_recipe SET effective_to = date(?, '-1 day')
-                  WHERE client_id=? AND effective_to IS NULL AND effective_from < ?`).run(from, c, from);
+                  WHERE client_id=? AND effective_to IS NULL AND effective_from <= ?`).run(from, c, from);
+      // A same-day replacement produces a zero-length window — retire it outright.
+      db.prepare(`UPDATE ehp_kit_recipe SET active=0
+                  WHERE client_id=? AND effective_to IS NOT NULL AND effective_to < effective_from`).run(c);
       db.prepare(`INSERT INTO ehp_kit_recipe (id, client_id, name, effective_from, notes, sticks_per_envelope, distinct_flavours, split_pattern)
                   VALUES (?,?,?,?,?,?,?,?)`)
         .run(id, c, b.name || ('Recipe ' + from), from, b.notes || null, sticks, flav, split);
