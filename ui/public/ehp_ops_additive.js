@@ -46,6 +46,9 @@
     s.textContent = `
       .ehp-ov{position:fixed;inset:0;z-index:9400;background:rgba(0,0,0,0.35);display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow:auto;}
       .ehp-panel{background:#fff;border-radius:16px;width:min(1180px,97vw);box-shadow:0 24px 64px rgba(0,0,0,0.28);overflow:hidden;}
+      .ehp-ov.full{padding:0;align-items:stretch;}
+      .ehp-ov.full .ehp-panel{width:100vw;min-height:100vh;border-radius:0;}
+      .ehp-max{background:none;border:none;font-size:15px;color:${MID};cursor:pointer;line-height:1;margin-right:10px;}
       .ehp-head{position:sticky;top:0;background:#fff;border-bottom:0.5px solid rgba(0,0,0,0.08);padding:14px 20px;display:flex;align-items:center;justify-content:space-between;z-index:3;}
       .ehp-t{font-size:16px;font-weight:700;color:${DARK};letter-spacing:-0.02em;}
       .ehp-s{font-size:11px;color:${LIGHT};margin-top:2px;}
@@ -102,13 +105,22 @@
         <div class="ehp-head">
           <div><div class="ehp-t">EHP Fulfilment — VOZ_TX</div>
           <div class="ehp-s">Inbound · assembly · dispatch · inventory</div></div>
-          <button class="ehp-x" id="ehp-close">×</button>
+          <div style="display:flex;align-items:center;">
+            <button class="ehp-max" id="ehp-max" title="Expand to full screen">⛶</button>
+            <button class="ehp-x" id="ehp-close">×</button>
+          </div>
         </div>
         <div class="ehp-tabs" id="ehp-tabs"></div>
         <div class="ehp-body" id="ehp-body">Loading…</div>
       </div>`;
       document.body.appendChild(o);
       el('ehp-close').addEventListener('click', close);
+      el('ehp-max').addEventListener('click', () => {
+        const on = o.classList.toggle('full');
+        try { localStorage.setItem('pinpoint.ehpFull', on ? '1' : '0'); } catch (e) {}
+        el('ehp-max').title = on ? 'Exit full screen' : 'Expand to full screen';
+      });
+      try { if (localStorage.getItem('pinpoint.ehpFull') === '1') o.classList.add('full'); } catch (e) {}
     }
     renderTabs(); render();
   }
@@ -339,7 +351,9 @@
   // ── Inventory ──
   async function renderInventory(body) {
     const d = await req('/ehp/skus');
-    const rows = d.skus || [];
+    const all = d.skus || [];
+    const rows = all.filter(r => r.is_component);          // stocked items
+    const others = all.filter(r => !r.is_component);       // Shopify product codes, not stock
     body.innerHTML = `
       <div style="font-size:10px;color:${LIGHT};margin-bottom:6px;">Periodic inventory: <b>estimated</b> on-hand between counts (each flavour averages sticks ÷ flavours per envelope). The fortnightly count replaces the estimate with truth.</div>
       <div id="ehp-period"></div>
@@ -354,8 +368,12 @@
         <td class="n"><input class="ehp-in" data-sku="${esc(r.sku)}" data-f="inners_per_carton" type="number" min="0" value="${r.inners_per_carton??''}" style="width:70px;text-align:right"></td>
         <td class="n"><input class="ehp-in" data-sku="${esc(r.sku)}" data-f="cartons_per_pallet" type="number" min="0" value="${r.cartons_per_pallet??''}" style="width:70px;text-align:right"></td>
         <td style="white-space:nowrap"><button class="ehp-btn g" data-save="${esc(r.sku)}">Save</button></td>
-      </tr>`).join('') : `<tr><td colspan="7" style="color:${LIGHT};text-align:center;padding:18px;">No SKUs yet — they appear automatically on first receipt or order.</td></tr>`}
-      </tbody></table>`;
+      </tr>`).join('') : `<tr><td colspan="9" style="color:${LIGHT};text-align:center;padding:18px;">No stocked SKUs yet — they appear automatically on first receipt or order.</td></tr>`}
+      </tbody></table>
+      ${others.length ? `<div style="margin-top:14px;font-size:10px;color:${LIGHT};line-height:1.6;">
+        <b>${others.length} SKU(s) seen on Shopify orders but never received into stock</b> — not consumed and not counted:
+        ${others.map(o=>esc(o.sku)).join(', ')}.<br>They become stocked items the first time they appear on an inbound receipt.
+      </div>` : ''}`;
     try {
       const cp = await req('/ehp/count-period');
       el('ehp-period').innerHTML = `<div class="ehp-msg k" style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
@@ -487,7 +505,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);   // active client can change via the picker
-    console.log('[ehp-ops] module v6 loaded');
+    console.log('[ehp-ops] module v7 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
