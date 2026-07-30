@@ -152,6 +152,7 @@
   }
 
   function draw(host, s, q, batches, inv, billing, rng, ts) {
+    ts = ts || {};
     const queuedOrders = q ? q.queued_orders : s.queued_orders;
     const queuedEnv = q ? q.queued_envelopes : s.queued_envelopes;
     const flagged = q ? q.flagged_high_qty : 0;
@@ -168,6 +169,15 @@
     const low = (inv && inv.inventory || []).filter(r => r.is_component && (r.estimated_on_hand || 0) <= 0);
     if (low.length) ex.push({ c: RED, h: `${low.length} component(s) estimated at or below zero`,
       b: low.map(r => r.sku).join(', ') + ' — receive stock or run a count.' });
+    const crit = (ts && ts.inventory || []).filter(i => i.status === 'critical');
+    if (crit.length) ex.push({ c: RED, h: `${crit.length} flavour(s) below the critical cover threshold`,
+      b: crit.map(i => `${i.sku} (${i.days_cover}d)`).join(', ') + ` — under a ${ts.settings.replenishment_lead_days}-day lead time, reorder now.` });
+    const warnLow = (ts && ts.inventory || []).filter(i => i.status === 'warning');
+    if (warnLow.length) ex.push({ c: AMBER, h: `${warnLow.length} flavour(s) approaching reorder point`,
+      b: warnLow.map(i => `${i.sku} (${i.days_cover}d)`).join(', ') });
+    if (ts && ts.backlog_limit > 0 && ts.backlog_now > ts.backlog_limit) ex.push({ c: RED,
+      h: `Backlog ${nf(ts.backlog_now)} envelopes exceeds the SLA limit of ${nf(ts.backlog_limit)}`,
+      b: 'Dispatch is falling behind intake — orders risk breaching the lodgement SLA.' });
     const assembledNotDispatched = batches.filter(b => b.state === 'assembled');
     if (assembledNotDispatched.length) ex.push({ c: AMBER,
       h: `${assembledNotDispatched.length} batch(es) assembled but not dispatched`,
@@ -242,19 +252,19 @@
       <div class="fwh-grid" style="margin-top:12px;">
         <div class="fwh-card">
           <div class="fwh-t">Throughput</div>
-          <div class="fwh-s">Envelopes ordered, assembled and lodged &mdash; cumulative across the week</div>
+          <div class="fwh-s">Cumulative across the week. <b>Backlog</b> is ordered but not yet lodged &mdash; above the dashed SLA limit means dispatch is falling behind intake.</div>
           <div style="height:210px;position:relative;"><canvas id="fwh-c-flow"></canvas></div>
         </div>
         <div class="fwh-card">
           <div class="fwh-t">Days of cover</div>
-          <div class="fwh-s">At the current burn rate &mdash; when each flavour runs out</div>
+          <div class="fwh-s">At the current burn rate. Red under ${ts && ts.settings ? ts.settings.cover_critical_days : 10} days, amber under ${ts && ts.settings ? ts.settings.cover_warning_days : 30} &mdash; set against a ${ts && ts.settings ? ts.settings.replenishment_lead_days : 30}-day replenishment lead time.</div>
           <div style="height:210px;" id="fwh-cover-wrap"><div class="fwh-gauges" id="fwh-gauges"></div></div>
         </div>
       </div>
 
       <div class="fwh-card" style="margin-top:12px;">
         <div class="fwh-t">Stock position by flavour</div>
-        <div class="fwh-s">Estimated on-hand over the week. Consumption is derived (${ts ? ts.per_flavour_per_envelope : '—'} sticks per envelope per flavour) and replaced by truth at each count.</div>
+        <div class="fwh-s">Estimated on-hand over the week. Consumption is derived and replaced by truth at each count. Crossing the <b>reorder point</b> means stock ordered today would land after you run out.</div>
         <div style="height:230px;position:relative;"><canvas id="fwh-c-stock"></canvas></div>
       </div>`;
 
@@ -286,24 +296,35 @@
     const cum = (key) => { let a = 0; return (ts.series || []).map(d => (a += d[key] || 0)); };
 
     // 1. running throughput — lines, not bars
+    const backlog = ts.backlog || [];
+    const limit = ts.backlog_limit || 0;
     mkChart('fwh-c-flow', { type: 'line', data: { labels, datasets: [
       { label: 'Ordered',   data: cum('envelopes_ordered'),   borderColor: PALETTE[1], backgroundColor: 'rgba(14,165,233,.10)', fill: true, tension: .32, pointRadius: 2, borderWidth: 2 },
       { label: 'Assembled', data: cum('envelopes_assembled'), borderColor: PALETTE[2], backgroundColor: 'transparent', tension: .32, pointRadius: 2, borderWidth: 2 },
       { label: 'Lodged',    data: cum('envelopes_dispatched'),borderColor: PALETTE[0], backgroundColor: 'transparent', tension: .32, pointRadius: 2, borderWidth: 2 },
+      { label: 'Backlog',   data: backlog, borderColor: '#D7263D', backgroundColor: 'rgba(215,38,61,.08)',
+        fill: true, tension: .32, pointRadius: 0, borderWidth: 1.5, borderDash: [4,3] },
+      ...(limit > 0 ? [{ label: `SLA limit (${nf(limit)})`, data: labels.map(()=>limit),
+        borderColor: 'rgba(215,38,61,.45)', borderDash: [2,4], pointRadius: 0, borderWidth: 1, fill: false }] : []),
     ] }, options: baseOpts });
 
     // 2. days of cover — radial gauges, one per flavour
     const cover = (ts.inventory || []).filter(i => i.days_cover !== null).slice(0, 6);
     const wrap = el('fwh-gauges');
     if (wrap && cover.length) {
-      const FULL = Math.max(14, ...cover.map(i => i.days_cover || 0));   // scale to the healthiest
+      const _cfg = ts.settings || {};
+      // Scale to the warning threshold so the arc means something absolute, not relative.
+      const FULL = Math.max(_cfg.cover_warning_days || 30, ...cover.map(i => i.days_cover || 0));
       wrap.innerHTML = cover.map((i, k) => `<div class="fwh-gauge">
           <canvas id="fwh-g-${k}"></canvas>
           <div class="fwh-gsku" title="${esc(i.sku)}">${esc(i.sku)}</div>
         </div>`).join('');
+      const cfg = ts.settings || {};
+      const crit = cfg.cover_critical_days || 10, warn = cfg.cover_warning_days || 30;
       cover.forEach((i, k) => {
         const days = Math.max(0, i.days_cover || 0);
-        const col = days <= 3 ? '#D7263D' : days <= 7 ? '#C8860A' : '#34C759';
+        const col = i.status === 'critical' ? '#D7263D' : i.status === 'warning' ? '#C8860A'
+                  : days <= crit ? '#D7263D' : days <= warn ? '#C8860A' : '#34C759';
         mkChart('fwh-g-' + k, {
           type: 'doughnut',
           data: { labels: ['Days of cover', 'Remaining scale'],
@@ -337,9 +358,15 @@
     const inv = ts.inventory || [];
     if (inv.length) {
       mkChart('fwh-c-stock', { type: 'line', data: { labels,
-        datasets: inv.map((i, k) => ({ label: i.sku, data: i.points.map(p => p.on_hand),
-          borderColor: PALETTE[(k + 1) % PALETTE.length], backgroundColor: 'transparent',
-          tension: .3, pointRadius: 2, borderWidth: 2 })) },
+        datasets: [
+          ...inv.map((i, k) => ({ label: i.sku, data: i.points.map(p => p.on_hand),
+            borderColor: PALETTE[(k + 1) % PALETTE.length], backgroundColor: 'transparent',
+            tension: .3, pointRadius: 2, borderWidth: 2 })),
+          // One reorder line at the highest reorder point — below it, an order placed today lands late.
+          ...(() => { const rp = Math.max(0, ...inv.map(i => i.reorder_point || 0));
+              return rp > 0 ? [{ label: `Reorder point (${nf(rp)})`, data: labels.map(()=>rp),
+                borderColor: 'rgba(215,38,61,.5)', borderDash: [3,4], pointRadius: 0, borderWidth: 1.5, fill: false }] : []; })(),
+        ] },
         options: { ...baseOpts, scales: { ...baseOpts.scales, y: { ...baseOpts.scales.y, beginAtZero: false } } } });
     } else {
       const cv = el('fwh-c-stock');
@@ -399,7 +426,7 @@
     window.addEventListener('hashchange', () => { applyImmediately(); check(); });
     setInterval(check, 4000);                 // client switch / week change
     window.refreshFulfilmentWeekHub = () => render(true);
-    console.log('[fulfilment-weekhub] module v3 loaded');
+    console.log('[fulfilment-weekhub] module v4 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
