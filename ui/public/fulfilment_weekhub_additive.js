@@ -352,7 +352,8 @@
           ? [['replenishment_lead_days', 'Replenishment lead time (days)'],
              ['cover_critical_days', 'Critical below (days)'],
              ['cover_warning_days', 'Warning below (days)']]
-          : [['sla_lodge_days', 'Lodgement SLA (business days)'],
+          : [['expected_daily_envelopes', 'Expected envelopes per working day (0 = auto)'],
+             ['sla_lodge_days', 'Lodgement SLA (business days)'],
              ['sla_inbound_days', 'Inbound put-away SLA (business days)']];
         const pop = document.createElement('div');
         pop.className = 'fwh-pop';
@@ -538,7 +539,7 @@
     window.addEventListener('hashchange', () => { applyImmediately(); check(); });
     setInterval(check, 4000);                 // client switch / week change
     window.refreshFulfilmentWeekHub = () => render(true);
-    console.log('[fulfilment-weekhub] module v6 loaded');
+    console.log('[fulfilment-weekhub] module v7 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
