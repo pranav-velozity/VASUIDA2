@@ -975,10 +975,55 @@ app.get('/pulse/context',
   aiLimiter,
   async (req, res) => {
   try {
+    // Fulfilment clients get a fulfilment-shaped context. Aggregates ONLY — recipient
+    // names and addresses must never reach the AI (contractual data-protection commitment).
+    const _cid = curClient();
+    const _isFulfilment = db.prepare(`SELECT 1 x FROM client_capability
+      WHERE client_id=? AND capability='envelope_fulfilment' AND enabled=1`).get(_cid);
+    if (_isFulfilment) {
+      const weeks = [];
+      const today = new Date();
+      for (let i = 3; i >= 0; i--) {
+        const d = new Date(today); d.setUTCDate(d.getUTCDate() - i * 7);
+        const day = d.getUTCDay(), mon = new Date(d); mon.setUTCDate(d.getUTCDate() - ((day + 6) % 7));
+        weeks.push(mon.toISOString().slice(0, 10));
+      }
+      const weekData = weeks.map(ws => {
+        const we = new Date(ws + 'T00:00:00Z'); we.setUTCDate(we.getUTCDate() + 6);
+        const to = we.toISOString().slice(0, 10);
+        const pal = db.prepare(`SELECT COALESCE(SUM(pallets),0) n FROM ehp_pallet_receipt
+          WHERE client_id=? AND received_date_local BETWEEN ? AND ?`).get(_cid, ws, to).n;
+        const ord = db.prepare(`SELECT COUNT(*) o, COALESCE(SUM(envelope_qty),0) e FROM ehp_order
+          WHERE client_id=? AND date(placed_at) BETWEEN ? AND ?`).get(_cid, ws, to);
+        const asm = db.prepare(`SELECT COALESCE(SUM(actual_envelopes),0) n FROM ehp_assembly_batch
+          WHERE client_id=? AND date(assembled_at) BETWEEN ? AND ?`).get(_cid, ws, to).n;
+        const dis = db.prepare(`SELECT COALESCE(SUM(actual_envelopes),0) n FROM ehp_assembly_batch
+          WHERE client_id=? AND date(dispatched_at) BETWEEN ? AND ?`).get(_cid, ws, to).n;
+        return { week_start: ws, pallets_received: pal, orders_received: ord.o,
+                 envelopes_ordered: ord.e, envelopes_assembled: asm, envelopes_dispatched: dis };
+      });
+      const q = db.prepare(`SELECT COUNT(*) o, COALESCE(SUM(envelope_qty),0) e FROM ehp_order
+        WHERE client_id=? AND state='queued'`).get(_cid);
+      const stock = db.prepare(`SELECT sku FROM ehp_sku WHERE client_id=? AND active=1 AND is_component=1`).all(_cid)
+        .map(r => ({ sku: r.sku, ...ehpEstimatedOnHand(_cid, r.sku) }))
+        .map(r => ({ sku: r.sku, estimated_on_hand: r.estimated_on_hand }));
+      const recipe = ehpActiveRecipe(_cid);
+      return res.json({
+        client: _cid, model: 'fulfilment', facility: 'VOZ_TX',
+        weeks: weekData,
+        queue: { orders: q.o, envelopes: q.e },
+        stock, settings: clientSettings(_cid),
+        recipe: recipe ? { sticks_per_envelope: recipe.sticks_per_envelope,
+                           distinct_flavours: recipe.distinct_flavours, split_pattern: recipe.split_pattern } : null,
+        note: 'Aggregates only. No order-level or recipient data is included by design.',
+      });
+    }
+
     const facilityHint = normFacility(req.query.facility || '');
 
     // ── Resolve facility + find last 4 week-starts ──
-    const allPlans = db.prepare('SELECT week_start, data FROM plans ORDER BY week_start DESC LIMIT 6').all();
+    const _pc = curClient();
+    const allPlans = db.prepare('SELECT week_start, data FROM plans WHERE client_id=? ORDER BY week_start DESC LIMIT 6').all(_pc);
     let facility = facilityHint;
     if (!facility) {
       for (const row of allPlans) {
@@ -1323,29 +1368,10 @@ app.post('/pulse/chat',
     lines.push('You are read-only — guide users to the UI for any changes (e.g. "Update that in Week Hub → Transit & Clearing").');
     lines.push('');
 
-    // ── Finance context (admin only) ──
-    if (userRole === 'org:admin_auth') {
-      try {
-        const finSum = db.prepare(`
-          SELECT
-            (SELECT COUNT(*) FROM fin_invoices WHERE status IN ('draft','sent','overdue')) as outstanding_n,
-            (SELECT COALESCE(SUM(total),0) FROM fin_invoices WHERE status IN ('draft','sent','overdue')) as outstanding_total,
-            (SELECT COALESCE(SUM(total),0) FROM fin_invoices WHERE status='paid' AND week_start >= ?) as revenue_ytd,
-            (SELECT COALESCE(SUM(amount),0) FROM fin_expenses WHERE month_key >= ?) as expenses_ytd
-        `).get(`${new Date().getUTCFullYear()}-01-01`, `${new Date().getUTCFullYear()}-01`);
-        if (finSum) {
-          const net = finSum.revenue_ytd - finSum.expenses_ytd;
-          const margin = finSum.revenue_ytd > 0 ? Math.round(net/finSum.revenue_ytd*100) : 0;
-          lines.push('## Finance summary (YTD)');
-          lines.push(`- Revenue YTD: USD ${finSum.revenue_ytd.toLocaleString()}`);
-          lines.push(`- Expenses YTD: USD ${finSum.expenses_ytd.toLocaleString()}`);
-          lines.push(`- Net: USD ${net.toLocaleString()} (${margin}% margin)`);
-          lines.push(`- Outstanding invoices: ${finSum.outstanding_n} (USD ${finSum.outstanding_total.toLocaleString()})`);
-          lines.push('');
-        }
-      } catch(e) { /* Finance tables may not exist yet */ }
-    }
+    // Finance is deliberately NOT in the AI context: it is VelOzity-internal, spans all
+    // clients, and has no place in a client-scoped assistant.
     lines.push('## User context');
+    lines.push('- Client: ' + curClient() + ' (answer ONLY about this client; you have no data for any other)');
     lines.push('- Role: ' + roleLabel);
     lines.push('- Facility: ' + (facility || 'not set'));
     lines.push('- Currently viewing week: ' + (currWk || 'not set'));
@@ -11093,6 +11119,7 @@ const FULFILMENT_DEFAULTS = [
   ['cover_warning_days',      '30', 'Days of cover treated as a warning'],
   ['sla_lodge_days',           '3', 'Business days from order to lodgement (SLA)'],
   ['sla_inbound_days',         '1', 'Business days to receive and put away (SLA)'],
+  ['expected_daily_envelopes',  '0', 'Expected envelopes per working day (0 = derive from actuals)'],
 ];
 (function seedFulfilmentSettings(){
   try {
@@ -11198,8 +11225,12 @@ app.get('/ehp/timeseries', authenticateRequest, (req, res) => {
     // Backlog = ordered but not yet lodged, cumulative across the week.
     let cO = 0, cD = 0;
     const backlog = series.map(d => { cO += d.envelopes_ordered; cD += d.envelopes_dispatched; return Math.max(0, cO - cD); });
-    const avgDaily = series.reduce((a, d) => a + d.envelopes_dispatched, 0) / Math.max(1, series.length);
-    // A backlog worth more than the SLA window of dispatch capacity is a real risk.
+    // Capacity per working day. A flat 7-day average understates it badly while volume is
+    // ramping, because idle days drag it down — so prefer the configured expectation, and
+    // otherwise average only over days that actually dispatched.
+    const activeDays = series.filter(d => d.envelopes_dispatched > 0).length;
+    const observed = activeDays ? series.reduce((a, d) => a + d.envelopes_dispatched, 0) / activeDays : 0;
+    const avgDaily = cfg.expected_daily_envelopes > 0 ? cfg.expected_daily_envelopes : observed;
     const backlogLimit = Math.round(avgDaily * cfg.sla_lodge_days);
 
     res.json({ from, to, series, inventory, settings: cfg,
