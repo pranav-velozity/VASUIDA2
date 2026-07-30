@@ -281,10 +281,10 @@
     body.innerHTML = `
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px;">
         <div><span class="ehp-lbl">Received date (facility local)</span><input class="ehp-in" id="ehp-rdate" type="date" value="${today}"></div>
-        <div><span class="ehp-lbl">Pallets received (billing)</span><input class="ehp-in" id="ehp-pallets" type="number" min="0" step="1" value="1" style="width:120px;"></div>
+        <div><span class="ehp-lbl">Pallets received (billing)</span><input class="ehp-in" id="ehp-pallets" type="number" min="0" step="1" value="0" style="width:120px;"></div>
         <div><span class="ehp-lbl">Reference</span><input class="ehp-in" id="ehp-ref" placeholder="ASN / DO number"></div>
       </div>
-      <div style="font-size:10px;color:${LIGHT};margin-bottom:8px;">A partial pallet bills as one. Pallet count is a physical count — independent of contents.</div>
+      <div style="font-size:10px;color:${LIGHT};margin-bottom:8px;"><b>Pallets drive billing</b> ($35 each) and are counted independently of the product lines below — leave at 0 for a non-palletised receipt. A partial pallet bills as one.</div>
       <div id="ehp-lines"></div>
       <button class="ehp-btn g" id="ehp-addline" style="margin-top:6px;">＋ Add product line</button>
       <div class="ehp-drop" id="ehp-drop" style="margin-top:12px;">Or drop a receipt spreadsheet (columns: sku, qty, uom, lot, expiry) <span id="ehp-fname" style="color:${BRAND};font-weight:600;"></span></div>
@@ -520,7 +520,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);   // active client can change via the picker
-    console.log('[ehp-ops] module v8 loaded');
+    console.log('[ehp-ops] module v9 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
