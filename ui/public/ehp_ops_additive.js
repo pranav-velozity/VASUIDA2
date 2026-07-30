@@ -104,7 +104,7 @@
   }
 
   function renderTabs() {
-    const tabs = [['queue','Assembly'],['inbound','Inbound'],['inventory','Inventory'],['recipe','Recipe']];
+    const tabs = [['queue','Assembly'],['inbound','Inbound'],['inventory','Inventory'],['recipe','Recipe'],['shopify','Shopify']];
     const c = el('ehp-tabs'); if (!c) return;
     c.innerHTML = tabs.map(([k,l]) => `<button class="ehp-tab ${_tab===k?'on':''}" data-tab="${k}">${l}</button>`).join('');
     c.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => { _tab = b.getAttribute('data-tab'); renderTabs(); render(); }));
@@ -120,6 +120,7 @@
       if (_tab === 'inbound')   return await renderInbound(body);
       if (_tab === 'inventory') return await renderInventory(body);
       if (_tab === 'recipe')    return await renderRecipe(body);
+      if (_tab === 'shopify')   return await renderShopify(body);
     } catch (e) {
       body.innerHTML = msg('e', e.status === 409
         ? 'Switch the Client selector to EHP to use this workspace.'
@@ -373,6 +374,63 @@
     });
   }
 
+  // ── Shopify integration ──
+  async function renderShopify(body) {
+    const st = await req('/shopify/status');
+    const dot = (on) => `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${on?GREEN:LIGHT};margin-right:6px;"></span>`;
+    body.innerHTML = `
+      ${!st.configured ? msg('e','The Shopify app is not configured on the server. Set SHOPIFY_API_KEY, SHOPIFY_API_SECRET and SHOPIFY_APP_URL in Render.') : ''}
+      <div class="ehp-kpis">
+        <div class="ehp-kpi"><div class="ehp-kl">Connection</div><div class="ehp-kv" style="font-size:15px;">${dot(st.connected)}${st.connected?'Connected':'Not connected'}</div><div class="ehp-ks">${esc(st.shop_domain||'no store linked')}</div></div>
+        <div class="ehp-kpi"><div class="ehp-kl">Queued orders</div><div class="ehp-kv">${nfmt(st.queued_orders)}</div><div class="ehp-ks">awaiting a batch</div></div>
+        <div class="ehp-kpi"><div class="ehp-kl">Last webhook</div><div class="ehp-kv" style="font-size:13px;">${esc(st.last_webhook_at||'—')}</div><div class="ehp-ks">orders/create</div></div>
+        <div class="ehp-kpi"><div class="ehp-kl">Unfulfilled</div><div class="ehp-kv" style="color:${st.unfulfilled_dispatched?AMBER:DARK}">${nfmt(st.unfulfilled_dispatched)}</div><div class="ehp-ks">dispatched, not yet in Shopify</div></div>
+      </div>
+      ${st.last_error ? msg('e','Last error: ' + st.last_error) : ''}
+      <div style="border:0.5px solid rgba(0,0,0,0.1);border-radius:10px;padding:14px;margin-top:6px;">
+        <div style="font-size:12px;font-weight:700;color:${DARK};margin-bottom:8px;">1 · Link the store</div>
+        <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+          <div><span class="ehp-lbl">Shopify store domain</span><input class="ehp-in" id="ehp-shop" value="${esc(st.shop_domain||'')}" placeholder="ehplabs.myshopify.com" style="width:280px"></div>
+          <button class="ehp-btn" id="ehp-genlink">Generate install link</button>
+        </div>
+        <div id="ehp-linkout"></div>
+        <div style="font-size:10px;color:${LIGHT};margin-top:8px;">Send the link to EHP. They click Install in their own Shopify admin — no tokens are copied or emailed. The redirect URL registered in the Partner dashboard must be exactly <code>${esc(st.callback_url||'(SHOPIFY_APP_URL not set)')}</code>.</div>
+      </div>
+      <div style="border:0.5px solid rgba(0,0,0,0.1);border-radius:10px;padding:14px;margin-top:10px;">
+        <div style="font-size:12px;font-weight:700;color:${DARK};margin-bottom:8px;">2 · Keep it in sync</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="ehp-btn g" id="ehp-poll" ${st.connected?'':'disabled'}>Poll for missed orders</button>
+          <button class="ehp-btn g" id="ehp-retry" ${st.unfulfilled_dispatched?'':'disabled'}>Retry ${nfmt(st.unfulfilled_dispatched)} fulfilment(s)</button>
+        </div>
+        <div id="ehp-syncout"></div>
+        <div style="font-size:10px;color:${LIGHT};margin-top:8px;">Last poll: ${esc(st.last_poll_at||'never')}. Webhooks are the primary path; polling catches anything missed.</div>
+      </div>`;
+
+    el('ehp-genlink')?.addEventListener('click', async () => {
+      try {
+        const r = await req('/shopify/connect', { method:'POST', body: JSON.stringify({ shop_domain: el('ehp-shop').value }) });
+        el('ehp-linkout').innerHTML = `<div class="ehp-msg k" style="margin-top:10px;">
+          <div style="margin-bottom:6px;">Install link for <b>${esc(r.shop_domain)}</b> — send this to EHP:</div>
+          <input class="ehp-in" style="width:100%;font-family:monospace;font-size:10px;" readonly value="${esc(r.install_url)}" onclick="this.select()">
+          <div style="margin-top:6px;font-size:10px;">Requests: ${esc(r.scopes)}</div></div>`;
+      } catch (e) { el('ehp-linkout').innerHTML = msg('e', e.message || String(e)); }
+    });
+    el('ehp-poll')?.addEventListener('click', async () => {
+      el('ehp-poll').disabled = true;
+      try { const r = await req('/shopify/poll', { method:'POST', body: JSON.stringify({}) });
+            el('ehp-syncout').innerHTML = msg('k', `Fetched ${r.fetched} order(s) — ${r.created} new, ${r.already_present} already present.`);
+            setTimeout(render, 1200); }
+      catch (e) { el('ehp-syncout').innerHTML = msg('e', e.message || String(e)); el('ehp-poll').disabled = false; }
+    });
+    el('ehp-retry')?.addEventListener('click', async () => {
+      el('ehp-retry').disabled = true;
+      try { const r = await req('/shopify/retry-fulfilments', { method:'POST', body: JSON.stringify({}) });
+            el('ehp-syncout').innerHTML = msg(r.failed ? 'w' : 'k', `Retried ${r.attempted} — ${r.ok} succeeded, ${r.failed} failed.` + (r.errors?.length ? ' e.g. ' + esc(r.errors[0].error) : ''));
+            setTimeout(render, 1200); }
+      catch (e) { el('ehp-syncout').innerHTML = msg('e', e.message || String(e)); el('ehp-retry').disabled = false; }
+    });
+  }
+
   // ── init ──
   function init() {
     styles();
@@ -380,7 +438,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);   // active client can change via the picker
-    console.log('[ehp-ops] module v3 loaded');
+    console.log('[ehp-ops] module v4 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
