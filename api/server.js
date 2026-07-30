@@ -10181,6 +10181,20 @@ CREATE TABLE IF NOT EXISTS ehp_assembly_batch (
 );
 CREATE INDEX IF NOT EXISTS idx_ehp_batch_state ON ehp_assembly_batch(client_id, state);
 
+-- Fortnightly count period. Periodic inventory: consumption is DERIVED at count time
+-- (opening + receipts - counted closing), because which flavour fills which slot is random.
+CREATE TABLE IF NOT EXISTS ehp_count_period (
+  id           TEXT PRIMARY KEY,
+  client_id    TEXT NOT NULL,
+  period_start TEXT NOT NULL,
+  period_end   TEXT,
+  status       TEXT NOT NULL DEFAULT 'open',    -- open | closed
+  closed_at    TEXT,
+  closed_by    TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ehp_period ON ehp_count_period(client_id, status);
+
 -- Perpetual inventory ledger. On-hand is the sum; every movement is explainable.
 CREATE TABLE IF NOT EXISTS ehp_inventory_txn (
   id          TEXT PRIMARY KEY,
@@ -10210,6 +10224,17 @@ CREATE TABLE IF NOT EXISTS ehp_stock_count (
 );
 CREATE INDEX IF NOT EXISTS idx_ehp_count_sku ON ehp_stock_count(client_id, sku);
 `);
+
+// Recipe is STRUCTURE, not fixed flavours: N sticks across M distinct flavours in a
+// given split. Which flavour fills which slot is decided on the floor and not tracked.
+try {
+  const rc = db.prepare("PRAGMA table_info(ehp_kit_recipe)").all().map(c => c.name);
+  if (!rc.includes('sticks_per_envelope')) db.exec("ALTER TABLE ehp_kit_recipe ADD COLUMN sticks_per_envelope INTEGER NOT NULL DEFAULT 5");
+  if (!rc.includes('distinct_flavours'))   db.exec("ALTER TABLE ehp_kit_recipe ADD COLUMN distinct_flavours INTEGER NOT NULL DEFAULT 3");
+  if (!rc.includes('split_pattern'))       db.exec("ALTER TABLE ehp_kit_recipe ADD COLUMN split_pattern TEXT DEFAULT '2,2,1'");
+  const sc = db.prepare("PRAGMA table_info(ehp_stock_count)").all().map(c => c.name);
+  if (!sc.includes('period_id')) db.exec("ALTER TABLE ehp_stock_count ADD COLUMN period_id TEXT");
+} catch (e) { console.error('[ehp:recipe-structure]', e.message); }
 
 // Flag (not a block) when a single order asks for an unusual number of envelopes.
 const EHP_ENVELOPE_ALERT_QTY = Number(process.env.EHP_ENVELOPE_ALERT_QTY || 5);
@@ -10292,21 +10317,81 @@ function ehpAssembleBatch(clientId, batchId, by) {
                if (r) r.lines = db.prepare('SELECT sku, qty_per_envelope FROM ehp_kit_recipe_line WHERE recipe_id=?').all(r.id);
                return r; })()
     : ehpActiveRecipe(clientId);
-  if (!recipe || !recipe.lines.length) return { error: 'no_active_recipe' };
-  const consumed = [];
+  if (!recipe) return { error: 'no_active_recipe' };
+  // Periodic inventory: no per-flavour deduction here. Flavour assignment is random on the
+  // floor, so posting a fixed split would be fiction. Total sticks used IS known and exact.
+  const sticks = (b.actual_envelopes || 0) * (recipe.sticks_per_envelope || 5);
   db.transaction(() => {
-    for (const l of recipe.lines) {
-      const qty = (b.actual_envelopes || 0) * (l.qty_per_envelope || 0);
-      if (!qty) continue;
-      db.prepare(`INSERT INTO ehp_inventory_txn (id, client_id, sku, qty_each, txn_type, ref_type, ref_id)
-                  VALUES (?,?,?,?, 'consumption', 'assembly_batch', ?)`)
-        .run(ehpNewId('inv'), clientId, l.sku, -qty, batchId);
-      consumed.push({ sku: l.sku, qty_each: -qty, on_hand_after: ehpOnHand(clientId, l.sku) });
-    }
     db.prepare(`UPDATE ehp_assembly_batch SET state='assembled', assembled_at=datetime('now') WHERE id=?`).run(batchId);
     db.prepare(`UPDATE ehp_order SET state='assembled' WHERE batch_id=? AND client_id=?`).run(batchId, clientId);
   })();
-  return { batch_id: batchId, envelopes: b.actual_envelopes, consumed };
+  return { batch_id: batchId, envelopes: b.actual_envelopes, sticks_consumed_total: sticks,
+           note: 'Per-flavour usage is derived at the next stock count.' };
+}
+
+// Envelopes assembled since a given date — drives the estimate between counts.
+function ehpEnvelopesSince(clientId, sinceIso) {
+  const r = db.prepare(`SELECT COALESCE(SUM(actual_envelopes),0) n FROM ehp_assembly_batch
+                        WHERE client_id=? AND assembled_at IS NOT NULL AND assembled_at >= ?`)
+              .get(clientId, sinceIso || '1970-01-01');
+  return r.n || 0;
+}
+
+// Estimated on-hand between counts. With M flavours filling the slots at random, each
+// flavour averages sticks_per_envelope / M per envelope. Clearly an estimate — the
+// fortnightly count replaces it with truth.
+function ehpEstimatedOnHand(clientId, sku) {
+  const ledger = ehpOnHand(clientId, sku);
+  const lastCount = db.prepare(`SELECT MAX(counted_at) t FROM ehp_stock_count WHERE client_id=? AND sku=?`).get(clientId, sku).t;
+  const recipe = ehpActiveRecipe(clientId);
+  const per = recipe ? (recipe.sticks_per_envelope || 5) / Math.max(1, recipe.distinct_flavours || 3) : 0;
+  const env = ehpEnvelopesSince(clientId, lastCount || '1970-01-01');
+  const est = Math.round(env * per);
+  return { ledger_on_hand: ledger, envelopes_since_count: env, estimated_used: est,
+           estimated_on_hand: ledger - est, last_count_at: lastCount || null };
+}
+
+// Close a count period: derive consumption per SKU and reconcile total sticks against
+// envelopes assembled. A gap here is shrinkage/damage — visible, not absorbed silently.
+function ehpCloseCountPeriod(clientId, periodId, counts, by) {
+  const per = db.prepare('SELECT * FROM ehp_count_period WHERE id=? AND client_id=?').get(periodId, clientId);
+  if (!per) return { error: 'period_not_found' };
+  if (per.status !== 'open') return { error: 'period_not_open' };
+  const recipe = ehpActiveRecipe(clientId);
+  const sticksPerEnv = recipe ? (recipe.sticks_per_envelope || 5) : 5;
+  const endIso = new Date().toISOString();
+  const lines = [];
+  db.transaction(() => {
+    for (const c of (counts || [])) {
+      const sku = String(c.sku || '').trim(); if (!sku) continue;
+      const counted = parseInt(c.counted_each, 10); if (!Number.isFinite(counted)) continue;
+      const system = ehpOnHand(clientId, sku);                 // opening + receipts (no consumption posted)
+      const derivedUse = system - counted;                     // what the floor actually used
+      const cid = ehpNewId('cnt');
+      db.prepare(`INSERT INTO ehp_stock_count (id, client_id, sku, counted_each, system_each, variance_each, counted_by, notes, period_id)
+                  VALUES (?,?,?,?,?,?,?,?,?)`)
+        .run(cid, clientId, sku, counted, system, counted - system, by || null, c.notes || null, periodId);
+      // Post the derived usage so the ledger equals the counted figure.
+      if (derivedUse !== 0) {
+        db.prepare(`INSERT INTO ehp_inventory_txn (id, client_id, sku, qty_each, txn_type, ref_type, ref_id)
+                    VALUES (?,?,?,?, 'consumption', 'count_period', ?)`)
+          .run(ehpNewId('inv'), clientId, sku, -derivedUse, periodId);
+      }
+      lines.push({ sku, system_each: system, counted_each: counted, derived_usage_each: derivedUse,
+                   on_hand_after: ehpOnHand(clientId, sku) });
+    }
+    db.prepare(`UPDATE ehp_count_period SET status='closed', period_end=?, closed_at=datetime('now'), closed_by=? WHERE id=?`)
+      .run(endIso.slice(0,10), by || null, periodId);
+  })();
+  const env = db.prepare(`SELECT COALESCE(SUM(actual_envelopes),0) n FROM ehp_assembly_batch
+                          WHERE client_id=? AND assembled_at IS NOT NULL AND date(assembled_at) >= ?`)
+                .get(clientId, per.period_start).n;
+  const expected = env * sticksPerEnv;
+  const derived = lines.reduce((a, l) => a + l.derived_usage_each, 0);
+  return { period_id: periodId, lines, envelopes_in_period: env,
+           expected_sticks: expected, derived_sticks: derived, variance_sticks: derived - expected,
+           note: derived === expected ? 'Derived usage matches envelopes assembled.'
+                                      : 'Gap between derived usage and envelopes assembled — investigate shrinkage or damage.' };
 }
 
 // ═══════════════════ SUPPLIER DISCREPANCY REPORT (non-compliance) ═══════════════════
@@ -10582,7 +10667,7 @@ app.get('/ehp/skus', authenticateRequest, (req, res) => {
   try {
     const c = ehpGuard(req, res); if (!c) return;
     const rows = db.prepare(`SELECT * FROM ehp_sku WHERE client_id=? AND active=1 ORDER BY sku`).all(c);
-    res.json({ client_id: c, skus: rows.map(r => ({ ...r, on_hand_each: ehpOnHand(c, r.sku) })) });
+    res.json({ client_id: c, skus: rows.map(r => ({ ...r, on_hand_each: ehpOnHand(c, r.sku), ...ehpEstimatedOnHand(c, r.sku) })) });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -10658,10 +10743,9 @@ app.get('/ehp/receipts', authenticateRequest, (req, res) => {
 app.get('/ehp/inventory', authenticateRequest, (req, res) => {
   try {
     const c = ehpGuard(req, res); if (!c) return;
-    const rows = db.prepare(`SELECT s.sku, s.name, s.flavour, s.format,
-        COALESCE((SELECT SUM(qty_each) FROM ehp_inventory_txn t WHERE t.client_id=s.client_id AND t.sku=s.sku),0) AS on_hand_each
-      FROM ehp_sku s WHERE s.client_id=? AND s.active=1 ORDER BY s.sku`).all(c);
-    res.json({ inventory: rows });
+    const rows = db.prepare(`SELECT s.sku, s.name, s.flavour, s.format FROM ehp_sku s
+      WHERE s.client_id=? AND s.active=1 ORDER BY s.sku`).all(c);
+    res.json({ inventory: rows.map(r => ({ ...r, ...ehpEstimatedOnHand(c, r.sku) })) });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -10776,20 +10860,57 @@ app.post('/ehp/recipe', authenticateRequest, writeOpLimiter, auditLog('create_eh
   try {
     const c = ehpGuard(req, res); if (!c) return;
     const b = req.body || {};
-    const lines = Array.isArray(b.lines) ? b.lines.filter(l => l && l.sku && Number(l.qty_per_envelope) > 0) : [];
-    if (!lines.length) return res.status(400).json({ error: 'at least one recipe line required' });
+    const sticks = parseInt(b.sticks_per_envelope, 10) || 5;
+    const flav   = parseInt(b.distinct_flavours, 10) || 3;
+    const split  = String(b.split_pattern || '2,2,1').trim();
+    const parts  = split.split(',').map(x => parseInt(x.trim(), 10)).filter(Number.isFinite);
+    if (parts.length !== flav) return res.status(400).json({ error: 'split_pattern must have one number per distinct flavour', split, distinct_flavours: flav });
+    if (parts.reduce((a, x) => a + x, 0) !== sticks) return res.status(400).json({ error: 'split_pattern must sum to sticks_per_envelope', split, sticks_per_envelope: sticks });
+    const lines = [];
     const from = String(b.effective_from || new Date().toISOString().slice(0, 10)).trim();
     const id = ehpNewId('rec');
     db.transaction(() => {
       // close the previous open-ended recipe the day before this one starts
       db.prepare(`UPDATE ehp_kit_recipe SET effective_to = date(?, '-1 day')
                   WHERE client_id=? AND effective_to IS NULL AND effective_from < ?`).run(from, c, from);
-      db.prepare(`INSERT INTO ehp_kit_recipe (id, client_id, name, effective_from, notes) VALUES (?,?,?,?,?)`)
-        .run(id, c, b.name || ('Recipe ' + from), from, b.notes || null);
+      db.prepare(`INSERT INTO ehp_kit_recipe (id, client_id, name, effective_from, notes, sticks_per_envelope, distinct_flavours, split_pattern)
+                  VALUES (?,?,?,?,?,?,?,?)`)
+        .run(id, c, b.name || ('Recipe ' + from), from, b.notes || null, sticks, flav, split);
       const ins = db.prepare(`INSERT INTO ehp_kit_recipe_line (recipe_id, client_id, sku, qty_per_envelope) VALUES (?,?,?,?)`);
       for (const l of lines) { ehpEnsureSku(c, String(l.sku).trim(), {}); ins.run(id, c, String(l.sku).trim(), parseInt(l.qty_per_envelope, 10)); }
     })();
     res.json(ehpActiveRecipe(c) || { recipe_id: id });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Count periods (periodic inventory) ──
+app.get('/ehp/count-period', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    let open = db.prepare(`SELECT * FROM ehp_count_period WHERE client_id=? AND status='open' ORDER BY period_start DESC LIMIT 1`).get(c);
+    if (!open) {   // open one automatically so a count can always be recorded
+      const id = ehpNewId('per');
+      db.prepare(`INSERT INTO ehp_count_period (id, client_id, period_start) VALUES (?,?,date('now'))`).run(id, c);
+      open = db.prepare('SELECT * FROM ehp_count_period WHERE id=?').get(id);
+    }
+    const history = db.prepare(`SELECT * FROM ehp_count_period WHERE client_id=? AND status='closed' ORDER BY closed_at DESC LIMIT 12`).all(c);
+    const env = db.prepare(`SELECT COALESCE(SUM(actual_envelopes),0) n FROM ehp_assembly_batch
+                            WHERE client_id=? AND assembled_at IS NOT NULL AND date(assembled_at) >= ?`).get(c, open.period_start).n;
+    const recipe = ehpActiveRecipe(c);
+    res.json({ open_period: open, envelopes_in_period: env,
+               expected_sticks: env * (recipe ? (recipe.sticks_per_envelope || 5) : 5), history });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/ehp/count-period/:id/close', authenticateRequest, writeOpLimiter, auditLog('close_ehp_count_period'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const b = req.body || {};
+    const r = ehpCloseCountPeriod(c, req.params.id, b.counts || [], b.by);
+    if (r.error) return res.status(409).json(r);
+    const id = ehpNewId('per');
+    db.prepare(`INSERT INTO ehp_count_period (id, client_id, period_start) VALUES (?,?,date('now'))`).run(id, c);
+    res.json({ ...r, next_period_id: id });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
