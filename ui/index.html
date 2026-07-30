@@ -281,176 +281,126 @@ window.__clerkOnLoad = function() {
 <body style="margin:0;padding:0;height:100%;overflow-x:hidden;">
 
 <!-- 🔐 Login Screen (shows when NOT signed in) -->
-<div id="auth-login-screen" style="display:flex;width:100vw;height:100vh;min-height:100vh;overflow:hidden;position:fixed;top:0;left:0;z-index:9999;">
+<div id="auth-login-screen" style="display:flex;width:100vw;height:100vh;min-height:100vh;overflow:hidden;position:fixed;top:0;left:0;z-index:9999;background:#fff;">
+<style>
+  /* All rules scoped to #auth-login-screen — nothing here may reach the app. */
+  #auth-login-screen{ --lg-accent:#990033; --lg-ink:#1a1719; --lg-n300:#d7d3d3; --lg-n500:#9b9797;
+                      --lg-n600:#7d7979; --lg-n700:#605d5d; --lg-divider:rgba(26,23,25,0.16);
+                      font-family:'DM Sans',system-ui,sans-serif; color:var(--lg-ink); }
+  #auth-login-screen *{ box-sizing:border-box; }
+  #auth-login-screen a{ color:var(--lg-accent); text-decoration:none; text-underline-offset:3px; }
+  #auth-login-screen a:hover{ text-decoration:underline; }
+  #auth-login-screen .lg-left{ flex:0 1 40%; min-width:420px; display:flex; flex-direction:column;
+    justify-content:space-between; gap:36px; padding:44px clamp(28px,3.4vw,60px) 32px;
+    border-right:1px solid var(--lg-divider); overflow-y:auto; }
+  #auth-login-screen .lg-right{ flex:1 1 0; min-width:0; position:relative; display:flex;
+    flex-direction:column; justify-content:center; gap:clamp(14px,2.2vh,28px);
+    padding:40px clamp(20px,2.4vw,44px); overflow:hidden; }
+  #auth-login-screen .lg-mark{ font-family:'ADLaM Display',serif; font-size:22px; letter-spacing:-.06em;
+    color:var(--lg-accent); line-height:1; }
+  #auth-login-screen .lg-word{ font-family:'ADLaM Display',serif; font-size:25px; letter-spacing:-.02em; line-height:1; }
+  #auth-login-screen .lg-word span{ color:var(--lg-accent); }
+  #auth-login-screen .lg-kicker{ font-size:10px; letter-spacing:.18em; text-transform:uppercase; color:var(--lg-n500); }
+  #auth-login-screen .lg-eyebrow{ font-size:10px; letter-spacing:.22em; text-transform:uppercase; color:var(--lg-accent); }
+  #auth-login-screen .lg-head{ font-family:'ADLaM Display',serif;
+    font-size:clamp(30px,min(3.2vw,5vh),56px); line-height:1.04; letter-spacing:-.03em; max-width:15ch; }
+  #auth-login-screen .lg-head span{ color:var(--lg-accent); }
+  #auth-login-screen .lg-sub{ font-size:clamp(12.5px,1.05vw,14px); line-height:1.6; max-width:48ch; color:var(--lg-n700); }
+  @media (max-height:600px){ #auth-login-screen .lg-sub{ display:none; } }
+  /* Clerk injects the sign-in form here — height reserved so nothing jumps on mount. */
+  #auth-login-screen #clerk-signin-mount{ width:100%; max-width:400px; min-height:420px; }
+  #auth-login-screen .lg-foot{ display:flex; align-items:center; gap:9px; font-size:11px;
+    letter-spacing:.10em; text-transform:uppercase; color:var(--lg-n600); }
+  #auth-login-screen .lg-foot i{ width:1px; height:11px; background:var(--lg-n300); flex:none; }
+  #auth-login-screen .lg-fine{ font-size:11px; color:var(--lg-n500); line-height:1.7; }
+  #auth-login-screen .lg-mapwrap{ position:relative; width:100%; }
+  #auth-login-screen .lg-mapwrap svg{ display:block; width:100%; height:auto; }
+  #auth-login-screen .lg-pin{ position:absolute; transform:translate(-26px,-26px); display:flex; align-items:center; gap:12px; }
+  #auth-login-screen .lg-pin.l{ flex-direction:row-reverse; transform:translate(calc(-100% + 26px),-26px); }
+  #auth-login-screen .lg-pin.t{ flex-direction:column-reverse; gap:2px; transform:translate(-26px,calc(-100% + 26px)); align-items:flex-start; }
+  #auth-login-screen .lg-pin.b{ flex-direction:column; gap:2px; transform:translate(-26px,-26px); align-items:flex-start; }
+  #auth-login-screen .lg-pin .eye{ position:relative; width:52px; height:52px; display:flex; align-items:center; justify-content:center; flex:none; }
+  #auth-login-screen .lg-pin .eye b{ width:6px; height:6px; border-radius:50%; background:var(--lg-n300); transition:all .6s ease; }
+  #auth-login-screen .lg-pin .eye i{ position:absolute; inset:0; border:1px solid var(--lg-accent); border-radius:50%; opacity:0; }
+  #auth-login-screen .lg-pin label{ font-family:'ADLaM Display',serif; font-size:clamp(11px,.95vw,14px);
+    white-space:nowrap; color:var(--lg-accent); opacity:0; transform:translateY(2px);
+    transition:opacity .5s ease,transform .5s ease; pointer-events:none; }
+  #auth-login-screen .lg-pin.on .eye b{ width:12px; height:12px; background:var(--lg-accent); }
+  #auth-login-screen .lg-pin.on .eye i{ animation:lgRing 2.4s ease-out infinite; border-width:1.5px; }
+  #auth-login-screen .lg-pin.on .eye i+i{ animation-delay:.8s; }
+  #auth-login-screen .lg-pin.on label{ opacity:1; transform:translateY(0); }
+  @keyframes lgRing{ 0%{transform:scale(.16);opacity:.8} 65%{opacity:.2} 100%{transform:scale(1);opacity:0} }
+  @media (prefers-reduced-motion:reduce){ #auth-login-screen .lg-pin.on .eye i{ animation:none; opacity:.25; } }
+  @media (max-width:900px){ #auth-login-screen .lg-right{ display:none; } #auth-login-screen .lg-left{ flex:1 1 100%; min-width:0; border-right:none; } }
+</style>
 
-  <!-- Left panel: login form -->
-  <div style="width:34%;min-width:320px;background:#fff;display:flex;flex-direction:column;justify-content:center;padding:56px 48px;position:relative;z-index:2;border-right:0.5px solid rgba(0,0,0,0.06);">
-    <div style="margin-bottom:40px;">
-      <div style="font-family:'ADLaM Display',serif;font-size:22px;line-height:1.1;">
-        <span style="color:#1C1C1E;">VelOzity</span><span style="color:#990033;"> Pinpoint</span>
+  <!-- Left: sign-in -->
+  <div class="lg-left">
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      <div style="display:flex;align-items:center;gap:11px;">
+        <div class="lg-mark">&gt;&gt;</div>
+        <div class="lg-word">VelOzity<span> Pinpoint</span></div>
       </div>
-      <div style="display:flex;align-items:center;gap:5px;margin-top:8px;">
-        <svg width="11" height="11" viewBox="0 0 46 46" fill="none" style="opacity:0.4;flex-shrink:0;"><path d="M32.73 14.9L26.3 5.77a3.93 3.93 0 0 0-6.6 0l-6.43 9.13L6.1 25.7a3.93 3.93 0 0 0 0 4.38l6.44 8.98 1.18 1.65a3.93 3.93 0 0 0 6.44 0l1.18-1.65 1.66-2.32 5.19-7.25.07-.1 4.47-6.25a3.93 3.93 0 0 0 0-4.24z" fill="#CC785C"/></svg>
-        <span style="font-size:10px;color:#AEAEB2;letter-spacing:0.07em;text-transform:uppercase;">Powered by Anthropic Claude</span>
-      </div>
+      <div class="lg-kicker">Value-added logistics · cloud visibility</div>
     </div>
+
     <div id="clerk-signin-mount"></div>
-    <div style="font-size:10px;color:#C7C7CC;margin-top:24px;line-height:1.7;">
-      By signing in you agree to VelOzity's terms.<br>Having trouble? Contact your administrator.
+
+    <div style="display:flex;flex-direction:column;gap:9px;">
+      <div style="height:1px;background:var(--lg-divider);margin-bottom:4px;"></div>
+      <div class="lg-foot">
+        <span style="color:var(--lg-accent);font-weight:600;">Pulse AI</span>
+        <i></i>
+        <svg width="16" height="16" viewBox="0 0 46 46" fill="none" style="flex:none;">
+          <path d="M32.73 14.9L26.3 5.77a3.93 3.93 0 0 0-6.6 0l-6.43 9.13L6.1 25.7a3.93 3.93 0 0 0 0 4.38l6.44 8.98 1.18 1.65a3.93 3.93 0 0 0 6.44 0l1.18-1.65 1.66-2.32 5.19-7.25.07-.1 4.47-6.25a3.93 3.93 0 0 0 0-4.24z" fill="#CC785C"/>
+        </svg>
+        <span>Powered by Anthropic Claude</span>
+      </div>
+      <div class="lg-fine">By signing in you agree to VelOzity's terms.<br>Having trouble? Contact your administrator.</div>
     </div>
   </div>
 
-  <!-- Right panel: operational pings -->
-  <div style="flex:1;background:#fff;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;border-left:0.5px solid rgba(0,0,0,0.06);">
-    <canvas id="login-grid-canvas" style="position:absolute;inset:0;width:100%;height:100%;z-index:0;"></canvas>
-    <div style="position:absolute;width:560px;height:560px;border-radius:50%;background:radial-gradient(circle,rgba(153,0,51,0.07) 0%,rgba(153,0,51,0.025) 50%,transparent 72%);animation:loginGlow 6s ease-in-out infinite;z-index:1;"></div>
-    <div id="login-pings" style="position:absolute;inset:0;z-index:2;pointer-events:none;"></div>
-    <div style="position:relative;z-index:3;display:flex;flex-direction:column;align-items:center;gap:28px;animation:loginRise 1.2s cubic-bezier(0.16,1,0.3,1) both;">
-      <div style="font-family:'ADLaM Display',serif;text-align:center;">
-        <span style="display:block;font-size:clamp(36px,4vw,56px);color:#1C1C1E;letter-spacing:-0.02em;line-height:1.05;">VelOzity</span>
-        <span style="display:block;font-size:clamp(36px,4vw,56px);color:#990033;letter-spacing:-0.02em;line-height:1.05;">Pinpoint</span>
-      </div>
-      <div style="display:flex;flex-direction:column;align-items:center;gap:10px;">
-        <div style="font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:0.22em;text-transform:uppercase;display:none;"></div>
-        <div style="display:flex;align-items:center;justify-content:center;gap:10px;">
-          <!-- Constant pulse orb -->
-          <div style="position:relative;width:20px;height:20px;flex-shrink:0;">
-            <div style="position:absolute;top:50%;left:50%;width:20px;height:20px;margin:-10px 0 0 -10px;border-radius:50%;border:1.5px solid rgba(153,0,51,0.7);animation:pingRing 2s ease-out infinite;"></div>
-            <div style="position:absolute;top:50%;left:50%;width:20px;height:20px;margin:-10px 0 0 -10px;border-radius:50%;border:1px solid rgba(153,0,51,0.45);animation:pingRing 2s 0.5s ease-out infinite;"></div>
-            <div style="position:absolute;top:50%;left:50%;width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;background:#990033;box-shadow:0 0 8px rgba(153,0,51,0.8);"></div>
-          </div>
-          <div style="font-family:'ADLaM Display',serif;font-size:20px;color:#990033;letter-spacing:0.06em;">With PULSE AI</div>
-          <div style="width:0.5px;height:20px;background:rgba(0,0,0,0.14);flex-shrink:0;"></div>
-          <svg width="20" height="20" viewBox="0 0 46 46" fill="none" xmlns="http://www.w3.org/2000/svg" style="opacity:1;flex-shrink:0;">
-            <path d="M32.73 14.9L26.3 5.77a3.93 3.93 0 0 0-6.6 0l-6.43 9.13L6.1 25.7a3.93 3.93 0 0 0 0 4.38l6.44 8.98 1.18 1.65a3.93 3.93 0 0 0 6.44 0l1.18-1.65 1.66-2.32 5.19-7.25.07-.1 4.47-6.25a3.93 3.93 0 0 0 0-4.24z" fill="#CC785C"/>
-          </svg>
-          <div style="font-size:13px;font-weight:500;color:#6E6E73;letter-spacing:0.1em;text-transform:uppercase;">Powered by Anthropic Claude</div>
-        </div>
-      </div>
+  <!-- Right: positioning + live service map -->
+  <div class="lg-right">
+    <div style="display:flex;flex-direction:column;gap:15px;">
+      <div class="lg-eyebrow">Live service index</div>
+      <div class="lg-head">Your supply chain ecosystem, <span>pinpointed.</span></div>
+      <div class="lg-sub">Value added services through last mile ecosystem — with VelOzity's Pulse AI reading the flow and telling you what moved, what stalled, and what it costs.</div>
     </div>
+    <div style="height:1px;background:var(--lg-divider);"></div>
+    <div class="lg-mapwrap" id="lg-mapwrap"><svg id="lg-map" aria-label="World map of the VelOzity service network"></svg></div>
   </div>
 
-  <style>
-    @keyframes loginGlow{0%,100%{transform:scale(1);opacity:.7}50%{transform:scale(1.15);opacity:1}}
-    @keyframes loginRise{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
-    @keyframes pingRing{0%{transform:scale(0.4);opacity:0.75}100%{transform:scale(3.4);opacity:0}}
-    @keyframes pingRing2{0%{transform:scale(0.4);opacity:0.5}100%{transform:scale(2.8);opacity:0}}
-    @keyframes pingFadeIn{0%{opacity:0;transform:scale(0.6)}20%{opacity:1;transform:scale(1)}80%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(0.8)}}
-    @keyframes pingLabel{0%{opacity:0;transform:translateY(4px)}10%{opacity:1;transform:translateY(0)}85%{opacity:1}100%{opacity:0}}
-  </style>
   <script>
-  (function loginPanel(){
+  // Map dots are pre-generated (see /public/login_map.json) — no d3, no topojson, no CDN
+  // at runtime. Fetched only on the login screen, so signed-in users never download it.
+  (function(){
     function init(){
-      var canvas=document.getElementById('login-grid-canvas');
-      if(!canvas) return;
-      var right=canvas.parentElement;
-      function drawGrid(){
-        canvas.width=right.offsetWidth; canvas.height=right.offsetHeight;
-        var ctx=canvas.getContext('2d');
-        ctx.strokeStyle='rgba(0,0,0,0.045)'; ctx.lineWidth=0.5;
-        var s=48;
-        for(var x=0;x<canvas.width;x+=s){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,canvas.height);ctx.stroke();}
-        for(var y=0;y<canvas.height;y+=s){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke();}
-      }
-      window.addEventListener('resize',drawGrid); drawGrid();
-
-      // Operational ping nodes
-      var PING_COL = '#990033';
-      var stages=[
-        {label:'VAS Processing'},
-        {label:'Transit'},
-        {label:'Clearing'},
-        {label:'Last Mile'},
-        {label:'Intake'},
-        {label:'Container Tracking'},
-        {label:'Carton Tracking'},
-        {label:'Units Tracking'},
-        {label:'Freight Management'},
-        {label:'First-to Last Mile'},
-        {label:'Inventory Consolidation'},
-        {label:'Inventory Deconsolidation'},
-        {label:'Bonded Warehouse'},
-        {label:'AI Pulse'},
-      ];
-
-      var container=document.getElementById('login-pings');
-      if(!container) return;
-
-      // Zones: avoid the center (logo area) — use quadrant-ish positions
-      var zones=[
-        {xMin:5, xMax:25, yMin:8,  yMax:40},
-        {xMin:5, xMax:25, yMin:55, yMax:88},
-        {xMin:70,xMax:90, yMin:8,  yMax:40},
-        {xMin:70,xMax:90, yMin:55, yMax:88},
-        {xMin:25,xMax:45, yMin:5,  yMax:20},
-        {xMin:55,xMax:75, yMin:5,  yMax:20},
-        {xMin:25,xMax:45, yMin:78, yMax:92},
-        {xMin:55,xMax:75, yMin:78, yMax:92},
-      ];
-
-      var usedZone = -1;
-      var stageIdx = 0;
-
-      function spawnPing(){
-        // Pick a zone different from last used
-        var zoneIdx;
-        do { zoneIdx = Math.floor(Math.random()*zones.length); } while(zoneIdx===usedZone && zones.length>1);
-        usedZone = zoneIdx;
-        var z = zones[zoneIdx];
-
-        var x = z.xMin + Math.random()*(z.xMax-z.xMin);
-        var y = z.yMin + Math.random()*(z.yMax-z.yMin);
-        var stage = stages[stageIdx % stages.length];
-        stageIdx++;
-
-        var dur = 6800; // ms visible — slow enough to read the label comfortably
-
-        var wrap = document.createElement('div');
-        wrap.style.cssText = 'position:absolute;left:'+x+'%;top:'+y+'%;transform:translate(-50%,-50%);animation:pingFadeIn '+dur+'ms ease forwards;';
-
-        // Outer ring 1
-        var r1 = document.createElement('div');
-        r1.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:1.5px solid rgba(153,0,51,0.30);animation:pingRing '+(dur*0.8)+'ms ease-out forwards;';
-
-        // Outer ring 2
-        var r2 = document.createElement('div');
-        r2.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:1px solid rgba(153,0,51,0.22);animation:pingRing2 '+(dur*0.7)+'ms '+260+'ms ease-out forwards;';
-
-        // Ring 3
-        var r3 = document.createElement('div');
-        r3.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:0.75px solid rgba(153,0,51,0.16);animation:pingRing '+(dur*0.9)+'ms '+520+'ms ease-out forwards;';
-        // Ring 4
-        var r4 = document.createElement('div');
-        r4.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:0.5px solid rgba(153,0,51,0.10);animation:pingRing2 '+dur+'ms '+780+'ms ease-out forwards;';
-        // Center dot
-        var dot = document.createElement('div');
-        dot.style.cssText = 'position:absolute;top:50%;left:50%;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;border-radius:50%;background:'+PING_COL+';box-shadow:0 0 12px rgba(153,0,51,0.28);';
-
-        // Label
-        var lbl = document.createElement('div');
-        lbl.style.cssText = 'position:absolute;top:calc(50% + 22px);left:50%;transform:translateX(-50%);white-space:nowrap;animation:pingLabel '+dur+'ms ease forwards;';
-        lbl.innerHTML = '<div style="font-family:\'ADLaM Display\',serif;font-size:13px;color:#1C1C1E;letter-spacing:0.1em;text-transform:uppercase;text-shadow:0 1px 10px rgba(255,255,255,0.95);">'+stage.label+'</div>';
-
-        wrap.appendChild(r1);
-        wrap.appendChild(r2);
-        wrap.appendChild(r3);
-        wrap.appendChild(r4);
-        wrap.appendChild(dot);
-        wrap.appendChild(lbl);
-        container.appendChild(wrap);
-
-        setTimeout(function(){ wrap.remove(); }, dur + 200);
-      }
-
-      // Respect a user's reduced-motion preference — show one static ping and stop.
-      var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      if (reduce) { spawnPing(); return; }
-      // One ping at a time: spawning faster than they fade is what made this feel frantic.
-      spawnPing();
-      setTimeout(spawnPing, 3400);
-      setInterval(spawnPing, 4200);
+      var wrap = document.getElementById('lg-mapwrap'), svg = document.getElementById('lg-map');
+      if (!wrap || !svg) return;
+      fetch('/public/login_map.json').then(function(r){ return r.ok ? r.json() : null; }).then(function(m){
+        if (!m) return;                                   // no map is fine; sign-in is unaffected
+        svg.setAttribute('viewBox', m.viewBox);
+        svg.innerHTML = '<g fill="var(--lg-n300)" r="'+m.r+'">' +
+          m.circles.replace(/<circle /g, '<circle r="'+m.r+'" ') + '</g>';
+        (m.pins || []).forEach(function(p){
+          var el = document.createElement('div');
+          el.className = 'lg-pin ' + (p.at || 'r');
+          el.style.left = p.left + '%'; el.style.top = p.top + '%';
+          el.innerHTML = '<div class="eye"><i></i><i></i><b></b></div><label>' + p.name + '</label>';
+          wrap.appendChild(el);
+        });
+        var pins = wrap.querySelectorAll('.lg-pin');
+        if (!pins.length) return;
+        var active = 0; pins[0].classList.add('on');
+        setInterval(function(){
+          pins[active].classList.remove('on');
+          active = (active + 1) % pins.length;
+          pins[active].classList.add('on');
+        }, 5000);
+      }).catch(function(){ /* decorative only */ });
     }
-    if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
   })();
   </script>
 </div>
