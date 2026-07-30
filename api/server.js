@@ -10266,6 +10266,7 @@ try {
   if (!sc.includes('period_id')) db.exec("ALTER TABLE ehp_stock_count ADD COLUMN period_id TEXT");
   const oc = db.prepare("PRAGMA table_info(ehp_order)").all().map(c => c.name);
   if (!oc.includes('fulfil_error')) db.exec("ALTER TABLE ehp_order ADD COLUMN fulfil_error TEXT");
+  if (!oc.includes('shop_domain')) db.exec("ALTER TABLE ehp_order ADD COLUMN shop_domain TEXT");
 } catch (e) { console.error('[ehp:recipe-structure]', e.message); }
 
 // Flag (not a block) when a single order asks for an unusual number of envelopes.
@@ -11030,6 +11031,11 @@ app.post('/shopify/connect', authenticateRequest, requireRole(['admin']), writeO
     const clientId = String((req.body || {}).client_id || curClient() || '').trim();
     const shop = shopifyNormaliseShop((req.body || {}).shop_domain);
     if (!clientId) return res.status(400).json({ error: 'client_id required' });
+    // Guard: only a client with envelope fulfilment enabled may be linked to a store,
+    // otherwise orders would be tagged to the wrong tenant.
+    const capOk = db.prepare(`SELECT 1 x FROM client_capability WHERE client_id=? AND capability='envelope_fulfilment' AND enabled=1`).get(clientId);
+    if (!capOk) return res.status(409).json({ error: 'client_not_enabled_for_fulfilment',
+      message: `Select the fulfilment client before linking a store (resolved: ${clientId}).` });
     if (!shop) return res.status(400).json({ error: 'invalid_shop_domain', message: 'Expected something like ehplabs.myshopify.com' });
     if (!SHOPIFY_API_KEY || !SHOPIFY_API_SECRET || !SHOPIFY_APP_URL) {
       return res.status(500).json({ error: 'shopify_app_not_configured',
@@ -11109,7 +11115,7 @@ async function shopifyRegisterWebhooks(clientId) {
 }
 
 // ── Order ingestion: shared by webhook and reconciliation poll ──
-function shopifyUpsertOrder(clientId, o) {
+function shopifyUpsertOrder(clientId, o, shopDomain) {
   if (!o || !o.id) return { skipped: true };
   const envelopes = (o.line_items || []).reduce((a, li) => a + (parseInt(li.quantity, 10) || 0), 0) || 1;
   const sa = o.shipping_address || o.customer?.default_address || {};
@@ -11120,12 +11126,12 @@ function shopifyUpsertOrder(clientId, o) {
   db.prepare(`INSERT INTO ehp_order
     (id, client_id, shopify_order_id, order_number, placed_at, envelope_qty,
      recipient_name, recipient_address, recipient_city, recipient_state, recipient_postcode, recipient_country,
-     state, flagged_high_qty)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'queued', ?)`)
+     state, flagged_high_qty, shop_domain)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'queued', ?, ?)`)
     .run(id, clientId, String(o.id), String(o.name || o.order_number || ''), o.created_at || null, envelopes,
          [sa.first_name, sa.last_name].filter(Boolean).join(' ') || (o.customer ? [o.customer.first_name, o.customer.last_name].filter(Boolean).join(' ') : ''),
          [sa.address1, sa.address2].filter(Boolean).join(', '), sa.city || '', sa.province_code || sa.province || '',
-         sa.zip || '', sa.country_code || 'US', flagged);
+         sa.zip || '', sa.country_code || 'US', flagged, shopDomain || null);
   // SKUs seen on the order feed the registry
   for (const li of (o.line_items || [])) if (li.sku) ehpEnsureSku(clientId, String(li.sku), { name: li.title, source: 'shopify' });
   return { id, envelopes, flagged: !!flagged };
@@ -11141,7 +11147,7 @@ app.post('/shopify/webhook/orders', (req, res) => {
     if (!safeEq(digest, hmac)) { console.warn('[shopify/webhook] bad HMAC from', shop); return res.status(401).send('bad hmac'); }
     const it = db.prepare(`SELECT * FROM client_integration WHERE provider='shopify' AND shop_domain=?`).get(shop || '');
     if (!it) return res.status(202).send('unknown shop');           // 2xx so Shopify stops retrying
-    const r = shopifyUpsertOrder(it.client_id, req.body);
+    const r = shopifyUpsertOrder(it.client_id, req.body, it.shop_domain);
     db.prepare(`UPDATE client_integration SET last_webhook_at=datetime('now'), updated_at=datetime('now')
                 WHERE client_id=? AND provider='shopify'`).run(it.client_id);
     res.status(200).json({ ok: true, ...r });
@@ -11156,7 +11162,8 @@ app.post('/shopify/poll', authenticateRequest, requireRole(['admin']), writeOpLi
     const q = since ? `?status=any&created_at_min=${encodeURIComponent(since)}&limit=250` : '?status=any&limit=250';
     const data = await shopifyApi(clientId, '/orders.json' + q);
     let created = 0, dupes = 0;
-    for (const o of (data.orders || [])) { const r = shopifyUpsertOrder(clientId, o); r.duplicate ? dupes++ : created++; }
+    const _it = shopifyIntegration(clientId);
+    for (const o of (data.orders || [])) { const r = shopifyUpsertOrder(clientId, o, _it && _it.shop_domain); r.duplicate ? dupes++ : created++; }
     db.prepare(`UPDATE client_integration SET last_poll_at=datetime('now'), updated_at=datetime('now')
                 WHERE client_id=? AND provider='shopify'`).run(clientId);
     res.json({ fetched: (data.orders || []).length, created, already_present: dupes });
@@ -11214,6 +11221,42 @@ app.post('/shopify/retry-fulfilments', authenticateRequest, requireRole(['admin'
             db.prepare(`UPDATE ehp_order SET fulfil_error=? WHERE id=?`).run(String(e.message || e).slice(0,300), o.id); }
     }
     res.json({ attempted: rows.length, ok, failed, errors: errors.slice(0, 10) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Purge fulfilment data (test cleanup). Explicit confirmation required. ──
+// Only ever touches ehp_* tables for one client. ICONIC's operational tables are
+// structurally out of reach — this cannot see them.
+app.post('/ehp/purge', authenticateRequest, requireRole(['admin']), writeOpLimiter, auditLog('ehp_purge'), (req, res) => {
+  try {
+    const b = req.body || {};
+    const clientId = String(b.client_id || curClient());
+    const shop = b.shop_domain ? shopifyNormaliseShop(b.shop_domain) : null;
+    if (b.confirm !== 'DELETE') {
+      return res.status(400).json({ error: 'confirmation_required',
+        message: 'Send {"confirm":"DELETE"} to proceed. Optionally include shop_domain to purge only that store\'s orders.' });
+    }
+    const capOk = db.prepare(`SELECT 1 x FROM client_capability WHERE client_id=? AND capability='envelope_fulfilment' AND enabled=1`).get(clientId);
+    if (!capOk) return res.status(409).json({ error: 'client_not_enabled_for_fulfilment', resolved_client: clientId });
+
+    const counts = {};
+    db.transaction(() => {
+      if (shop) {
+        // Targeted: just this store's orders, plus any batch left with no orders.
+        counts.orders = db.prepare(`DELETE FROM ehp_order WHERE client_id=? AND shop_domain=?`).run(clientId, shop).changes;
+        counts.batches = db.prepare(`DELETE FROM ehp_assembly_batch WHERE client_id=? AND id NOT IN (SELECT DISTINCT batch_id FROM ehp_order WHERE batch_id IS NOT NULL)`).run(clientId).changes;
+      } else {
+        // Full reset of this client's fulfilment data — pre-go-live use only.
+        counts.orders      = db.prepare(`DELETE FROM ehp_order WHERE client_id=?`).run(clientId).changes;
+        counts.batches     = db.prepare(`DELETE FROM ehp_assembly_batch WHERE client_id=?`).run(clientId).changes;
+        counts.inventory_txns = db.prepare(`DELETE FROM ehp_inventory_txn WHERE client_id=?`).run(clientId).changes;
+        counts.receipt_lines  = db.prepare(`DELETE FROM ehp_receipt_line WHERE client_id=?`).run(clientId).changes;
+        counts.receipts    = db.prepare(`DELETE FROM ehp_pallet_receipt WHERE client_id=?`).run(clientId).changes;
+        counts.stock_counts= db.prepare(`DELETE FROM ehp_stock_count WHERE client_id=?`).run(clientId).changes;
+        counts.count_periods = db.prepare(`DELETE FROM ehp_count_period WHERE client_id=?`).run(clientId).changes;
+      }
+    })();
+    res.json({ client_id: clientId, scope: shop ? ('orders from ' + shop) : 'all fulfilment data for this client', deleted: counts });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
