@@ -289,18 +289,43 @@
     const d = await req('/ehp/skus');
     const rows = d.skus || [];
     body.innerHTML = `
-      <div style="font-size:10px;color:${LIGHT};margin-bottom:6px;">On-hand is the sum of the movement ledger. Set pack conversions so carton/inner receipts convert correctly.</div>
+      <div style="font-size:10px;color:${LIGHT};margin-bottom:6px;">Periodic inventory: <b>estimated</b> on-hand between counts (each flavour averages sticks ÷ flavours per envelope). The fortnightly count replaces the estimate with truth.</div>
+      <div id="ehp-period"></div>
       <div id="ehp-invmsg"></div>
-      <table class="ehp"><thead><tr><th>SKU</th><th>Flavour</th><th class="n">On hand (each)</th><th class="n">Per inner</th><th class="n">Inner/carton</th><th class="n">Carton/pallet</th><th></th></tr></thead>
+      <table class="ehp"><thead><tr><th>SKU</th><th>Flavour</th><th class="n">Ledger</th><th class="n">Est. used</th><th class="n">Est. on hand</th><th class="n">Per inner</th><th class="n">Inner/carton</th><th class="n">Carton/pallet</th><th></th></tr></thead>
       <tbody>${rows.length ? rows.map(r=>`<tr>
         <td><b>${esc(r.sku)}</b></td><td>${esc(r.flavour||'—')}</td>
-        <td class="n"><b>${nfmt(r.on_hand_each)}</b></td>
+        <td class="n">${nfmt(r.ledger_on_hand)}</td>
+        <td class="n" style="color:${MID}">${nfmt(r.estimated_used)}</td>
+        <td class="n"><b style="color:${(r.estimated_on_hand||0) < 0 ? RED : DARK}">${nfmt(r.estimated_on_hand)}</b></td>
         <td class="n"><input class="ehp-in" data-sku="${esc(r.sku)}" data-f="eaches_per_inner" type="number" min="0" value="${r.eaches_per_inner??''}" style="width:70px;text-align:right"></td>
         <td class="n"><input class="ehp-in" data-sku="${esc(r.sku)}" data-f="inners_per_carton" type="number" min="0" value="${r.inners_per_carton??''}" style="width:70px;text-align:right"></td>
         <td class="n"><input class="ehp-in" data-sku="${esc(r.sku)}" data-f="cartons_per_pallet" type="number" min="0" value="${r.cartons_per_pallet??''}" style="width:70px;text-align:right"></td>
-        <td style="white-space:nowrap"><button class="ehp-btn g" data-save="${esc(r.sku)}">Save</button> <button class="ehp-btn g" data-count="${esc(r.sku)}">Count</button></td>
+        <td style="white-space:nowrap"><button class="ehp-btn g" data-save="${esc(r.sku)}">Save</button></td>
       </tr>`).join('') : `<tr><td colspan="7" style="color:${LIGHT};text-align:center;padding:18px;">No SKUs yet — they appear automatically on first receipt or order.</td></tr>`}
       </tbody></table>`;
+    try {
+      const cp = await req('/ehp/count-period');
+      el('ehp-period').innerHTML = `<div class="ehp-msg k" style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+        <span>Open count period from <b>${esc(cp.open_period.period_start)}</b> — ${nfmt(cp.envelopes_in_period)} envelopes assembled, ${nfmt(cp.expected_sticks)} sticks expected.</span>
+        <button class="ehp-btn" id="ehp-closeper">Record count &amp; close period</button></div>`;
+      el('ehp-closeper').addEventListener('click', async () => {
+        const counts = [];
+        for (const r of rows) {
+          const v = prompt(`Counted quantity (each) for ${r.sku}:`, '');
+          if (v === null) return;
+          const n = parseInt(v,10); if (Number.isFinite(n)) counts.push({ sku: r.sku, counted_each: n });
+        }
+        if (!counts.length) return;
+        try {
+          const res = await req('/ehp/count-period/'+cp.open_period.id+'/close', { method:'POST', body: JSON.stringify({ counts }) });
+          el('ehp-invmsg').innerHTML = msg(res.variance_sticks === 0 ? 'k' : 'w',
+            `Period closed. Derived usage ${nfmt(res.derived_sticks)} sticks vs ${nfmt(res.expected_sticks)} expected — variance ${res.variance_sticks>0?'+':''}${nfmt(res.variance_sticks)}. ${res.note}`);
+          setTimeout(render, 1400);
+        } catch (e) { el('ehp-invmsg').innerHTML = msg('e', e.message||String(e)); }
+      });
+    } catch (e) { /* period panel is optional */ }
+
     body.querySelectorAll('[data-save]').forEach(b => b.addEventListener('click', async () => {
       const sku = b.getAttribute('data-save'); const patch = {};
       body.querySelectorAll(`[data-sku="${sku}"]`).forEach(i => { patch[i.getAttribute('data-f')] = i.value === '' ? '' : parseInt(i.value,10); });
@@ -310,65 +335,40 @@
       catch (e) { el('ehp-invmsg').innerHTML = msg('e', e.message||String(e)); }
       b.disabled = false;
     }));
-    body.querySelectorAll('[data-count]').forEach(b => b.addEventListener('click', async () => {
-      const sku = b.getAttribute('data-count');
-      const v = prompt(`Counted quantity (each) for ${sku}:`); if (v === null) return;
-      const counted = parseInt(v,10); if (!Number.isFinite(counted)) return;
-      try {
-        const r = await req('/ehp/stock-count', { method:'POST', body: JSON.stringify({ sku, counted_each: counted }) });
-        el('ehp-invmsg').innerHTML = msg(r.variance_each === 0 ? 'k' : 'w',
-          `${sku}: counted ${nfmt(r.counted_each)}, system ${nfmt(r.system_each)}, variance ${r.variance_each>0?'+':''}${nfmt(r.variance_each)} — adjustment posted.`);
-        setTimeout(render, 900);
-      } catch (e) { el('ehp-invmsg').innerHTML = msg('e', e.message||String(e)); }
-    }));
   }
 
-  // ── Recipe ──
-  let _rlines = [];
+  // ── Recipe (structure only — which flavour fills which slot is decided on the floor) ──
   async function renderRecipe(body) {
     const d = await req('/ehp/recipe');
     const a = d.active;
-    if (!_rlines.length) _rlines = a ? a.lines.map(l=>({sku:l.sku, qty:l.qty_per_envelope})) : [{sku:'',qty:2},{sku:'',qty:2},{sku:'',qty:1}];
     body.innerHTML = `
       <div class="ehp-kpis"><div class="ehp-kpi" style="grid-column:span 2;">
-        <div class="ehp-kl">Active recipe</div>
-        <div class="ehp-kv" style="font-size:15px;">${a?esc(a.name):'None'}</div>
-        <div class="ehp-ks">${a? a.lines.map(l=>`${l.qty_per_envelope}× ${l.sku}`).join(' · ') + ` — from ${esc(a.effective_from)}` : 'Consumption cannot be derived until a recipe exists.'}</div>
+        <div class="ehp-kl">Active structure</div>
+        <div class="ehp-kv" style="font-size:15px;">${a ? esc(a.sticks_per_envelope + ' sticks · ' + a.distinct_flavours + ' flavours · ' + (a.split_pattern||'')) : 'None'}</div>
+        <div class="ehp-ks">${a ? esc(a.name) + ' — from ' + esc(a.effective_from) : 'Set the envelope structure before assembling.'}</div>
       </div></div>
-      <div style="font-size:10px;color:${LIGHT};margin:6px 0;">Creating a new recipe closes the current one the day before it starts, so historical consumption stays accurate.</div>
-      <div id="ehp-rlines"></div>
-      <button class="ehp-btn g" id="ehp-raddline" style="margin-top:6px;">＋ Add flavour</button>
-      <div style="display:flex;gap:10px;align-items:flex-end;margin-top:12px;">
-        <div><span class="ehp-lbl">Name</span><input class="ehp-in" id="ehp-rname" placeholder="2+2+1 August"></div>
+      ${msg('w','Flavours are not fixed. The recipe defines the pattern only — 5 sticks across 3 distinct flavours, split 2/2/1. Actual per-flavour usage is derived at each stock count.')}
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;">
+        <div><span class="ehp-lbl">Sticks per envelope</span><input class="ehp-in" id="ehp-sticks" type="number" min="1" value="${a?a.sticks_per_envelope:5}" style="width:110px"></div>
+        <div><span class="ehp-lbl">Distinct flavours</span><input class="ehp-in" id="ehp-flav" type="number" min="1" value="${a?a.distinct_flavours:3}" style="width:110px"></div>
+        <div><span class="ehp-lbl">Split pattern</span><input class="ehp-in" id="ehp-split" value="${a?esc(a.split_pattern||'2,2,1'):'2,2,1'}" placeholder="2,2,1" style="width:120px"></div>
+        <div><span class="ehp-lbl">Name</span><input class="ehp-in" id="ehp-rname" placeholder="Standard sample envelope"></div>
         <div><span class="ehp-lbl">Effective from</span><input class="ehp-in" id="ehp-rfrom" type="date" value="${new Date().toISOString().slice(0,10)}"></div>
         <button class="ehp-btn" id="ehp-rsave">Save new version</button>
       </div>
       <div id="ehp-rmsg"></div>
-      ${(d.history||[]).length>1 ? `<table class="ehp" style="margin-top:16px"><thead><tr><th>Version</th><th>From</th><th>To</th></tr></thead><tbody>${d.history.map(h=>`<tr><td>${esc(h.name)}</td><td>${esc(h.effective_from)}</td><td>${esc(h.effective_to||'current')}</td></tr>`).join('')}</tbody></table>`:''}`;
-    drawRlines();
-    el('ehp-raddline').addEventListener('click', ()=>{ _rlines.push({sku:'',qty:1}); drawRlines(); });
+      ${(d.history||[]).length ? `<table class="ehp" style="margin-top:16px"><thead><tr><th>Version</th><th>Structure</th><th>From</th><th>To</th></tr></thead><tbody>${d.history.map(h=>`<tr><td>${esc(h.name)}</td><td>${esc((h.sticks_per_envelope||5)+' / '+(h.distinct_flavours||3)+' / '+(h.split_pattern||''))}</td><td>${esc(h.effective_from)}</td><td>${esc(h.effective_to||'current')}</td></tr>`).join('')}</tbody></table>`:''}`;
     el('ehp-rsave').addEventListener('click', async () => {
-      const lines = _rlines.filter(l=>l.sku && Number(l.qty)>0).map(l=>({sku:l.sku, qty_per_envelope:Number(l.qty)}));
-      if (!lines.length) { el('ehp-rmsg').innerHTML = msg('e','Add at least one flavour with a quantity.'); return; }
-      const total = lines.reduce((s,l)=>s+l.qty_per_envelope,0);
       try {
-        await req('/ehp/recipe', { method:'POST', body: JSON.stringify({ name: el('ehp-rname').value || null, effective_from: el('ehp-rfrom').value, lines }) });
-        el('ehp-rmsg').innerHTML = msg('k', `Recipe saved — ${total} sticks per envelope.`);
-        _rlines = []; setTimeout(render, 900);
-      } catch (e) { el('ehp-rmsg').innerHTML = msg('e', e.message||String(e)); }
+        await req('/ehp/recipe', { method:'POST', body: JSON.stringify({
+          name: el('ehp-rname').value || null, effective_from: el('ehp-rfrom').value,
+          sticks_per_envelope: parseInt(el('ehp-sticks').value,10),
+          distinct_flavours: parseInt(el('ehp-flav').value,10),
+          split_pattern: el('ehp-split').value }) });
+        el('ehp-rmsg').innerHTML = msg('k','Structure saved.');
+        setTimeout(render, 900);
+      } catch (e) { el('ehp-rmsg').innerHTML = msg('e', e.message || String(e)); }
     });
-  }
-  function drawRlines() {
-    const c = el('ehp-rlines'); if (!c) return;
-    const total = _rlines.reduce((s,l)=>s+(Number(l.qty)||0),0);
-    c.innerHTML = `<table class="ehp"><thead><tr><th>SKU</th><th class="n">Qty per envelope</th><th></th></tr></thead><tbody>
-      ${_rlines.map((l,i)=>`<tr>
-        <td><input class="ehp-in" data-ri="${i}" data-rf="sku" value="${esc(l.sku||'')}" placeholder="FIZZ-KIWI" style="width:220px"></td>
-        <td class="n"><input class="ehp-in" data-ri="${i}" data-rf="qty" type="number" min="1" value="${esc(l.qty||1)}" style="width:80px;text-align:right"></td>
-        <td><button class="ehp-btn g" data-rdel="${i}" style="padding:5px 8px;">✕</button></td></tr>`).join('')}
-      </tbody><tfoot><tr><td style="color:${MID}"><b>Total per envelope</b></td><td class="n"><b>${total}</b></td><td></td></tr></tfoot></table>`;
-    c.querySelectorAll('[data-rf]').forEach(inp => inp.addEventListener('input', ()=>{ _rlines[+inp.getAttribute('data-ri')][inp.getAttribute('data-rf')] = inp.value; if(inp.getAttribute('data-rf')==='qty') drawRlines(); }));
-    c.querySelectorAll('[data-rdel]').forEach(b => b.addEventListener('click', ()=>{ _rlines.splice(+b.getAttribute('data-rdel'),1); drawRlines(); }));
   }
 
   // ── init ──
@@ -378,7 +378,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);   // active client can change via the picker
-    console.log('[ehp-ops] module v1 loaded');
+    console.log('[ehp-ops] module v2 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
