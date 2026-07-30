@@ -76,7 +76,7 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
-app.use(express.json({ limit: '100mb' }));
+app.use(express.json({ limit: '100mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
 // 🔐 Rate Limiting
 app.use(apiLimiter);
@@ -10264,6 +10264,8 @@ try {
   if (!rc.includes('split_pattern'))       db.exec("ALTER TABLE ehp_kit_recipe ADD COLUMN split_pattern TEXT DEFAULT '2,2,1'");
   const sc = db.prepare("PRAGMA table_info(ehp_stock_count)").all().map(c => c.name);
   if (!sc.includes('period_id')) db.exec("ALTER TABLE ehp_stock_count ADD COLUMN period_id TEXT");
+  const oc = db.prepare("PRAGMA table_info(ehp_order)").all().map(c => c.name);
+  if (!oc.includes('fulfil_error')) db.exec("ALTER TABLE ehp_order ADD COLUMN fulfil_error TEXT");
 } catch (e) { console.error('[ehp:recipe-structure]', e.message); }
 
 // Flag (not a block) when a single order asks for an unusual number of envelopes.
@@ -10823,7 +10825,7 @@ app.post('/ehp/batch/:id/assemble', authenticateRequest, writeOpLimiter, auditLo
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
-app.post('/ehp/batch/:id/dispatch', authenticateRequest, writeOpLimiter, auditLog('dispatch_ehp_batch'), (req, res) => {
+app.post('/ehp/batch/:id/dispatch', authenticateRequest, writeOpLimiter, auditLog('dispatch_ehp_batch'), async (req, res) => {
   try {
     const c = ehpGuard(req, res); if (!c) return;
     const b = db.prepare('SELECT * FROM ehp_assembly_batch WHERE id=? AND client_id=?').get(req.params.id, c);
@@ -10833,9 +10835,11 @@ app.post('/ehp/batch/:id/dispatch', authenticateRequest, writeOpLimiter, auditLo
       db.prepare(`UPDATE ehp_assembly_batch SET state='dispatched', dispatched_at=datetime('now') WHERE id=?`).run(b.id);
       db.prepare(`UPDATE ehp_order SET state='dispatched', fulfilled_at=datetime('now') WHERE batch_id=? AND client_id=?`).run(b.id, c);
     })();
-    // Shopify fulfilment write-back happens in the integration increment.
-    res.json({ batch_id: b.id, envelopes: b.actual_envelopes, orders: b.order_count, state: 'dispatched',
-               shopify: 'pending_integration' });
+    // Mark the orders fulfilled in Shopify. Dispatch already succeeded locally, so a
+    // Shopify failure is reported rather than rolled back — retry via /shopify/retry-fulfilments.
+    let shop = { skipped: 'not_connected' };
+    try { shop = await shopifyFulfilBatch(c, b.id); } catch (e) { shop = { error: String(e.message || e) }; }
+    res.json({ batch_id: b.id, envelopes: b.actual_envelopes, orders: b.order_count, state: 'dispatched', shopify: shop });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -10965,6 +10969,274 @@ app.get('/ehp/summary', authenticateRequest, (req, res) => {
       orders_received: ordersIn.orders, envelopes_ordered: ordersIn.envelopes,
       envelopes_assembled: asm, envelopes_dispatched: dis,
       queued_orders: q.orders, queued_envelopes: q.envelopes });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ═══════════════════ SHOPIFY INTEGRATION (OAuth custom distribution) ═══════════════════
+// EHP's only step is clicking an install link. Scopes are declared by us, the token
+// arrives via the OAuth callback, and no secret is ever emailed around.
+db.exec(`
+CREATE TABLE IF NOT EXISTS client_integration (
+  client_id    TEXT NOT NULL,
+  provider     TEXT NOT NULL,                 -- 'shopify'
+  shop_domain  TEXT,                          -- e.g. ehplabs.myshopify.com
+  access_token TEXT,                          -- never returned to the browser
+  scopes       TEXT,
+  status       TEXT NOT NULL DEFAULT 'pending',   -- pending | connected | error
+  installed_at TEXT,
+  last_webhook_at TEXT,
+  last_poll_at TEXT,
+  last_error   TEXT,
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (client_id, provider)
+);
+CREATE TABLE IF NOT EXISTS shopify_oauth_state (
+  state      TEXT PRIMARY KEY,
+  client_id  TEXT NOT NULL,
+  shop       TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+
+const SHOPIFY_API_KEY     = process.env.SHOPIFY_API_KEY || '';
+const SHOPIFY_API_SECRET  = process.env.SHOPIFY_API_SECRET || '';
+const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2025-01';
+const SHOPIFY_APP_URL     = (process.env.SHOPIFY_APP_URL || '').replace(/\/+$/, '');
+const SHOPIFY_SCOPES = [
+  'read_orders',
+  'read_products',
+  'read_assigned_fulfillment_orders',
+  'write_assigned_fulfillment_orders',
+  'write_fulfillments',
+].join(',');
+
+function shopifyNormaliseShop(d) {
+  let x = String(d || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  if (x && !x.includes('.')) x += '.myshopify.com';
+  return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(x) ? x : null;
+}
+function shopifyIntegration(clientId) {
+  return db.prepare(`SELECT * FROM client_integration WHERE client_id=? AND provider='shopify'`).get(clientId);
+}
+// Timing-safe compare so HMAC checks don't leak via response timing.
+function safeEq(a, b) {
+  const x = Buffer.from(String(a || ''), 'utf8'), y = Buffer.from(String(b || ''), 'utf8');
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+
+// ── Admin: generate an install link for a client ──
+app.post('/shopify/connect', authenticateRequest, requireRole(['admin']), writeOpLimiter, auditLog('shopify_connect'), (req, res) => {
+  try {
+    const clientId = String((req.body || {}).client_id || curClient() || '').trim();
+    const shop = shopifyNormaliseShop((req.body || {}).shop_domain);
+    if (!clientId) return res.status(400).json({ error: 'client_id required' });
+    if (!shop) return res.status(400).json({ error: 'invalid_shop_domain', message: 'Expected something like ehplabs.myshopify.com' });
+    if (!SHOPIFY_API_KEY || !SHOPIFY_API_SECRET || !SHOPIFY_APP_URL) {
+      return res.status(500).json({ error: 'shopify_app_not_configured',
+        message: 'Set SHOPIFY_API_KEY, SHOPIFY_API_SECRET and SHOPIFY_APP_URL in the environment.' });
+    }
+    db.prepare(`INSERT INTO client_integration (client_id, provider, shop_domain, status, updated_at)
+                VALUES (?, 'shopify', ?, 'pending', datetime('now'))
+                ON CONFLICT(client_id, provider) DO UPDATE SET shop_domain=excluded.shop_domain, status='pending', updated_at=datetime('now')`)
+      .run(clientId, shop);
+    const state = crypto.randomBytes(16).toString('hex');
+    db.prepare(`INSERT INTO shopify_oauth_state (state, client_id, shop) VALUES (?,?,?)`).run(state, clientId, shop);
+    const redirectUri = SHOPIFY_APP_URL + '/shopify/callback';
+    const url = `https://${shop}/admin/oauth/authorize?client_id=${encodeURIComponent(SHOPIFY_API_KEY)}`
+      + `&scope=${encodeURIComponent(SHOPIFY_SCOPES)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
+    res.json({ install_url: url, shop_domain: shop, client_id: clientId, scopes: SHOPIFY_SCOPES });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── OAuth callback (Shopify redirects the merchant here after they click Install) ──
+app.get('/shopify/callback', async (req, res) => {
+  const fail = (m) => res.status(400).send(`<html><body style="font-family:sans-serif;padding:40px"><h2>Connection failed</h2><p>${escHtml(m)}</p></body></html>`);
+  try {
+    const { hmac, state, shop, code } = req.query;
+    if (!hmac || !state || !shop || !code) return fail('Missing parameters.');
+    // 1. verify the callback signature
+    const q = { ...req.query }; delete q.hmac; delete q.signature;
+    const msg = Object.keys(q).sort().map(k => `${k}=${q[k]}`).join('&');
+    const digest = crypto.createHmac('sha256', SHOPIFY_API_SECRET).update(msg).digest('hex');
+    if (!safeEq(digest, hmac)) return fail('Signature verification failed.');
+    // 2. state must be one we issued
+    const st = db.prepare('SELECT * FROM shopify_oauth_state WHERE state=?').get(state);
+    if (!st) return fail('Unknown or expired install link. Generate a new one.');
+    db.prepare('DELETE FROM shopify_oauth_state WHERE state=?').run(state);
+    const shopNorm = shopifyNormaliseShop(shop);
+    if (!shopNorm || shopNorm !== st.shop) return fail('Shop mismatch.');
+    // 3. exchange the code for a permanent access token
+    const r = await fetch(`https://${shopNorm}/admin/oauth/access_token`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: SHOPIFY_API_KEY, client_secret: SHOPIFY_API_SECRET, code }),
+    });
+    if (!r.ok) return fail('Token exchange failed: HTTP ' + r.status);
+    const tok = await r.json();
+    db.prepare(`UPDATE client_integration SET access_token=?, scopes=?, status='connected',
+                installed_at=datetime('now'), last_error=NULL, updated_at=datetime('now')
+                WHERE client_id=? AND provider='shopify'`)
+      .run(tok.access_token, tok.scope || SHOPIFY_SCOPES, st.client_id);
+    // 4. register the order webhook (idempotent on Shopify's side)
+    try { await shopifyRegisterWebhooks(st.client_id); } catch (e) { console.error('[shopify] webhook register', e.message); }
+    res.send(`<html><body style="font-family:sans-serif;padding:40px;text-align:center">
+      <h2 style="color:#990033">Connected</h2>
+      <p>${escHtml(shopNorm)} is now linked to VelOzity Pinpoint.</p>
+      <p style="color:#6E6E73;font-size:13px">You can close this window.</p></body></html>`);
+  } catch (e) { console.error('[shopify/callback]', e); fail(String(e.message || e)); }
+});
+
+async function shopifyApi(clientId, path, opts) {
+  const it = shopifyIntegration(clientId);
+  if (!it || !it.access_token) throw new Error('shopify_not_connected');
+  const r = await fetch(`https://${it.shop_domain}/admin/api/${SHOPIFY_API_VERSION}${path}`, {
+    ...(opts || {}),
+    headers: { 'X-Shopify-Access-Token': it.access_token, 'Content-Type': 'application/json', ...((opts || {}).headers || {}) },
+  });
+  const txt = await r.text();
+  let body = null; try { body = txt ? JSON.parse(txt) : null; } catch (e) { body = txt; }
+  if (!r.ok) { const err = new Error('shopify_api_' + r.status); err.status = r.status; err.body = body; throw err; }
+  return body;
+}
+
+async function shopifyRegisterWebhooks(clientId) {
+  const addr = SHOPIFY_APP_URL + '/shopify/webhook/orders';
+  const existing = await shopifyApi(clientId, '/webhooks.json').catch(() => ({ webhooks: [] }));
+  const has = (existing.webhooks || []).some(w => w.address === addr && w.topic === 'orders/create');
+  if (has) return { ok: true, already: true };
+  await shopifyApi(clientId, '/webhooks.json', { method: 'POST',
+    body: JSON.stringify({ webhook: { topic: 'orders/create', address: addr, format: 'json' } }) });
+  return { ok: true, created: true };
+}
+
+// ── Order ingestion: shared by webhook and reconciliation poll ──
+function shopifyUpsertOrder(clientId, o) {
+  if (!o || !o.id) return { skipped: true };
+  const envelopes = (o.line_items || []).reduce((a, li) => a + (parseInt(li.quantity, 10) || 0), 0) || 1;
+  const sa = o.shipping_address || o.customer?.default_address || {};
+  const flagged = envelopes >= EHP_ENVELOPE_ALERT_QTY ? 1 : 0;
+  const existing = db.prepare(`SELECT id FROM ehp_order WHERE client_id=? AND shopify_order_id=?`).get(clientId, String(o.id));
+  if (existing) return { id: existing.id, duplicate: true };
+  const id = ehpNewId('ord');
+  db.prepare(`INSERT INTO ehp_order
+    (id, client_id, shopify_order_id, order_number, placed_at, envelope_qty,
+     recipient_name, recipient_address, recipient_city, recipient_state, recipient_postcode, recipient_country,
+     state, flagged_high_qty)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'queued', ?)`)
+    .run(id, clientId, String(o.id), String(o.name || o.order_number || ''), o.created_at || null, envelopes,
+         [sa.first_name, sa.last_name].filter(Boolean).join(' ') || (o.customer ? [o.customer.first_name, o.customer.last_name].filter(Boolean).join(' ') : ''),
+         [sa.address1, sa.address2].filter(Boolean).join(', '), sa.city || '', sa.province_code || sa.province || '',
+         sa.zip || '', sa.country_code || 'US', flagged);
+  // SKUs seen on the order feed the registry
+  for (const li of (o.line_items || [])) if (li.sku) ehpEnsureSku(clientId, String(li.sku), { name: li.title, source: 'shopify' });
+  return { id, envelopes, flagged: !!flagged };
+}
+
+// ── Webhook: orders/create ──
+app.post('/shopify/webhook/orders', (req, res) => {
+  try {
+    const hmac = req.get('X-Shopify-Hmac-Sha256') || '';
+    const shop = shopifyNormaliseShop(req.get('X-Shopify-Shop-Domain'));
+    if (!req.rawBody) return res.status(400).send('no body');
+    const digest = crypto.createHmac('sha256', SHOPIFY_API_SECRET).update(req.rawBody).digest('base64');
+    if (!safeEq(digest, hmac)) { console.warn('[shopify/webhook] bad HMAC from', shop); return res.status(401).send('bad hmac'); }
+    const it = db.prepare(`SELECT * FROM client_integration WHERE provider='shopify' AND shop_domain=?`).get(shop || '');
+    if (!it) return res.status(202).send('unknown shop');           // 2xx so Shopify stops retrying
+    const r = shopifyUpsertOrder(it.client_id, req.body);
+    db.prepare(`UPDATE client_integration SET last_webhook_at=datetime('now'), updated_at=datetime('now')
+                WHERE client_id=? AND provider='shopify'`).run(it.client_id);
+    res.status(200).json({ ok: true, ...r });
+  } catch (e) { console.error('[shopify/webhook]', e); res.status(200).send('ok'); }  // never make Shopify retry on our bug
+});
+
+// ── Reconciliation poll: webhooks do get missed ──
+app.post('/shopify/poll', authenticateRequest, requireRole(['admin']), writeOpLimiter, auditLog('shopify_poll'), async (req, res) => {
+  try {
+    const clientId = String((req.body || {}).client_id || curClient());
+    const since = String((req.body || {}).since || '').trim();
+    const q = since ? `?status=any&created_at_min=${encodeURIComponent(since)}&limit=250` : '?status=any&limit=250';
+    const data = await shopifyApi(clientId, '/orders.json' + q);
+    let created = 0, dupes = 0;
+    for (const o of (data.orders || [])) { const r = shopifyUpsertOrder(clientId, o); r.duplicate ? dupes++ : created++; }
+    db.prepare(`UPDATE client_integration SET last_poll_at=datetime('now'), updated_at=datetime('now')
+                WHERE client_id=? AND provider='shopify'`).run(clientId);
+    res.json({ fetched: (data.orders || []).length, created, already_present: dupes });
+  } catch (e) { res.status(500).json({ error: String(e.message || e), body: e.body }); }
+});
+
+// ── Fulfilment write-back: mark orders shipped in Shopify (no tracking number) ──
+// Uses the Fulfillment Orders API; the legacy Fulfillment API is deprecated.
+async function shopifyFulfilOrder(clientId, orderRow) {
+  if (!orderRow || !orderRow.shopify_order_id) return { skipped: 'no_shopify_id' };
+  const fo = await shopifyApi(clientId, `/orders/${orderRow.shopify_order_id}/fulfillment_orders.json`);
+  const open = (fo.fulfillment_orders || []).filter(x => ['open', 'in_progress', 'scheduled'].includes(String(x.status)));
+  if (!open.length) return { skipped: 'no_open_fulfillment_orders' };
+  const payload = { fulfillment: {
+    // No tracking: EHP's Shopify workflow decides whether the customer is emailed.
+    line_items_by_fulfillment_order: open.map(x => ({ fulfillment_order_id: x.id })),
+  } };
+  const r = await shopifyApi(clientId, '/fulfillments.json', { method: 'POST', body: JSON.stringify(payload) });
+  return { fulfillment_id: r && r.fulfillment ? r.fulfillment.id : null };
+}
+
+// Fulfil every dispatched order in a batch. One failure must not sink the batch —
+// failures are recorded per order and retried separately.
+async function shopifyFulfilBatch(clientId, batchId) {
+  const it = shopifyIntegration(clientId);
+  if (!it || it.status !== 'connected') return { skipped: 'not_connected', ok: 0, failed: 0 };
+  const orders = db.prepare(`SELECT * FROM ehp_order WHERE batch_id=? AND client_id=? AND shopify_fulfilment_id IS NULL`).all(batchId, clientId);
+  let ok = 0, failed = 0; const errors = [];
+  for (const o of orders) {
+    try {
+      const r = await shopifyFulfilOrder(clientId, o);
+      db.prepare(`UPDATE ehp_order SET shopify_fulfilment_id=?, fulfil_error=NULL WHERE id=?`)
+        .run(r.fulfillment_id || (r.skipped ? 'skipped:' + r.skipped : null), o.id);
+      ok++;
+    } catch (e) {
+      failed++; errors.push({ order: o.order_number, error: String(e.message || e) });
+      db.prepare(`UPDATE ehp_order SET fulfil_error=? WHERE id=?`).run(String(e.message || e).slice(0, 300), o.id);
+    }
+  }
+  return { ok, failed, errors: errors.slice(0, 10) };
+}
+
+// Retry any order whose fulfilment failed.
+app.post('/shopify/retry-fulfilments', authenticateRequest, requireRole(['admin']), writeOpLimiter, auditLog('shopify_retry_fulfil'), async (req, res) => {
+  try {
+    const clientId = String((req.body || {}).client_id || curClient());
+    const rows = db.prepare(`SELECT * FROM ehp_order WHERE client_id=? AND state='dispatched'
+                             AND shopify_fulfilment_id IS NULL`).all(clientId);
+    let ok = 0, failed = 0; const errors = [];
+    for (const o of rows) {
+      try { const r = await shopifyFulfilOrder(clientId, o);
+            db.prepare(`UPDATE ehp_order SET shopify_fulfilment_id=?, fulfil_error=NULL WHERE id=?`)
+              .run(r.fulfillment_id || (r.skipped ? 'skipped:' + r.skipped : null), o.id); ok++; }
+      catch (e) { failed++; errors.push({ order: o.order_number, error: String(e.message || e) });
+            db.prepare(`UPDATE ehp_order SET fulfil_error=? WHERE id=?`).run(String(e.message || e).slice(0,300), o.id); }
+    }
+    res.json({ attempted: rows.length, ok, failed, errors: errors.slice(0, 10) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Status (never returns the token) ──
+app.get('/shopify/status', authenticateRequest, (req, res) => {
+  try {
+    const clientId = String(req.query.client_id || curClient());
+    const it = shopifyIntegration(clientId);
+    const q = db.prepare(`SELECT COUNT(*) n FROM ehp_order WHERE client_id=? AND state='queued'`).get(clientId).n;
+    res.json({
+      configured: !!(SHOPIFY_API_KEY && SHOPIFY_API_SECRET && SHOPIFY_APP_URL),
+      client_id: clientId,
+      connected: !!(it && it.status === 'connected'),
+      shop_domain: it ? it.shop_domain : null,
+      status: it ? it.status : 'not_configured',
+      installed_at: it ? it.installed_at : null,
+      last_webhook_at: it ? it.last_webhook_at : null,
+      last_poll_at: it ? it.last_poll_at : null,
+      last_error: it ? it.last_error : null,
+      queued_orders: q,
+      unfulfilled_dispatched: db.prepare(`SELECT COUNT(*) n FROM ehp_order WHERE client_id=? AND state='dispatched' AND shopify_fulfilment_id IS NULL`).get(clientId).n,
+      callback_url: SHOPIFY_APP_URL ? SHOPIFY_APP_URL + '/shopify/callback' : null,
+    });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
