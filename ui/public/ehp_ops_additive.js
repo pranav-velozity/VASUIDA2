@@ -87,7 +87,11 @@
     try {
       await req('/ehp/queue');           // 409 when the active client lacks the capability
       _enabled = true;
-    } catch (e) { _enabled = (e.status !== 409 && e.status !== 403); if (e.status === 409) _enabled = false; }
+    } catch (e) {
+      // Fail closed: a 401 on a cold load must not be read as "capability present".
+      if (e.status === 409 || e.status === 403) _enabled = false;
+      else return;                       // transient — leave the nav as it is and retry
+    }
     const sub = el('nav-vas-fulfilment');
     if (sub) sub.style.display = _enabled ? '' : 'none';
     const legacy = el('nav-ehp');                      // pre-restructure nav item, if still present
@@ -533,7 +537,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);   // active client can change via the picker
-    console.log('[ehp-ops] module v11 loaded');
+    console.log('[ehp-ops] module v12 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

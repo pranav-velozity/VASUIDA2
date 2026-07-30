@@ -8,10 +8,11 @@
   const BRAND = '#990033', DARK = '#1C1C1E', MID = '#6E6E73', LIGHT = '#AEAEB2';
   const GREEN = '#34C759', AMBER = '#FFD014', RED = '#B33F40';
   const AMBER_TXT = '#8A6D00';        // #FFD014 is too light for text on white
-  const LS_ON = 'pinpoint.fulfilmentClient';
+  // Keyed per client: a cached flag from EHP must not decide the layout for ICONIC.
+  const lsKey = () => 'pinpoint.fulfilmentClient.' + (window.pinpointClient || 'unknown');
   // Remembered from the last session so the ICONIC layout is hidden on the very first
   // paint, instead of flashing while the capability check round-trips.
-  let _on = (() => { try { return localStorage.getItem(LS_ON) === '1'; } catch (e) { return false; } })();
+  let _on = (() => { try { return localStorage.getItem(lsKey()) === '1'; } catch (e) { return false; } })();
   let _busy = false, _lastWeek = '', _conn = null;
 
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
@@ -498,12 +499,19 @@
   }
 
   async function check() {
-    // Capability-driven: any client with envelope fulfilment gets this Week Hub.
-    let enabled = false;
-    try { await req('/ehp/queue'); enabled = true; }
-    catch (e) { enabled = !(e.status === 409 || e.status === 403); if (e.status === 409) enabled = false; }
+    // Capability-driven, and it must FAIL CLOSED. A cold load returns 401 before the Clerk
+    // token is ready; treating that as "enabled" would hide the ICONIC layout and leave a
+    // blank page until the user happened to navigate away and back.
+    let enabled;
+    try {
+      await req('/ehp/queue');
+      enabled = true;                                   // definitive: fulfilment client
+    } catch (e) {
+      if (e.status === 409 || e.status === 403) enabled = false;   // definitive: not one
+      else return;                                      // transient — change nothing, retry later
+    }
     _on = enabled;
-    try { localStorage.setItem(LS_ON, enabled ? '1' : '0'); } catch (e) {}
+    try { localStorage.setItem(lsKey(), enabled ? '1' : '0'); } catch (e) {}
     const host = el('fwh');
     if (!_on) { if (host) host.remove(); toggleIconicSections(false); return; }
     if (!onWeekHub()) { if (host) host.style.display = 'none'; return; }
@@ -549,7 +557,7 @@
     window.addEventListener('hashchange', () => { applyImmediately(); check(); });
     setInterval(check, 4000);                 // client switch / week change
     window.refreshFulfilmentWeekHub = () => render(true);
-    console.log('[fulfilment-weekhub] module v8 loaded');
+    console.log('[fulfilment-weekhub] module v9 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
