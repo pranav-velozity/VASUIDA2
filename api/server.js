@@ -7241,8 +7241,8 @@ async function pulseReplyToThread(threadId, contextSnippet, question) {
     if (!body) return;
 
     const msgId = uuidv4();
-    db.prepare(`INSERT INTO collab_messages (id,thread_id,author_id,author_name,author_role,body,attachments,is_pulse)
-      VALUES (?,?,?,?,?,?,?,?)`).run(msgId, threadId, 'pulse', 'Pulse', 'AI', body, '[]', 1);
+    db.prepare(`INSERT INTO collab_messages (client_id,id,thread_id,author_id,author_name,author_role,body,attachments,is_pulse)
+      VALUES (?,?,?,?,?,?,?,?,?)`).run(curClient(), msgId, threadId, 'pulse', 'Pulse', 'AI', body, '[]', 1);
     db.prepare(`UPDATE collab_threads SET updated_at=datetime('now') WHERE id=?`).run(threadId);
   } catch(e) {
     console.error('[collab/pulse]', e.message);
@@ -7257,6 +7257,7 @@ app.get('/threads',
     const { context_type, context_key, status } = req.query;
     let where = 'WHERE 1=1';
     const params = [];
+    { const sc = scopeSql(tenantReadIds(req), 't.client_id'); where += sc.clause; params.push(...sc.params); }
     if (context_type) { where += ' AND context_type=?'; params.push(context_type); }
     if (context_key)  { where += ' AND context_key=?';  params.push(context_key); }
     if (status)       { where += ' AND status=?';       params.push(status); }
@@ -7276,7 +7277,8 @@ app.get('/threads/count',
   authenticateRequest,
   (req, res) => {
   try {
-    const row = db.prepare(`SELECT COUNT(*) as n FROM collab_threads WHERE status='open'`).get();
+    const _sc = scopeSql(tenantReadIds(req));
+    const row = db.prepare(`SELECT COUNT(*) as n FROM collab_threads WHERE status='open'${_sc.clause}`).get(..._sc.params);
     res.json({ open: row?.n || 0 });
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
 });
@@ -7290,14 +7292,14 @@ app.post('/threads',
     if (!context_type || !context_key || !title) return res.status(400).json({ error: 'context_type, context_key, title required' });
     const user = collabUserFromReq(req);
     const id = uuidv4();
-    db.prepare(`INSERT INTO collab_threads (id,context_type,context_key,context_label,title,created_by_id,created_by_name,created_by_role)
-      VALUES (?,?,?,?,?,?,?,?)`).run(id, context_type, context_key, context_label||'', title, user.id, user.name, user.role);
+    db.prepare(`INSERT INTO collab_threads (client_id,id,context_type,context_key,context_label,title,created_by_id,created_by_name,created_by_role)
+      VALUES (?,?,?,?,?,?,?,?,?)`).run(curClient(), id, context_type, context_key, context_label||'', title, user.id, user.name, user.role);
 
     // Post opening message if provided
     if (initial_message?.trim()) {
       const msgId = uuidv4();
-      db.prepare(`INSERT INTO collab_messages (id,thread_id,author_id,author_name,author_role,body,attachments,is_pulse)
-        VALUES (?,?,?,?,?,?,?,?)`).run(msgId, id, user.id, user.name, user.role, initial_message.trim(), '[]', 0);
+      db.prepare(`INSERT INTO collab_messages (client_id,id,thread_id,author_id,author_name,author_role,body,attachments,is_pulse)
+        VALUES (?,?,?,?,?,?,?,?,?)`).run(curClient(), msgId, id, user.id, user.name, user.role, initial_message.trim(), '[]', 0);
     }
 
     // PULSE auto-joins with context summary (async, non-blocking)
@@ -7333,8 +7335,8 @@ app.post('/threads/:id/messages',
     if (!body?.trim() && !attachments.length) return res.status(400).json({ error: 'body or attachments required' });
 
     const msgId = uuidv4();
-    db.prepare(`INSERT INTO collab_messages (id,thread_id,author_id,author_name,author_role,body,attachments,is_pulse)
-      VALUES (?,?,?,?,?,?,?,?)`).run(msgId, req.params.id, user.id, user.name, user.role, body?.trim()||'', JSON.stringify(attachments), 0);
+    db.prepare(`INSERT INTO collab_messages (client_id,id,thread_id,author_id,author_name,author_role,body,attachments,is_pulse)
+      VALUES (?,?,?,?,?,?,?,?,?)`).run(curClient(), msgId, req.params.id, user.id, user.name, user.role, body?.trim()||'', JSON.stringify(attachments), 0);
     db.prepare(`UPDATE collab_threads SET updated_at=datetime('now') WHERE id=?`).run(req.params.id);
 
     const msg = db.prepare('SELECT * FROM collab_messages WHERE id=?').get(msgId);
