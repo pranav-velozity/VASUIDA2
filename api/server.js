@@ -11260,6 +11260,29 @@ app.post('/ehp/purge', authenticateRequest, requireRole(['admin']), writeOpLimit
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Diagnose: which endpoints does the token actually have access to? ──
+// Distinguishes a broken token (everything fails) from protected-customer-data
+// gating (shop/products fine, orders 403).
+app.get('/shopify/diagnose', authenticateRequest, requireRole(['admin']), async (req, res) => {
+  const clientId = String(req.query.client_id || curClient());
+  const out = { client_id: clientId, api_version: SHOPIFY_API_VERSION, checks: [] };
+  const probe = async (label, path, note) => {
+    try { const r = await shopifyApi(clientId, path);
+          out.checks.push({ label, path, ok: true, sample: Object.keys(r || {}).slice(0, 3), note }); }
+    catch (e) { out.checks.push({ label, path, ok: false, status: e.status || null,
+          error: String(e.message || e), body: e.body ? String(JSON.stringify(e.body)).slice(0, 300) : null, note }); }
+  };
+  await probe('shop (no PII)', '/shop.json', 'fails only if the token itself is bad');
+  await probe('products (no PII)', '/products.json?limit=1', 'fails if read_products missing');
+  await probe('orders (PROTECTED customer data)', '/orders.json?status=any&limit=1', '403 here + shop OK = protected customer data not approved');
+  await probe('webhooks', '/webhooks.json', 'confirms webhook registration is possible');
+  const shopOk = out.checks[0]?.ok, ordersFail = out.checks[2] && !out.checks[2].ok && out.checks[2].status === 403;
+  out.diagnosis = shopOk && ordersFail
+    ? 'Token is valid but order access is blocked — request Protected Customer Data access for this app in the Partner dashboard.'
+    : (!shopOk ? 'Token or connection problem — re-install the app.' : 'Order access looks available.');
+  res.json(out);
+});
+
 // ── Status (never returns the token) ──
 app.get('/shopify/status', authenticateRequest, (req, res) => {
   try {
