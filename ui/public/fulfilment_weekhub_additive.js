@@ -86,6 +86,12 @@
       .fwh-gauge canvas{max-height:104px;}
       .fwh-gsku{font-size:10px;font-weight:600;color:${DARK};margin-top:2px;
                 white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .fwh-backlog{display:flex;align-items:center;gap:16px;margin-top:14px;padding:13px 16px;
+                   border-radius:11px;border:0.5px solid rgba(0,0,0,.08);background:#FAFAFA;}
+      .fwh-bnum{font-size:34px;font-weight:700;letter-spacing:-.02em;line-height:1;}
+      .fwh-bmeta{flex:1;}
+      .fwh-btrack{height:6px;border-radius:3px;background:rgba(0,0,0,.07);overflow:hidden;margin-top:7px;}
+      .fwh-bfill{height:100%;border-radius:3px;transition:width .5s ease;}
     `;
     document.head.appendChild(s);
   }
@@ -242,9 +248,32 @@
             ${node('📮', 'Lodged with USPS', nf(s.envelopes_dispatched), 'envelopes', s.envelopes_dispatched > 0, true)}
           </div>
           <div style="font-size:10px;color:${LIGHT};margin-top:2px;">
-            All four are totals for this week. <b>${nf(queuedEnv)} envelope(s)</b> are currently open in the queue (a live figure, not a weekly total).
-            USPS transit is not shown: letter-mail samples carry no tracking, so there is no signal after lodgement.
+            All four are totals for this week. USPS transit is not shown: letter-mail samples carry no tracking, so there is no signal after lodgement.
           </div>
+          ${(() => {
+            const bl = ts.backlog_now != null ? ts.backlog_now : queuedEnv;
+            const lim = ts.backlog_limit || 0;
+            const over = lim > 0 && bl > lim;
+            const pct = lim > 0 ? Math.min(100, Math.round(bl / lim * 100)) : (bl > 0 ? 100 : 0);
+            const col = over ? RED : (pct >= 70 ? AMBER : GREEN);
+            return `<div class="fwh-backlog">
+              <div><div class="fwh-kl">Current backlog</div>
+                <div class="fwh-bnum" style="color:${col}">${nf(bl)}</div>
+                <div class="fwh-ks">envelopes ordered, not yet lodged</div></div>
+              <div class="fwh-bmeta">
+                <div style="font-size:11px;color:${over ? RED : MID};font-weight:${over ? '600' : '400'};">
+                  ${lim > 0 ? (over
+                      ? `Above the ${nf(lim)}-envelope SLA limit — dispatch is behind intake.`
+                      : `Within the ${nf(lim)}-envelope SLA limit (${pct}%).`)
+                    : 'No SLA limit yet — dispatch some batches to establish a rate.'}
+                </div>
+                <div class="fwh-btrack"><div class="fwh-bfill" style="width:${pct}%;background:${col}"></div></div>
+                <div style="font-size:10px;color:${LIGHT};margin-top:5px;">
+                  ${nf(queuedOrders)} order(s) awaiting a batch · ${nf(queuedEnv)} envelope(s) live in the queue
+                </div>
+              </div>
+            </div>`;
+          })()}
           ${recipe ? `<div style="font-size:10px;color:${LIGHT};margin-top:10px;">
             Active structure: ${recipe.sticks_per_envelope || 5} sticks &middot; ${recipe.distinct_flavours || 3} flavours &middot; ${esc(recipe.split_pattern || '')}
           </div>` : ''}
@@ -509,7 +538,7 @@
     window.addEventListener('hashchange', () => { applyImmediately(); check(); });
     setInterval(check, 4000);                 // client switch / week change
     window.refreshFulfilmentWeekHub = () => render(true);
-    console.log('[fulfilment-weekhub] module v5 loaded');
+    console.log('[fulfilment-weekhub] module v6 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
