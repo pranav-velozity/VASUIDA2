@@ -301,13 +301,13 @@ window.__clerkOnLoad = function() {
   </div>
 
   <!-- Right panel: operational pings -->
-  <div style="flex:1;background:#1C1C1E;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;">
+  <div style="flex:1;background:#fff;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;border-left:0.5px solid rgba(0,0,0,0.06);">
     <canvas id="login-grid-canvas" style="position:absolute;inset:0;width:100%;height:100%;z-index:0;"></canvas>
-    <div style="position:absolute;width:500px;height:500px;border-radius:50%;background:radial-gradient(circle,rgba(153,0,51,0.1) 0%,rgba(153,0,51,0.03) 50%,transparent 75%);animation:loginGlow 6s ease-in-out infinite;z-index:1;"></div>
+    <div style="position:absolute;width:560px;height:560px;border-radius:50%;background:radial-gradient(circle,rgba(153,0,51,0.07) 0%,rgba(153,0,51,0.025) 50%,transparent 72%);animation:loginGlow 6s ease-in-out infinite;z-index:1;"></div>
     <div id="login-pings" style="position:absolute;inset:0;z-index:2;pointer-events:none;"></div>
     <div style="position:relative;z-index:3;display:flex;flex-direction:column;align-items:center;gap:28px;animation:loginRise 1.2s cubic-bezier(0.16,1,0.3,1) both;">
       <div style="font-family:'ADLaM Display',serif;text-align:center;">
-        <span style="display:block;font-size:clamp(36px,4vw,56px);color:#fff;letter-spacing:-0.02em;line-height:1.05;">VelOzity</span>
+        <span style="display:block;font-size:clamp(36px,4vw,56px);color:#1C1C1E;letter-spacing:-0.02em;line-height:1.05;">VelOzity</span>
         <span style="display:block;font-size:clamp(36px,4vw,56px);color:#990033;letter-spacing:-0.02em;line-height:1.05;">Pinpoint</span>
       </div>
       <div style="display:flex;flex-direction:column;align-items:center;gap:10px;">
@@ -319,12 +319,12 @@ window.__clerkOnLoad = function() {
             <div style="position:absolute;top:50%;left:50%;width:20px;height:20px;margin:-10px 0 0 -10px;border-radius:50%;border:1px solid rgba(153,0,51,0.45);animation:pingRing 2s 0.5s ease-out infinite;"></div>
             <div style="position:absolute;top:50%;left:50%;width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;background:#990033;box-shadow:0 0 8px rgba(153,0,51,0.8);"></div>
           </div>
-          <div style="font-family:'ADLaM Display',serif;font-size:13px;color:rgba(255,255,255,0.55);letter-spacing:0.06em;">With PULSE AI</div>
-          <div style="width:0.5px;height:14px;background:rgba(255,255,255,0.15);flex-shrink:0;"></div>
-          <svg width="13" height="13" viewBox="0 0 46 46" fill="none" xmlns="http://www.w3.org/2000/svg" style="opacity:0.45;flex-shrink:0;">
+          <div style="font-family:'ADLaM Display',serif;font-size:20px;color:#990033;letter-spacing:0.06em;">With PULSE AI</div>
+          <div style="width:0.5px;height:20px;background:rgba(0,0,0,0.14);flex-shrink:0;"></div>
+          <svg width="20" height="20" viewBox="0 0 46 46" fill="none" xmlns="http://www.w3.org/2000/svg" style="opacity:1;flex-shrink:0;">
             <path d="M32.73 14.9L26.3 5.77a3.93 3.93 0 0 0-6.6 0l-6.43 9.13L6.1 25.7a3.93 3.93 0 0 0 0 4.38l6.44 8.98 1.18 1.65a3.93 3.93 0 0 0 6.44 0l1.18-1.65 1.66-2.32 5.19-7.25.07-.1 4.47-6.25a3.93 3.93 0 0 0 0-4.24z" fill="#CC785C"/>
           </svg>
-          <div style="font-size:10px;color:rgba(255,255,255,0.3);letter-spacing:0.1em;text-transform:uppercase;">Powered by Anthropic Claude</div>
+          <div style="font-size:13px;font-weight:500;color:#6E6E73;letter-spacing:0.1em;text-transform:uppercase;">Powered by Anthropic Claude</div>
         </div>
       </div>
     </div>
@@ -347,7 +347,7 @@ window.__clerkOnLoad = function() {
       function drawGrid(){
         canvas.width=right.offsetWidth; canvas.height=right.offsetHeight;
         var ctx=canvas.getContext('2d');
-        ctx.strokeStyle='rgba(255,255,255,0.03)'; ctx.lineWidth=0.5;
+        ctx.strokeStyle='rgba(0,0,0,0.045)'; ctx.lineWidth=0.5;
         var s=48;
         for(var x=0;x<canvas.width;x+=s){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,canvas.height);ctx.stroke();}
         for(var y=0;y<canvas.height;y+=s){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke();}
@@ -429,7 +429,7 @@ window.__clerkOnLoad = function() {
         // Label
         var lbl = document.createElement('div');
         lbl.style.cssText = 'position:absolute;top:calc(50% + 22px);left:50%;transform:translateX(-50%);white-space:nowrap;animation:pingLabel '+dur+'ms ease forwards;';
-        lbl.innerHTML = '<div style="font-family:\'ADLaM Display\',serif;font-size:18px;color:#fff;letter-spacing:0.1em;text-transform:uppercase;text-shadow:0 2px 14px rgba(0,0,0,0.98);">'+stage.label+'</div>';
+        lbl.innerHTML = '<div style="font-family:\'ADLaM Display\',serif;font-size:18px;color:#1C1C1E;letter-spacing:0.1em;text-transform:uppercase;text-shadow:0 1px 10px rgba(255,255,255,0.95);">'+stage.label+'</div>';
 
         wrap.appendChild(r1);
         wrap.appendChild(r2);
