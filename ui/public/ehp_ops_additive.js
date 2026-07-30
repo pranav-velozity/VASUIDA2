@@ -175,7 +175,7 @@
       x.disabled = true;
       try {
         const r = await req('/ehp/batch/'+x.getAttribute('data-asm')+'/assemble', { method:'POST', body:'{}' });
-        el('ehp-batchmsg').innerHTML = msg('k', `Assembled ${r.envelopes} envelopes — consumed: ` + r.consumed.map(c=>`${c.sku} ${c.qty_each}`).join(', '));
+        el('ehp-batchmsg').innerHTML = msg('k', `Assembled ${nfmt(r.envelopes)} envelope(s) · ${nfmt(r.sticks_consumed_total||0)} sticks used in total. Per-flavour usage is derived at the next stock count.`);
         setTimeout(render, 900);
       } catch (e) { el('ehp-batchmsg').innerHTML = msg('e', e.message || String(e)); x.disabled = false; }
     }));
@@ -183,7 +183,14 @@
       x.disabled = true;
       try {
         const r = await req('/ehp/batch/'+x.getAttribute('data-dis')+'/dispatch', { method:'POST', body:'{}' });
-        el('ehp-batchmsg').innerHTML = msg('k', `Dispatched ${r.envelopes} envelopes (${r.orders} orders). Shopify write-back: ${r.shopify}.`);
+        const sh = r.shopify || {};
+        let shTxt, shKind = 'k';
+        if (sh.error)            { shTxt = 'Shopify write-back FAILED: ' + sh.error; shKind = 'e'; }
+        else if (sh.skipped)     { shTxt = 'Shopify write-back skipped (' + sh.skipped + ')'; shKind = 'w'; }
+        else if (sh.failed)      { shTxt = `Shopify: ${sh.ok} fulfilled, ${sh.failed} failed` + (sh.errors && sh.errors[0] ? ' — ' + sh.errors[0].error : ''); shKind = 'w'; }
+        else                     { shTxt = `Shopify: ${sh.ok || 0} order(s) marked fulfilled`; }
+        el('ehp-batchmsg').innerHTML = msg(shKind, `Dispatched ${nfmt(r.envelopes)} envelope(s) across ${nfmt(r.orders)} order(s). ` + shTxt);
+        console.log('[ehp] dispatch result', r);
         setTimeout(render, 900);
       } catch (e) { el('ehp-batchmsg').innerHTML = msg('e', e.message || String(e)); x.disabled = false; }
     }));
@@ -191,8 +198,34 @@
       try {
         const r = await req('/ehp/batch/'+x.getAttribute('data-pick')+'/picklist');
         const w = window.open('', '_blank');
-        w.document.write('<h3>Pick list — batch '+esc(x.getAttribute('data-pick'))+'</h3><table border=1 cellpadding=4 style="border-collapse:collapse;font:12px sans-serif"><tr><th>Order</th><th>Env</th><th>Name</th><th>Address</th><th>City</th><th>State</th><th>Zip</th></tr>' +
-          (r.orders||[]).map(o=>`<tr><td>${esc(o.order_number)}</td><td>${o.envelope_qty}</td><td>${esc(o.recipient_name)}</td><td>${esc(o.recipient_address)}</td><td>${esc(o.recipient_city)}</td><td>${esc(o.recipient_state)}</td><td>${esc(o.recipient_postcode)}</td></tr>`).join('') + '</table>');
+        const rows = (r.orders||[]);
+        const totalEnv = rows.reduce((a,o)=>a+(o.envelope_qty||0),0);
+        w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pick list</title><style>
+          body{font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;color:#1C1C1E;margin:28px;}
+          h2{font-size:18px;margin:0 0 4px;color:#990033;} .meta{color:#6E6E73;font-size:12px;margin-bottom:16px;}
+          table{width:100%;border-collapse:collapse;table-layout:auto;}
+          th,td{border:1px solid #ddd;padding:7px 9px;vertical-align:top;text-align:left;
+                white-space:normal;word-break:break-word;overflow-wrap:anywhere;}
+          th{background:#F5F5F7;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#6E6E73;}
+          td.n{text-align:right;white-space:nowrap;} .flag{color:#C8860A;font-weight:600;}
+          col.c-order{width:11%} col.c-env{width:6%} col.c-name{width:20%} col.c-addr{width:31%}
+          col.c-city{width:16%} col.c-state{width:8%} col.c-zip{width:8%}
+          @media print{body{margin:10mm} th{background:#eee !important;-webkit-print-color-adjust:exact}}
+        </style></head><body>
+        <h2>Pick list</h2>
+        <div class="meta">Batch ${esc(x.getAttribute('data-pick'))} &middot; ${rows.length} order(s) &middot; ${totalEnv} envelope(s) &middot; ${new Date().toLocaleString()}</div>
+        <table>
+          <colgroup><col class="c-order"><col class="c-env"><col class="c-name"><col class="c-addr"><col class="c-city"><col class="c-state"><col class="c-zip"></colgroup>
+          <thead><tr><th>Order</th><th>Env</th><th>Name</th><th>Address</th><th>City</th><th>State</th><th>Zip</th></tr></thead>
+          <tbody>${rows.map(o=>`<tr>
+            <td>${esc(o.order_number)}${o.flagged_high_qty?' <span class="flag">&#9873;</span>':''}</td>
+            <td class="n">${o.envelope_qty}</td>
+            <td>${esc(o.recipient_name)}</td>
+            <td>${esc(o.recipient_address)}</td>
+            <td>${esc(o.recipient_city)}</td>
+            <td>${esc(o.recipient_state)}</td>
+            <td>${esc(o.recipient_postcode)}</td></tr>`).join('')}</tbody>
+        </table></body></html>`);
         w.document.close();
       } catch (e) { alert('Pick list failed: ' + (e.message||e)); }
     }));
@@ -438,7 +471,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);   // active client can change via the picker
-    console.log('[ehp-ops] module v4 loaded');
+    console.log('[ehp-ops] module v5 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
