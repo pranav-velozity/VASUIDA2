@@ -333,10 +333,10 @@ window.__clerkOnLoad = function() {
   <style>
     @keyframes loginGlow{0%,100%{transform:scale(1);opacity:.7}50%{transform:scale(1.15);opacity:1}}
     @keyframes loginRise{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
-    @keyframes pingRing{0%{transform:scale(0.4);opacity:0.9}100%{transform:scale(4.8);opacity:0}}
-    @keyframes pingRing2{0%{transform:scale(0.4);opacity:0.6}100%{transform:scale(3.8);opacity:0}}
+    @keyframes pingRing{0%{transform:scale(0.4);opacity:0.75}100%{transform:scale(3.4);opacity:0}}
+    @keyframes pingRing2{0%{transform:scale(0.4);opacity:0.5}100%{transform:scale(2.8);opacity:0}}
     @keyframes pingFadeIn{0%{opacity:0;transform:scale(0.6)}20%{opacity:1;transform:scale(1)}80%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(0.8)}}
-    @keyframes pingLabel{0%{opacity:0;transform:translateY(4px)}15%{opacity:1;transform:translateY(0)}80%{opacity:1}100%{opacity:0}}
+    @keyframes pingLabel{0%{opacity:0;transform:translateY(4px)}10%{opacity:1;transform:translateY(0)}85%{opacity:1}100%{opacity:0}}
   </style>
   <script>
   (function loginPanel(){
@@ -403,33 +403,33 @@ window.__clerkOnLoad = function() {
         var stage = stages[stageIdx % stages.length];
         stageIdx++;
 
-        var dur = 4800; // ms visible — longer ping
+        var dur = 6800; // ms visible — slow enough to read the label comfortably
 
         var wrap = document.createElement('div');
         wrap.style.cssText = 'position:absolute;left:'+x+'%;top:'+y+'%;transform:translate(-50%,-50%);animation:pingFadeIn '+dur+'ms ease forwards;';
 
         // Outer ring 1
         var r1 = document.createElement('div');
-        r1.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:2px solid '+PING_COL+';animation:pingRing '+(dur*0.8)+'ms ease-out forwards;';
+        r1.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:1.5px solid rgba(153,0,51,0.30);animation:pingRing '+(dur*0.8)+'ms ease-out forwards;';
 
         // Outer ring 2
         var r2 = document.createElement('div');
-        r2.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:1.5px solid '+PING_COL+';animation:pingRing2 '+(dur*0.7)+'ms '+150+'ms ease-out forwards;';
+        r2.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:1px solid rgba(153,0,51,0.22);animation:pingRing2 '+(dur*0.7)+'ms '+260+'ms ease-out forwards;';
 
         // Ring 3
         var r3 = document.createElement('div');
-        r3.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:1px solid '+PING_COL+';animation:pingRing '+(dur*0.9)+'ms '+280+'ms ease-out forwards;';
+        r3.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:0.75px solid rgba(153,0,51,0.16);animation:pingRing '+(dur*0.9)+'ms '+520+'ms ease-out forwards;';
         // Ring 4
         var r4 = document.createElement('div');
-        r4.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:0.5px solid '+PING_COL+';animation:pingRing2 '+dur+'ms '+420+'ms ease-out forwards;';
+        r4.style.cssText = 'position:absolute;top:50%;left:50%;width:35px;height:35px;margin:-17.5px 0 0 -17.5px;border-radius:50%;border:0.5px solid rgba(153,0,51,0.10);animation:pingRing2 '+dur+'ms '+780+'ms ease-out forwards;';
         // Center dot
         var dot = document.createElement('div');
-        dot.style.cssText = 'position:absolute;top:50%;left:50%;width:15px;height:15px;margin:-7.5px 0 0 -7.5px;border-radius:50%;background:'+PING_COL+';box-shadow:0 0 18px rgba(153,0,51,0.95);';
+        dot.style.cssText = 'position:absolute;top:50%;left:50%;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;border-radius:50%;background:'+PING_COL+';box-shadow:0 0 12px rgba(153,0,51,0.28);';
 
         // Label
         var lbl = document.createElement('div');
         lbl.style.cssText = 'position:absolute;top:calc(50% + 22px);left:50%;transform:translateX(-50%);white-space:nowrap;animation:pingLabel '+dur+'ms ease forwards;';
-        lbl.innerHTML = '<div style="font-family:\'ADLaM Display\',serif;font-size:18px;color:#1C1C1E;letter-spacing:0.1em;text-transform:uppercase;text-shadow:0 1px 10px rgba(255,255,255,0.95);">'+stage.label+'</div>';
+        lbl.innerHTML = '<div style="font-family:\'ADLaM Display\',serif;font-size:13px;color:#1C1C1E;letter-spacing:0.1em;text-transform:uppercase;text-shadow:0 1px 10px rgba(255,255,255,0.95);">'+stage.label+'</div>';
 
         wrap.appendChild(r1);
         wrap.appendChild(r2);
@@ -442,12 +442,13 @@ window.__clerkOnLoad = function() {
         setTimeout(function(){ wrap.remove(); }, dur + 200);
       }
 
-      // Stagger initial pings
-      for(var i=0;i<3;i++){
-        (function(delay){ setTimeout(spawnPing, delay); })(i * 900);
-      }
-      // Then keep spawning
-      setInterval(spawnPing, 1800);
+      // Respect a user's reduced-motion preference — show one static ping and stop.
+      var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (reduce) { spawnPing(); return; }
+      // One ping at a time: spawning faster than they fade is what made this feel frantic.
+      spawnPing();
+      setTimeout(spawnPing, 3400);
+      setInterval(spawnPing, 4200);
     }
     if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
   })();
