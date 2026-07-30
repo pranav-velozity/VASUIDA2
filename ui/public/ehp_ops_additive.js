@@ -169,17 +169,22 @@
         <div style="font-size:10px;color:${LIGHT};padding-bottom:8px;">Whole orders only — the actual count may land slightly above your target.</div>
       </div>
       <div id="ehp-batchmsg"></div>
-      <table class="ehp"><thead><tr><th>Batch</th><th class="n">Target</th><th class="n">Envelopes</th><th class="n">Orders</th><th>State</th><th>Assembled (CT)</th><th>Dispatched (CT)</th><th></th></tr></thead>
+      <table class="ehp"><thead><tr><th>Batch</th><th class="n">Target</th><th class="n">Envelopes</th><th class="n">Orders</th><th>State</th><th class="n">Shopify</th><th>Assembled (CT)</th><th>Dispatched (CT)</th><th></th></tr></thead>
       <tbody>${b.length ? b.map(x => `<tr>
         <td style="font-family:monospace;font-size:10px;">${esc(String(x.id).slice(-8))}</td>
         <td class="n">${nfmt(x.target_envelopes)}</td><td class="n"><b>${nfmt(x.actual_envelopes)}</b></td><td class="n">${nfmt(x.order_count)}</td>
         <td><span class="ehp-chip" style="background:${x.state==='dispatched'?'rgba(52,199,89,.14)':x.state==='assembled'?'rgba(200,134,10,.14)':'rgba(0,0,0,.06)'};color:${x.state==='dispatched'?GREEN:x.state==='assembled'?AMBER:MID};">${esc(x.state)}</span></td>
+        <td class="n" style="font-size:10px;">${x.state==='dispatched'
+          ? `<span style="color:${GREEN}">${(x.fulfilment&&x.fulfilment.fulfilled)||0} ok</span>` +
+            (((x.fulfilment&&x.fulfilment.not_fulfilled)||0) ? ` · <span style="color:${AMBER}">${x.fulfilment.not_fulfilled} not sent</span>` : '')
+          : `<span style="color:${LIGHT}">—</span>`}</td>
         <td style="font-size:10px;color:${MID}">${esc(localTs(x.assembled_at))}</td>
         <td style="font-size:10px;color:${MID}">${esc(localTs(x.dispatched_at))}</td>
         <td style="white-space:nowrap;">
           ${x.state==='queued' ? `<button class="ehp-btn g" data-asm="${esc(x.id)}">Assemble</button>` : ''}
           ${x.state==='assembled' ? `<button class="ehp-btn g" data-dis="${esc(x.id)}">Dispatch</button>` : ''}
           <button class="ehp-btn g" data-pick="${esc(x.id)}">Pick list</button>
+          ${x.state==='dispatched' && ((x.fulfilment&&x.fulfilment.not_fulfilled)||0) ? `<button class="ehp-btn g" data-why="${esc(x.id)}">Why?</button>` : ''}
         </td></tr>`).join('') : `<tr><td colspan="8" style="color:${LIGHT};text-align:center;padding:18px;">No batches yet.</td></tr>`}
       </tbody></table>`;
 
@@ -221,6 +226,15 @@
         setTimeout(render, 900);
       } catch (e) { el('ehp-batchmsg').innerHTML = msg('e', e.message || String(e)); x.disabled = false; }
     }));
+    body.querySelectorAll('[data-why]').forEach(x => x.addEventListener('click', async () => {
+      try {
+        const r = await req('/ehp/batch/'+x.getAttribute('data-why')+'/orders');
+        const nf = r.not_fulfilled || [];
+        el('ehp-batchmsg').innerHTML = msg('w',
+          `${(r.fulfilled||[]).length} order(s) fulfilled in Shopify. ${nf.length} not sent — ` +
+          nf.map(o=>`${o.order_number}: ${o.reason}`).join(' · '));
+      } catch (e) { el('ehp-batchmsg').innerHTML = msg('e', e.message || String(e)); }
+    }));
     body.querySelectorAll('[data-pick]').forEach(x => x.addEventListener('click', async () => {
       try {
         const r = await req('/ehp/batch/'+x.getAttribute('data-pick')+'/picklist');
@@ -236,7 +250,8 @@
           th{background:#F5F5F7;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#6E6E73;}
           td.n{text-align:right;white-space:nowrap;} .flag{color:#C8860A;font-weight:600;}
           col.c-order{width:11%} col.c-env{width:6%} col.c-name{width:20%} col.c-addr{width:31%}
-          col.c-city{width:13%} col.c-state{width:7%} col.c-zip{width:7%} col.c-addr2{width:14%}
+          col.c-city{width:11%} col.c-state{width:5%} col.c-zip{width:11%} col.c-addr2{width:13%}
+          td.zip{white-space:nowrap;}
           @media print{body{margin:10mm} th{background:#eee !important;-webkit-print-color-adjust:exact}}
         </style></head><body>
         <h2>Pick list</h2>
@@ -252,7 +267,7 @@
             <td>${esc(o.recipient_address2 || '')}</td>
             <td>${esc(o.recipient_city)}</td>
             <td>${esc(o.recipient_state)}</td>
-            <td>${esc(o.recipient_postcode)}</td></tr>`).join('')}</tbody>
+            <td class="zip">${esc(o.recipient_postcode)}</td></tr>`).join('')}</tbody>
         </table></body></html>`);
         w.document.close();
       } catch (e) { alert('Pick list failed: ' + (e.message||e)); }
@@ -505,7 +520,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);   // active client can change via the picker
-    console.log('[ehp-ops] module v7 loaded');
+    console.log('[ehp-ops] module v8 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
