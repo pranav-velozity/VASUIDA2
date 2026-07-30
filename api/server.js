@@ -10988,6 +10988,86 @@ app.post('/ehp/count-period/:id/close', authenticateRequest, writeOpLimiter, aud
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Per-client service rates (billing defaults) ──
+// Generic by design: any client with the relevant capability gets its own rate card.
+db.exec(`
+CREATE TABLE IF NOT EXISTS client_rate (
+  client_id    TEXT NOT NULL,
+  service_code TEXT NOT NULL,      -- inbound_pallet | envelope_dispatched | ...
+  label        TEXT NOT NULL,
+  unit         TEXT NOT NULL,      -- pallet | envelope | unit | carton
+  rate         REAL,               -- NULL until agreed
+  currency     TEXT NOT NULL DEFAULT 'USD',
+  active       INTEGER NOT NULL DEFAULT 1,
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (client_id, service_code)
+);
+`);
+(function seedFulfilmentRates(){
+  try {
+    // Seed a rate card for every client with envelope fulfilment enabled.
+    const clients = db.prepare(`SELECT client_id FROM client_capability WHERE capability='envelope_fulfilment' AND enabled=1`).all();
+    const ins = db.prepare(`INSERT OR IGNORE INTO client_rate (client_id, service_code, label, unit, rate, currency) VALUES (?,?,?,?,?,?)`);
+    for (const c of clients) {
+      ins.run(c.client_id, 'inbound_pallet', 'Inbound handling', 'pallet', 35.00, 'USD');
+      ins.run(c.client_id, 'envelope_dispatched', 'Envelope fulfilment & dispatch', 'envelope', null, 'USD');
+    }
+  } catch (e) { console.error('[rates:seed]', e.message); }
+})();
+
+app.get('/finance/rates', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const clientId = String(req.query.client_id || curClient());
+    res.json({ client_id: clientId,
+      rates: db.prepare(`SELECT * FROM client_rate WHERE client_id=? AND active=1 ORDER BY service_code`).all(clientId) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/finance/rates', authenticateRequest, requireRole(['admin']), writeOpLimiter, auditLog('edit_client_rate'), (req, res) => {
+  try {
+    const b = req.body || {};
+    const clientId = String(b.client_id || curClient());
+    const code = String(b.service_code || '').trim();
+    if (!code) return res.status(400).json({ error: 'service_code required' });
+    const rate = (b.rate === '' || b.rate === null || b.rate === undefined) ? null : Number(b.rate);
+    if (rate !== null && !Number.isFinite(rate)) return res.status(400).json({ error: 'rate must be a number' });
+    db.prepare(`INSERT INTO client_rate (client_id, service_code, label, unit, rate, currency, updated_at)
+                VALUES (?,?,?,?,?,?,datetime('now'))
+                ON CONFLICT(client_id, service_code) DO UPDATE SET
+                  rate=excluded.rate, label=COALESCE(excluded.label, label),
+                  unit=COALESCE(excluded.unit, unit), currency=COALESCE(excluded.currency, currency),
+                  updated_at=datetime('now')`)
+      .run(clientId, code, b.label || code, b.unit || 'unit', rate, b.currency || 'USD');
+    res.json(db.prepare(`SELECT * FROM client_rate WHERE client_id=? AND service_code=?`).get(clientId, code));
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Weekly billing preview: volumes x rates. Drives the weekly invoice.
+app.get('/finance/fulfilment-billing', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const clientId = String(req.query.client_id || curClient());
+    const from = String(req.query.from || '').trim(), to = String(req.query.to || '').trim();
+    if (!from || !to) return res.status(400).json({ error: 'from and to required' });
+    const rates = {}; for (const r of db.prepare(`SELECT * FROM client_rate WHERE client_id=? AND active=1`).all(clientId)) rates[r.service_code] = r;
+    const pallets = db.prepare(`SELECT COALESCE(SUM(pallets),0) n FROM ehp_pallet_receipt
+                                WHERE client_id=? AND received_date_local BETWEEN ? AND ?`).get(clientId, from, to).n;
+    const envelopes = db.prepare(`SELECT COALESCE(SUM(actual_envelopes),0) n FROM ehp_assembly_batch
+                                  WHERE client_id=? AND dispatched_at IS NOT NULL AND date(dispatched_at) BETWEEN ? AND ?`).get(clientId, from, to).n;
+    const line = (code, qty) => {
+      const r = rates[code] || {};
+      const amount = (r.rate != null) ? Math.round(qty * r.rate * 100) / 100 : null;
+      return { service_code: code, label: r.label || code, unit: r.unit || 'unit', qty,
+               rate: r.rate ?? null, currency: r.currency || 'USD', amount,
+               note: r.rate == null ? 'rate not set' : null };
+    };
+    const lines = [line('inbound_pallet', pallets), line('envelope_dispatched', envelopes)];
+    const total = lines.reduce((a, l) => a + (l.amount || 0), 0);
+    res.json({ client_id: clientId, from, to, lines,
+               total: Math.round(total * 100) / 100,
+               complete: lines.every(l => l.amount !== null) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Week Hub / reporting summary ──
 app.get('/ehp/summary', authenticateRequest, (req, res) => {
   try {
