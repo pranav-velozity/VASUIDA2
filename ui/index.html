@@ -468,6 +468,12 @@ window.__clerkOnLoad = function() {
   .pn-nav-items{display:flex;align-items:center;gap:2px;padding:4px;background:#F5F5F7;border-radius:10px;border:0.5px solid rgba(0,0,0,0.06);}
   .pn-nav-item{font-size:12px;font-weight:500;color:#6E6E73;padding:6px 14px;border-radius:7px;text-decoration:none;transition:background .15s,color .15s;white-space:nowrap;cursor:pointer;}
   .pn-nav-item.active{background:#990033;color:#fff;box-shadow:0 2px 8px rgba(153,0,51,0.25);}
+  .pn-nav-dd{position:relative;display:inline-block;}
+  .pn-nav-menu{display:none;position:absolute;top:calc(100% + 6px);left:0;min-width:230px;background:#fff;border:0.5px solid rgba(0,0,0,0.12);border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,0.14);padding:5px;z-index:9600;}
+  .pn-nav-dd.open .pn-nav-menu{display:block;}
+  .pn-nav-sub{display:block;padding:8px 11px;border-radius:7px;font-size:12px;font-weight:500;color:#1C1C1E;text-decoration:none;cursor:pointer;white-space:nowrap;}
+  .pn-nav-sub:hover{background:#F5F5F7;}
+  .pn-nav-sub small{display:block;font-size:10px;font-weight:400;color:#AEAEB2;margin-top:1px;}
   .pn-nav-item:hover:not(.active){background:rgba(0,0,0,0.04);color:#1C1C1E;}
   .pn-user{display:flex;align-items:center;gap:10px;}
   .pn-user-info{text-align:right;}
@@ -552,12 +558,17 @@ window.__clerkOnLoad = function() {
     <nav class="pn-nav-items" id="pn-nav-items">
       <a class="pn-nav-item active" href="#week-hub" id="nav-weekhub" onclick="event.preventDefault();window.show('#week-hub')">Week Hub</a>
       <a class="pn-nav-item" href="#receiving" id="nav-receiving" onclick="event.preventDefault();window.show('#receiving')">Receiving Ops</a>
-      <a class="pn-nav-item" href="#intake" id="nav-intake-pn" onclick="event.preventDefault();window.show('#intake')">VAS Ops</a>
+      <span class="pn-nav-dd" id="nav-vas-dd">
+        <a class="pn-nav-item" href="#intake" id="nav-intake-pn" onclick="event.preventDefault();event.stopPropagation();window.pnToggleVasMenu&&window.pnToggleVasMenu(event)">VAS Ops ▾</a>
+        <span class="pn-nav-menu" id="nav-vas-menu">
+          <a class="pn-nav-sub" id="nav-vas-labelling" onclick="event.preventDefault();window.pnVasGo&&window.pnVasGo('labelling')">Labelling<small>UID intake &amp; scanning</small></a>
+          <a class="pn-nav-sub" id="nav-vas-fulfilment" onclick="event.preventDefault();window.pnVasGo&&window.pnVasGo('fulfilment')">Fulfilment<small>Inbound, assembly &amp; dispatch</small></a>
+        </span>
+      </span>
       <a class="pn-nav-item" href="#exec" id="nav-exec" onclick="event.preventDefault();window.show('#exec')">Executive</a>
       <a class="pn-nav-item" href="#map" id="nav-map" onclick="event.preventDefault();window.show('#map')">Live Map</a>
       <a class="pn-nav-item" href="#reports" id="nav-reports" onclick="event.preventDefault();window.show('#reports')">Reports &amp; Downloads</a>
       <a class="pn-nav-item" href="#finance" id="nav-finance" onclick="event.preventDefault();window.show('#finance')" style="display:none;">Finance</a>
-      <a class="pn-nav-item" href="#ehp" id="nav-ehp" onclick="event.preventDefault();window.openEhpOps&&window.openEhpOps()" style="display:none;">EHP Fulfilment</a>
     </nav>
     <div class="pn-user">
       <div class="pn-date" id="vo-today"></div>
@@ -6278,8 +6289,25 @@ window.__openPrebookModal = function(){
   <script src="/public/collaboration_additive.js?v=2" defer></script>
   <script src="/public/exec_pdf_additive.js?v=3" defer></script>
   <script src="/public/noncompliance_additive.js?v=3" defer></script>
+  <script>
+  // VAS Ops dropdown: Labelling (UID intake) and Fulfilment (EHP workspace).
+  window.pnToggleVasMenu = function(ev){
+    var dd = document.getElementById('nav-vas-dd'); if(!dd) return;
+    var open = dd.classList.contains('open');
+    dd.classList.toggle('open', !open);
+    if(!open){
+      var close = function(e){ if(!dd.contains(e.target)){ dd.classList.remove('open'); document.removeEventListener('click', close); } };
+      setTimeout(function(){ document.addEventListener('click', close); }, 0);
+    }
+  };
+  window.pnVasGo = function(which){
+    var dd = document.getElementById('nav-vas-dd'); if(dd) dd.classList.remove('open');
+    if(which === 'fulfilment'){ if(window.openEhpOps) window.openEhpOps(); return; }
+    if(window.show) window.show('#intake');
+  };
+  </script>
   <script src="/public/tenancy_additive.js?v=4" defer></script>
-  <script src="/public/ehp_ops_additive.js?v=2" defer></script>
+  <script src="/public/ehp_ops_additive.js?v=3" defer></script>
 
 
 <!-- ── Week Hub Split-Flap Insight Flipper ── -->
