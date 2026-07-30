@@ -46,6 +46,39 @@
     };
   })();
 
+  // ── Capability-gated nav ──
+  // Subtractive only: hide what the active client doesn't have. Never force-show, so the
+  // existing role-based gating (e.g. Finance) keeps the final say.
+  const NAV_CAPS = {
+    'nav-weekhub':        'week_hub',
+    'nav-receiving':      'receiving_ops',
+    'nav-vas-labelling':  'vas_labelling',
+    'nav-exec':           'executive',
+    'nav-map':            'live_map',
+    'nav-reports':        'reports',
+    'nav-finance':        'finance',
+  };
+  function applyCapabilityNav() {
+    if (!_who) return;
+    const r = _who.resolved || {};
+    const active = window.pinpointClient || (r.client_ids || [])[0];
+    const caps = (r.capabilities && r.capabilities[active]) || null;
+    if (!caps) return;                       // unknown -> change nothing
+    for (const [id, cap] of Object.entries(NAV_CAPS)) {
+      const n = document.getElementById(id);
+      if (n && !caps.includes(cap)) n.style.display = 'none';
+    }
+    // If Labelling is hidden, only show the VAS Ops parent when Fulfilment is available.
+    const lab = document.getElementById('nav-vas-labelling');
+    const ful = document.getElementById('nav-vas-fulfilment');
+    const dd  = document.getElementById('nav-vas-dd');
+    if (dd) {
+      const labOn = lab && lab.style.display !== 'none';
+      const fulOn = ful && ful.style.display !== 'none';
+      if (!labOn && !fulOn) dd.style.display = 'none';
+    }
+  }
+
   // ── UI ──
   function styles() {
     if (document.getElementById('tenancy-styles')) return;
@@ -132,7 +165,8 @@
         setActiveClient(null);
       }
       render();
-      console.log('[tenancy v4] org:', r.org_type, '| clients:', (r.client_ids || []).join(','), '| active:', window.pinpointClient || '(server-derived)');
+      applyCapabilityNav();
+      console.log('[tenancy v5] org:', r.org_type, '| clients:', (r.client_ids || []).join(','), '| active:', window.pinpointClient || '(server-derived)');
     } catch (e) { /* diagnostics only — never block the app */ }
   }
 
@@ -146,7 +180,7 @@
     })();
     window.addEventListener('state:ready', load);
     // header can re-render on navigation — re-assert the switcher
-    setInterval(() => { if (_who && !document.getElementById('tn-wrap')) render(); }, 1000);
+    setInterval(() => { if (_who && !document.getElementById('tn-wrap')) render(); applyCapabilityNav(); }, 1000);
     window.pinpointTenancy = () => _who;
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
