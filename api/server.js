@@ -10268,6 +10268,10 @@ try {
   if (!oc.includes('fulfil_error')) db.exec("ALTER TABLE ehp_order ADD COLUMN fulfil_error TEXT");
   if (!oc.includes('shop_domain')) db.exec("ALTER TABLE ehp_order ADD COLUMN shop_domain TEXT");
   if (!oc.includes('recipient_address2')) db.exec("ALTER TABLE ehp_order ADD COLUMN recipient_address2 TEXT");
+  const sk = db.prepare("PRAGMA table_info(ehp_sku)").all().map(c => c.name);
+  // A component is something we physically receive and consume. SKUs auto-created from
+  // Shopify order lines are product identifiers, not stock — they must not be consumed.
+  if (!sk.includes('is_component')) db.exec("ALTER TABLE ehp_sku ADD COLUMN is_component INTEGER NOT NULL DEFAULT 0");
 } catch (e) { console.error('[ehp:recipe-structure]', e.message); }
 
 // Flag (not a block) when a single order asks for an unusual number of envelopes.
@@ -10376,13 +10380,19 @@ function ehpEnvelopesSince(clientId, sinceIso) {
 // fortnightly count replaces it with truth.
 function ehpEstimatedOnHand(clientId, sku) {
   const ledger = ehpOnHand(clientId, sku);
+  const meta = db.prepare('SELECT is_component FROM ehp_sku WHERE client_id=? AND sku=?').get(clientId, sku);
+  if (!meta || !meta.is_component) {
+    // Not stocked (e.g. a Shopify product code) — nothing is drawn down against it.
+    return { ledger_on_hand: ledger, envelopes_since_count: 0, estimated_used: 0,
+             estimated_on_hand: ledger, last_count_at: null, is_component: 0 };
+  }
   const lastCount = db.prepare(`SELECT MAX(counted_at) t FROM ehp_stock_count WHERE client_id=? AND sku=?`).get(clientId, sku).t;
   const recipe = ehpActiveRecipe(clientId);
   const per = recipe ? (recipe.sticks_per_envelope || 5) / Math.max(1, recipe.distinct_flavours || 3) : 0;
   const env = ehpEnvelopesSince(clientId, lastCount || '1970-01-01');
   const est = Math.round(env * per);
   return { ledger_on_hand: ledger, envelopes_since_count: env, estimated_used: est,
-           estimated_on_hand: ledger - est, last_count_at: lastCount || null };
+           estimated_on_hand: ledger - est, last_count_at: lastCount || null, is_component: 1 };
 }
 
 // Close a count period: derive consumption per SKU and reconcile total sticks against
@@ -10399,6 +10409,7 @@ function ehpCloseCountPeriod(clientId, periodId, counts, by) {
     for (const c of (counts || [])) {
       const sku = String(c.sku || '').trim(); if (!sku) continue;
       const counted = parseInt(c.counted_each, 10); if (!Number.isFinite(counted)) continue;
+      db.prepare(`UPDATE ehp_sku SET is_component=1 WHERE client_id=? AND sku=?`).run(clientId, sku);
       const system = ehpOnHand(clientId, sku);                 // opening + receipts (no consumption posted)
       const derivedUse = system - counted;                     // what the floor actually used
       const cid = ehpNewId('cnt');
@@ -10740,6 +10751,7 @@ app.post('/ehp/receipt', authenticateRequest, writeOpLimiter, auditLog('create_e
       for (const l of lines) {
         const sku = String(l.sku || '').trim(); if (!sku) continue;
         ehpEnsureSku(c, sku, { flavour: l.flavour, format: l.format });
+        db.prepare(`UPDATE ehp_sku SET is_component=1 WHERE client_id=? AND sku=?`).run(c, sku);
         const conv = ehpToEaches(c, sku, l.qty, l.uom);
         if (!conv.known) warnings.push({ sku, uom: l.uom, message: 'no pack conversion set — recorded at face value' });
         const lid = ehpNewId('rl');
