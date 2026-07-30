@@ -94,7 +94,7 @@
   }
 
   // ── shell ──
-  function close(){ const o = document.querySelector('.ehp-ov'); if (o) o.remove(); }
+  function close(){ const o = document.querySelector('.ehp-ov'); if (o) o.remove(); stopLive(); }
   async function open() {
     styles();
     let o = document.querySelector('.ehp-ov');
@@ -122,7 +122,7 @@
       });
       try { if (localStorage.getItem('pinpoint.ehpFull') === '1') o.classList.add('full'); } catch (e) {}
     }
-    renderTabs(); render();
+    renderTabs(); render(); startLive();
   }
 
   function renderTabs() {
@@ -514,13 +514,25 @@
   }
 
   // ── init ──
+  let _liveTimer = null;
+  function startLive() {
+    stopLive();
+    _liveTimer = setInterval(() => {
+      // Only the read-mostly tabs; never re-render a form mid-entry.
+      if (!document.querySelector('.ehp-ov')) return stopLive();
+      if (document.visibilityState !== 'visible') return;
+      if (_tab === 'queue' || _tab === 'inventory') render();
+    }, 15000);
+  }
+  function stopLive() { if (_liveTimer) { clearInterval(_liveTimer); _liveTimer = null; } }
+
   function init() {
     styles();
     window.openEhpOps = open;
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);   // active client can change via the picker
-    console.log('[ehp-ops] module v9 loaded');
+    console.log('[ehp-ops] module v10 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

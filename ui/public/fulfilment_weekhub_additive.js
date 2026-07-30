@@ -11,7 +11,7 @@
   // Remembered from the last session so the ICONIC layout is hidden on the very first
   // paint, instead of flashing while the capability check round-trips.
   let _on = (() => { try { return localStorage.getItem(LS_ON) === '1'; } catch (e) { return false; } })();
-  let _busy = false, _lastWeek = '';
+  let _busy = false, _lastWeek = '', _conn = null;
 
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
   const el = id => document.getElementById(id);
@@ -59,6 +59,19 @@
       .fwh-eh{font-size:12px;font-weight:600;color:${DARK};}
       .fwh-eb{font-size:10px;color:${MID};margin-top:1px;}
       .fwh-none{font-size:11px;color:${LIGHT};text-align:center;padding:18px;}
+      @keyframes fwhFlash{0%{background:rgba(153,0,51,.16);}100%{background:transparent;}}
+      .fwh-kpi.flash{animation:fwhFlash 1.5s ease-out;}
+      @keyframes fwhPulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.35;transform:scale(.8);}}
+      .fwh-live{display:inline-block;width:8px;height:8px;border-radius:50%;background:${GREEN};margin-right:6px;
+                animation:fwhPulse 1.6s ease-in-out infinite;}
+      .fwh-live.off{background:${RED};animation:none;}
+      .fwh-conn{display:flex;align-items:center;justify-content:space-between;gap:10px;background:#fff;
+                border:0.5px solid rgba(0,0,0,0.09);border-radius:12px;padding:9px 14px;margin-bottom:12px;font-size:11px;}
+      .fwh-gauges{display:flex;gap:10px;flex-wrap:wrap;justify-content:space-around;align-items:center;height:100%;}
+      .fwh-gauge{width:118px;text-align:center;}
+      .fwh-gauge canvas{max-height:104px;}
+      .fwh-gsku{font-size:10px;font-weight:600;color:${DARK};margin-top:2px;
+                white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
     `;
     document.head.appendChild(s);
   }
@@ -111,12 +124,31 @@
       try { inv = await req('/ehp/inventory'); } catch (e) {}
       try { billing = await req(`/finance/fulfilment-billing?from=${rng.from}&to=${rng.to}`); } catch (e) {}
       try { ts = await req(`/ehp/timeseries?from=${rng.from}&to=${rng.to}`); } catch (e) {}
+      await loadConn();
       draw(host, sum, queue, batches.batches || [], inv, billing, rng, ts);
       host.dataset.loaded = '1';
     } catch (e) {
       host.innerHTML = `<div class="fwh-card" style="color:${RED};font-size:12px;">Could not load fulfilment summary: ${esc(e.message || e)}</div>`;
     }
     _busy = false;
+  }
+
+  const _prev = {};
+  function shortTs(v) {
+    if (!v) return '';
+    const iso = String(v).includes('T') ? v : String(v).replace(' ', 'T') + 'Z';
+    const d = new Date(iso); if (isNaN(d)) return String(v);
+    return d.toLocaleString('en-US', { timeZone: 'America/Chicago', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:true });
+  }
+  // Highlight a tile whose value moved since the last refresh.
+  function flashChanged(vals) {
+    for (const [k, v] of Object.entries(vals)) {
+      if (_prev[k] !== undefined && _prev[k] !== v) {
+        const n = document.querySelector(`.fwh-kpi[data-k="${k}"]`);
+        if (n) { n.classList.remove('flash'); void n.offsetWidth; n.classList.add('flash'); }
+      }
+      _prev[k] = v;
+    }
   }
 
   function draw(host, s, q, batches, inv, billing, rng, ts) {
@@ -154,13 +186,24 @@
         <div class="fwh-nb">${sub}</div>
       </div>`;
 
+    const conn = _conn || {};
+    const liveOk = !!conn.connected;
     host.innerHTML = `
+      <div class="fwh-conn">
+        <div><span class="fwh-live ${liveOk?'':'off'}"></span>
+          <b>${liveOk ? 'Shopify connected' : 'Shopify not connected'}</b>
+          <span style="color:${LIGHT}"> &middot; ${esc(conn.shop_domain || 'no store linked')}</span></div>
+        <div style="color:${MID}">
+          ${conn.last_webhook_at ? 'Last order received ' + esc(shortTs(conn.last_webhook_at)) : 'No orders received yet'}
+          ${conn.unfulfilled_dispatched ? ` &middot; <span style="color:${AMBER};font-weight:600;">${nf(conn.unfulfilled_dispatched)} unfulfilled</span>` : ''}
+        </div>
+      </div>
       <div class="fwh-kpis">
-        <div class="fwh-kpi"><div class="fwh-kl">Pallets received</div><div class="fwh-kv">${nf(s.pallets_received)}</div><div class="fwh-ks">billable inbound</div></div>
-        <div class="fwh-kpi"><div class="fwh-kl">Orders received</div><div class="fwh-kv">${nf(s.orders_received)}</div><div class="fwh-ks">${nf(s.envelopes_ordered)} envelopes</div></div>
-        <div class="fwh-kpi"><div class="fwh-kl">Envelopes assembled</div><div class="fwh-kv">${nf(s.envelopes_assembled)}</div><div class="fwh-ks">this week</div></div>
-        <div class="fwh-kpi"><div class="fwh-kl">Envelopes dispatched</div><div class="fwh-kv" style="color:${BRAND}">${nf(s.envelopes_dispatched)}</div><div class="fwh-ks">billable outbound</div></div>
-        <div class="fwh-kpi"><div class="fwh-kl">Queue depth</div><div class="fwh-kv">${nf(queuedEnv)}</div><div class="fwh-ks">${nf(queuedOrders)} order(s) awaiting a batch</div></div>
+        <div class="fwh-kpi" data-k="pallets"><div class="fwh-kl">Pallets received</div><div class="fwh-kv">${nf(s.pallets_received)}</div><div class="fwh-ks">billable inbound</div></div>
+        <div class="fwh-kpi" data-k="orders"><div class="fwh-kl">Orders received</div><div class="fwh-kv">${nf(s.orders_received)}</div><div class="fwh-ks">${nf(s.envelopes_ordered)} envelopes</div></div>
+        <div class="fwh-kpi" data-k="assembled"><div class="fwh-kl">Envelopes assembled</div><div class="fwh-kv">${nf(s.envelopes_assembled)}</div><div class="fwh-ks">this week</div></div>
+        <div class="fwh-kpi" data-k="dispatched"><div class="fwh-kl">Envelopes dispatched</div><div class="fwh-kv" style="color:${BRAND}">${nf(s.envelopes_dispatched)}</div><div class="fwh-ks">billable outbound</div></div>
+        <div class="fwh-kpi" data-k="queue"><div class="fwh-kl">Queue depth</div><div class="fwh-kv">${nf(queuedEnv)}</div><div class="fwh-ks">${nf(queuedOrders)} order(s) awaiting a batch</div></div>
 
       </div>
 
@@ -205,7 +248,7 @@
         <div class="fwh-card">
           <div class="fwh-t">Days of cover</div>
           <div class="fwh-s">At the current burn rate &mdash; when each flavour runs out</div>
-          <div style="height:210px;position:relative;"><canvas id="fwh-c-cover"></canvas></div>
+          <div style="height:210px;" id="fwh-cover-wrap"><div class="fwh-gauges" id="fwh-gauges"></div></div>
         </div>
       </div>
 
@@ -216,6 +259,8 @@
       </div>`;
 
     drawCharts(ts);
+    flashChanged({ pallets: s.pallets_received, orders: s.orders_received,
+                   assembled: s.envelopes_assembled, dispatched: s.envelopes_dispatched, queue: queuedEnv });
   }
 
   // ── charts ──
@@ -232,7 +277,7 @@
     interaction: { mode: 'index', intersect: false },
     plugins: { legend: { labels: { boxWidth: 10, font: { size: 10 } } } },
     scales: { x: { grid: { display: false }, ticks: { font: { size: 9 } } },
-              y: { beginAtZero: true, ticks: { font: { size: 9 } }, grid: { color: 'rgba(0,0,0,.05)' } } },
+              y: { beginAtZero: true, ticks: { font: { size: 9 } }, grid: { display: false }, border: { display: false } } },
   };
 
   function drawCharts(ts) {
@@ -247,20 +292,45 @@
       { label: 'Lodged',    data: cum('envelopes_dispatched'),borderColor: PALETTE[0], backgroundColor: 'transparent', tension: .32, pointRadius: 2, borderWidth: 2 },
     ] }, options: baseOpts });
 
-    // 2. days of cover — the actionable one
-    const cover = (ts.inventory || []).filter(i => i.days_cover !== null);
-    if (cover.length) {
-      mkChart('fwh-c-cover', { type: 'bar', data: {
-        labels: cover.map(i => i.sku),
-        datasets: [{ label: 'Days of cover', data: cover.map(i => i.days_cover),
-          backgroundColor: cover.map(i => i.days_cover <= 3 ? '#D7263D' : i.days_cover <= 7 ? '#C8860A' : '#34C759'),
-          borderRadius: 4, barThickness: 22 }],
-      }, options: { ...baseOpts, indexAxis: 'y', plugins: { legend: { display: false } },
-        scales: { x: { beginAtZero: true, ticks: { font: { size: 9 } }, grid: { color: 'rgba(0,0,0,.05)' } },
-                  y: { grid: { display: false }, ticks: { font: { size: 9 } } } } } });
-    } else {
-      const cv = el('fwh-c-cover');
-      if (cv && cv.parentNode) cv.parentNode.innerHTML = `<div class="fwh-none">No burn rate yet &mdash; assemble a batch to establish one.</div>`;
+    // 2. days of cover — radial gauges, one per flavour
+    const cover = (ts.inventory || []).filter(i => i.days_cover !== null).slice(0, 6);
+    const wrap = el('fwh-gauges');
+    if (wrap && cover.length) {
+      const FULL = Math.max(14, ...cover.map(i => i.days_cover || 0));   // scale to the healthiest
+      wrap.innerHTML = cover.map((i, k) => `<div class="fwh-gauge">
+          <canvas id="fwh-g-${k}"></canvas>
+          <div class="fwh-gsku" title="${esc(i.sku)}">${esc(i.sku)}</div>
+        </div>`).join('');
+      cover.forEach((i, k) => {
+        const days = Math.max(0, i.days_cover || 0);
+        const col = days <= 3 ? '#D7263D' : days <= 7 ? '#C8860A' : '#34C759';
+        mkChart('fwh-g-' + k, {
+          type: 'doughnut',
+          data: { labels: ['Days of cover', 'Remaining scale'],
+                  datasets: [{ data: [Math.min(days, FULL), Math.max(0, FULL - days)],
+                    backgroundColor: [col, 'rgba(0,0,0,.06)'], borderWidth: 0 }] },
+          options: { responsive: true, maintainAspectRatio: false, cutout: '72%',
+            rotation: -110, circumference: 220,
+            plugins: { legend: { display: false }, tooltip: { enabled: false } } },
+          plugins: [{
+            id: 'centre' + k,
+            afterDraw(ch) {
+              const { ctx, chartArea } = ch; if (!chartArea) return;
+              const x = (chartArea.left + chartArea.right) / 2;
+              const y = (chartArea.top + chartArea.bottom) / 2 + 4;
+              ctx.save();
+              ctx.textAlign = 'center'; ctx.fillStyle = col;
+              ctx.font = '700 21px -apple-system,Segoe UI,Roboto,sans-serif';
+              ctx.fillText(String(days), x, y);
+              ctx.fillStyle = '#AEAEB2'; ctx.font = '500 9px -apple-system,Segoe UI,Roboto,sans-serif';
+              ctx.fillText('days', x, y + 13);
+              ctx.restore();
+            },
+          }],
+        });
+      });
+    } else if (wrap) {
+      wrap.innerHTML = `<div class="fwh-none">No burn rate yet &mdash; assemble a batch to establish one.</div>`;
     }
 
     // 3. stock burn-down per flavour
@@ -309,15 +379,27 @@
       <div class="fwh-grid"><div class="fwh-card" style="height:190px"></div><div class="fwh-card" style="height:190px"></div></div>`;
   }
 
+  async function loadConn() {
+    try { _conn = await req('/shopify/status'); } catch (e) { _conn = null; }
+  }
+
   function init() {
     styles();
     applyImmediately();          // before any network call
     check();
+    // Live refresh — the panel previously only updated when you navigated away and back.
+    setInterval(() => {
+      if (!_on || !onWeekHub() || document.visibilityState !== 'visible') return;
+      render(true);
+    }, 20000);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && _on && onWeekHub()) render(true);
+    });
     window.addEventListener('state:ready', () => { _lastWeek = ''; check(); });
     window.addEventListener('hashchange', () => { applyImmediately(); check(); });
     setInterval(check, 4000);                 // client switch / week change
     window.refreshFulfilmentWeekHub = () => render(true);
-    console.log('[fulfilment-weekhub] module v2 loaded');
+    console.log('[fulfilment-weekhub] module v3 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
