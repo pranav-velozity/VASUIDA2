@@ -102,9 +102,19 @@
   }
 
   // Hide ICONIC-shaped sections; keep the shared week capsules.
+  // Never guess at another module's layout: remember the exact inline value we replaced
+  // and put it back. Writing '' here previously wiped a display the app had set itself.
   function toggleIconicSections(hide) {
     for (const id of ['wh-kpi-row', 'page-flow']) {
-      const n = el(id); if (n) n.style.display = hide ? 'none' : '';
+      const n = el(id); if (!n) continue;
+      if (hide) {
+        if (n.dataset.fwhPrev === undefined) n.dataset.fwhPrev = n.style.display || '';
+        n.style.display = 'none';
+      } else if (n.dataset.fwhPrev !== undefined) {
+        n.style.display = n.dataset.fwhPrev;
+        delete n.dataset.fwhPrev;
+      }
+      // If we never hid it, leave it entirely alone.
     }
   }
 
@@ -539,7 +549,7 @@
     window.addEventListener('hashchange', () => { applyImmediately(); check(); });
     setInterval(check, 4000);                 // client switch / week change
     window.refreshFulfilmentWeekHub = () => render(true);
-    console.log('[fulfilment-weekhub] module v7 loaded');
+    console.log('[fulfilment-weekhub] module v8 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
