@@ -635,6 +635,21 @@ CREATE TABLE IF NOT EXISTS role_alias (
   for (const [t, list] of Object.entries(ceilings)) for (const p of list) ceilRows.push([t, p]);
   ins(`INSERT OR IGNORE INTO org_type_permission (org_type,permission) VALUES (?,?)`, ceilRows);
 
+  // Capability set v2 — applied once (marker row), so later manual toggles are never overwritten.
+  const capsV2 = db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability='caps_v2'`).get();
+  if (!capsV2) {
+    const setCap = db.prepare(`INSERT INTO client_capability (client_id, capability, enabled) VALUES (?,?,?)
+                               ON CONFLICT(client_id, capability) DO UPDATE SET enabled=excluded.enabled`);
+    // ICONIC keeps the full ICONIC-shaped surface
+    for (const c of ['live_map','vas_labelling']) setCap.run('ICONIC', c, 1);
+    for (const c of ['live_map','vas_labelling']) setCap.run('VOZ', c, 1);
+    // EHP: reserved for the future PO/labelling/case work — present but OFF, so enabling
+    // them later is a config flip rather than a build.
+    for (const c of ['receiving_ops','vas_labelling','live_map','transit_clearing','freight_lanes','apo_generator','iconic_sftp','non_compliance'])
+      setCap.run('EHP', c, 0);
+    db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled) VALUES ('__meta','caps_v2',1)`).run();
+  }
+
   ins(`INSERT OR IGNORE INTO role_alias (clerk_role,role) VALUES (?,?)`, [
     ['org:admin_auth','admin'],
     ['org:member','ops'],          // legacy 'member'
@@ -1941,7 +1956,7 @@ app.get('/flow/week/:weekStart',
   const monday = mondayOfLoose(wsIn);
   if (!monday) return res.status(400).json({ error: 'invalid weekStart' });
 
-  const row = flowWeekGet.get(facility, monday);
+  const row = flowWeekGet.get(facility, monday, curClient());
   if (!row) return res.json({ facility, week_start: monday, data: null, updated_at: null });
 
   return res.json({
@@ -1989,7 +2004,7 @@ app.post('/flow/week/:weekStart',
   const patch = (req.body && typeof req.body === 'object') ? req.body : null;
   if (!patch) return res.status(400).json({ error: 'patch object required' });
 
-  const existingRow = flowWeekGet.get(facility, monday);
+  const existingRow = flowWeekGet.get(facility, monday, curClient());
   const existing = existingRow ? (safeJsonParse(existingRow.data, {}) || {}) : {};
   const merged = (function mergeFlowWeek(existingObj, patchObj) {
     const out = { ...(existingObj || {}) };
@@ -5677,7 +5692,7 @@ function safeJsonParse(s, fallback) {
 const flowWeekGet = db.prepare(`
   SELECT data, updated_at
   FROM flow_week
-  WHERE facility = ? AND week_start = ?
+  WHERE facility = ? AND week_start = ? AND client_id = ?
 `);
 
 const flowWeekUpsert = db.prepare(`
@@ -5855,13 +5870,14 @@ const Bins = {
     return n;
   }),
   getByWeek: (ws) => {
+    // Scoped via request context (AsyncLocalStorage) — no req available in the DAL.
     return db.prepare(`
       SELECT week_start, mobile_bin, total_units, weight_kg, date_local,
              carton_length_cm, carton_width_cm, carton_height_cm
       FROM bins
-      WHERE week_start = ?
+      WHERE week_start = ? AND client_id = ?
       ORDER BY mobile_bin
-    `).all(ws);
+    `).all(ws, curClient());
   }
 };
 
@@ -9932,6 +9948,7 @@ app.get('/nc/incidents', authenticateRequest, auditLog('view_nc_incidents'), (re
     const week = String(req.query.week_start||'').trim();
     if (!week) return res.status(400).json({ error: 'week_start required' });
     const params = [week]; let sql = 'SELECT * FROM nc_incident WHERE week_start=?';
+    { const sc = scopeSql(tenantReadIds(req)); sql += sc.clause; params.push(...sc.params); }
     if (req.query.supplier) { sql += ' AND supplier=?'; params.push(String(req.query.supplier)); }
     sql += ' ORDER BY supplier, po_number, created_at';
     const incidents = db.prepare(sql).all(...params);
