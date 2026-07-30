@@ -14,6 +14,16 @@
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
   const el = id => document.getElementById(id);
   const nfmt = n => Number(n || 0).toLocaleString();
+  // Timestamps are stored in UTC. VOZ_TX operates on America/Chicago, so show facility-local.
+  const FACILITY_TZ = 'America/Chicago';
+  function localTs(v) {
+    if (!v) return '—';
+    const iso = String(v).includes('T') ? v : String(v).replace(' ', 'T') + 'Z';
+    const d = new Date(iso);
+    if (isNaN(d)) return String(v);
+    return d.toLocaleString('en-US', { timeZone: FACILITY_TZ, year:'numeric', month:'short', day:'2-digit',
+                                       hour:'2-digit', minute:'2-digit', hour12: true });
+  }
   function apiBase(){ return (document.querySelector('meta[name="api-base"]')?.content || window.apiBase || '').replace(/\/+$/,''); }
   async function tok(){ if (window.Clerk?.session) { try { return await window.Clerk.session.getToken(); } catch(e){} } return null; }
 
@@ -147,13 +157,13 @@
         <div style="font-size:10px;color:${LIGHT};padding-bottom:8px;">Whole orders only — the actual count may land slightly above your target.</div>
       </div>
       <div id="ehp-batchmsg"></div>
-      <table class="ehp"><thead><tr><th>Batch</th><th class="n">Target</th><th class="n">Envelopes</th><th class="n">Orders</th><th>State</th><th>Assembled</th><th>Dispatched</th><th></th></tr></thead>
+      <table class="ehp"><thead><tr><th>Batch</th><th class="n">Target</th><th class="n">Envelopes</th><th class="n">Orders</th><th>State</th><th>Assembled (CT)</th><th>Dispatched (CT)</th><th></th></tr></thead>
       <tbody>${b.length ? b.map(x => `<tr>
         <td style="font-family:monospace;font-size:10px;">${esc(String(x.id).slice(-8))}</td>
         <td class="n">${nfmt(x.target_envelopes)}</td><td class="n"><b>${nfmt(x.actual_envelopes)}</b></td><td class="n">${nfmt(x.order_count)}</td>
         <td><span class="ehp-chip" style="background:${x.state==='dispatched'?'rgba(52,199,89,.14)':x.state==='assembled'?'rgba(200,134,10,.14)':'rgba(0,0,0,.06)'};color:${x.state==='dispatched'?GREEN:x.state==='assembled'?AMBER:MID};">${esc(x.state)}</span></td>
-        <td style="font-size:10px;color:${MID}">${esc(x.assembled_at||'—')}</td>
-        <td style="font-size:10px;color:${MID}">${esc(x.dispatched_at||'—')}</td>
+        <td style="font-size:10px;color:${MID}">${esc(localTs(x.assembled_at))}</td>
+        <td style="font-size:10px;color:${MID}">${esc(localTs(x.dispatched_at))}</td>
         <td style="white-space:nowrap;">
           ${x.state==='queued' ? `<button class="ehp-btn g" data-asm="${esc(x.id)}">Assemble</button>` : ''}
           ${x.state==='assembled' ? `<button class="ehp-btn g" data-dis="${esc(x.id)}">Dispatch</button>` : ''}
@@ -187,7 +197,12 @@
         let shTxt, shKind = 'k';
         if (sh.error)            { shTxt = 'Shopify write-back FAILED: ' + sh.error; shKind = 'e'; }
         else if (sh.skipped)     { shTxt = 'Shopify write-back skipped (' + sh.skipped + ')'; shKind = 'w'; }
-        else if (sh.failed)      { shTxt = `Shopify: ${sh.ok} fulfilled, ${sh.failed} failed` + (sh.errors && sh.errors[0] ? ' — ' + sh.errors[0].error : ''); shKind = 'w'; }
+        else if (sh.failed || sh.skipped) {
+          shTxt = `Shopify: ${sh.ok||0} fulfilled` + (sh.skipped ? `, ${sh.skipped} skipped` : '') + (sh.failed ? `, ${sh.failed} failed` : '');
+          if (sh.skips && sh.skips[0]) shTxt += ' — reason: ' + sh.skips[0].reason;
+          else if (sh.errors && sh.errors[0]) shTxt += ' — ' + sh.errors[0].error;
+          shKind = 'w';
+        }
         else                     { shTxt = `Shopify: ${sh.ok || 0} order(s) marked fulfilled`; }
         el('ehp-batchmsg').innerHTML = msg(shKind, `Dispatched ${nfmt(r.envelopes)} envelope(s) across ${nfmt(r.orders)} order(s). ` + shTxt);
         console.log('[ehp] dispatch result', r);
@@ -209,19 +224,20 @@
           th{background:#F5F5F7;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#6E6E73;}
           td.n{text-align:right;white-space:nowrap;} .flag{color:#C8860A;font-weight:600;}
           col.c-order{width:11%} col.c-env{width:6%} col.c-name{width:20%} col.c-addr{width:31%}
-          col.c-city{width:16%} col.c-state{width:8%} col.c-zip{width:8%}
+          col.c-city{width:13%} col.c-state{width:7%} col.c-zip{width:7%} col.c-addr2{width:14%}
           @media print{body{margin:10mm} th{background:#eee !important;-webkit-print-color-adjust:exact}}
         </style></head><body>
         <h2>Pick list</h2>
         <div class="meta">Batch ${esc(x.getAttribute('data-pick'))} &middot; ${rows.length} order(s) &middot; ${totalEnv} envelope(s) &middot; ${new Date().toLocaleString()}</div>
         <table>
-          <colgroup><col class="c-order"><col class="c-env"><col class="c-name"><col class="c-addr"><col class="c-city"><col class="c-state"><col class="c-zip"></colgroup>
-          <thead><tr><th>Order</th><th>Env</th><th>Name</th><th>Address</th><th>City</th><th>State</th><th>Zip</th></tr></thead>
+          <colgroup><col class="c-order"><col class="c-env"><col class="c-name"><col class="c-addr"><col class="c-addr2"><col class="c-city"><col class="c-state"><col class="c-zip"></colgroup>
+          <thead><tr><th>Order</th><th>Env</th><th>Name</th><th>Address 1</th><th>Address 2</th><th>City</th><th>State</th><th>Zip</th></tr></thead>
           <tbody>${rows.map(o=>`<tr>
             <td>${esc(o.order_number)}${o.flagged_high_qty?' <span class="flag">&#9873;</span>':''}</td>
             <td class="n">${o.envelope_qty}</td>
             <td>${esc(o.recipient_name)}</td>
             <td>${esc(o.recipient_address)}</td>
+            <td>${esc(o.recipient_address2 || '')}</td>
             <td>${esc(o.recipient_city)}</td>
             <td>${esc(o.recipient_state)}</td>
             <td>${esc(o.recipient_postcode)}</td></tr>`).join('')}</tbody>
@@ -471,7 +487,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);   // active client can change via the picker
-    console.log('[ehp-ops] module v5 loaded');
+    console.log('[ehp-ops] module v6 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
