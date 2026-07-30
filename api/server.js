@@ -11068,6 +11068,62 @@ app.get('/finance/fulfilment-billing', authenticateRequest, requireRole(['admin'
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Per-client operating thresholds. Generic: any fulfilment client gets its own set. ──
+db.exec(`
+CREATE TABLE IF NOT EXISTS client_setting (
+  client_id  TEXT NOT NULL,
+  key        TEXT NOT NULL,
+  value      TEXT,
+  label      TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (client_id, key)
+);
+`);
+const FULFILMENT_DEFAULTS = [
+  ['replenishment_lead_days', '30', 'Replenishment lead time (days) — drives stock thresholds'],
+  ['cover_critical_days',     '10', 'Days of cover treated as critical'],
+  ['cover_warning_days',      '30', 'Days of cover treated as a warning'],
+  ['sla_lodge_days',           '3', 'Business days from order to lodgement (SLA)'],
+  ['sla_inbound_days',         '1', 'Business days to receive and put away (SLA)'],
+];
+(function seedFulfilmentSettings(){
+  try {
+    const clients = db.prepare(`SELECT client_id FROM client_capability WHERE capability='envelope_fulfilment' AND enabled=1`).all();
+    const ins = db.prepare(`INSERT OR IGNORE INTO client_setting (client_id, key, value, label) VALUES (?,?,?,?)`);
+    for (const c of clients) for (const [k, v, l] of FULFILMENT_DEFAULTS) ins.run(c.client_id, k, v, l);
+  } catch (e) { console.error('[settings:seed]', e.message); }
+})();
+
+function clientSettings(clientId) {
+  const out = {};
+  for (const [k, v] of FULFILMENT_DEFAULTS.map(d => [d[0], d[1]])) out[k] = Number(v);
+  for (const r of db.prepare(`SELECT key, value FROM client_setting WHERE client_id=?`).all(clientId)) {
+    const n = Number(r.value); if (Number.isFinite(n)) out[r.key] = n;
+  }
+  return out;
+}
+
+app.get('/ehp/settings', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    res.json({ client_id: c, settings: clientSettings(c),
+      rows: db.prepare(`SELECT * FROM client_setting WHERE client_id=? ORDER BY key`).all(c) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/ehp/settings', authenticateRequest, requireRole(['admin']), writeOpLimiter, auditLog('edit_client_setting'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const b = req.body || {};
+    const up = db.prepare(`INSERT INTO client_setting (client_id, key, value, updated_at) VALUES (?,?,?,datetime('now'))
+                           ON CONFLICT(client_id, key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')`);
+    for (const [k, v] of Object.entries(b.settings || {})) {
+      if (FULFILMENT_DEFAULTS.some(d => d[0] === k)) up.run(c, k, String(v));
+    }
+    res.json({ client_id: c, settings: clientSettings(c) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Daily timeseries for the Week Hub charts ──
 app.get('/ehp/timeseries', authenticateRequest, (req, res) => {
   try {
@@ -11122,7 +11178,25 @@ app.get('/ehp/timeseries', authenticateRequest, (req, res) => {
                days_cover: perDay > 0 ? Math.floor(last / perDay) : null };
     });
 
-    res.json({ from, to, series, inventory,
+    const cfg = clientSettings(c);
+    // Reorder point = what you burn during a replenishment lead time. Falling below it
+    // means an order placed today arrives after you have run out.
+    for (const inv of inventory) {
+      inv.reorder_point = Math.round((inv.daily_burn || 0) * cfg.replenishment_lead_days);
+      inv.status = inv.days_cover === null ? 'unknown'
+        : inv.days_cover <= cfg.cover_critical_days ? 'critical'
+        : inv.days_cover <= cfg.cover_warning_days ? 'warning' : 'ok';
+    }
+    // Backlog = ordered but not yet lodged, cumulative across the week.
+    let cO = 0, cD = 0;
+    const backlog = series.map(d => { cO += d.envelopes_ordered; cD += d.envelopes_dispatched; return Math.max(0, cO - cD); });
+    const avgDaily = series.reduce((a, d) => a + d.envelopes_dispatched, 0) / Math.max(1, series.length);
+    // A backlog worth more than the SLA window of dispatch capacity is a real risk.
+    const backlogLimit = Math.round(avgDaily * cfg.sla_lodge_days);
+
+    res.json({ from, to, series, inventory, settings: cfg,
+               backlog, backlog_limit: backlogLimit,
+               backlog_now: backlog.length ? backlog[backlog.length - 1] : 0,
                per_flavour_per_envelope: Math.round(perFlavour * 100) / 100 });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
