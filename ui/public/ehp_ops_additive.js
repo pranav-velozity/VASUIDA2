@@ -8,7 +8,8 @@
   'use strict';
 
   const BRAND = '#990033', DARK = '#1C1C1E', MID = '#6E6E73', LIGHT = '#AEAEB2';
-  const GREEN = '#34C759', AMBER = '#C8860A', RED = '#D7263D';
+  const GREEN = '#34C759', AMBER = '#FFD014', RED = '#B33F40';
+  const AMBER_TXT = '#8A6D00';   // #FFD014 is too light for text on white
   let _enabled = false, _tab = 'queue', _cache = {};
 
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
@@ -73,8 +74,8 @@
       table.ehp td.n,table.ehp th.n{text-align:right;}
       .ehp-chip{display:inline-block;font-size:10px;font-weight:600;padding:2px 8px;border-radius:999px;}
       .ehp-msg{border-radius:8px;padding:8px 10px;font-size:11px;margin:8px 0;}
-      .ehp-msg.e{background:rgba(215,38,61,.08);border:0.5px solid rgba(215,38,61,.3);color:${RED};}
-      .ehp-msg.w{background:rgba(200,134,10,.1);border:0.5px solid rgba(200,134,10,.3);color:${AMBER};}
+      .ehp-msg.e{background:rgba(179,63,64,.09);border:0.5px solid rgba(179,63,64,.32);color:${RED};}
+      .ehp-msg.w{background:rgba(255,208,20,.16);border:0.5px solid rgba(255,208,20,.55);color:${AMBER_TXT};}
       .ehp-msg.k{background:rgba(52,199,89,.1);border:0.5px solid rgba(52,199,89,.3);color:#1f7a34;}
       .ehp-drop{border:1.5px dashed rgba(0,0,0,0.18);border-radius:10px;padding:12px;text-align:center;font-size:11px;color:${MID};cursor:pointer;}
     `;
@@ -159,7 +160,7 @@
       <div class="ehp-kpis">
         <div class="ehp-kpi"><div class="ehp-kl">Queued orders</div><div class="ehp-kv">${nfmt(q.queued_orders)}</div><div class="ehp-ks">awaiting a batch</div></div>
         <div class="ehp-kpi"><div class="ehp-kl">Queued envelopes</div><div class="ehp-kv">${nfmt(q.queued_envelopes)}</div><div class="ehp-ks">billable units</div></div>
-        <div class="ehp-kpi"><div class="ehp-kl">Flagged orders</div><div class="ehp-kv" style="color:${q.flagged_high_qty?AMBER:DARK}">${nfmt(q.flagged_high_qty)}</div><div class="ehp-ks">unusually large</div></div>
+        <div class="ehp-kpi"><div class="ehp-kl">Flagged orders</div><div class="ehp-kv" style="color:${q.flagged_high_qty?AMBER_TXT:DARK}">${nfmt(q.flagged_high_qty)}</div><div class="ehp-ks">unusually large</div></div>
         <div class="ehp-kpi"><div class="ehp-kl">Active recipe</div><div class="ehp-kv" style="font-size:14px;">${q.active_recipe ? esc(q.active_recipe.name) : '—'}</div><div class="ehp-ks">${q.active_recipe ? q.active_recipe.lines.map(l=>l.qty_per_envelope+'× '+l.sku).join(' · ') : 'none set'}</div></div>
       </div>
       ${!q.active_recipe ? msg('w','No active kit recipe — set one on the Recipe tab before assembling, or consumption cannot be derived.') : ''}
@@ -173,10 +174,10 @@
       <tbody>${b.length ? b.map(x => `<tr>
         <td style="font-family:monospace;font-size:10px;">${esc(String(x.id).slice(-8))}</td>
         <td class="n">${nfmt(x.target_envelopes)}</td><td class="n"><b>${nfmt(x.actual_envelopes)}</b></td><td class="n">${nfmt(x.order_count)}</td>
-        <td><span class="ehp-chip" style="background:${x.state==='dispatched'?'rgba(52,199,89,.14)':x.state==='assembled'?'rgba(200,134,10,.14)':'rgba(0,0,0,.06)'};color:${x.state==='dispatched'?GREEN:x.state==='assembled'?AMBER:MID};">${esc(x.state)}</span></td>
+        <td><span class="ehp-chip" style="background:${x.state==='dispatched'?'rgba(52,199,89,.14)':x.state==='assembled'?'rgba(255,208,20,.28)':'rgba(0,0,0,.06)'};color:${x.state==='dispatched'?GREEN:x.state==='assembled'?AMBER_TXT:MID};">${esc(x.state)}</span></td>
         <td class="n" style="font-size:10px;">${x.state==='dispatched'
           ? `<span style="color:${GREEN}">${(x.fulfilment&&x.fulfilment.fulfilled)||0} ok</span>` +
-            (((x.fulfilment&&x.fulfilment.not_fulfilled)||0) ? ` · <span style="color:${AMBER}">${x.fulfilment.not_fulfilled} not sent</span>` : '')
+            (((x.fulfilment&&x.fulfilment.not_fulfilled)||0) ? ` · <span style="color:${AMBER_TXT}">${x.fulfilment.not_fulfilled} not sent</span>` : '')
           : `<span style="color:${LIGHT}">—</span>`}</td>
         <td style="font-size:10px;color:${MID}">${esc(localTs(x.assembled_at))}</td>
         <td style="font-size:10px;color:${MID}">${esc(localTs(x.dispatched_at))}</td>
@@ -466,7 +467,7 @@
         <div class="ehp-kpi"><div class="ehp-kl">Connection</div><div class="ehp-kv" style="font-size:15px;">${dot(st.connected)}${st.connected?'Connected':'Not connected'}</div><div class="ehp-ks">${esc(st.shop_domain||'no store linked')}</div></div>
         <div class="ehp-kpi"><div class="ehp-kl">Queued orders</div><div class="ehp-kv">${nfmt(st.queued_orders)}</div><div class="ehp-ks">awaiting a batch</div></div>
         <div class="ehp-kpi"><div class="ehp-kl">Last webhook</div><div class="ehp-kv" style="font-size:13px;">${esc(st.last_webhook_at||'—')}</div><div class="ehp-ks">orders/create</div></div>
-        <div class="ehp-kpi"><div class="ehp-kl">Unfulfilled</div><div class="ehp-kv" style="color:${st.unfulfilled_dispatched?AMBER:DARK}">${nfmt(st.unfulfilled_dispatched)}</div><div class="ehp-ks">dispatched, not yet in Shopify</div></div>
+        <div class="ehp-kpi"><div class="ehp-kl">Unfulfilled</div><div class="ehp-kv" style="color:${st.unfulfilled_dispatched?AMBER_TXT:DARK}">${nfmt(st.unfulfilled_dispatched)}</div><div class="ehp-ks">dispatched, not yet in Shopify</div></div>
       </div>
       ${st.last_error ? msg('e','Last error: ' + st.last_error) : ''}
       <div style="border:0.5px solid rgba(0,0,0,0.1);border-radius:10px;padding:14px;margin-top:6px;">
@@ -532,7 +533,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);   // active client can change via the picker
-    console.log('[ehp-ops] module v10 loaded');
+    console.log('[ehp-ops] module v11 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

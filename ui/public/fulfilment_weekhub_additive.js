@@ -6,7 +6,8 @@
   'use strict';
 
   const BRAND = '#990033', DARK = '#1C1C1E', MID = '#6E6E73', LIGHT = '#AEAEB2';
-  const GREEN = '#34C759', AMBER = '#C8860A', RED = '#D7263D';
+  const GREEN = '#34C759', AMBER = '#FFD014', RED = '#B33F40';
+  const AMBER_TXT = '#8A6D00';        // #FFD014 is too light for text on white
   const LS_ON = 'pinpoint.fulfilmentClient';
   // Remembered from the last session so the ICONIC layout is hidden on the very first
   // paint, instead of flashing while the capability check round-trips.
@@ -41,7 +42,15 @@
       .fwh-grid{display:grid;grid-template-columns:1.4fr 1fr;gap:12px;align-items:start;}
       @media (max-width:1100px){.fwh-grid{grid-template-columns:1fr;}}
       .fwh-card{background:#fff;border:0.5px solid rgba(0,0,0,0.09);border-radius:12px;padding:15px 17px;}
-      .fwh-t{font-size:13px;font-weight:700;color:${DARK};}
+      .fwh-t{font-size:13px;font-weight:700;color:${DARK};display:flex;align-items:center;justify-content:space-between;gap:8px;}
+      .fwh-cfg{background:none;border:none;color:${LIGHT};cursor:pointer;font-size:12px;padding:2px 4px;border-radius:5px;}
+      .fwh-cfg:hover{background:#F5F5F7;color:${BRAND};}
+      .fwh-pop{position:absolute;z-index:40;background:#fff;border:0.5px solid rgba(0,0,0,.14);border-radius:10px;
+        box-shadow:0 12px 32px rgba(0,0,0,.16);padding:12px 14px;min-width:240px;}
+      .fwh-pop label{display:block;font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:${LIGHT};margin:8px 0 3px;}
+      .fwh-pop input{width:100%;border:0.5px solid rgba(0,0,0,.15);border-radius:7px;padding:6px 8px;font:400 12px inherit;box-sizing:border-box;}
+      .fwh-pop .row{display:flex;gap:8px;justify-content:flex-end;margin-top:11px;}
+      .fwh-pop button{border:none;border-radius:7px;padding:6px 12px;font:600 11px inherit;cursor:pointer;}
       .fwh-s{font-size:10px;color:${LIGHT};margin-bottom:12px;}
       .fwh-flow{display:flex;align-items:flex-start;justify-content:space-between;gap:6px;margin:16px 0 6px;}
       .fwh-node{flex:1;text-align:center;position:relative;}
@@ -59,8 +68,13 @@
       .fwh-eh{font-size:12px;font-weight:600;color:${DARK};}
       .fwh-eb{font-size:10px;color:${MID};margin-top:1px;}
       .fwh-none{font-size:11px;color:${LIGHT};text-align:center;padding:18px;}
-      @keyframes fwhFlash{0%{background:rgba(153,0,51,.16);}100%{background:transparent;}}
-      .fwh-kpi.flash{animation:fwhFlash 1.5s ease-out;}
+      .fwh-exwrap{max-height:186px;overflow:hidden;position:relative;}
+      .fwh-exwrap.scrolling::after{content:'';position:absolute;left:0;right:0;bottom:0;height:22px;
+        background:linear-gradient(transparent,#fff);pointer-events:none;}
+      .fwh-exscroll{will-change:transform;}
+      .fwh-excount{font-size:9px;color:${LIGHT};margin-left:6px;font-weight:500;}
+      @keyframes fwhFlash{0%{background:rgba(153,0,51,.20);}55%{background:rgba(153,0,51,.14);}100%{background:transparent;}}
+      .fwh-kpi.flash{animation:fwhFlash 3.6s ease-out;}
       @keyframes fwhPulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.35;transform:scale(.8);}}
       .fwh-live{display:inline-block;width:8px;height:8px;border-radius:50%;background:${GREEN};margin-right:6px;
                 animation:fwhPulse 1.6s ease-in-out infinite;}
@@ -205,7 +219,7 @@
           <span style="color:${LIGHT}"> &middot; ${esc(conn.shop_domain || 'no store linked')}</span></div>
         <div style="color:${MID}">
           ${conn.last_webhook_at ? 'Last order received ' + esc(shortTs(conn.last_webhook_at)) : 'No orders received yet'}
-          ${conn.unfulfilled_dispatched ? ` &middot; <span style="color:${AMBER};font-weight:600;">${nf(conn.unfulfilled_dispatched)} unfulfilled</span>` : ''}
+          ${conn.unfulfilled_dispatched ? ` &middot; <span style="color:${AMBER_TXT};font-weight:600;">${nf(conn.unfulfilled_dispatched)} unfulfilled</span>` : ''}
         </div>
       </div>
       <div class="fwh-kpis">
@@ -237,12 +251,16 @@
         </div>
 
         <div class="fwh-card">
-          <div class="fwh-t">Needs attention</div>
+          <div class="fwh-t"><span>Needs attention${ex.length > 3 ? `<span class="fwh-excount">${ex.length} items &middot; scrolling</span>` : ''}</span></div>
           <div class="fwh-s">Exceptions for this week</div>
-          ${ex.length ? ex.map(e => `<div class="fwh-ex">
-            <div class="fwh-ei" style="background:${e.c}"></div>
-            <div><div class="fwh-eh">${esc(e.h)}</div><div class="fwh-eb">${esc(e.b)}</div></div>
-          </div>`).join('') : `<div class="fwh-none">Nothing needs attention.</div>`}
+          <div class="fwh-exwrap ${ex.length > 3 ? 'scrolling' : ''}" id="fwh-exwrap">
+            <div class="fwh-exscroll" id="fwh-exscroll">
+            ${ex.length ? ex.map(e => `<div class="fwh-ex">
+              <div class="fwh-ei" style="background:${e.c}"></div>
+              <div><div class="fwh-eh">${esc(e.h)}</div><div class="fwh-eb">${esc(e.b)}</div></div>
+            </div>`).join('') : `<div class="fwh-none">Nothing needs attention.</div>`}
+            </div>
+          </div>
           <div style="margin-top:12px;text-align:right;">
             <button onclick="window.openEhpOps&&window.openEhpOps()" style="background:${BRAND};color:#fff;border:none;border-radius:8px;padding:7px 13px;font:600 11px/1 inherit;cursor:pointer;">Open Fulfilment →</button>
           </div>
@@ -251,26 +269,91 @@
 
       <div class="fwh-grid" style="margin-top:12px;">
         <div class="fwh-card">
-          <div class="fwh-t">Throughput</div>
+          <div class="fwh-t"><span>Throughput</span><button class="fwh-cfg" data-cfg="sla" title="Edit SLA">&#9881;</button></div>
           <div class="fwh-s">Cumulative across the week. <b>Backlog</b> is ordered but not yet lodged &mdash; above the dashed SLA limit means dispatch is falling behind intake.</div>
           <div style="height:210px;position:relative;"><canvas id="fwh-c-flow"></canvas></div>
         </div>
         <div class="fwh-card">
-          <div class="fwh-t">Days of cover</div>
+          <div class="fwh-t"><span>Days of cover</span><button class="fwh-cfg" data-cfg="cover" title="Edit thresholds">&#9881;</button></div>
           <div class="fwh-s">At the current burn rate. Red under ${ts && ts.settings ? ts.settings.cover_critical_days : 10} days, amber under ${ts && ts.settings ? ts.settings.cover_warning_days : 30} &mdash; set against a ${ts && ts.settings ? ts.settings.replenishment_lead_days : 30}-day replenishment lead time.</div>
           <div style="height:210px;" id="fwh-cover-wrap"><div class="fwh-gauges" id="fwh-gauges"></div></div>
         </div>
       </div>
 
       <div class="fwh-card" style="margin-top:12px;">
-        <div class="fwh-t">Stock position by flavour</div>
+        <div class="fwh-t"><span>Stock position by flavour</span><button class="fwh-cfg" data-cfg="cover" title="Edit thresholds">&#9881;</button></div>
         <div class="fwh-s">Estimated on-hand over the week. Consumption is derived and replaced by truth at each count. Crossing the <b>reorder point</b> means stock ordered today would land after you run out.</div>
         <div style="height:230px;position:relative;"><canvas id="fwh-c-stock"></canvas></div>
       </div>`;
 
     drawCharts(ts);
+    startExScroll(ex.length);
+    wireSettings(ts.settings || {});
     flashChanged({ pallets: s.pallets_received, orders: s.orders_received,
                    assembled: s.envelopes_assembled, dispatched: s.envelopes_dispatched, queue: queuedEnv });
+  }
+
+  // ── needs-attention auto-scroll (pauses on hover) ──
+  let _exTimer = null;
+  function startExScroll(count) {
+    if (_exTimer) { clearInterval(_exTimer); _exTimer = null; }
+    const wrap = el('fwh-exwrap'), inner = el('fwh-exscroll');
+    if (!wrap || !inner || count <= 3) return;
+    let y = 0, paused = false, holdUntil = Date.now() + 2500;   // read the top item first
+    wrap.onmouseenter = () => { paused = true; };
+    wrap.onmouseleave = () => { paused = false; };
+    _exTimer = setInterval(() => {
+      if (paused || Date.now() < holdUntil) return;
+      const max = inner.scrollHeight - wrap.clientHeight;
+      if (max <= 0) return;
+      y += 0.5;                                   // slow enough to read
+      if (y >= max) { y = 0; holdUntil = Date.now() + 2500; }
+      inner.style.transform = `translateY(${-y}px)`;
+    }, 40);
+  }
+
+  // ── inline threshold editing ──
+  function wireSettings(cur) {
+    document.querySelectorAll('.fwh-cfg').forEach(btn => {
+      btn.onclick = (ev) => {
+        ev.stopPropagation();
+        document.querySelectorAll('.fwh-pop').forEach(p => p.remove());
+        const which = btn.getAttribute('data-cfg');
+        const fields = which === 'cover'
+          ? [['replenishment_lead_days', 'Replenishment lead time (days)'],
+             ['cover_critical_days', 'Critical below (days)'],
+             ['cover_warning_days', 'Warning below (days)']]
+          : [['sla_lodge_days', 'Lodgement SLA (business days)'],
+             ['sla_inbound_days', 'Inbound put-away SLA (business days)']];
+        const pop = document.createElement('div');
+        pop.className = 'fwh-pop';
+        pop.innerHTML = fields.map(([k, l]) =>
+          `<label>${l}</label><input type="number" min="0" step="1" data-k="${k}" value="${cur[k] != null ? cur[k] : ''}">`).join('')
+          + `<div class="row"><button data-x="c" style="background:#F5F5F7;color:${MID}">Cancel</button>
+             <button data-x="s" style="background:${BRAND};color:#fff">Save</button></div>`;
+        const card = btn.closest('.fwh-card');
+        card.style.position = 'relative';
+        pop.style.top = '38px'; pop.style.right = '12px';
+        card.appendChild(pop);
+        pop.onclick = e => e.stopPropagation();
+        pop.querySelector('[data-x="c"]').onclick = () => pop.remove();
+        pop.querySelector('[data-x="s"]').onclick = async () => {
+          const settings = {};
+          pop.querySelectorAll('input[data-k]').forEach(i => { if (i.value !== '') settings[i.getAttribute('data-k')] = Number(i.value); });
+          try {
+            const t = await tok();
+            const h = { 'Content-Type': 'application/json' };
+            if (t) h.Authorization = 'Bearer ' + t;
+            if (window.pinpointClient) h['x-pinpoint-client'] = window.pinpointClient;
+            const r = await fetch(apiBase() + '/ehp/settings', { method: 'POST', headers: h, body: JSON.stringify({ settings }) });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            pop.remove(); render(true);
+          } catch (e) { alert('Could not save: ' + (e.message || e)); }
+        };
+        const off = () => { pop.remove(); document.removeEventListener('click', off); };
+        setTimeout(() => document.addEventListener('click', off), 0);
+      };
+    });
   }
 
   // ── charts ──
@@ -302,10 +385,10 @@
       { label: 'Ordered',   data: cum('envelopes_ordered'),   borderColor: PALETTE[1], backgroundColor: 'rgba(14,165,233,.10)', fill: true, tension: .32, pointRadius: 2, borderWidth: 2 },
       { label: 'Assembled', data: cum('envelopes_assembled'), borderColor: PALETTE[2], backgroundColor: 'transparent', tension: .32, pointRadius: 2, borderWidth: 2 },
       { label: 'Lodged',    data: cum('envelopes_dispatched'),borderColor: PALETTE[0], backgroundColor: 'transparent', tension: .32, pointRadius: 2, borderWidth: 2 },
-      { label: 'Backlog',   data: backlog, borderColor: '#D7263D', backgroundColor: 'rgba(215,38,61,.08)',
+      { label: 'Backlog',   data: backlog, borderColor: RED, backgroundColor: 'rgba(179,63,64,.10)',
         fill: true, tension: .32, pointRadius: 0, borderWidth: 1.5, borderDash: [4,3] },
       ...(limit > 0 ? [{ label: `SLA limit (${nf(limit)})`, data: labels.map(()=>limit),
-        borderColor: 'rgba(215,38,61,.45)', borderDash: [2,4], pointRadius: 0, borderWidth: 1, fill: false }] : []),
+        borderColor: 'rgba(179,63,64,.5)', borderDash: [2,4], pointRadius: 0, borderWidth: 1, fill: false }] : []),
     ] }, options: baseOpts });
 
     // 2. days of cover — radial gauges, one per flavour
@@ -323,8 +406,8 @@
       const crit = cfg.cover_critical_days || 10, warn = cfg.cover_warning_days || 30;
       cover.forEach((i, k) => {
         const days = Math.max(0, i.days_cover || 0);
-        const col = i.status === 'critical' ? '#D7263D' : i.status === 'warning' ? '#C8860A'
-                  : days <= crit ? '#D7263D' : days <= warn ? '#C8860A' : '#34C759';
+        const col = i.status === 'critical' ? RED : i.status === 'warning' ? AMBER
+                  : days <= crit ? RED : days <= warn ? AMBER : '#34C759';
         mkChart('fwh-g-' + k, {
           type: 'doughnut',
           data: { labels: ['Days of cover', 'Remaining scale'],
@@ -365,7 +448,7 @@
           // One reorder line at the highest reorder point — below it, an order placed today lands late.
           ...(() => { const rp = Math.max(0, ...inv.map(i => i.reorder_point || 0));
               return rp > 0 ? [{ label: `Reorder point (${nf(rp)})`, data: labels.map(()=>rp),
-                borderColor: 'rgba(215,38,61,.5)', borderDash: [3,4], pointRadius: 0, borderWidth: 1.5, fill: false }] : []; })(),
+                borderColor: 'rgba(179,63,64,.55)', borderDash: [3,4], pointRadius: 0, borderWidth: 1.5, fill: false }] : []; })(),
         ] },
         options: { ...baseOpts, scales: { ...baseOpts.scales, y: { ...baseOpts.scales.y, beginAtZero: false } } } });
     } else {
@@ -426,7 +509,7 @@
     window.addEventListener('hashchange', () => { applyImmediately(); check(); });
     setInterval(check, 4000);                 // client switch / week change
     window.refreshFulfilmentWeekHub = () => render(true);
-    console.log('[fulfilment-weekhub] module v4 loaded');
+    console.log('[fulfilment-weekhub] module v5 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
