@@ -10267,6 +10267,7 @@ try {
   const oc = db.prepare("PRAGMA table_info(ehp_order)").all().map(c => c.name);
   if (!oc.includes('fulfil_error')) db.exec("ALTER TABLE ehp_order ADD COLUMN fulfil_error TEXT");
   if (!oc.includes('shop_domain')) db.exec("ALTER TABLE ehp_order ADD COLUMN shop_domain TEXT");
+  if (!oc.includes('recipient_address2')) db.exec("ALTER TABLE ehp_order ADD COLUMN recipient_address2 TEXT");
 } catch (e) { console.error('[ehp:recipe-structure]', e.message); }
 
 // Flag (not a block) when a single order asks for an unusual number of envelopes.
@@ -10848,7 +10849,7 @@ app.post('/ehp/batch/:id/dispatch', authenticateRequest, writeOpLimiter, auditLo
 app.get('/ehp/batch/:id/picklist', authenticateRequest, auditLog('view_ehp_picklist'), (req, res) => {
   try {
     const c = ehpGuard(req, res); if (!c) return;
-    const orders = db.prepare(`SELECT order_number, envelope_qty, recipient_name, recipient_address,
+    const orders = db.prepare(`SELECT order_number, envelope_qty, recipient_name, recipient_address, recipient_address2,
         recipient_city, recipient_state, recipient_postcode, recipient_country, flagged_high_qty
       FROM ehp_order WHERE batch_id=? AND client_id=? ORDER BY order_number`).all(req.params.id, c);
     res.json({ batch_id: req.params.id, orders });
@@ -11125,12 +11126,12 @@ function shopifyUpsertOrder(clientId, o, shopDomain) {
   const id = ehpNewId('ord');
   db.prepare(`INSERT INTO ehp_order
     (id, client_id, shopify_order_id, order_number, placed_at, envelope_qty,
-     recipient_name, recipient_address, recipient_city, recipient_state, recipient_postcode, recipient_country,
+     recipient_name, recipient_address, recipient_address2, recipient_city, recipient_state, recipient_postcode, recipient_country,
      state, flagged_high_qty, shop_domain)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'queued', ?, ?)`)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued', ?, ?)`)
     .run(id, clientId, String(o.id), String(o.name || o.order_number || ''), o.created_at || null, envelopes,
          [sa.first_name, sa.last_name].filter(Boolean).join(' ') || (o.customer ? [o.customer.first_name, o.customer.last_name].filter(Boolean).join(' ') : ''),
-         [sa.address1, sa.address2].filter(Boolean).join(', '), sa.city || '', sa.province_code || sa.province || '',
+         sa.address1 || '', sa.address2 || '', sa.city || '', sa.province_code || sa.province || '',
          sa.zip || '', sa.country_code || 'US', flagged, shopDomain || null);
   // SKUs seen on the order feed the registry
   for (const li of (o.line_items || [])) if (li.sku) ehpEnsureSku(clientId, String(li.sku), { name: li.title, source: 'shopify' });
@@ -11191,19 +11192,24 @@ async function shopifyFulfilBatch(clientId, batchId) {
   const it = shopifyIntegration(clientId);
   if (!it || it.status !== 'connected') return { skipped: 'not_connected', ok: 0, failed: 0 };
   const orders = db.prepare(`SELECT * FROM ehp_order WHERE batch_id=? AND client_id=? AND shopify_fulfilment_id IS NULL`).all(batchId, clientId);
-  let ok = 0, failed = 0; const errors = [];
+  let ok = 0, failed = 0, skipped = 0; const errors = [], skips = [];
   for (const o of orders) {
     try {
       const r = await shopifyFulfilOrder(clientId, o);
-      db.prepare(`UPDATE ehp_order SET shopify_fulfilment_id=?, fulfil_error=NULL WHERE id=?`)
-        .run(r.fulfillment_id || (r.skipped ? 'skipped:' + r.skipped : null), o.id);
-      ok++;
+      if (r.fulfillment_id) {
+        db.prepare(`UPDATE ehp_order SET shopify_fulfilment_id=?, fulfil_error=NULL WHERE id=?`).run(r.fulfillment_id, o.id);
+        ok++;
+      } else {
+        // Not an error, but nothing changed in Shopify — must not be reported as fulfilled.
+        skipped++; skips.push({ order: o.order_number, reason: r.skipped || 'no_fulfillment_id' });
+        db.prepare(`UPDATE ehp_order SET fulfil_error=? WHERE id=?`).run('skipped: ' + (r.skipped || 'no_fulfillment_id'), o.id);
+      }
     } catch (e) {
       failed++; errors.push({ order: o.order_number, error: String(e.message || e) });
       db.prepare(`UPDATE ehp_order SET fulfil_error=? WHERE id=?`).run(String(e.message || e).slice(0, 300), o.id);
     }
   }
-  return { ok, failed, errors: errors.slice(0, 10) };
+  return { ok, failed, skipped, errors: errors.slice(0, 10), skips: skips.slice(0, 10) };
 }
 
 // Retry any order whose fulfilment failed.
@@ -11281,6 +11287,30 @@ app.get('/shopify/diagnose', authenticateRequest, requireRole(['admin']), async 
     ? 'Token is valid but order access is blocked — request Protected Customer Data access for this app in the Partner dashboard.'
     : (!shopOk ? 'Token or connection problem — re-install the app.' : 'Order access looks available.');
   res.json(out);
+});
+
+// ── Why did an order not fulfil? Shows Shopify's fulfilment-order states verbatim. ──
+app.get('/shopify/order-debug', authenticateRequest, requireRole(['admin']), async (req, res) => {
+  try {
+    const clientId = String(req.query.client_id || curClient());
+    const num = String(req.query.order_number || '').trim();
+    const row = num
+      ? db.prepare(`SELECT * FROM ehp_order WHERE client_id=? AND order_number=?`).get(clientId, num)
+      : db.prepare(`SELECT * FROM ehp_order WHERE client_id=? AND state='dispatched' ORDER BY created_at DESC LIMIT 1`).get(clientId);
+    if (!row) return res.status(404).json({ error: 'order_not_found' });
+    const out = { order_number: row.order_number, shopify_order_id: row.shopify_order_id,
+                  state: row.state, shopify_fulfilment_id: row.shopify_fulfilment_id, fulfil_error: row.fulfil_error };
+    try {
+      const fo = await shopifyApi(clientId, `/orders/${row.shopify_order_id}/fulfillment_orders.json`);
+      out.fulfillment_orders = (fo.fulfillment_orders || []).map(x => ({
+        id: x.id, status: x.status, request_status: x.request_status,
+        assigned_location: x.assigned_location_id, line_items: (x.line_items || []).length }));
+      out.open_count = out.fulfillment_orders.filter(x => ['open','in_progress','scheduled'].includes(String(x.status))).length;
+      out.hint = out.open_count ? 'Open fulfilment orders exist — fulfilment should succeed.'
+        : 'No fulfilment orders in an open state. Check the assigned location and whether the order is already fulfilled or cancelled.';
+    } catch (e) { out.fulfillment_orders_error = String(e.message || e); out.body = e.body; }
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
 // ── Status (never returns the token) ──
