@@ -1506,12 +1506,14 @@ app.post('/pulse/chat',
     // The role/facility/week line is tiny and dynamic — sent uncached each time.
 
     // Find where the ops data starts (after the user context lines)
-    const opsDataStartIdx = lines.findIndex(l => l.startsWith('## Operations data'));
+    // The cache split keys off the data heading. Fulfilment clients emit a different one,
+    // and either slice may be empty — the API rejects an empty text block, so guard both.
+    const opsDataStartIdx = lines.findIndex(l => l.startsWith('## Operations data') || l.startsWith('## Fulfilment data'));
     const staticLines  = opsDataStartIdx >= 0 ? lines.slice(opsDataStartIdx) : lines;
     const dynamicLines = opsDataStartIdx >= 0 ? lines.slice(0, opsDataStartIdx) : [];
 
-    const staticBlock  = staticLines.join('\n');
-    const dynamicBlock = dynamicLines.join('\n');
+    const staticBlock  = staticLines.join('\n').trim();
+    const dynamicBlock = dynamicLines.join('\n').trim();
 
     const anthropic = getAnthropic();
     const response = await anthropic.messages.create({
@@ -1519,16 +1521,16 @@ app.post('/pulse/chat',
       max_tokens: 800,
       system: [
         // Static ops data — cached for the session (content identical across turns)
-        {
+        ...(staticBlock ? [{
           type: 'text',
           text: staticBlock,
           cache_control: { type: 'ephemeral' }
-        },
+        }] : []),
         // Dynamic context — small, changes per request, not cached
-        {
+        ...(dynamicBlock ? [{
           type: 'text',
           text: dynamicBlock,
-        }
+        }] : []),
       ],
       messages: messages.map(m => ({ role: m.role, content: m.content })),
     }, {
@@ -7297,20 +7299,8 @@ async function pulseReplyToThread(threadId, contextSnippet, question) {
         }
       }
 
-      // Finance summary (admin context)
-      const finSum = db.prepare(`
-        SELECT
-          (SELECT COUNT(*) FROM fin_invoices WHERE status IN ('draft','sent','overdue')) as outstanding_n,
-          (SELECT COALESCE(SUM(total),0) FROM fin_invoices WHERE status IN ('draft','sent','overdue')) as outstanding_total,
-          (SELECT COALESCE(SUM(total),0) FROM fin_invoices WHERE status='paid' AND week_start >= ?) as revenue_ytd,
-          (SELECT COALESCE(SUM(amount),0) FROM fin_expenses WHERE month_key >= ?) as expenses_ytd
-      `).get(`${new Date().getUTCFullYear()}-01-01`, `${new Date().getUTCFullYear()}-01`);
-      if (finSum) {
-        const net = finSum.revenue_ytd - finSum.expenses_ytd;
-        opsLines.push('## Finance (YTD)');
-        opsLines.push(`Revenue: USD ${finSum.revenue_ytd.toLocaleString()} | Expenses: USD ${finSum.expenses_ytd.toLocaleString()} | Net: USD ${net.toLocaleString()} | Outstanding: ${finSum.outstanding_n} invoices (USD ${finSum.outstanding_total.toLocaleString()})`);
-        opsLines.push('');
-      }
+      // Finance is deliberately NOT in any AI context: it is VelOzity-internal, spans all
+      // clients, and must not reach a client-scoped assistant.
     } catch(dbErr) {
       opsLines.push('(Could not load full ops data: ' + dbErr.message + ')');
     }
