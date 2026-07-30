@@ -11007,6 +11007,12 @@ const SHOPIFY_APP_URL     = (process.env.SHOPIFY_APP_URL || '').replace(/\/+$/, 
 const SHOPIFY_SCOPES = [
   'read_orders',
   'read_products',
+  // Merchant-managed: orders sitting at the merchant's own locations. This is the set that
+  // matters unless/until VelOzity registers as a Shopify fulfillment service.
+  'read_merchant_managed_fulfillment_orders',
+  'write_merchant_managed_fulfillment_orders',
+  // Assigned: only populated if the app IS a registered fulfillment service. Harmless to keep,
+  // and means no scope change is needed if we move to that model later.
   'read_assigned_fulfillment_orders',
   'write_assigned_fulfillment_orders',
   'write_fulfillments',
