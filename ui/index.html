@@ -630,8 +630,95 @@ window.__clerkOnLoad = function() {
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 18L18 6M6 6l12 12" stroke-linecap="round"/></svg>
       Zero
     </button>
+    <button id="wh-btn-zero-uids" onclick="window.openZeroUids&&window.openZeroUids()" style="font-size:11px;font-weight:500;color:#AEAEB2;background:transparent;border:none;cursor:pointer;padding:7px 8px;display:flex;align-items:center;gap:4px;transition:color .15s;" title="Delete all scanned UIDs for a chosen week">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Zero UIDs
+    </button>
   </div>
 </div>
+
+<script>
+// Zero UIDs for an ISO week. Destructive, so: password-gated, preview first,
+// and the deletion only runs after the preview has been seen and confirmed.
+(function(){
+  var BRAND='#990033', MID='#6E6E73', LIGHT='#AEAEB2', RED='#B33F40';
+  function base(){ return (document.querySelector('meta[name="api-base"]')||{}).content||''; }
+  async function tok(){ try { return await window.Clerk.session.getToken(); } catch(e){ return null; } }
+  async function call(body){
+    var t = await tok();
+    var h = { 'Content-Type':'application/json' };
+    if (t) h.Authorization = 'Bearer ' + t;
+    if (window.pinpointClient) h['x-pinpoint-client'] = window.pinpointClient;
+    var r = await fetch(base().replace(/\/+$/,'') + '/records/zero-week', { method:'POST', headers:h, body:JSON.stringify(body) });
+    var d = null; try { d = await r.json(); } catch(e){}
+    if (!r.ok) { var e2 = new Error((d&&(d.error||d.message))||('HTTP '+r.status)); e2.status=r.status; throw e2; }
+    return d;
+  }
+  function isoWeekOf(d){
+    var t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    var dn = t.getUTCDay() || 7; t.setUTCDate(t.getUTCDate() + 4 - dn);
+    var y0 = new Date(Date.UTC(t.getUTCFullYear(),0,1));
+    return { year: t.getUTCFullYear(), week: Math.ceil(((t - y0)/86400000 + 1)/7) };
+  }
+  window.openZeroUids = function(){
+    var cur = (window.state && window.state.weekStart) ? new Date(window.state.weekStart+'T00:00:00Z') : new Date();
+    var iso = isoWeekOf(cur);
+    var old = document.getElementById('zu-modal'); if (old) old.remove();
+    var ov = document.createElement('div');
+    ov.id = 'zu-modal';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:center;justify-content:center;';
+    ov.innerHTML = '<div style="background:#fff;border-radius:16px;padding:28px;width:min(94vw,460px);box-shadow:0 20px 60px rgba(0,0,0,.25);font-family:inherit;">'
+      + '<div style="font-size:15px;font-weight:700;color:#1C1C1E;">Zero UIDs for a week</div>'
+      + '<div style="font-size:11px;color:'+MID+';margin-top:3px;">Permanently deletes every scanned UID record in the selected week for the current client. The plan is not affected.</div>'
+      + '<div style="height:.5px;background:rgba(0,0,0,.08);margin:16px 0;"></div>'
+      + '<div style="display:flex;gap:10px;">'
+      +   '<div style="flex:1;"><label style="display:block;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:'+LIGHT+';margin-bottom:4px;">Year</label>'
+      +     '<input id="zu-year" type="number" value="'+iso.year+'" style="width:100%;border:.5px solid rgba(0,0,0,.15);border-radius:9px;padding:9px 11px;font-size:13px;font-family:inherit;box-sizing:border-box;"></div>'
+      +   '<div style="flex:1;"><label style="display:block;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:'+LIGHT+';margin-bottom:4px;">Week number (1-53)</label>'
+      +     '<input id="zu-week" type="number" min="1" max="53" value="'+iso.week+'" style="width:100%;border:.5px solid rgba(0,0,0,.15);border-radius:9px;padding:9px 11px;font-size:13px;font-family:inherit;box-sizing:border-box;"></div>'
+      + '</div>'
+      + '<div style="margin-top:12px;"><label style="display:block;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:'+LIGHT+';margin-bottom:4px;">Password</label>'
+      +   '<input id="zu-pw" type="password" placeholder="Report password" style="width:100%;border:.5px solid rgba(0,0,0,.15);border-radius:9px;padding:9px 11px;font-size:13px;font-family:inherit;box-sizing:border-box;"></div>'
+      + '<div id="zu-out" style="margin-top:12px;"></div>'
+      + '<div style="display:flex;gap:10px;margin-top:16px;">'
+      +   '<button id="zu-cancel" style="flex:1;background:#F5F5F7;color:'+MID+';border:none;border-radius:10px;padding:11px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">Cancel</button>'
+      +   '<button id="zu-preview" style="flex:2;background:'+BRAND+';color:#fff;border:none;border-radius:10px;padding:11px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">Preview</button>'
+      + '</div></div>';
+    document.body.appendChild(ov);
+    ov.addEventListener('click', function(e){ if (e.target === ov) ov.remove(); });
+    document.getElementById('zu-cancel').onclick = function(){ ov.remove(); };
+
+    document.getElementById('zu-preview').onclick = async function(){
+      var out = document.getElementById('zu-out');
+      var payload = { year:+document.getElementById('zu-year').value,
+                      week:+document.getElementById('zu-week').value,
+                      password:document.getElementById('zu-pw').value };
+      out.innerHTML = '<div style="font-size:12px;color:'+MID+';">Checking…</div>';
+      try {
+        var d = await call(payload);
+        if (!d.records) { out.innerHTML = '<div style="font-size:12px;color:'+MID+';">No UID records found for '+d.week_start+' to '+d.week_end+'.</div>'; return; }
+        out.innerHTML = '<div style="background:rgba(179,63,64,.08);border:.5px solid rgba(179,63,64,.3);border-radius:9px;padding:11px 13px;">'
+          + '<div style="font-size:12px;font-weight:700;color:'+RED+';">'+d.records.toLocaleString()+' UID record(s) will be permanently deleted</div>'
+          + '<div style="font-size:11px;color:'+MID+';margin-top:4px;">Week '+d.week+' of '+d.year+' &middot; '+d.week_start+' to '+d.week_end+' &middot; '+d.distinct_pos+' PO(s) &middot; client '+d.client_id+'</div>'
+          + '<div style="font-size:10px;color:'+LIGHT+';margin-top:6px;">'+(d.by_day||[]).map(function(x){return x.d+': '+x.n.toLocaleString();}).join(' &middot; ')+'</div>'
+          + '</div>'
+          + '<button id="zu-confirm" style="width:100%;margin-top:11px;background:'+RED+';color:#fff;border:none;border-radius:10px;padding:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">Delete '+d.records.toLocaleString()+' records permanently</button>';
+        document.getElementById('zu-confirm').onclick = async function(){
+          this.disabled = true; this.textContent = 'Deleting…';
+          try {
+            var r = await call(Object.assign({}, payload, { confirm:'ZERO' }));
+            out.innerHTML = '<div style="background:rgba(52,199,89,.1);border:.5px solid rgba(52,199,89,.35);border-radius:9px;padding:11px 13px;font-size:12px;color:#1f7a34;">Deleted '+r.deleted.toLocaleString()+' record(s). '+r.remaining_in_week+' remain in week '+r.week+'.</div>';
+            setTimeout(function(){ ov.remove(); location.reload(); }, 1800);
+          } catch(e){ out.innerHTML = '<div style="font-size:12px;color:'+RED+';">'+(e.message||e)+'</div>'; }
+        };
+      } catch(e){
+        out.innerHTML = '<div style="font-size:12px;color:'+RED+';">'
+          + (e.status === 403 ? 'Incorrect password.' : (e.message||e)) + '</div>';
+      }
+    };
+  };
+})();
+</script>
 
 <!-- ── KPI Tiles ── -->
 <div id="wh-kpi-row" style="display:none;">
