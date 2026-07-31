@@ -10688,6 +10688,58 @@ th{font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:#AEAEB2;fon
   } catch (e) { res.status(500).send('Report error: ' + _ncEh(String(e.message || e))); }
 });
 
+// ── Zero UIDs for a week: remove all scan records in an ISO week, for this client ──
+// Destructive and password-gated. Always previews first; only deletes on explicit confirm.
+function isoWeekMonday(year, week) {
+  const simple = new Date(Date.UTC(year, 0, 4));           // Jan 4 is always in ISO week 1
+  const dow = simple.getUTCDay() || 7;
+  const w1 = new Date(simple); w1.setUTCDate(simple.getUTCDate() - dow + 1);
+  const m = new Date(w1); m.setUTCDate(w1.getUTCDate() + (week - 1) * 7);
+  return m;
+}
+app.post('/records/zero-week', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+  auditLog('records_zero_week'), (req, res) => {
+  try {
+    const b = req.body || {};
+    const year = parseInt(b.year, 10), week = parseInt(b.week, 10);
+    if (!Number.isFinite(year) || year < 2020 || year > 2100) return res.status(400).json({ error: 'valid year required' });
+    if (!Number.isFinite(week) || week < 1 || week > 53) return res.status(400).json({ error: 'week must be 1-53' });
+
+    const expected = process.env.COST_REPORT_PASSWORD || 'velozity2026';
+    if (!b.password || b.password !== expected) return res.status(403).json({ error: 'invalid_password' });
+
+    const mon = isoWeekMonday(year, week);
+    const from = mon.toISOString().slice(0, 10);
+    const sun = new Date(mon); sun.setUTCDate(mon.getUTCDate() + 6);
+    const to = sun.toISOString().slice(0, 10);
+    const client = curClient();
+
+    const count = db.prepare(`SELECT COUNT(*) n FROM records
+      WHERE client_id=? AND date_local BETWEEN ? AND ?`).get(client, from, to).n;
+    const byDay = db.prepare(`SELECT date_local d, COUNT(*) n FROM records
+      WHERE client_id=? AND date_local BETWEEN ? AND ? GROUP BY date_local ORDER BY date_local`).all(client, from, to);
+    const pos = db.prepare(`SELECT COUNT(DISTINCT po_number) n FROM records
+      WHERE client_id=? AND date_local BETWEEN ? AND ?`).get(client, from, to).n;
+
+    if (b.confirm !== 'ZERO') {
+      return res.json({ dry_run: true, client_id: client, year, week, week_start: from, week_end: to,
+        records: count, distinct_pos: pos, by_day: byDay,
+        message: count ? 'Send {"confirm":"ZERO"} with the same payload to delete these records.'
+                       : 'No records found for this week — nothing to delete.' });
+    }
+
+    let deleted = 0;
+    db.transaction(() => {
+      deleted = db.prepare(`DELETE FROM records WHERE client_id=? AND date_local BETWEEN ? AND ?`)
+                  .run(client, from, to).changes;
+    })();
+    console.log(`[records:zero-week] ${client} ${year}-W${week} (${from}..${to}) deleted ${deleted} records`);
+    res.json({ deleted, client_id: client, year, week, week_start: from, week_end: to,
+      remaining_in_week: db.prepare(`SELECT COUNT(*) n FROM records
+        WHERE client_id=? AND date_local BETWEEN ? AND ?`).get(client, from, to).n });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Week audit: when did the records for a given date actually arrive? ──
 // There is no created_at on records, but rowid is monotonic, so insertion order is
 // recoverable. Distinct rowid clusters = distinct upload batches.
