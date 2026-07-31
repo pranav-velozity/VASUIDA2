@@ -6509,14 +6509,22 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
       const recvRows = db.prepare(`SELECT SUM(cartons_received) as total FROM receiving WHERE week_start = ?`).get(week_start);
       const cartonsIn = recvRows?.total || 0;
       const cartonDelta = Math.max(0, cartonsOut - cartonsIn);
-      // Standard VAS rates
+      // Rates come from the client's rate card (Finance -> Rates); the historic values are
+      // the fallback. Quantity multipliers below are business rules, not prices.
+      const _c = curClient();
+      const rBase   = rateFor(_c, 'vas_base_processing', 0.21);
+      const rOut    = rateFor(_c, 'vas_outbound', 0.05);
+      const rLabel  = rateFor(_c, 'vas_additional_labelling', 0.01);
+      const rPoly   = rateFor(_c, 'vas_polybagging', 0.05);
+      const rStore  = rateFor(_c, 'vas_storage', 0.01);
+      const rCarton = rateFor(_c, 'carton_replacement', 1.10);
       const lines = [
-        { sort_order:0, description:'VAS Base Processing',         unit_label:'Per Unit',        rate:0.21, quantity:units,              total:Math.round(0.21*units*100)/100,              gst_free:0, is_misc:0 },
-        { sort_order:1, description:'Outbound Activities',         unit_label:'Per Unit',        rate:0.05, quantity:units,              total:Math.round(0.05*units*100)/100,              gst_free:0, is_misc:0 },
-        { sort_order:2, description:'Additional Labelling',        unit_label:'Per Unit',        rate:0.01, quantity:units*3,            total:Math.round(0.01*units*3*100)/100,            gst_free:0, is_misc:0 },
-        { sort_order:3, description:'Polybagging',                 unit_label:'Per Unit',        rate:0.05, quantity:0,                 total:0,                                           gst_free:0, is_misc:0 },
-        { sort_order:4, description:'Storage post-processing',     unit_label:'Per Unit Per Day', rate:0.01, quantity:0,                 total:0,                                           gst_free:0, is_misc:0 },
-        { sort_order:5, description:'Carton Replacement - labour only', unit_label:'Per Carton', rate:1.10, quantity:cartonDelta*2,      total:Math.round(1.10*cartonDelta*2*100)/100,      gst_free:0, is_misc:0 },
+        { sort_order:0, description:'VAS Base Processing',         unit_label:'Per Unit',        rate:rBase,   quantity:units,              total:Math.round(rBase*units*100)/100,              gst_free:0, is_misc:0 },
+        { sort_order:1, description:'Outbound Activities',         unit_label:'Per Unit',        rate:rOut,    quantity:units,              total:Math.round(rOut*units*100)/100,               gst_free:0, is_misc:0 },
+        { sort_order:2, description:'Additional Labelling',        unit_label:'Per Unit',        rate:rLabel,  quantity:units*3,            total:Math.round(rLabel*units*3*100)/100,           gst_free:0, is_misc:0 },
+        { sort_order:3, description:'Polybagging',                 unit_label:'Per Unit',        rate:rPoly,   quantity:0,                 total:0,                                            gst_free:0, is_misc:0 },
+        { sort_order:4, description:'Storage post-processing',     unit_label:'Per Unit Per Day', rate:rStore, quantity:0,                 total:0,                                            gst_free:0, is_misc:0 },
+        { sort_order:5, description:'Carton Replacement - labour only', unit_label:'Per Carton', rate:rCarton, quantity:cartonDelta*2,      total:Math.round(rCarton*cartonDelta*2*100)/100,    gst_free:0, is_misc:0 },
         { sort_order:6, description:'',                            unit_label:'',                rate:0,    quantity:0,                 total:0,                                           gst_free:0, is_misc:1 },
         { sort_order:7, description:'',                            unit_label:'',                rate:0,    quantity:0,                 total:0,                                           gst_free:0, is_misc:1 },
       ];
@@ -6528,6 +6536,7 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
     }
 
     if (type === 'SEA' || type === 'AIR') {
+      const _rCustoms = rateFor(curClient(), 'customs_clearance', 158);
       // Load flow/container data
       const flowRows = db.prepare('SELECT data FROM flow_week WHERE week_start = ?').all(week_start);
       const containers = [];
@@ -6582,9 +6591,9 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
           description: `Customs Clearance - ${c.container_id||'—'}`,
           unit_label: 'Flat Fee per Container',
           container_id: c.container_id || '',
-          rate: 158,
+          rate: _rCustoms,
           quantity: 1,
-          total: 158,
+          total: _rCustoms,
           gst_free: 1,
           is_misc: 0
         }));
@@ -11290,17 +11299,41 @@ CREATE TABLE IF NOT EXISTS client_rate (
   PRIMARY KEY (client_id, service_code)
 );
 `);
-(function seedFulfilmentRates(){
+(function seedRateCards(){
   try {
-    // Seed a rate card for every client with envelope fulfilment enabled.
-    const clients = db.prepare(`SELECT client_id FROM client_capability WHERE capability='envelope_fulfilment' AND enabled=1`).all();
     const ins = db.prepare(`INSERT OR IGNORE INTO client_rate (client_id, service_code, label, unit, rate, currency) VALUES (?,?,?,?,?,?)`);
-    for (const c of clients) {
+
+    // Fulfilment clients (envelope model)
+    for (const c of db.prepare(`SELECT client_id FROM client_capability WHERE capability='envelope_fulfilment' AND enabled=1`).all()) {
       ins.run(c.client_id, 'inbound_pallet', 'Inbound handling', 'pallet', 35.00, 'USD');
       ins.run(c.client_id, 'envelope_dispatched', 'Envelope fulfilment & dispatch', 'envelope', null, 'USD');
     }
+
+    // VAS clients. These were previously hard-coded in the invoice prefill; they are
+    // seeded here at their existing values so behaviour is unchanged, but editable.
+    const VAS_DEFAULTS = [
+      ['vas_base_processing',      'VAS Base Processing',              'unit',          0.21],
+      ['vas_outbound',             'Outbound Activities',              'unit',          0.05],
+      ['vas_additional_labelling', 'Additional Labelling',             'unit',          0.01],
+      ['vas_polybagging',          'Polybagging',                      'unit',          0.05],
+      ['vas_storage',              'Storage post-processing',          'unit per day',  0.01],
+      ['carton_replacement',       'Carton Replacement \u2013 labour only', 'carton',   1.10],
+      ['customs_clearance',        'Customs Clearance',                'container',   158.00],
+    ];
+    for (const c of db.prepare(`SELECT client_id FROM client_capability WHERE capability='vas_ops' AND enabled=1`).all()) {
+      for (const [code, label, unit, rate] of VAS_DEFAULTS) ins.run(c.client_id, code, label, unit, rate, 'USD');
+    }
   } catch (e) { console.error('[rates:seed]', e.message); }
 })();
+
+// Configured rate for a service, falling back to the historic literal so a missing or
+// blank rate can never silently zero an invoice line.
+function rateFor(clientId, code, fallback) {
+  try {
+    const r = db.prepare(`SELECT rate FROM client_rate WHERE client_id=? AND service_code=? AND active=1`).get(clientId, code);
+    return (r && r.rate != null) ? Number(r.rate) : fallback;
+  } catch (e) { return fallback; }
+}
 
 app.get('/finance/rates', authenticateRequest, requireRole(['admin']), (req, res) => {
   try {
