@@ -304,7 +304,13 @@ window._finTab=function(tab){
 
 // ── Rates: per-client service rates that drive billing ──
 async function renderRatesTab(){
-  const host=el('fin-tab-rates'); if(!host) return;
+  const host=el('fin-tab-rates');
+  if(!host){
+    // Panel markup predates this module version — almost always a cached script.
+    console.warn('[finance] Rates container missing; hard-refresh to load the current module.');
+    alert('The Finance panel is running an older cached version. Please hard-refresh (Ctrl+Shift+R) and try again.');
+    return;
+  }
   host.innerHTML='<div style="padding:24px;color:'+MID+';font-size:12px;">Loading rates…</div>';
   try{
     const d=await api('/finance/rates');
@@ -335,7 +341,7 @@ async function renderRatesTab(){
       const inp=host.querySelector('[data-rate="'+code+'"]');
       b.disabled=true; b.textContent='Saving…';
       try{
-        await api('/finance/rates',{method:'POST',body:{service_code:code,rate:inp.value===''?null:Number(inp.value)}});
+        await api('/finance/rates',{method:'POST',body:JSON.stringify({service_code:code,rate:inp.value===''?null:Number(inp.value)})});
         el('fin-rates-msg').innerHTML='<div style="background:rgba(52,199,89,.1);border:0.5px solid rgba(52,199,89,.35);color:#1f7a34;border-radius:8px;padding:8px 10px;font-size:11px;margin-bottom:10px;">Rate saved for '+esc(code)+'.</div>';
       }catch(e){
         el('fin-rates-msg').innerHTML='<div style="background:rgba(179,63,64,.08);border:0.5px solid rgba(179,63,64,.3);color:#B33F40;border-radius:8px;padding:8px 10px;font-size:11px;margin-bottom:10px;">'+esc(e.message||String(e))+'</div>';
