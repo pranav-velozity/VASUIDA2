@@ -250,6 +250,9 @@ function injectSkeleton(host){
         <button class="fin-nav-item" id="fin-nav-expenses" onclick="window._finTab('expenses')">
           <span class="nav-icon">${icons.expenses}</span>Expenses
         </button>
+        <button class="fin-nav-item" id="fin-nav-rates" onclick="window._finTab('rates')">
+          <span class="nav-icon">${icons.rates || icons.expenses}</span>Rates
+        </button>
       </div>
 
       <div style="margin:8px 16px;height:1px;background:rgba(255,255,255,0.07);"></div>
@@ -275,6 +278,7 @@ function injectSkeleton(host){
       <div id="fin-tab-invoices"></div>
       <div id="fin-tab-pl" style="display:none;"></div>
       <div id="fin-tab-expenses" style="display:none;"></div>
+      <div id="fin-tab-rates" style="display:none;"></div>
     </div>
   </div>
   <div class="fin-panel" id="fin-panel"></div>
@@ -284,7 +288,7 @@ function injectSkeleton(host){
 
 window._finTab=function(tab){
   _finState.tab=tab;
-  ['invoices','pl','expenses'].forEach(t=>{
+  ['invoices','pl','expenses','rates'].forEach(t=>{
     const btn=el('fin-nav-'+t),content=el('fin-tab-'+t);
     if(btn)btn.classList.toggle('active',t===tab);
     if(content)content.style.display=t===tab?'':'none';
@@ -295,7 +299,53 @@ window._finTab=function(tab){
   if(tab==='invoices')renderInvoicesTab();
   if(tab==='pl')renderPLTab();
   if(tab==='expenses')renderExpensesTab();
+  if(tab==='rates')renderRatesTab();
 };
+
+// ── Rates: per-client service rates that drive billing ──
+async function renderRatesTab(){
+  const host=el('fin-tab-rates'); if(!host) return;
+  host.innerHTML='<div style="padding:24px;color:'+MID+';font-size:12px;">Loading rates…</div>';
+  try{
+    const d=await api('/finance/rates');
+    const rows=d.rates||[];
+    host.innerHTML=
+      '<div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:18px 20px;">'
+      +'<div style="font-size:13px;font-weight:700;color:'+DARK+';">Service rates &middot; '+esc(d.client_id)+'</div>'
+      +'<div style="font-size:10px;color:'+LIGHT+';margin-top:2px;margin-bottom:14px;">These rates price the weekly invoice. A blank rate means the charge cannot be calculated and will show as unset.</div>'
+      +'<div id="fin-rates-msg"></div>'
+      +(rows.length
+        ? '<table style="width:100%;border-collapse:collapse;">'
+          +'<thead><tr>'
+          +['Service','Unit','Rate','Currency',''].map(h=>'<th style="text-align:left;padding:7px 8px;border-bottom:0.5px solid rgba(0,0,0,0.08);font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:'+LIGHT+';">'+h+'</th>').join('')
+          +'</tr></thead><tbody>'
+          +rows.map(r=>'<tr>'
+            +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);font-size:12px;font-weight:600;">'+esc(r.label||r.service_code)
+              +'<div style="font-size:9px;color:'+LIGHT+';font-weight:400;">'+esc(r.service_code)+'</div></td>'
+            +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);font-size:11px;color:'+MID+';">per '+esc(r.unit)+'</td>'
+            +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);"><input data-rate="'+esc(r.service_code)+'" type="number" step="0.01" min="0" value="'+(r.rate==null?'':r.rate)+'" placeholder="not set" style="width:110px;border:0.5px solid rgba(0,0,0,0.15);border-radius:7px;padding:6px 8px;font-size:12px;font-family:inherit;text-align:right;box-sizing:border-box;"></td>'
+            +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);font-size:11px;color:'+MID+';">'+esc(r.currency||'USD')+'</td>'
+            +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);text-align:right;"><button data-save-rate="'+esc(r.service_code)+'" style="background:'+BRAND+';color:#fff;border:none;border-radius:7px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;">Save</button></td>'
+            +'</tr>').join('')
+          +'</tbody></table>'
+        : '<div style="color:'+LIGHT+';font-size:12px;text-align:center;padding:22px;">No service rates for this client. Rates appear automatically for clients with fulfilment enabled.</div>')
+      +'</div>';
+    host.querySelectorAll('[data-save-rate]').forEach(b=>b.addEventListener('click',async()=>{
+      const code=b.getAttribute('data-save-rate');
+      const inp=host.querySelector('[data-rate="'+code+'"]');
+      b.disabled=true; b.textContent='Saving…';
+      try{
+        await api('/finance/rates',{method:'POST',body:{service_code:code,rate:inp.value===''?null:Number(inp.value)}});
+        el('fin-rates-msg').innerHTML='<div style="background:rgba(52,199,89,.1);border:0.5px solid rgba(52,199,89,.35);color:#1f7a34;border-radius:8px;padding:8px 10px;font-size:11px;margin-bottom:10px;">Rate saved for '+esc(code)+'.</div>';
+      }catch(e){
+        el('fin-rates-msg').innerHTML='<div style="background:rgba(179,63,64,.08);border:0.5px solid rgba(179,63,64,.3);color:#B33F40;border-radius:8px;padding:8px 10px;font-size:11px;margin-bottom:10px;">'+esc(e.message||String(e))+'</div>';
+      }
+      b.disabled=false; b.textContent='Save';
+    }));
+  }catch(e){
+    host.innerHTML='<div style="padding:22px;color:#B33F40;font-size:12px;">Could not load rates: '+esc(e.message||String(e))+'</div>';
+  }
+}
 window._finSelectWeek=function(v){_finState.week=safeDate(v);renderInvoiceGrid();};
 window._finCurrencyChange=function(v){
   _finState.currency=v;renderKPIs();
@@ -406,7 +456,7 @@ window._finCreateInvoice=async function(type,weekStart){
   openPanel(`<div style="padding:20px;color:${LIGHT};font-size:12px;">Loading ${type} data…</div>`);
   try{
     const pf=await api(`/finance/prefill/${type}/${ws}`);
-    renderInvoiceEditor({id:null,type,week_start:ws,invoice_date:isoToday(),due_date:addDays(isoToday(),type==='VAS'?30:7),status:'draft',notes:pf.notes||'',subtotal:pf.subtotal||0,gst:pf.gst||0,customs:pf.customs||0,misc_total:0,total:pf.total||0,lines:pf.lines||[]});
+    renderInvoiceEditor({id:null,type,week_start:ws,invoice_date:isoToday(),due_date:addDays(isoToday(),type==='VAS'?30:7),status:'draft',notes:'',subtotal:pf.subtotal||0,gst:pf.gst||0,customs:pf.customs||0,misc_total:0,total:pf.total||0,lines:pf.lines||[]});
   }catch(e){openPanel(`<div style="padding:20px;color:${BRAND};">Error: ${esc(e.message)}</div>`);}
 };
 
@@ -444,7 +494,7 @@ function renderInvoiceEditor(inv){
 
   openPanel(`
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-      <div><div style="font-size:15px;font-weight:700;color:${DARK};">${typeIcon(type)} ${type==='AIR'?'Door-to-Door with Air Freight':type==='SEA'?'Door-to-Door with Sea Freight':'VAS Invoice'}</div><div style="font-size:11px;color:${LIGHT};">${weekLabel(inv.week_start)}</div></div>
+      <div><div style="font-size:15px;font-weight:700;color:${DARK};">${typeIcon(type)} ${type} Invoice</div><div style="font-size:11px;color:${LIGHT};">${weekLabel(inv.week_start)}</div></div>
       <button onclick="window._finClosePanel()" style="width:28px;height:28px;border-radius:8px;border:none;background:${BG};color:${MID};font-size:14px;cursor:pointer;">✕</button>
     </div>
     <div style="display:grid;grid-template-columns:1fr auto;gap:10px;margin-bottom:14px;">
@@ -677,7 +727,7 @@ async function renderPLTab(){
           <!-- ── Unit Economics: 4-channel cards in one row ── -->
           <div style="background:#fff;border-radius:14px;padding:18px 20px;margin-bottom:18px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 1px 4px rgba(0,0,0,0.04);">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.02em;">Unit Economics <span style="font-size:9px;font-weight:500;color:#AEAEB2;">· D2D = fully landed (door-to-door): inland China, customs both ends, last-mile (air also incl. netting/palletisation)</span></div>
+              <div style="font-size:13px;font-weight:700;color:#1C1C1E;letter-spacing:-0.02em;">Unit Economics <span style="font-size:9px;font-weight:500;color:#AEAEB2;">· D2D = door to door: inland China, customs both ends, last-mile (air also incl. netting/palletisation)</span></div>
               <div style="font-size:10px;color:#8e8e93;">Revenue · Cost · Margin per unit processed</div>
             </div>
             <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;" id="fin-ue-strip">
@@ -1253,7 +1303,6 @@ async function renderExpensesTab(){
         <option value="">All periods</option>
         ${(()=>{const opts=[];const now=new Date();for(let i=0;i<12;i++){const d=new Date(now.getUTCFullYear(),now.getUTCMonth()-i,1);const mk=d.toISOString().slice(0,7);const label=d.toLocaleDateString('en-AU',{month:'short',year:'numeric'});opts.push(`<option value="${mk}">${label}</option>`);}return opts.join('');})()}
       </select>
-      <button class="fin-btn fin-btn-ghost" onclick="window._finOpenDefaults()">⚙ Defaults</button>
       <button class="fin-btn fin-btn-primary" onclick="window._finAddExpense()">+ Add Expense</button>
     </div>
   </div>
@@ -1356,8 +1405,8 @@ function renderExpTable(exps){
 
 // Display-only label map. Data/category keys are unchanged; this only affects what users see.
 function catLabel(cat){
-  if(cat==='Sea Freight Cost')return 'Fully Landed with Sea Freight';
-  if(cat==='Air Freight Cost')return 'Fully Landed with Air Freight';
+  if(cat==='Sea Freight Cost')return 'Door to Door via Sea';
+  if(cat==='Air Freight Cost')return 'Door to Door via Air';
   return cat;
 }
 function catColor(cat,alpha){
@@ -1437,77 +1486,6 @@ window._finDeleteExpense=async function(id){
   if(!confirm('Delete this expense and any recurring copies?'))return;
   try{await api(`/finance/expenses/${id}`,{method:'DELETE'});window._finClosePanel();if(_finState.tab==='expenses')renderExpensesTab();if(_finState.tab==='pl')renderPLTab();renderKPIs();}
   catch(e){alert('Delete failed: '+e.message);}
-};
-
-// ── Invoice Defaults (password-gated editor under Expenses) ──
-window._finOpenDefaults=async function(){
-  const pw=prompt('Enter the Defaults password to edit invoice defaults:');
-  if(pw===null)return; // cancelled
-  let token;
-  try{
-    const r=await api('/finance/defaults/auth',{method:'POST',body:JSON.stringify({password:pw})});
-    token=r.token;
-  }catch(e){ alert('Incorrect password.'); return; }
-  let cfg;
-  try{ cfg=await api('/finance/defaults'); }
-  catch(e){ openPanel(`<div style="padding:20px;color:${BRAND};">Error loading defaults: ${esc(e.message)}</div>`); return; }
-  renderDefaultsEditor(cfg,token);
-};
-
-function renderDefaultsEditor(cfg,token){
-  const v=cfg.vas||{},s=cfg.sea||{},a=cfg.air||{};
-  const f=(label,path,val,step='0.01')=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;">
-    <span style="font-size:12px;color:${DARK};">${label}</span>
-    <input class="fin-input" style="width:120px;text-align:right;flex:none;" type="number" step="${step}" data-def="${path}" value="${val}"/>
-  </div>`;
-  const hdr=(t)=>`<div style="font-size:10px;font-weight:700;color:${LIGHT};text-transform:uppercase;letter-spacing:0.06em;margin:14px 0 8px;">${t}</div>`;
-  openPanel(`
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-      <div style="font-size:15px;font-weight:700;color:${DARK};">Invoice Defaults</div>
-      <button onclick="window._finClosePanel()" style="width:28px;height:28px;border-radius:8px;border:none;background:${BG};color:${MID};font-size:14px;cursor:pointer;">✕</button>
-    </div>
-    <div style="font-size:11px;color:${MID};margin-bottom:8px;">Values that prefill new invoices. Saved immediately and applied to the next invoice you create. All amounts USD.</div>
-    ${hdr('VAS — Rates')}
-    ${f('Base Processing / unit','vas.base_processing',v.base_processing)}
-    ${f('Outbound Activities / unit','vas.outbound',v.outbound)}
-    ${f('Additional Labelling / unit','vas.labelling',v.labelling)}
-    ${f('Polybagging / unit','vas.polybagging',v.polybagging)}
-    ${f('Storage post-processing / unit/day','vas.storage',v.storage)}
-    ${f('Carton Replacement / carton','vas.carton_replacement',v.carton_replacement)}
-    ${hdr('VAS — Multipliers')}
-    ${f('Labelling multiplier (× units)','vas.labelling_multiplier',v.labelling_multiplier,'1')}
-    ${f('Carton Replacement multiplier (× carton delta)','vas.carton_multiplier',v.carton_multiplier,'1')}
-    ${hdr('Sea')}
-    ${f('Freight rate / container (default)','sea.freight_rate',s.freight_rate,'1')}
-    ${f('Freight rate / 20ft container','sea.freight_rate_20ft',s.freight_rate_20ft,'1')}
-    ${f('Customs clearance / container','sea.customs_clearance',s.customs_clearance,'1')}
-    ${f('Safety net / container','sea.safety_net',s.safety_net,'1')}
-    ${hdr('Air')}
-    ${f('Customs processing (flat fee)','air.customs_processing',a.customs_processing,'1')}
-    ${hdr('Shared')}
-    ${f('GST %','gst_pct',cfg.gst_pct,'0.1')}
-    <div style="display:flex;gap:8px;margin-top:20px;">
-      <button class="fin-btn fin-btn-primary" style="flex:1;" onclick="window._finSaveDefaults('${token}')">Save defaults</button>
-      <button class="fin-btn fin-btn-ghost" onclick="window._finClosePanel()">Cancel</button>
-    </div>
-    <div style="font-size:10px;color:${LIGHT};margin-top:10px;">Note: the 20ft rate is stored for reference — sea freight defaults to the universal rate and you apply 20ft manually on the line.</div>
-  `);
-}
-
-window._finSaveDefaults=async function(token){
-  const config={vas:{},sea:{},air:{}};
-  document.querySelectorAll('[data-def]').forEach(inp=>{
-    const path=inp.getAttribute('data-def');
-    const val=parseFloat(inp.value);
-    const num=isNaN(val)?0:val;
-    if(path.indexOf('.')>-1){const parts=path.split('.');config[parts[0]][parts[1]]=num;}
-    else config[path]=num;
-  });
-  try{
-    await api('/finance/defaults',{method:'PUT',body:JSON.stringify({token,config})});
-    window._finClosePanel();
-    alert('Defaults saved. They apply to the next invoice you create.');
-  }catch(e){ alert('Save failed: '+(e.message||e)); }
 };
 
 window.showFinancePage=async function(){
