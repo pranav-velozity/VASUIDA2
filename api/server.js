@@ -10688,6 +10688,44 @@ th{font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:#AEAEB2;fon
   } catch (e) { res.status(500).send('Report error: ' + _ncEh(String(e.message || e))); }
 });
 
+// ── Week audit: when did the records for a given date actually arrive? ──
+// There is no created_at on records, but rowid is monotonic, so insertion order is
+// recoverable. Distinct rowid clusters = distinct upload batches.
+app.get('/records/week-audit', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const d = String(req.query.date || '').trim();
+    if (!d) return res.status(400).json({ error: 'date required (YYYY-MM-DD)' });
+    const rows = db.prepare(`SELECT rowid, completed_at, sync_state, status FROM records
+                             WHERE date_local=? ORDER BY rowid`).all(d);
+    if (!rows.length) return res.json({ date: d, total: 0 });
+
+    // Group consecutive rowids into batches; a large gap implies a separate upload.
+    const GAP = 500;
+    const batches = [];
+    let cur = { from: rows[0].rowid, to: rows[0].rowid, n: 1,
+                completed_at_min: rows[0].completed_at, completed_at_max: rows[0].completed_at };
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (r.rowid - cur.to > GAP) { batches.push(cur); cur = { from: r.rowid, to: r.rowid, n: 0,
+        completed_at_min: r.completed_at, completed_at_max: r.completed_at }; }
+      cur.to = r.rowid; cur.n++;
+      if (r.completed_at) {
+        if (!cur.completed_at_min || r.completed_at < cur.completed_at_min) cur.completed_at_min = r.completed_at;
+        if (!cur.completed_at_max || r.completed_at > cur.completed_at_max) cur.completed_at_max = r.completed_at;
+      }
+    }
+    batches.push(cur);
+
+    const maxRowid = db.prepare('SELECT MAX(rowid) m FROM records').get().m;
+    res.json({
+      date: d, total: rows.length, max_rowid_in_table: maxRowid,
+      batches: batches.map(b => ({ ...b,
+        share_of_table: +(b.to / maxRowid * 100).toFixed(1) + '% through the table' })),
+      note: 'Separate rowid clusters indicate separate upload batches. Low rowids were inserted long ago; rowids close to max were inserted recently.',
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Records integrity: is the de-duplication constraint actually in place? ──
 // The unique index is what stops a re-uploaded UID file inserting duplicates. If the
 // index is missing, every row inserts as new and applied counts inflate silently.
