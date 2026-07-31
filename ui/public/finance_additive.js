@@ -302,56 +302,68 @@ window._finTab=function(tab){
   if(tab==='rates')renderRatesTab();
 };
 
-// ── Rates: per-client service rates that drive billing ──
+// ── Rates: the client's invoice line template — rate, quantity source and multiplier ──
+const QTY_LABEL={applied_units:'Applied units',carton_delta:'Carton delta',pallets_received:'Pallets received',envelopes_dispatched:'Envelopes dispatched',manual:'Manual entry'};
 async function renderRatesTab(){
   const host=el('fin-tab-rates');
   if(!host){
-    // Panel markup predates this module version — almost always a cached script.
     console.warn('[finance] Rates container missing; hard-refresh to load the current module.');
     alert('The Finance panel is running an older cached version. Please hard-refresh (Ctrl+Shift+R) and try again.');
     return;
   }
-  host.innerHTML='<div style="padding:24px;color:'+MID+';font-size:12px;">Loading rates…</div>';
+  host.innerHTML='<div style="padding:24px;color:'+MID+';font-size:12px;">Loading rate card…</div>';
   try{
     const d=await api('/finance/rates');
-    const rows=d.rates||[];
+    const rows=d.rates||[], sources=d.qty_sources||Object.keys(QTY_LABEL);
+    const groups={};
+    rows.forEach(r=>{(groups[r.invoice_type||'VAS']=groups[r.invoice_type||'VAS']||[]).push(r);});
+    const section=(type,list)=>
+      '<div style="margin-top:18px;">'
+      +'<div style="font-size:11px;font-weight:700;color:'+DARK+';text-transform:uppercase;letter-spacing:.06em;">'+esc(type)+' invoice lines</div>'
+      +'<div style="font-size:10px;color:'+LIGHT+';margin-bottom:8px;">Each line bills its quantity source × multiplier × rate.</div>'
+      +'<table style="width:100%;border-collapse:collapse;">'
+      +'<thead><tr>'+['Line','Rate','Quantity from','×','Unit'].map(h=>'<th style="text-align:left;padding:6px 8px;border-bottom:0.5px solid rgba(0,0,0,0.08);font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:'+LIGHT+';">'+h+'</th>').join('')+'<th></th></tr></thead><tbody>'
+      +list.map(r=>'<tr>'
+        +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);font-size:12px;font-weight:600;">'+esc(r.label||r.service_code)
+          +'<div style="font-size:9px;color:'+LIGHT+';font-weight:400;">'+esc(r.service_code)+'</div></td>'
+        +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);"><input data-f="rate" data-code="'+esc(r.service_code)+'" type="number" step="0.01" min="0" value="'+(r.rate==null?'':r.rate)+'" placeholder="not set" style="width:96px;border:0.5px solid rgba(0,0,0,0.15);border-radius:7px;padding:6px 8px;font-size:12px;font-family:inherit;text-align:right;box-sizing:border-box;"></td>'
+        +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);"><select data-f="qty_source" data-code="'+esc(r.service_code)+'" style="border:0.5px solid rgba(0,0,0,0.15);border-radius:7px;padding:6px 8px;font-size:11px;font-family:inherit;background:#fff;">'
+          +sources.map(sv=>'<option value="'+esc(sv)+'"'+((r.qty_source||'manual')===sv?' selected':'')+'>'+esc(QTY_LABEL[sv]||sv)+'</option>').join('')+'</select></td>'
+        +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);"><input data-f="qty_multiplier" data-code="'+esc(r.service_code)+'" type="number" step="0.5" min="0" value="'+(r.qty_multiplier==null?1:r.qty_multiplier)+'" style="width:62px;border:0.5px solid rgba(0,0,0,0.15);border-radius:7px;padding:6px 8px;font-size:12px;font-family:inherit;text-align:right;box-sizing:border-box;"></td>'
+        +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);font-size:11px;color:'+MID+';">per '+esc(r.unit)+'</td>'
+        +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);text-align:right;"><button data-save-rate="'+esc(r.service_code)+'" style="background:'+BRAND+';color:#fff;border:none;border-radius:7px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;">Save</button></td>'
+        +'</tr>').join('')
+      +'</tbody></table></div>';
     host.innerHTML=
       '<div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:18px 20px;">'
-      +'<div style="font-size:13px;font-weight:700;color:'+DARK+';">Service rates &middot; '+esc(d.client_id)+'</div>'
-      +'<div style="font-size:10px;color:'+LIGHT+';margin-top:2px;margin-bottom:14px;">These rates price the weekly invoice. A blank rate means the charge cannot be calculated and will show as unset.</div>'
-      +'<div id="fin-rates-msg"></div>'
-      +(rows.length
-        ? '<table style="width:100%;border-collapse:collapse;">'
-          +'<thead><tr>'
-          +['Service','Unit','Rate','Currency',''].map(h=>'<th style="text-align:left;padding:7px 8px;border-bottom:0.5px solid rgba(0,0,0,0.08);font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:'+LIGHT+';">'+h+'</th>').join('')
-          +'</tr></thead><tbody>'
-          +rows.map(r=>'<tr>'
-            +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);font-size:12px;font-weight:600;">'+esc(r.label||r.service_code)
-              +'<div style="font-size:9px;color:'+LIGHT+';font-weight:400;">'+esc(r.service_code)+'</div></td>'
-            +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);font-size:11px;color:'+MID+';">per '+esc(r.unit)+'</td>'
-            +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);"><input data-rate="'+esc(r.service_code)+'" type="number" step="0.01" min="0" value="'+(r.rate==null?'':r.rate)+'" placeholder="not set" style="width:110px;border:0.5px solid rgba(0,0,0,0.15);border-radius:7px;padding:6px 8px;font-size:12px;font-family:inherit;text-align:right;box-sizing:border-box;"></td>'
-            +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);font-size:11px;color:'+MID+';">'+esc(r.currency||'USD')+'</td>'
-            +'<td style="padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);text-align:right;"><button data-save-rate="'+esc(r.service_code)+'" style="background:'+BRAND+';color:#fff;border:none;border-radius:7px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;">Save</button></td>'
-            +'</tr>').join('')
-          +'</tbody></table>'
-        : '<div style="color:'+LIGHT+';font-size:12px;text-align:center;padding:22px;">No service rates for this client. Rates appear automatically for clients with fulfilment enabled.</div>')
+      +'<div style="font-size:13px;font-weight:700;color:'+DARK+';">Rate card &middot; '+esc(d.client_id)+'<span style="font-weight:400;color:'+LIGHT+';font-size:11px;"> &middot; invoice code '+esc(d.invoice_code||'—')+'</span></div>'
+      +'<div style="font-size:10px;color:'+LIGHT+';margin-top:2px;">This is the invoice template for this client. Creating an invoice fills these lines with the week\'s actual quantities.</div>'
+      +'<div id="fin-rates-msg" style="margin-top:10px;"></div>'
+      +(rows.length?Object.keys(groups).sort().map(t=>section(t,groups[t])).join('')
+        :'<div style="color:'+LIGHT+';font-size:12px;text-align:center;padding:22px;">No rate card for this client yet.</div>')
       +'</div>';
     host.querySelectorAll('[data-save-rate]').forEach(b=>b.addEventListener('click',async()=>{
       const code=b.getAttribute('data-save-rate');
-      const inp=host.querySelector('[data-rate="'+code+'"]');
+      const g=f=>host.querySelector('[data-f="'+f+'"][data-code="'+code+'"]');
       b.disabled=true; b.textContent='Saving…';
       try{
-        await api('/finance/rates',{method:'POST',body:JSON.stringify({service_code:code,rate:inp.value===''?null:Number(inp.value)})});
-        el('fin-rates-msg').innerHTML='<div style="background:rgba(52,199,89,.1);border:0.5px solid rgba(52,199,89,.35);color:#1f7a34;border-radius:8px;padding:8px 10px;font-size:11px;margin-bottom:10px;">Rate saved for '+esc(code)+'.</div>';
+        await api('/finance/rates',{method:'POST',body:JSON.stringify({
+          service_code:code,
+          rate:g('rate').value===''?null:Number(g('rate').value),
+          qty_source:g('qty_source').value,
+          qty_multiplier:Number(g('qty_multiplier').value)
+        })});
+        el('fin-rates-msg').innerHTML='<div style="background:rgba(52,199,89,.1);border:0.5px solid rgba(52,199,89,.35);color:#1f7a34;border-radius:8px;padding:8px 10px;font-size:11px;">Saved '+esc(code)+'.</div>';
       }catch(e){
-        el('fin-rates-msg').innerHTML='<div style="background:rgba(179,63,64,.08);border:0.5px solid rgba(179,63,64,.3);color:#B33F40;border-radius:8px;padding:8px 10px;font-size:11px;margin-bottom:10px;">'+esc(e.message||String(e))+'</div>';
+        el('fin-rates-msg').innerHTML='<div style="background:rgba(179,63,64,.08);border:0.5px solid rgba(179,63,64,.3);color:#B33F40;border-radius:8px;padding:8px 10px;font-size:11px;">'+esc(e.message||String(e))+'</div>';
       }
       b.disabled=false; b.textContent='Save';
     }));
   }catch(e){
-    host.innerHTML='<div style="padding:22px;color:#B33F40;font-size:12px;">Could not load rates: '+esc(e.message||String(e))+'</div>';
+    host.innerHTML='<div style="padding:22px;color:#B33F40;font-size:12px;">Could not load rate card: '+esc(e.message||String(e))+'</div>';
   }
 }
+
 window._finSelectWeek=function(v){_finState.week=safeDate(v);renderInvoiceGrid();};
 window._finCurrencyChange=function(v){
   _finState.currency=v;renderKPIs();
