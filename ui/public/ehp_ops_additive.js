@@ -11,6 +11,7 @@
   const GREEN = '#34C759', AMBER = '#FFD014', RED = '#B33F40';
   const AMBER_TXT = '#8A6D00';   // #FFD014 is too light for text on white
   let _enabled = false, _tab = 'queue', _cache = {};
+  let _capClient = null;                         // client the capability answer applies to
 
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
   const el = id => document.getElementById(id);
@@ -84,6 +85,12 @@
 
   // ── nav visibility ──
   async function refreshEnabled() {
+    const activeClient = window.pinpointClient || 'unknown';
+    if (_capClient === activeClient) {           // already known — don't re-probe
+      const sub0 = el('nav-vas-fulfilment');
+      if (sub0) sub0.style.display = _enabled ? '' : 'none';
+      return;
+    }
     try {
       await req('/ehp/queue');           // 409 when the active client lacks the capability
       _enabled = true;
@@ -92,6 +99,7 @@
       if (e.status === 409 || e.status === 403) _enabled = false;
       else return;                       // transient — leave the nav as it is and retry
     }
+    _capClient = activeClient;
     const sub = el('nav-vas-fulfilment');
     if (sub) sub.style.display = _enabled ? '' : 'none';
     const legacy = el('nav-ehp');                      // pre-restructure nav item, if still present

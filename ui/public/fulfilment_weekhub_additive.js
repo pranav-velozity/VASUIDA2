@@ -14,6 +14,8 @@
   // paint, instead of flashing while the capability check round-trips.
   let _on = (() => { try { return localStorage.getItem(lsKey()) === '1'; } catch (e) { return false; } })();
   let _busy = false, _lastWeek = '', _conn = null;
+  // Once the answer is definitive for a client, stop re-asking every few seconds.
+  let _capClient = null;
 
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
   const el = id => document.getElementById(id);
@@ -499,6 +501,14 @@
   }
 
   async function check() {
+    const activeClient = window.pinpointClient || 'unknown';
+    if (_capClient === activeClient) {           // already known for this client
+      if (!_on) { toggleIconicSections(false); const h0 = el('fwh'); if (h0) h0.remove(); return; }
+      if (!onWeekHub()) { const h1 = el('fwh'); if (h1) h1.style.display = 'none'; return; }
+      const h2 = el('fwh'); if (h2) h2.style.display = '';
+      toggleIconicSections(true);
+      return render(false);
+    }
     // Capability-driven, and it must FAIL CLOSED. A cold load returns 401 before the Clerk
     // token is ready; treating that as "enabled" would hide the ICONIC layout and leave a
     // blank page until the user happened to navigate away and back.
@@ -511,6 +521,7 @@
       else return;                                      // transient — change nothing, retry later
     }
     _on = enabled;
+    _capClient = activeClient;                   // definitive for this client
     try { localStorage.setItem(lsKey(), enabled ? '1' : '0'); } catch (e) {}
     const host = el('fwh');
     if (!_on) { if (host) host.remove(); toggleIconicSections(false); return; }
