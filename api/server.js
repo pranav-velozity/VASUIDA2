@@ -6536,7 +6536,17 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
     }
 
     if (type === 'SEA' || type === 'AIR') {
-      const _rCustoms = rateFor(curClient(), 'customs_clearance', 158);
+      const _c2 = curClient();
+      const _rCustoms = rateFor(_c2, 'customs_clearance', 158);
+      // Container rates by size. Air has no standard container rate, so it stays user-entered.
+      const _r40 = rateFor(_c2, 'sea_container_40ft', 8100);
+      const _r20 = rateFor(_c2, 'sea_container_20ft', 5500);
+      const containerRate = (c) => {
+        if (type !== 'SEA') return 0;
+        const size = parseInt(String(c.size_ft || '').replace(/\D/g, ''), 10);
+        if (size === 20) return _r20;
+        return _r40;                       // 40ft is the default where size is unstated
+      };
       // Load flow/container data
       const flowRows = db.prepare('SELECT data FROM flow_week WHERE week_start = ?').all(week_start);
       const containers = [];
@@ -6579,9 +6589,9 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
           container_type: c.size_ft ? `${c.size_ft}' HC` : '40\' HC',
           vessel: c.vessel || '',
           zendesks: c.lane_keys ? c.lane_keys.map(k=>k.split('||')[1]).filter(Boolean) : [],
-          rate: 0, // User enters rate per container
+          rate: containerRate(c),        // from the rate card, by container size
           quantity: 1,
-          total: 0,
+          total: containerRate(c),       // qty 1, so total tracks the rate
           gst_free: 0,
           is_misc: 0
         }));
@@ -11319,6 +11329,8 @@ CREATE TABLE IF NOT EXISTS client_rate (
       ['vas_storage',              'Storage post-processing',          'unit per day',  0.01],
       ['carton_replacement',       'Carton Replacement \u2013 labour only', 'carton',   1.10],
       ['customs_clearance',        'Customs Clearance',                'container',   158.00],
+      ['sea_container_40ft',       'Sea Container \u2014 40ft',             'container',  8100.00],
+      ['sea_container_20ft',       'Sea Container \u2014 20ft',             'container',  5500.00],
     ];
     for (const c of db.prepare(`SELECT client_id FROM client_capability WHERE capability='vas_ops' AND enabled=1`).all()) {
       for (const [code, label, unit, rate] of VAS_DEFAULTS) ins.run(c.client_id, code, label, unit, rate, 'USD');
