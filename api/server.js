@@ -763,11 +763,15 @@ const TENANT_TABLES = [
     if (!cols.includes('client_id')) return;              // Step 2 must have run first
     const cur = db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='uniq_client_po_sku_uid'").get();
     if (cur) { db.exec('DROP INDEX IF EXISTS uniq_po_sku_uid;'); return; }   // already migrated
-    db.exec(`
-      DROP INDEX IF EXISTS uniq_po_sku_uid;
-      CREATE UNIQUE INDEX IF NOT EXISTS uniq_client_po_sku_uid ON records(client_id, po_number, sku_code, uid);
-    `);
-    console.log('[migrate:records] unique index now (client_id, po_number, sku_code, uid)');
+    // Create the replacement FIRST. Dropping first and failing the create would leave the
+    // table with no unique constraint at all, silently allowing duplicate UIDs.
+    try {
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_client_po_sku_uid ON records(client_id, po_number, sku_code, uid);`);
+      db.exec(`DROP INDEX IF EXISTS uniq_po_sku_uid;`);
+      console.log('[migrate:records] unique index now (client_id, po_number, sku_code, uid)');
+    } catch (e) {
+      console.error('[migrate:records] \u26a0 could not create unique index — legacy index RETAINED so duplicates stay blocked:', e.message);
+    }
   } catch (e) { console.error('[migrate:records]', e.message); }
 })();
 
@@ -10682,6 +10686,72 @@ th{font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:#AEAEB2;fon
 </div></body></html>`;
     res.send(html);
   } catch (e) { res.status(500).send('Report error: ' + _ncEh(String(e.message || e))); }
+});
+
+// ── Records integrity: is the de-duplication constraint actually in place? ──
+// The unique index is what stops a re-uploaded UID file inserting duplicates. If the
+// index is missing, every row inserts as new and applied counts inflate silently.
+app.get('/records/integrity', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const idx = db.prepare(`SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='records'`).all();
+    const hasNew = idx.some(i => i.name === 'uniq_client_po_sku_uid');
+    const hasOld = idx.some(i => i.name === 'uniq_po_sku_uid');
+    const nulls = db.prepare(`SELECT COUNT(*) n FROM records WHERE client_id IS NULL`).get().n;
+    const dupGroups = db.prepare(`SELECT COUNT(*) n FROM (
+      SELECT client_id, po_number, sku_code, uid FROM records
+      GROUP BY client_id, po_number, sku_code, uid HAVING COUNT(*) > 1)`).get().n;
+    const dupRows = db.prepare(`SELECT COALESCE(SUM(c - 1),0) n FROM (
+      SELECT COUNT(*) c FROM records
+      GROUP BY client_id, po_number, sku_code, uid HAVING COUNT(*) > 1)`).get().n;
+    const total = db.prepare('SELECT COUNT(*) n FROM records').get().n;
+    const sample = db.prepare(`SELECT client_id, po_number, sku_code, uid, COUNT(*) c FROM records
+      GROUP BY client_id, po_number, sku_code, uid HAVING COUNT(*) > 1 ORDER BY c DESC LIMIT 5`).all();
+    res.json({
+      total_records: total,
+      unique_index_present: hasNew,
+      legacy_index_present: hasOld,
+      null_client_id_rows: nulls,
+      duplicate_groups: dupGroups,
+      excess_rows: dupRows,
+      worst_offenders: sample,
+      indexes: idx.map(i => i.name),
+      diagnosis: !hasNew
+        ? 'NO unique constraint on records — duplicates can be inserted freely. Run /records/dedupe to clean and restore it.'
+        : (dupRows > 0 ? 'Index present but duplicates exist (created while it was missing). Run /records/dedupe.'
+                       : 'Healthy — de-duplication constraint in place, no duplicates.'),
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Repair: remove duplicate rows and restore the unique constraint ──
+// Keeps the earliest row per (client_id, po_number, sku_code, uid). Destructive, so it
+// requires explicit confirmation and reports a dry run by default.
+app.post('/records/dedupe', authenticateRequest, requireRole(['admin']), writeOpLimiter, auditLog('records_dedupe'), (req, res) => {
+  try {
+    const b = req.body || {};
+    const nullsFixed = b.confirm === 'DEDUPE'
+      ? db.prepare(`UPDATE records SET client_id='ICONIC' WHERE client_id IS NULL`).run().changes : 0;
+    const excess = db.prepare(`SELECT COALESCE(SUM(c - 1),0) n FROM (
+      SELECT COUNT(*) c FROM records GROUP BY client_id, po_number, sku_code, uid HAVING COUNT(*) > 1)`).get().n;
+    if (b.confirm !== 'DEDUPE') {
+      return res.json({ dry_run: true, would_delete: excess,
+        message: 'Send {"confirm":"DEDUPE"} to remove duplicates and restore the unique index.' });
+    }
+    let deleted = 0;
+    db.transaction(() => {
+      // rowid is monotonic, so MIN(rowid) is the earliest row for each key.
+      deleted = db.prepare(`DELETE FROM records WHERE rowid NOT IN (
+        SELECT MIN(rowid) FROM records GROUP BY client_id, po_number, sku_code, uid)`).run().changes;
+    })();
+    let indexRestored = false, indexError = null;
+    try {
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_client_po_sku_uid ON records(client_id, po_number, sku_code, uid);`);
+      db.exec(`DROP INDEX IF EXISTS uniq_po_sku_uid;`);
+      indexRestored = true;
+    } catch (e) { indexError = String(e.message || e); }
+    res.json({ deleted, null_client_id_fixed: nullsFixed, index_restored: indexRestored, index_error: indexError,
+      remaining: db.prepare('SELECT COUNT(*) n FROM records').get().n });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
 // ── Tenancy diagnostics (READ-ONLY — Step 1). Verifies resolution before Step 3 enforces it. ──
