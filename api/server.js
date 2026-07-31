@@ -11350,7 +11350,9 @@ CREATE TABLE IF NOT EXISTS client_rate (
       ['sea_container_40ft',       'Sea Container \u2014 40ft',             'container',  8100.00],
       ['sea_container_20ft',       'Sea Container \u2014 20ft',             'container',  5500.00],
     ];
-    for (const c of db.prepare(`SELECT client_id FROM client_capability WHERE capability='vas_ops' AND enabled=1`).all()) {
+    // Gate on vas_labelling, not vas_ops: a fulfilment client does VAS-shaped work but
+    // bills entirely different lines, and would otherwise inherit the labelling rate card.
+    for (const c of db.prepare(`SELECT client_id FROM client_capability WHERE capability='vas_labelling' AND enabled=1`).all()) {
       for (const [code, label, unit, rate] of VAS_DEFAULTS) ins.run(c.client_id, code, label, unit, rate, 'USD');
     }
   } catch (e) { console.error('[rates:seed]', e.message); }
@@ -11403,6 +11405,28 @@ const QTY_SOURCES = ['applied_units', 'carton_delta', 'pallets_received', 'envel
     db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled) VALUES ('__meta','rates_v2',1)`).run();
     console.log('[rates] templates and invoice codes applied');
   } catch (e) { console.error('[rates:v2]', e.message); }
+})();
+
+// Remove labelling lines wrongly seeded onto clients that do not do labelling. Only rows
+// still at their seeded default are removed, so an edited rate is never discarded.
+(function rateTemplatesV3(){
+  try {
+    if (db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability='rates_v3'`).get()) return;
+    const LABELLING_CODES = {
+      vas_base_processing: 0.21, vas_outbound: 0.05, vas_additional_labelling: 0.01,
+      vas_polybagging: 0.05, vas_storage: 0.01, carton_replacement: 1.10,
+      customs_clearance: 158.00, sea_container_40ft: 8100.00, sea_container_20ft: 5500.00,
+    };
+    const noLabel = db.prepare(`SELECT c.id FROM client c
+      WHERE NOT EXISTS (SELECT 1 FROM client_capability k
+        WHERE k.client_id=c.id AND k.capability='vas_labelling' AND k.enabled=1)`).all();
+    const del = db.prepare(`DELETE FROM client_rate WHERE client_id=? AND service_code=? AND (rate IS NULL OR rate=?)`);
+    let removed = 0;
+    for (const c of noLabel)
+      for (const [code, dflt] of Object.entries(LABELLING_CODES)) removed += del.run(c.id, code, dflt).changes;
+    db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled) VALUES ('__meta','rates_v3',1)`).run();
+    if (removed) console.log(`[rates] removed ${removed} labelling line(s) from non-labelling clients`);
+  } catch (e) { console.error('[rates:v3]', e.message); }
 })();
 
 function clientInvoiceCode(clientId) {
