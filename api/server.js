@@ -5891,7 +5891,7 @@ app.put('/plan/weeks/:mondayISO',
   db.prepare(`
     INSERT INTO plans(week_start, data, updated_at, client_id)
     VALUES(?, ?, datetime('now'), ?)
-    ON CONFLICT(week_start) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
+    ON CONFLICT(client_id, week_start) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
   `).run(monday, JSON.stringify(arr), curClient());
   // Lane engine hook — ensure planned-date snapshots exist for every lane
   // (supplier, ticket, mode) in the uploaded plan. Non-fatal: snapshot
@@ -5916,7 +5916,7 @@ app.post('/plan/weeks/:mondayISO/zero',
   db.prepare(`
     INSERT INTO plans(week_start, data, updated_at, client_id)
     VALUES(?, '[]', datetime('now'), ?)
-    ON CONFLICT(week_start) DO UPDATE SET data='[]', updated_at=datetime('now')
+    ON CONFLICT(client_id, week_start) DO UPDATE SET data='[]', updated_at=datetime('now')
   `).run(monday, curClient());
   return res.json({ ok: true, week_start: monday, rows: 0 });
 });
