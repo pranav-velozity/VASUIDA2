@@ -6343,30 +6343,19 @@ const { v4: uuidv4 } = require('uuid');
 function genInvoiceRef(type, weekStart, existingCount) {
   const d = new Date(weekStart + 'T00:00:00Z');
   const yyyy = d.getUTCFullYear();
-
-  if (type === 'VAS') {
-    // INVVAS027_2026 — global counter per year
-    const pattern = `INVVAS%_${yyyy}`;
-    const existing = db.prepare(
-      `SELECT ref_number FROM fin_invoices WHERE type = 'VAS' AND ref_number LIKE ? ORDER BY ref_number DESC LIMIT 1`
-    ).get(pattern);
-    let seq = 1;
-    if (existing) {
-      const match = existing.ref_number.match(/INVVAS(\d+)_\d{4}$/);
-      if (match) seq = parseInt(match[1]) + 1;
-    }
-    return `INVVAS${String(seq).padStart(3,'0')}_${yyyy}`;
-  }
-
-  // SEA: VOZ_INSD2D_W132026-1  AIR: VOZ_INAD2D_W132026-1
-  // Counter resets per week — increment within same week only
   const wk = String(getISOWeek(d)).padStart(2, '0');
-  const prefix = type === 'SEA' ? 'VOZ_INSD2D' : 'VOZ_INAD2D';
+  const code = clientInvoiceCode(curClient());          // TIC | EHP | ...
   const weekCode = `W${wk}${yyyy}`;
+
+  // VAS: INVVAS_TIC_W312026-1   Sea: VOZ_TIC_INSD2D_W312026-1   Air: VOZ_TIC_INAD2D_W312026-1
+  // The counter resets per client per week, so two clients never collide.
+  const prefix = type === 'VAS' ? `INVVAS_${code}`
+               : type === 'SEA' ? `VOZ_${code}_INSD2D`
+                                : `VOZ_${code}_INAD2D`;
   const pattern = `${prefix}_${weekCode}-%`;
   const existing = db.prepare(
-    `SELECT ref_number FROM fin_invoices WHERE type = ? AND ref_number LIKE ? ORDER BY ref_number DESC LIMIT 1`
-  ).get(type, pattern);
+    `SELECT ref_number FROM fin_invoices WHERE ref_number LIKE ? ORDER BY LENGTH(ref_number) DESC, ref_number DESC LIMIT 1`
+  ).get(pattern);
   let seq = 1;
   if (existing) {
     const match = existing.ref_number.match(/-(\d+)$/);
@@ -6501,38 +6490,67 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
     const we = weDate.toISOString().slice(0,10);
 
     if (type === 'VAS') {
-      // Units applied this week
-      const units = db.prepare(`SELECT COUNT(*) as n FROM records WHERE date_local >= ? AND date_local <= ? AND status='complete'`).get(week_start, we)?.n || 0;
-      // Cartons out (distinct mobile bins with status complete)
-      const cartonsOut = db.prepare(`SELECT COUNT(DISTINCT NULLIF(TRIM(mobile_bin),'')) as n FROM records WHERE date_local >= ? AND date_local <= ? AND status='complete'`).get(week_start, we)?.n || 0;
-      // Cartons in from receiving table
-      const recvRows = db.prepare(`SELECT SUM(cartons_received) as total FROM receiving WHERE week_start = ?`).get(week_start);
-      const cartonsIn = recvRows?.total || 0;
-      const cartonDelta = Math.max(0, cartonsOut - cartonsIn);
-      // Rates come from the client's rate card (Finance -> Rates); the historic values are
-      // the fallback. Quantity multipliers below are business rules, not prices.
       const _c = curClient();
-      const rBase   = rateFor(_c, 'vas_base_processing', 0.21);
-      const rOut    = rateFor(_c, 'vas_outbound', 0.05);
-      const rLabel  = rateFor(_c, 'vas_additional_labelling', 0.01);
-      const rPoly   = rateFor(_c, 'vas_polybagging', 0.05);
-      const rStore  = rateFor(_c, 'vas_storage', 0.01);
-      const rCarton = rateFor(_c, 'carton_replacement', 1.10);
-      const lines = [
-        { sort_order:0, description:'VAS Base Processing',         unit_label:'Per Unit',        rate:rBase,   quantity:units,              total:Math.round(rBase*units*100)/100,              gst_free:0, is_misc:0 },
-        { sort_order:1, description:'Outbound Activities',         unit_label:'Per Unit',        rate:rOut,    quantity:units,              total:Math.round(rOut*units*100)/100,               gst_free:0, is_misc:0 },
-        { sort_order:2, description:'Additional Labelling',        unit_label:'Per Unit',        rate:rLabel,  quantity:units*3,            total:Math.round(rLabel*units*3*100)/100,           gst_free:0, is_misc:0 },
-        { sort_order:3, description:'Polybagging',                 unit_label:'Per Unit',        rate:rPoly,   quantity:0,                 total:0,                                            gst_free:0, is_misc:0 },
-        { sort_order:4, description:'Storage post-processing',     unit_label:'Per Unit Per Day', rate:rStore, quantity:0,                 total:0,                                            gst_free:0, is_misc:0 },
-        { sort_order:5, description:'Carton Replacement - labour only', unit_label:'Per Carton', rate:rCarton, quantity:cartonDelta*2,      total:Math.round(rCarton*cartonDelta*2*100)/100,    gst_free:0, is_misc:0 },
-        { sort_order:6, description:'',                            unit_label:'',                rate:0,    quantity:0,                 total:0,                                           gst_free:0, is_misc:1 },
-        { sort_order:7, description:'',                            unit_label:'',                rate:0,    quantity:0,                 total:0,                                           gst_free:0, is_misc:1 },
-      ];
-      const subtotal = lines.slice(0,6).reduce((s,l)=>s+l.total,0);
-      const gst = Math.round(subtotal*0.10*100)/100;
-      const customs = 0; // VAS has no customs
+
+      // ── Weekly quantities available to template lines, scoped to this client ──
+      const units = db.prepare(`SELECT COUNT(*) as n FROM records
+        WHERE client_id=? AND date_local >= ? AND date_local <= ? AND status='complete'`).get(_c, week_start, we)?.n || 0;
+      const cartonsOut = db.prepare(`SELECT COUNT(DISTINCT NULLIF(TRIM(mobile_bin),'')) as n FROM records
+        WHERE client_id=? AND date_local >= ? AND date_local <= ? AND status='complete'`).get(_c, week_start, we)?.n || 0;
+      const cartonsIn = db.prepare(`SELECT SUM(cartons_received) as total FROM receiving
+        WHERE client_id=? AND week_start = ?`).get(_c, week_start)?.total || 0;
+      const cartonDelta = Math.max(0, cartonsOut - cartonsIn);
+
+      let palletsReceived = 0, envelopesDispatched = 0;
+      try {
+        palletsReceived = db.prepare(`SELECT COALESCE(SUM(pallets),0) n FROM ehp_pallet_receipt
+          WHERE client_id=? AND received_date_local BETWEEN ? AND ?`).get(_c, week_start, we).n || 0;
+        envelopesDispatched = db.prepare(`SELECT COALESCE(SUM(actual_envelopes),0) n FROM ehp_assembly_batch
+          WHERE client_id=? AND dispatched_at IS NOT NULL AND date(dispatched_at) BETWEEN ? AND ?`).get(_c, week_start, we).n || 0;
+      } catch (e) { /* fulfilment tables absent for non-fulfilment clients */ }
+
+      const QTY = {
+        applied_units: units,
+        carton_delta: cartonDelta,
+        pallets_received: palletsReceived,
+        envelopes_dispatched: envelopesDispatched,
+        manual: 0,
+      };
+
+      // ── Lines come from the client's rate card, not from code ──
+      const tpl = db.prepare(`SELECT * FROM client_rate
+        WHERE client_id=? AND active=1 AND invoice_type='VAS' ORDER BY sort_order, service_code`).all(_c);
+
+      const lines = tpl.map((t, i) => {
+        const base = QTY[t.qty_source] !== undefined ? QTY[t.qty_source] : 0;
+        const qty  = Math.round(base * (t.qty_multiplier || 1));
+        const rate = t.rate != null ? Number(t.rate) : 0;
+        return {
+          sort_order: i,
+          description: t.label || t.service_code,
+          unit_label: 'Per ' + (t.unit || 'Unit').replace(/\b\w/g, m => m.toUpperCase()),
+          service_code: t.service_code,
+          rate,
+          quantity: qty,
+          total: Math.round(rate * qty * 100) / 100,
+          gst_free: t.gst_free ? 1 : 0,
+          is_misc: 0,
+        };
+      });
+      // Two free-text lines, as before
+      lines.push({ sort_order: lines.length,   description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
+      lines.push({ sort_order: lines.length+1, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
+
+      const billable = lines.filter(l => !l.is_misc);
+      const subtotal = Math.round(billable.reduce((a,l)=>a+l.total,0)*100)/100;
+      const gst = Math.round(billable.filter(l=>!l.gst_free).reduce((a,l)=>a+l.total,0)*0.10*100)/100;
+      const customs = 0;
       const total = Math.round((subtotal+gst+customs)*100)/100;
-      return res.json({ type:'VAS', week_start, units, cartonsIn, cartonsOut, cartonDelta, lines, subtotal, gst, customs, total });
+      return res.json({ type:'VAS', client_id:_c, week_start, units, cartonsIn, cartonsOut, cartonDelta,
+        pallets_received: palletsReceived, envelopes_dispatched: envelopesDispatched,
+        lines, subtotal, gst, customs, total,
+        template_lines: tpl.length,
+        note: tpl.length ? undefined : 'No VAS rate card configured for this client — set rates in Finance → Rates.' });
     }
 
     if (type === 'SEA' || type === 'AIR') {
@@ -11338,6 +11356,62 @@ CREATE TABLE IF NOT EXISTS client_rate (
   } catch (e) { console.error('[rates:seed]', e.message); }
 })();
 
+// The rate card doubles as the invoice line template: what to charge AND which weekly
+// number to multiply it by. That is the whole client difference — ICONIC bills applied
+// units, a fulfilment client bills envelopes and pallets. Same engine, different rows.
+try {
+  const rc = db.prepare("PRAGMA table_info(client_rate)").all().map(c => c.name);
+  if (!rc.includes('invoice_type'))   db.exec("ALTER TABLE client_rate ADD COLUMN invoice_type TEXT NOT NULL DEFAULT 'VAS'");
+  if (!rc.includes('qty_source'))     db.exec("ALTER TABLE client_rate ADD COLUMN qty_source TEXT NOT NULL DEFAULT 'manual'");
+  if (!rc.includes('qty_multiplier')) db.exec("ALTER TABLE client_rate ADD COLUMN qty_multiplier REAL NOT NULL DEFAULT 1");
+  if (!rc.includes('sort_order'))     db.exec("ALTER TABLE client_rate ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0");
+  if (!rc.includes('gst_free'))       db.exec("ALTER TABLE client_rate ADD COLUMN gst_free INTEGER NOT NULL DEFAULT 0");
+  const cc = db.prepare("PRAGMA table_info(client)").all().map(c => c.name);
+  if (!cc.includes('invoice_code'))   db.exec("ALTER TABLE client ADD COLUMN invoice_code TEXT");
+} catch (e) { console.error('[rates:schema]', e.message); }
+
+// Quantity sources a template line can draw on. Each needs a query, so the set is
+// deliberately bounded — adding one is a small, contained change.
+const QTY_SOURCES = ['applied_units', 'carton_delta', 'pallets_received', 'envelopes_dispatched', 'manual'];
+
+// One-time metadata pass: gives the seeded rows their quantity behaviour and ordering,
+// and sets the invoice code used in reference numbers.
+(function rateTemplatesV2(){
+  try {
+    if (db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability='rates_v2'`).get()) return;
+    const up = db.prepare(`UPDATE client_rate SET invoice_type=?, qty_source=?, qty_multiplier=?, sort_order=?, gst_free=?
+                           WHERE client_id=? AND service_code=?`);
+    // [service_code, invoice_type, qty_source, multiplier, sort, gst_free]
+    const TPL = [
+      ['vas_base_processing',      'VAS', 'applied_units',        1, 0, 0],
+      ['vas_outbound',             'VAS', 'applied_units',        1, 1, 0],
+      ['vas_additional_labelling', 'VAS', 'applied_units',        3, 2, 0],
+      ['vas_polybagging',          'VAS', 'manual',               1, 3, 0],
+      ['vas_storage',              'VAS', 'manual',               1, 4, 0],
+      ['carton_replacement',       'VAS', 'carton_delta',         2, 5, 0],
+      ['inbound_pallet',           'VAS', 'pallets_received',     1, 0, 0],
+      ['envelope_dispatched',      'VAS', 'envelopes_dispatched', 1, 1, 0],
+      ['customs_clearance',        'SEA', 'manual',               1, 0, 1],
+      ['sea_container_40ft',       'SEA', 'manual',               1, 1, 0],
+      ['sea_container_20ft',       'SEA', 'manual',               1, 2, 0],
+    ];
+    for (const c of db.prepare('SELECT client_id FROM client_rate GROUP BY client_id').all())
+      for (const [code, itype, qsrc, mult, sort, gstf] of TPL) up.run(itype, qsrc, mult, sort, gstf, c.client_id, code);
+    // Invoice codes used in reference numbers
+    db.prepare(`UPDATE client SET invoice_code='TIC' WHERE id='ICONIC' AND (invoice_code IS NULL OR invoice_code='')`).run();
+    db.prepare(`UPDATE client SET invoice_code='EHP' WHERE id='EHP' AND (invoice_code IS NULL OR invoice_code='')`).run();
+    db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled) VALUES ('__meta','rates_v2',1)`).run();
+    console.log('[rates] templates and invoice codes applied');
+  } catch (e) { console.error('[rates:v2]', e.message); }
+})();
+
+function clientInvoiceCode(clientId) {
+  try {
+    const r = db.prepare('SELECT invoice_code FROM client WHERE id=?').get(clientId);
+    return (r && r.invoice_code) ? r.invoice_code : String(clientId || '').slice(0, 3).toUpperCase();
+  } catch (e) { return 'TIC'; }
+}
+
 // Configured rate for a service, falling back to the historic literal so a missing or
 // blank rate can never silently zero an invoice line.
 function rateFor(clientId, code, fallback) {
@@ -11351,7 +11425,10 @@ app.get('/finance/rates', authenticateRequest, requireRole(['admin']), (req, res
   try {
     const clientId = String(req.query.client_id || curClient());
     res.json({ client_id: clientId,
-      rates: db.prepare(`SELECT * FROM client_rate WHERE client_id=? AND active=1 ORDER BY service_code`).all(clientId) });
+      invoice_code: clientInvoiceCode(clientId),
+      qty_sources: QTY_SOURCES,
+      rates: db.prepare(`SELECT * FROM client_rate WHERE client_id=? AND active=1
+                         ORDER BY invoice_type, sort_order, service_code`).all(clientId) });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -11363,6 +11440,10 @@ app.post('/finance/rates', authenticateRequest, requireRole(['admin']), writeOpL
     if (!code) return res.status(400).json({ error: 'service_code required' });
     const rate = (b.rate === '' || b.rate === null || b.rate === undefined) ? null : Number(b.rate);
     if (rate !== null && !Number.isFinite(rate)) return res.status(400).json({ error: 'rate must be a number' });
+    const mult = (b.qty_multiplier === undefined || b.qty_multiplier === '') ? null : Number(b.qty_multiplier);
+    if (mult !== null && (!Number.isFinite(mult) || mult < 0)) return res.status(400).json({ error: 'qty_multiplier must be a positive number' });
+    if (b.qty_source && !QTY_SOURCES.includes(b.qty_source))
+      return res.status(400).json({ error: 'unknown qty_source', allowed: QTY_SOURCES });
     db.prepare(`INSERT INTO client_rate (client_id, service_code, label, unit, rate, currency, updated_at)
                 VALUES (?,?,?,?,?,?,datetime('now'))
                 ON CONFLICT(client_id, service_code) DO UPDATE SET
@@ -11370,6 +11451,8 @@ app.post('/finance/rates', authenticateRequest, requireRole(['admin']), writeOpL
                   unit=COALESCE(excluded.unit, unit), currency=COALESCE(excluded.currency, currency),
                   updated_at=datetime('now')`)
       .run(clientId, code, b.label || code, b.unit || 'unit', rate, b.currency || 'USD');
+    if (b.qty_source) db.prepare(`UPDATE client_rate SET qty_source=? WHERE client_id=? AND service_code=?`).run(b.qty_source, clientId, code);
+    if (mult !== null) db.prepare(`UPDATE client_rate SET qty_multiplier=? WHERE client_id=? AND service_code=?`).run(mult, clientId, code);
     res.json(db.prepare(`SELECT * FROM client_rate WHERE client_id=? AND service_code=?`).get(clientId, code));
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
