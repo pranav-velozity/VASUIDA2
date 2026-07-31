@@ -400,7 +400,7 @@ const LANE_BASELINE_SEED = [
 db.exec(`
 CREATE TABLE IF NOT EXISTS fin_invoices (
   id          TEXT PRIMARY KEY,
-  type        TEXT NOT NULL CHECK(type IN ('VAS','SEA','AIR')),
+  type        TEXT NOT NULL,   -- validated against the client's rate card, not a fixed list
   week_start  TEXT NOT NULL,
   ref_number  TEXT NOT NULL UNIQUE,
   status      TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','sent','paid','overdue')),
@@ -774,6 +774,48 @@ const TENANT_TABLES = [
     }
   } catch (e) { console.error('[migrate:records]', e.message); }
 })();
+
+// Drop the hard-coded invoice type CHECK so a fulfilment client can be invoiced at all.
+// SQLite cannot ALTER a constraint, so the table is rebuilt — columns and indexes preserved.
+(function relaxInvoiceTypeCheck(){
+  try {
+    const row = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='fin_invoices'`).get();
+    if (!row || !row.sql || !/CHECK\(type IN/.test(row.sql)) return;      // already relaxed
+    const info = db.prepare(`PRAGMA table_info(fin_invoices)`).all();
+    const cols = info.map(c => c.name);
+    const before = db.prepare('SELECT COUNT(*) n FROM fin_invoices').get().n;
+    const idx = db.prepare(`SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='fin_invoices' AND sql IS NOT NULL`).all();
+    // Rebuild the column definitions from the live schema, dropping only the type CHECK.
+    const defs = info.map(c => {
+      if (c.name === 'type') return `"type" TEXT NOT NULL`;
+      let d = `"${c.name}" ${c.type || 'TEXT'}`;
+      if (c.notnull) d += ' NOT NULL';
+      if (c.dflt_value !== null && c.dflt_value !== undefined) d += ` DEFAULT ${c.dflt_value}`;
+      if (c.pk) d += ' PRIMARY KEY';
+      return d;
+    });
+    const list = cols.map(c => `"${c}"`).join(',');
+    db.exec(`CREATE TABLE "fin_invoices__new" (${defs.join(', ')}, UNIQUE(ref_number));`);
+    db.exec(`INSERT INTO "fin_invoices__new" (${list}) SELECT ${list} FROM fin_invoices;`);
+    db.exec(`DROP TABLE fin_invoices; ALTER TABLE "fin_invoices__new" RENAME TO fin_invoices;`);
+    for (const i of idx) { try { db.exec(i.sql); } catch (e) {} }
+    const after = db.prepare('SELECT COUNT(*) n FROM fin_invoices').get().n;
+    console.log(`[migrate:fin_invoices] type CHECK removed; rows ${before} -> ${after}` + (before === after ? ' OK' : ' \u26a0 COUNT MISMATCH'));
+  } catch (e) { console.error('[migrate:fin_invoices]', e.message); }
+})();
+
+// Valid invoice types for a client: the ICONIC-shaped set, plus anything on its rate card.
+function validInvoiceTypes(clientId) {
+  const base = ['VAS', 'SEA', 'AIR'];
+  try {
+    const codes = db.prepare(`SELECT service_code FROM client_rate WHERE client_id=? AND active=1`).all(clientId)
+      .map(r => String(r.service_code || '').toUpperCase());
+    const extra = [];
+    if (codes.includes('INBOUND_PALLET')) extra.push('INBOUND');
+    if (codes.includes('ENVELOPE_DISPATCHED')) extra.push('FULFILMENT');
+    return [...base, ...extra];
+  } catch (e) { return base; }
+}
 
 // Generic PK rebuild: preserves every existing column (including ones added by
 // later _addColumnIfMissing calls) and replays the table's indexes.
@@ -8300,8 +8342,8 @@ function buildReport(D) {
   const sections = [
     { num:'01', label:'Executive Summary',        desc:'Unit cost KPIs across VAS, Sea and Air freight with MoM trends', color: '#990033' },
     { num:'02', label:'Freight Mix',              desc:'Air vs Sea volume split and 4-month trend analysis', color: '#0EA5E9' },
-    { num:'03', label:'Sea Freight Utilisation',  desc:'Container throughput, unit cost and supplier breakdown', color: '#0EA5E9' },
-    { num:'04', label:'Air Freight Utilisation',  desc:'AWB throughput, unit cost and supplier breakdown', color: '#F59E0B' },
+    { num:'03', label:'Door to Door via Sea',  desc:'Door-to-door cost, container throughput, unit cost and supplier breakdown', color: '#0EA5E9' },
+    { num:'04', label:'Door to Door via Air',  desc:'Door-to-door cost, AWB throughput, unit cost and supplier breakdown', color: '#F59E0B' },
     { num:'05', label:'VAS Processing',           desc:'Applied units, unit cost trend and supplier heatmap', color: '#990033' },
     { num:'06', label:'Carton Replacement',       desc:'Replacement volumes, billed cost and top 3 suppliers', color: '#8B5CF6' },
   ];
@@ -8331,6 +8373,8 @@ function buildReport(D) {
           All monetary values are in <strong>\${CURR} (\${D.fx_note})</strong>, excluding GST.
           Unit costs are calculated using completed records for POs in the same operational week as each invoice. Weeks are assigned to months by their Monday start date.
           Carton replacement is reported separately and excluded from VAS unit cost calculations.
+          <br><br>
+          <strong>Sea and Air figures are door-to-door costs</strong> — the total cost to move units by that mode, not the freight leg alone. Door to door includes inland transport in China, customs clearance at source and destination, and last-mile delivery. Air additionally includes special handling such as netting and palletisation.
         </div>
       </div>
     </div>
@@ -8379,7 +8423,7 @@ function buildReport(D) {
           </div>
 
           <div class="kpi-card sea">
-            <div class="kpi-label">Sea Freight Cost / Unit</div>
+            <div class="kpi-label">Door to Door via Sea · Cost / Unit</div>
             <div class="kpi-value">\${fmtC(seaD.unit_revenue)}</div>
             <div class="kpi-sub">\${fmtU(seaD.applied_units)} sea units · \${D.sea_containers.ft20} × 20ft + \${D.sea_containers.ft40} × 40ft</div>
             \${delta(seaD.unit_revenue, seaPrev.unit_revenue)}
@@ -8391,7 +8435,7 @@ function buildReport(D) {
           </div>
 
           <div class="kpi-card air">
-            <div class="kpi-label">Air Freight Cost / Unit</div>
+            <div class="kpi-label">Door to Door via Air · Cost / Unit</div>
             <div class="kpi-value">\${fmtC(airD.unit_revenue)}</div>
             <div class="kpi-sub">\${fmtU(airD.applied_units)} air units</div>
             \${delta(airD.unit_revenue, airPrev.unit_revenue)}
@@ -8412,8 +8456,8 @@ function buildReport(D) {
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:12px;">
           \${[
             {label:'VAS Cost/Unit',val:vasD.unit_revenue,units:vasD.applied_units,ul:'units',color:'#990033'},
-            {label:'Sea Cost/Unit',val:seaD.unit_revenue,units:seaD.applied_units,ul:'sea units',color:'#0EA5E9'},
-            {label:'Air Cost/Unit',val:airD.unit_revenue,units:airD.applied_units,ul:'air units',color:'#F59E0B'},
+            {label:'D2D Sea $/Unit',val:seaD.unit_revenue,units:seaD.applied_units,ul:'sea units',color:'#0EA5E9'},
+            {label:'D2D Air $/Unit',val:airD.unit_revenue,units:airD.applied_units,ul:'air units',color:'#F59E0B'},
           ].map(k=>'<div style="padding:10px 14px;border-radius:8px;border:0.5px solid rgba(0,0,0,0.08);border-top:2px solid '+k.color+';">'
             +'<div style="font-size:9px;font-weight:600;color:#AEAEB2;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">'+k.label+'</div>'
             +'<div style="font-size:20px;font-weight:700;color:#1C1C1E;">'+fmtC(k.val)+'</div>'
@@ -8426,8 +8470,8 @@ function buildReport(D) {
           const hdrs = '<th>Channel</th>'+mLabels.map((l,i)=>'<th class="num"'+(i===3?' style="font-weight:700;color:#1C1C1E;"':'')+'>'+l+(i===3?' ★':'')+' </th>').join('')+'<th class="num">MoM Δ</th>';
           const compRows = [
             {label:'VAS Cost/Unit',key:'unit_revenue',src:'vas',color:'#990033'},
-            {label:'Sea Cost/Unit',key:'unit_revenue',src:'sea',color:'#0EA5E9'},
-            {label:'Air Cost/Unit',key:'unit_revenue',src:'air',color:'#F59E0B'},
+            {label:'D2D Sea $/Unit',key:'unit_revenue',src:'sea',color:'#0EA5E9'},
+            {label:'D2D Air $/Unit',key:'unit_revenue',src:'air',color:'#F59E0B'},
           ].map(row=>{
             const vals=months.map(m=>D[row.src][m]?.[row.key]);
             const prev=vals[2],curr=vals[3];
@@ -8448,7 +8492,7 @@ function buildReport(D) {
       <div class="method-footer">
         <strong>Methodology:</strong>
         VAS Cost/Unit = VAS invoice lines (excl. Carton Replacement) ÷ applied units, by invoice_date month.
-        Sea/Air Cost/Unit = invoice totals (type=SEA/AIR) grouped by invoice week_start month ÷ applied units filtered by freight type on plan rows.
+        Door-to-door Sea/Air cost per unit = full landed invoice totals (type=SEA/AIR) grouped by invoice week_start month ÷ applied units filtered by freight type on plan rows.
         All invoices included regardless of status. Carton Replacement excluded from VAS totals.
         All values in \${D.fx_note}. MoM compares selected month to prior month.
       </div>
@@ -8486,11 +8530,11 @@ function buildReport(D) {
               <div style="font-size:11px;color:#AEAEB2;margin-top:2px;">\${D.freight_mix[sel]?.air_pct||0}% of total</div>
             </div>
             <div style="padding:12px;border-radius:8px;background:#F0F9FF;border:0.5px solid rgba(14,165,233,0.1);">
-              <div style="font-size:9px;font-weight:600;color:#0EA5E9;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Sea Cost/Unit</div>
+              <div style="font-size:9px;font-weight:600;color:#0EA5E9;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">D2D Sea $/Unit</div>
               <div style="font-size:20px;font-weight:700;color:#1C1C1E;">\${fmtC(D.sea[sel]?.unit_revenue)}</div>
             </div>
             <div style="padding:12px;border-radius:8px;background:#FFFBEB;border:0.5px solid rgba(245,158,11,0.1);">
-              <div style="font-size:9px;font-weight:600;color:#F59E0B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Air Cost/Unit</div>
+              <div style="font-size:9px;font-weight:600;color:#F59E0B;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">D2D Air $/Unit</div>
               <div style="font-size:20px;font-weight:700;color:#1C1C1E;">\${fmtC(D.air[sel]?.unit_revenue)}</div>
             </div>
           </div>
@@ -8502,7 +8546,7 @@ function buildReport(D) {
             <div><div class="chart-title">Mix by Mode</div><div class="chart-wrap" style="height:130px;"><canvas id="chart-mix-bar"></canvas></div></div>
             <div><div class="chart-title">Cost/Unit Trend</div><div class="chart-wrap" style="height:130px;"><canvas id="chart-mix-cost"></canvas></div></div>
           </div>
-          <table class="data-table"><thead><tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">Sea $/U</th><th class="num">Air $/U</th></tr></thead><tbody>\${months.map((mk,i)=>\`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td><td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td><td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td><td class="num">\${fmtC(D.sea[mk]?.unit_revenue)}</td><td class="num">\${fmtC(D.air[mk]?.unit_revenue)}</td></tr>\`).join('')}</tbody></table>
+          <table class="data-table"><thead><tr><th>Month</th><th class="num">Sea Units</th><th class="num">Air Units</th><th class="num">Sea %</th><th class="num">D2D Sea $/U</th><th class="num">D2D Air $/U</th></tr></thead><tbody>\${months.map((mk,i)=>\`<tr\${i===3?' style="font-weight:600;"':''}><td>\${mLabels[i]}</td><td class="num">\${fmtU(D.freight_mix[mk]?.sea)}</td><td class="num">\${fmtU(D.freight_mix[mk]?.air)}</td><td class="num">\${fmtP(D.freight_mix[mk]?.sea_pct)}</td><td class="num">\${fmtC(D.sea[mk]?.unit_revenue)}</td><td class="num">\${fmtC(D.air[mk]?.unit_revenue)}</td></tr>\`).join('')}</tbody></table>
         </div>
       </div>
       <div class="method-footer">
@@ -8519,17 +8563,17 @@ function buildReport(D) {
       \${pageNum(5, 8)}
       <div class="section-header">
         <div>
-          <div class="section-title">Sea Freight Utilisation</div>
-          <div class="section-subtitle">Container throughput and unit cost — \${fmtMonth(sel)}</div>
+          <div class="section-title">Door to Door via Sea</div>
+          <div class="section-subtitle">Door-to-door cost, container throughput and unit cost — \${fmtMonth(sel)}</div>
         </div>
-        <span class="section-badge" style="background:rgba(14,165,233,0.1);color:#0EA5E9;">Sea</span>
+        <span class="section-badge" style="background:rgba(14,165,233,0.1);color:#0EA5E9;">D2D Sea</span>
       </div>
       <div class="section-body">
         <div class="three-col" style="margin-bottom:20px;">
           <div class="kpi-card sea" style="padding:14px 16px;">
             <div class="kpi-label">Total Cost</div>
             <div class="kpi-value" style="font-size:22px;">\${fmt(seaD.revenue)}</div>
-            <div class="kpi-sub">Sea freight invoices</div>
+            <div class="kpi-sub">Door-to-door invoices (sea)</div>
           </div>
           <div class="kpi-card sea" style="padding:14px 16px;">
             <div class="kpi-label">Units Shipped</div>
@@ -8565,7 +8609,7 @@ function buildReport(D) {
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px;">
           \${[
-            {label:'Total Cost',val:fmt(seaD.revenue),sub:'Sea freight invoices'},
+            {label:'Total Cost',val:fmt(seaD.revenue),sub:'Door-to-door invoices (sea)'},
             {label:'Units Shipped',val:fmtU(seaD.applied_units),sub:'Applied sea units'},
             {label:'Cost / Unit',val:fmtC(seaD.unit_revenue),sub:'Invoice \u00F7 applied units'},
           ].map(k=>'<div style="padding:10px 14px;border-radius:8px;background:#F0F9FF;border:0.5px solid rgba(14,165,233,0.2);">'
@@ -8600,17 +8644,17 @@ function buildReport(D) {
       \${pageNum(6, 8)}
       <div class="section-header">
         <div>
-          <div class="section-title">Air Freight Utilisation</div>
-          <div class="section-subtitle">Airfreight throughput and unit cost — \${fmtMonth(sel)}</div>
+          <div class="section-title">Door to Door via Air</div>
+          <div class="section-subtitle">Door-to-door cost, airfreight throughput and unit cost — \${fmtMonth(sel)}</div>
         </div>
-        <span class="section-badge" style="background:rgba(245,158,11,0.1);color:#F59E0B;">Air</span>
+        <span class="section-badge" style="background:rgba(245,158,11,0.1);color:#F59E0B;">D2D Air</span>
       </div>
       <div class="section-body">
         <div class="three-col" style="margin-bottom:20px;">
           <div class="kpi-card air" style="padding:14px 16px;">
             <div class="kpi-label">Total Cost</div>
             <div class="kpi-value" style="font-size:22px;">\${fmt(airD.revenue)}</div>
-            <div class="kpi-sub">Air freight invoices</div>
+            <div class="kpi-sub">Door-to-door invoices (air)</div>
           </div>
           <div class="kpi-card air" style="padding:14px 16px;">
             <div class="kpi-label">Units Shipped</div>
@@ -8630,7 +8674,7 @@ function buildReport(D) {
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px;">
           \${[
-            {label:'Total Cost',val:fmt(airD.revenue),sub:'Air freight invoices'},
+            {label:'Total Cost',val:fmt(airD.revenue),sub:'Door-to-door invoices (air)'},
             {label:'Units Shipped',val:fmtU(airD.applied_units),sub:'Applied air units'},
             {label:'Cost / Unit',val:fmtC(airD.unit_revenue),sub:'Invoice \u00F7 applied units'},
           ].map(k=>'<div style="padding:10px 14px;border-radius:8px;background:#FFFBEB;border:0.5px solid rgba(245,158,11,0.2);">'
@@ -8890,8 +8934,8 @@ function renderCharts(D, months, mLabels) {
     data: {
       labels: mLabels,
       datasets: [
-        { label: 'Sea Cost/Unit', data: months.map(m=>D.sea[m]?.unit_revenue), borderColor: '#0EA5E9', backgroundColor: 'rgba(14,165,233,0.1)', borderWidth: 2, pointRadius: 4, tension: 0.3, fill: true },
-        { label: 'Air Cost/Unit', data: months.map(m=>D.air[m]?.unit_revenue), borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.1)', borderWidth: 2, pointRadius: 4, tension: 0.3, fill: true },
+        { label: 'D2D Sea $/Unit', data: months.map(m=>D.sea[m]?.unit_revenue), borderColor: '#0EA5E9', backgroundColor: 'rgba(14,165,233,0.1)', borderWidth: 2, pointRadius: 4, tension: 0.3, fill: true },
+        { label: 'D2D Air $/Unit', data: months.map(m=>D.air[m]?.unit_revenue), borderColor: '#F59E0B', backgroundColor: 'rgba(245,158,11,0.1)', borderWidth: 2, pointRadius: 4, tension: 0.3, fill: true },
       ]
     },
     options: { ...defaults, plugins: { ...defaults.plugins, datalabels: false },
