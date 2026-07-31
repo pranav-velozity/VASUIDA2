@@ -410,6 +410,14 @@ async function renderInvoicesTab(){
     const sel=el('fin-week-sel');if(sel&&_finState.week)sel.value=_finState.week;
     const invoices=await api('/finance/invoices');
     _finState.invoices=invoices;
+    // Invoice types come from the client's rate card — a fulfilment client has no sea/air.
+    try{
+      const rc=await api('/finance/rates');
+      const types=[...new Set((rc.rates||[]).map(r=>r.invoice_type||'VAS'))];
+      _finState.invTypes=['VAS','SEA','AIR'].filter(t=>types.includes(t));
+      if(!_finState.invTypes.length)_finState.invTypes=['VAS'];
+      _finState.clientId=rc.client_id;
+    }catch(e){ _finState.invTypes=['VAS','SEA','AIR']; }
     cont.innerHTML=`
       <div id="fin-inv-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:28px;"></div>
       <div class="fin-card"><div class="fin-section-title">All Invoices</div><div id="fin-inv-table"></div></div>`;
@@ -421,7 +429,9 @@ function renderInvoiceGrid(){
   const cont=el('fin-inv-grid');if(!cont)return;
   const ws=_finState.week;
   const weekInvs=_finState.invoices.filter(i=>i.week_start===ws);
-  cont.innerHTML=['VAS','SEA','AIR'].map(type=>{
+  const TYPES=_finState.invTypes||['VAS','SEA','AIR'];
+  cont.style.gridTemplateColumns='repeat('+Math.min(3,TYPES.length)+',1fr)';
+  cont.innerHTML=TYPES.map(type=>{
     const inv=weekInvs.find(i=>i.type===type);
     if(inv){
       return`<div class="fin-card" style="cursor:pointer;transition:box-shadow .15s;" onmouseenter="this.style.boxShadow='0 4px 24px rgba(0,0,0,0.1)'" onmouseleave="this.style.boxShadow='none'" onclick="window._finEditInvoice('${inv.id}')">
