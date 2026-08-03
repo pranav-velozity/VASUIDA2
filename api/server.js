@@ -7714,8 +7714,8 @@ app.get('/report/cost-utilisation/data',
     for (const mk of months) {
       // All VAS invoices for this month
       const invs = db.prepare(`
-        SELECT i.id, i.invoice_date FROM fin_invoices i
-        WHERE i.type='VAS' AND substr(i.week_start,1,7)=?
+        SELECT i.id, i.invoice_date, i.ref_number, i.week_start, i.subtotal FROM fin_invoices i
+        WHERE i.type='VAS' AND substr(i.week_start,1,7)=? ORDER BY i.week_start, i.ref_number
       `).all(mk);
 
       let vasRev = 0, cartonRev = 0, cartonQty = 0;
@@ -7738,6 +7738,7 @@ app.get('/report/cost-utilisation/data',
       `).all(mk).map(r => r.week_start);
 
       let appliedUnits = 0;
+      const vasPerWeek = [];
       for (const ws of vasWeekStarts) {
         const planRow = planDataFor(ws);
         if (!planRow) continue;
@@ -7752,6 +7753,7 @@ app.get('/report/cost-utilisation/data',
           WHERE status='complete' AND po_number IN (${placeholders})
         `).get(...pos);
         appliedUnits += count?.n || 0;
+        vasPerWeek.push({ week_start: ws, units: count?.n || 0 });
       }
 
       // VAS expenses this month
@@ -7761,6 +7763,12 @@ app.get('/report/cost-utilisation/data',
       `).get(mk)?.total || 0;
 
       vasData[mk] = {
+        provenance: {
+          weeks: vasWeekStarts,
+          week_units: vasPerWeek,
+          invoices: invs.map(i => ({ ref: i.ref_number, week_start: i.week_start, subtotal: i.subtotal })),
+          carton_qty: cartonQty,
+        },
         revenue: applyFx(vasRev),
         applied_units: appliedUnits,
         expense: applyFx(vasExp),
@@ -7792,8 +7800,8 @@ app.get('/report/cost-utilisation/data',
     for (const mk of months) {
       for (const [type, store] of [['SEA', seaData], ['AIR', airData]]) {
         const invs = db.prepare(`
-          SELECT subtotal FROM fin_invoices
-          WHERE type=? AND substr(week_start,1,7)=?
+          SELECT ref_number, week_start, subtotal FROM fin_invoices
+          WHERE type=? AND substr(week_start,1,7)=? ORDER BY week_start, ref_number
         `).all(type, mk);
         const invoiceTotal = invs.reduce((s, i) => s + (i.subtotal || 0), 0);
 
@@ -7809,6 +7817,7 @@ app.get('/report/cost-utilisation/data',
         `).all(mk, mk).map(r => r.week_start);
 
         let vasUnits = 0;
+        const perWeek = [];
         for (const ws of weekStarts) {
           const planRow = planDataFor(ws);
           if (!planRow) continue;
@@ -7826,6 +7835,7 @@ app.get('/report/cost-utilisation/data',
               AND po_number IN (${placeholders})
           `).get(...pos);
           vasUnits += count?.n || 0;
+          perWeek.push({ week_start: ws, units: count?.n || 0 });
         }
 
         // Non-VAS consolidated units — declared on lanes with is_non_vas=true
@@ -7858,6 +7868,16 @@ app.get('/report/cost-utilisation/data',
         `).get(expCat, mk)?.total || 0;
 
         store[mk] = {
+          // Provenance: exactly which weeks, invoices and units are behind this figure.
+          // Weeks are assigned to a month by their Monday, so a week can span two calendar
+          // months — this makes that explicit rather than leaving it to be discovered.
+          provenance: {
+            weeks: weekStarts,
+            week_units: perWeek,
+            invoices: invs.map(i => ({ ref: i.ref_number, week_start: i.week_start, subtotal: i.subtotal })),
+            vas_units: vasUnits,
+            nonvas_units: nonVasUnits,
+          },
           revenue: applyFx(invoiceTotal),
           applied_units: appliedUnits,
           vas_units: vasUnits,
@@ -8238,6 +8258,44 @@ const esc  = (s) => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').rep
 const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const fmtMonth = (mk) => { const [y,m] = mk.split('-'); return MONTH_NAMES[+m-1] + ' ' + y; };
 
+// Shows exactly what a month's figure is built from. Weeks belong to the month their
+// Monday falls in, so a week can straddle two calendar months — stating the span makes
+// that visible instead of leaving the reader to discover it.
+const weekSpan = (ws) => {
+  const d = new Date(ws + 'T00:00:00Z'); const e = new Date(d); e.setUTCDate(d.getUTCDate() + 6);
+  const f = (x) => x.toLocaleDateString('en-GB', { day:'2-digit', month:'short', timeZone:'UTC' });
+  return f(d) + ' \u2013 ' + f(e);
+};
+const provenanceBlock = (p, unitLabel) => {
+  if (!p) return '';
+  const weeks = p.weeks || [], wu = p.week_units || [], invs = p.invoices || [];
+  const crosses = weeks.filter(ws => { const d = new Date(ws+'T00:00:00Z'); const e = new Date(d);
+    e.setUTCDate(d.getUTCDate()+6); return e.getUTCMonth() !== d.getUTCMonth(); });
+  const totalUnits = wu.reduce((a,x)=>a+(x.units||0),0);
+  const invTotal = invs.reduce((a,i)=>a+(i.subtotal||0),0);
+  return \`
+  <div class="prov-box">
+    <div class="prov-title">What this figure includes</div>
+    <div class="prov-grid">
+      <div>
+        <div class="prov-h">Weeks accounted for (\${weeks.length})</div>
+        \${weeks.length ? weeks.map(ws => {
+          const u = (wu.find(x=>x.week_start===ws)||{}).units;
+          return \`<div class="prov-row"><span>\${ws} &middot; \${weekSpan(ws)}</span><span>\${u!=null?u.toLocaleString()+' '+unitLabel:'—'}</span></div>\`;
+        }).join('') : '<div class="prov-row"><span>None</span><span></span></div>'}
+        \${totalUnits ? \`<div class="prov-row prov-total"><span>Total</span><span>\${totalUnits.toLocaleString()} \${unitLabel}</span></div>\` : ''}
+      </div>
+      <div>
+        <div class="prov-h">Invoices accounted for (\${invs.length})</div>
+        \${invs.length ? invs.map(i => \`<div class="prov-row"><span>\${esc(i.ref||'—')}</span><span>\${fmtC(i.subtotal||0)}</span></div>\`).join('')
+                      : '<div class="prov-row"><span>None</span><span></span></div>'}
+        \${invs.length ? \`<div class="prov-row prov-total"><span>Total (ex-GST)</span><span>\${fmtC(invTotal)}</span></div>\` : ''}
+      </div>
+    </div>
+    \${crosses.length ? \`<div class="prov-note"><strong>Week boundary:</strong> \${crosses.length} week\${crosses.length>1?'s':''} in this month \${crosses.length>1?'span':'spans'} a month end (\${crosses.map(weekSpan).join('; ')}). A week is counted in the month its Monday falls in, so all of that week's units and invoices are included here.</div>\` : ''}
+  </div>\`;
+};
+
 const deltaHtml = (curr, prev) => {
   if (curr == null || prev == null || prev === 0) return '<span class="kpi-delta flat">—</span>';
   const pct = ((curr - prev) / prev * 100);
@@ -8245,6 +8303,21 @@ const deltaHtml = (curr, prev) => {
   const arrow = pct > 0 ? '↑' : '↓';
   return \`<span class="kpi-delta \${dir}">\${arrow} \${Math.abs(pct).toFixed(1)}% vs \${fmtMonth(Object.keys(window._D?.vas||{})[2]||'')}</span>\`;
 };
+
+const PROV_CSS = \`
+  .prov-box{border:0.5px solid rgba(0,0,0,0.10);border-radius:8px;padding:12px 14px;margin-top:14px;background:#FCFCFD;}
+  .prov-title{font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:#990033;font-weight:700;margin-bottom:9px;}
+  .prov-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;}
+  .prov-h{font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:#AEAEB2;margin-bottom:5px;}
+  .prov-row{display:flex;justify-content:space-between;gap:10px;font-size:10px;color:#1C1C1E;padding:2px 0;border-bottom:0.5px solid rgba(0,0,0,0.04);}
+  .prov-row span:last-child{color:#6E6E73;white-space:nowrap;}
+  .prov-total{font-weight:700;border-bottom:none;border-top:0.5px solid rgba(0,0,0,0.12);margin-top:3px;padding-top:4px;}
+  .prov-total span:last-child{color:#1C1C1E;}
+  .prov-note{margin-top:9px;font-size:9.5px;line-height:1.5;color:#8A6D00;background:rgba(255,208,20,.14);border:0.5px solid rgba(255,208,20,.5);border-radius:6px;padding:7px 9px;}
+  @media print{.prov-box{break-inside:avoid;}}
+\`;
+
+try { const _st = document.createElement('style'); _st.textContent = PROV_CSS; document.head.appendChild(_st); } catch(e) {}
 
 const SECTION_COLORS = {
   vas: '#990033', sea: '#0EA5E9', air: '#F59E0B', carton: '#8B5CF6'
@@ -8665,6 +8738,7 @@ function buildReport(D) {
           </div>
         </div>
       </div>
+      \${provenanceBlock(D.sea[sel]?.provenance, 'units')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         Cost = fin_invoices subtotal (ex-GST), type=SEA, grouped by week_start month (all statuses including draft).
@@ -8731,6 +8805,7 @@ function buildReport(D) {
         </div>
 
       </div>
+      \${provenanceBlock(D.air[sel]?.provenance, 'units')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         Cost = fin_invoices subtotal (ex-GST), type=AIR, grouped by week_start month (all statuses including draft).
@@ -8804,6 +8879,7 @@ function buildReport(D) {
           <div class="chart-wrap" style="height:100px;"><canvas id="chart-vas-radar"></canvas></div>
         </div>
       </div>
+      \${provenanceBlock(D.vas[sel]?.provenance, 'units')}
       <div class="method-footer">
         <strong>Methodology:</strong>
         Cost = VAS invoice line totals (ex-GST) excluding lines matching 'Carton Replacement - labour only', grouped by invoice week_start month (all statuses).
