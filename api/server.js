@@ -11774,6 +11774,33 @@ CREATE TABLE IF NOT EXISTS shopify_oauth_state (
 const SHOPIFY_API_KEY     = process.env.SHOPIFY_API_KEY || '';
 const SHOPIFY_API_SECRET  = process.env.SHOPIFY_API_SECRET || '';
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2025-01';
+// Webhook delivery filters exist only from 2024-07. On older versions Shopify ACCEPTS the
+// `filter` field and silently discards it, leaving the app subscribed to every order in the
+// store with no error anywhere — so the floor is asserted before any subscription is made.
+const SHOPIFY_WEBHOOK_FILTER_MIN = '2024-07';
+function apiVersionAtLeast(v, min) {
+  const p = (x) => { const m = String(x || '').match(/^(\d{4})-(\d{2})$/); return m ? (+m[1] * 100 + +m[2]) : null; };
+  const a = p(v), b = p(min);
+  return (a !== null && b !== null) ? a >= b : false;
+}
+function assertWebhookFilterSupport() {
+  if (!apiVersionAtLeast(SHOPIFY_API_VERSION, SHOPIFY_WEBHOOK_FILTER_MIN)) {
+    throw new Error(`shopify_api_version_too_old: webhook filters require ${SHOPIFY_WEBHOOK_FILTER_MIN} or later, ` +
+      `SHOPIFY_API_VERSION is "${SHOPIFY_API_VERSION}". Older versions accept the filter field and discard it, ` +
+      `which would subscribe us to every order in the store.`);
+  }
+}
+// Webhooks must reach the API host, which is not necessarily the app/browser host.
+const SHOPIFY_WEBHOOK_HOST = (process.env.SHOPIFY_WEBHOOK_HOST || process.env.SHOPIFY_APP_URL || '').replace(/\/+$/, '');
+// Every host that has ever been ours. Cleanup must cover all of them: if the webhook host
+// is changed, a stale unfiltered subscription left at the OLD host would keep delivering
+// every order in the store, and matching only the current host would never remove it.
+const SHOPIFY_OWNED_HOSTS = [...new Set([
+  SHOPIFY_WEBHOOK_HOST,
+  (process.env.SHOPIFY_APP_URL || '').replace(/\/+$/, ''),
+  ...String(process.env.SHOPIFY_LEGACY_HOSTS || '').split(',').map(x => x.trim().replace(/\/+$/, '')),
+].filter(Boolean))];
+const isOurWebhookUri = (uri) => SHOPIFY_OWNED_HOSTS.some(h => String(uri || '').startsWith(h));
 const SHOPIFY_APP_URL     = (process.env.SHOPIFY_APP_URL || '').replace(/\/+$/, '');
 const SHOPIFY_SCOPES = [
   'read_orders',
@@ -11860,11 +11887,24 @@ app.get('/shopify/callback', async (req, res) => {
                 installed_at=datetime('now'), last_error=NULL, updated_at=datetime('now')
                 WHERE client_id=? AND provider='shopify'`)
       .run(tok.access_token, tok.scope || SHOPIFY_SCOPES, st.client_id);
-    // 4. register the order webhook (idempotent on Shopify's side)
-    try { await shopifyRegisterWebhooks(st.client_id); } catch (e) { console.error('[shopify] webhook register', e.message); }
+    // 4. Register webhook subscriptions. This is part of the install, not an afterthought:
+    // an install that completes without subscriptions looks healthy and receives nothing.
+    let reg;
+    try {
+      reg = await shopifyRegisterWebhooks(st.client_id);
+    } catch (e) {
+      console.error('[shopify] webhook registration failed —', e.message);
+      db.prepare(`UPDATE client_integration SET status='error', last_error=?, updated_at=datetime('now')
+                  WHERE client_id=? AND provider='shopify'`).run(String(e.message || e).slice(0, 500), st.client_id);
+      return fail('Connected to Shopify, but webhook registration failed, so no orders would reach us. '
+        + 'The install has been marked as failed. Details: ' + String(e.message || e));
+    }
+    const filtered = reg.subscriptions.filter(x => x.filter).length;
     res.send(`<html><body style="font-family:sans-serif;padding:40px;text-align:center">
       <h2 style="color:#990033">Connected</h2>
       <p>${escHtml(shopNorm)} is now linked to VelOzity Pinpoint.</p>
+      <p style="color:#6E6E73;font-size:13px">${reg.subscriptions.length} webhook subscription(s) registered,
+        ${filtered} filtered to tagged orders only.</p>
       <p style="color:#6E6E73;font-size:13px">You can close this window.</p></body></html>`);
   } catch (e) { console.error('[shopify/callback]', e); fail(String(e.message || e)); }
 });
@@ -11882,14 +11922,128 @@ async function shopifyApi(clientId, path, opts) {
   return body;
 }
 
+// ── GraphQL Admin API ──
+async function shopifyGraphQL(clientId, query, variables) {
+  const it = shopifyIntegration(clientId);
+  if (!it || !it.access_token) throw new Error('shopify_not_connected');
+  const r = await fetch(`https://${it.shop_domain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+    method: 'POST',
+    headers: { 'X-Shopify-Access-Token': it.access_token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, variables: variables || {} }),
+  });
+  const txt = await r.text();
+  let body = null; try { body = txt ? JSON.parse(txt) : null; } catch (e) { body = txt; }
+  if (!r.ok) { const e = new Error('shopify_graphql_' + r.status); e.status = r.status; e.body = body; throw e; }
+  if (body && Array.isArray(body.errors) && body.errors.length) {
+    const e = new Error('shopify_graphql_error: ' + body.errors.map(x => x.message).join('; '));
+    e.body = body; throw e;
+  }
+  return body && body.data;
+}
+
+// ── Webhook subscriptions ──
+// Order topics are filtered to the client's routing tag so untagged orders never reach us.
+// FULFILLMENT_ORDERS_MOVED and APP_UNINSTALLED carry no order tags in their payloads, so a
+// filter there would match nothing and the topic would never fire — they stay unfiltered.
+const SHOPIFY_ORDER_TAG = process.env.SHOPIFY_ORDER_TAG || 'velozity';
+function shopifyWebhookSpec() {
+  const tagFilter = `tags:${SHOPIFY_ORDER_TAG}`;
+  return [
+    { topic: 'ORDERS_CREATE',            filter: tagFilter, path: '/shopify/webhooks/orders-create' },
+    // Required: if the tag is applied by a Shopify Flow it lands a moment after creation, so
+    // orders/create fires before the tag exists and is filtered out. Only orders/updated delivers.
+    { topic: 'ORDERS_UPDATED',           filter: tagFilter, path: '/shopify/webhooks/orders-updated' },
+    { topic: 'ORDERS_CANCELLED',         filter: tagFilter, path: '/shopify/webhooks/orders-cancelled' },
+    { topic: 'FULFILLMENT_ORDERS_MOVED', filter: null,      path: '/shopify/webhooks/fo-moved' },
+    { topic: 'APP_UNINSTALLED',          filter: null,      path: '/shopify/webhooks/app-uninstalled' },
+  ];
+}
+
+const Q_LIST_WEBHOOKS = `
+  query listWebhooks($cursor: String) {
+    webhookSubscriptions(first: 100, after: $cursor) {
+      pageInfo { hasNextPage endCursor }
+      edges { node { id topic filter uri } }
+    }
+  }`;
+const M_CREATE_WEBHOOK = `
+  mutation webhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
+    webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
+      webhookSubscription { id topic filter uri }
+      userErrors { field message }
+    }
+  }`;
+const M_DELETE_WEBHOOK = `
+  mutation webhookSubscriptionDelete($id: ID!) {
+    webhookSubscriptionDelete(id: $id) {
+      deletedWebhookSubscriptionId
+      userErrors { field message }
+    }
+  }`;
+
+async function shopifyListWebhooks(clientId) {
+  const out = []; let cursor = null;
+  for (let page = 0; page < 10; page++) {
+    const d = await shopifyGraphQL(clientId, Q_LIST_WEBHOOKS, { cursor });
+    const conn = d && d.webhookSubscriptions;
+    if (!conn) break;
+    for (const e of (conn.edges || [])) if (e && e.node) out.push(e.node);
+    if (!conn.pageInfo || !conn.pageInfo.hasNextPage) break;
+    cursor = conn.pageInfo.endCursor;
+  }
+  return out;
+}
+
+// Register every subscription. Throws on any failure — an install that completes without
+// subscriptions looks healthy but receives nothing, which is only discovered when orders
+// never arrive.
 async function shopifyRegisterWebhooks(clientId) {
-  const addr = SHOPIFY_APP_URL + '/shopify/webhook/orders';
-  const existing = await shopifyApi(clientId, '/webhooks.json').catch(() => ({ webhooks: [] }));
-  const has = (existing.webhooks || []).some(w => w.address === addr && w.topic === 'orders/create');
-  if (has) return { ok: true, already: true };
-  await shopifyApi(clientId, '/webhooks.json', { method: 'POST',
-    body: JSON.stringify({ webhook: { topic: 'orders/create', address: addr, format: 'json' } }) });
-  return { ok: true, created: true };
+  assertWebhookFilterSupport();
+  if (!SHOPIFY_WEBHOOK_HOST) throw new Error('shopify_webhook_host_not_set: set SHOPIFY_WEBHOOK_HOST (or SHOPIFY_APP_URL) to the API host that receives webhooks.');
+  if (!/^https:\/\//i.test(SHOPIFY_WEBHOOK_HOST)) throw new Error(`shopify_webhook_host_invalid: must be https, got "${SHOPIFY_WEBHOOK_HOST}"`);
+
+  const spec = shopifyWebhookSpec();
+  const existing = await shopifyListWebhooks(clientId);
+  const results = [];
+
+  for (const sp of spec) {
+    const uri = SHOPIFY_WEBHOOK_HOST + sp.path;
+
+    // Remove stale subscriptions on this topic that point at our host. A leftover
+    // unfiltered subscription from a previous install would quietly deliver everything.
+    const stale = existing.filter(w => String(w.topic) === sp.topic && isOurWebhookUri(w.uri));
+    for (const w of stale) {
+      const d = await shopifyGraphQL(clientId, M_DELETE_WEBHOOK, { id: w.id });
+      const errs = d && d.webhookSubscriptionDelete && d.webhookSubscriptionDelete.userErrors;
+      if (errs && errs.length) throw new Error(`webhook_delete_failed ${sp.topic}: ${errs.map(e => e.message).join('; ')}`);
+    }
+
+    const input = { uri, format: 'JSON' };
+    if (sp.filter) input.filter = sp.filter;
+    const d = await shopifyGraphQL(clientId, M_CREATE_WEBHOOK, { topic: sp.topic, webhookSubscription: input });
+    const payload = d && d.webhookSubscriptionCreate;
+    const errs = payload && payload.userErrors;
+    if (errs && errs.length) throw new Error(`webhook_create_failed ${sp.topic}: ${errs.map(e => e.message).join('; ')}`);
+    const sub = payload && payload.webhookSubscription;
+    if (!sub || !sub.id) throw new Error(`webhook_create_failed ${sp.topic}: no subscription returned`);
+
+    // Read back the filter. If it did not persist, the API version predates filter support
+    // and we are subscribed to every order in the store — fail loudly rather than discover
+    // it when the client's whole order feed arrives here.
+    const got = sub.filter || null;
+    if ((sp.filter || null) !== got) {
+      throw new Error(`webhook_filter_not_persisted ${sp.topic}: sent ${JSON.stringify(sp.filter)}, ` +
+        `Shopify returned ${JSON.stringify(got)}. API version "${SHOPIFY_API_VERSION}" may not support filters ` +
+        `(requires ${SHOPIFY_WEBHOOK_FILTER_MIN}+). Refusing to leave an unfiltered order subscription in place.`);
+    }
+
+    results.push({ topic: sp.topic, id: sub.id, uri: sub.uri, filter: got, replaced: stale.length });
+    console.log(`[shopify:webhooks] ${sp.topic} -> ${uri}${got ? ` (filter ${got})` : ''}${stale.length ? ` [replaced ${stale.length}]` : ''}`);
+  }
+
+  db.prepare(`UPDATE client_integration SET last_error=NULL, updated_at=datetime('now')
+              WHERE client_id=? AND provider='shopify'`).run(clientId);
+  return { ok: true, api_version: SHOPIFY_API_VERSION, host: SHOPIFY_WEBHOOK_HOST, subscriptions: results };
 }
 
 // ── Order ingestion: shared by webhook and reconciliation poll ──
@@ -11932,6 +12086,141 @@ app.post('/shopify/webhook/orders', (req, res) => {
   } catch (e) { console.error('[shopify/webhook]', e); res.status(200).send('ok'); }  // never make Shopify retry on our bug
 });
 
+// ── Webhook receivers ──
+// Shared verification: HMAC first, then resolve the shop to a client. Anything unverified
+// is rejected; anything unknown gets a 2xx so Shopify stops retrying.
+function shopifyWebhookAuth(req, res) {
+  const hmac = req.get('X-Shopify-Hmac-Sha256') || '';
+  const shop = shopifyNormaliseShop(req.get('X-Shopify-Shop-Domain'));
+  const topic = req.get('X-Shopify-Topic') || '';
+  if (!req.rawBody) { res.status(400).send('no body'); return null; }
+  const digest = crypto.createHmac('sha256', SHOPIFY_API_SECRET).update(req.rawBody).digest('base64');
+  if (!safeEq(digest, hmac)) { console.warn('[shopify:webhook] bad HMAC', topic, shop); res.status(401).send('bad hmac'); return null; }
+  const it = db.prepare(`SELECT * FROM client_integration WHERE provider='shopify' AND shop_domain=?`).get(shop || '');
+  if (!it) { res.status(202).send('unknown shop'); return null; }
+  db.prepare(`UPDATE client_integration SET last_webhook_at=datetime('now'), updated_at=datetime('now')
+              WHERE client_id=? AND provider='shopify'`).run(it.client_id);
+  return { it, shop, topic };
+}
+
+// Defence in depth. Shopify's own docs note that an invalid filter expression still creates
+// the subscription but suppresses delivery — and an unsupported API version discards the
+// filter entirely and delivers everything. If a payload carries tags and ours is absent,
+// the filter is not doing its job, so drop the order here and say so loudly.
+function shopifyOrderIsRouted(o) {
+  const raw = o && o.tags;
+  if (raw === undefined || raw === null) return { routed: true, reason: 'no tags field in payload' };
+  const tags = String(raw).split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+  const want = String(SHOPIFY_ORDER_TAG).trim().toLowerCase();
+  return { routed: tags.includes(want), tags, reason: tags.includes(want) ? 'tagged' : 'tag absent' };
+}
+
+app.post('/shopify/webhooks/orders-create', (req, res) => {
+  try {
+    const ctx = shopifyWebhookAuth(req, res); if (!ctx) return;
+    const o = req.body || {};
+    const routed = shopifyOrderIsRouted(o);
+    if (!routed.routed) {
+      console.warn(`[shopify:orders-create] UNTAGGED order ${o.id} delivered — webhook filter is not being applied. Ignoring.`);
+      return res.status(200).json({ ok: true, ignored: 'not_routed' });
+    }
+    const r = shopifyUpsertOrder(ctx.it.client_id, o, ctx.it.shop_domain);
+    res.status(200).json({ ok: true, ...r });
+  } catch (e) { console.error('[shopify:orders-create]', e); res.status(200).send('ok'); }
+});
+
+// Orders may be tagged by a Shopify Flow that runs just after creation, in which case
+// orders/create fired before the tag existed and was filtered out. This is then the ONLY
+// delivery for that order, so it must be able to insert, not just update.
+app.post('/shopify/webhooks/orders-updated', (req, res) => {
+  try {
+    const ctx = shopifyWebhookAuth(req, res); if (!ctx) return;
+    const o = req.body || {};
+    const routed = shopifyOrderIsRouted(o);
+    if (!routed.routed) {
+      console.warn(`[shopify:orders-updated] UNTAGGED order ${o.id} delivered — webhook filter is not being applied. Ignoring.`);
+      return res.status(200).json({ ok: true, ignored: 'not_routed' });
+    }
+    const clientId = ctx.it.client_id;
+    const existing = db.prepare(`SELECT * FROM ehp_order WHERE client_id=? AND shopify_order_id=?`)
+                       .get(clientId, String(o.id));
+    if (!existing) {
+      const r = shopifyUpsertOrder(clientId, o, ctx.it.shop_domain);
+      console.log(`[shopify:orders-updated] first sighting of ${o.name || o.id} (Flow-tagged) — ingested`);
+      return res.status(200).json({ ok: true, ingested_on_update: true, ...r });
+    }
+    // Already in progress: never rewrite state or address once assembly has begun.
+    if (existing.state !== 'queued') {
+      return res.status(200).json({ ok: true, unchanged: true, state: existing.state });
+    }
+    const envelopes = (o.line_items || []).reduce((a, li) => a + (parseInt(li.quantity, 10) || 0), 0) || 1;
+    const sa = o.shipping_address || o.customer?.default_address || {};
+    db.prepare(`UPDATE ehp_order SET envelope_qty=?, recipient_name=?, recipient_address=?, recipient_address2=?,
+                  recipient_city=?, recipient_state=?, recipient_postcode=?, recipient_country=?, flagged_high_qty=?
+                WHERE id=?`)
+      .run(envelopes,
+        [sa.first_name, sa.last_name].filter(Boolean).join(' ') || existing.recipient_name,
+        sa.address1 || '', sa.address2 || '', sa.city || '', sa.province_code || sa.province || '',
+        sa.zip || '', sa.country_code || 'US', envelopes >= EHP_ENVELOPE_ALERT_QTY ? 1 : 0, existing.id);
+    res.status(200).json({ ok: true, updated: true, envelope_qty: envelopes });
+  } catch (e) { console.error('[shopify:orders-updated]', e); res.status(200).send('ok'); }
+});
+
+app.post('/shopify/webhooks/orders-cancelled', (req, res) => {
+  try {
+    const ctx = shopifyWebhookAuth(req, res); if (!ctx) return;
+    const o = req.body || {};
+    const row = db.prepare(`SELECT * FROM ehp_order WHERE client_id=? AND shopify_order_id=?`)
+                  .get(ctx.it.client_id, String(o.id));
+    if (!row) return res.status(200).json({ ok: true, unknown_order: true });
+    if (row.state === 'queued') {
+      // Not yet assembled — pull it from the queue so it is never kitted.
+      db.prepare(`UPDATE ehp_order SET state='cancelled' WHERE id=?`).run(row.id);
+      console.log(`[shopify:orders-cancelled] ${o.name || o.id} removed from queue`);
+      return res.status(200).json({ ok: true, cancelled: true });
+    }
+    // Already assembled or dispatched: the physical work happened, so the record stands.
+    // Flagged for a human rather than silently reversed.
+    db.prepare(`UPDATE ehp_order SET fulfil_error=? WHERE id=?`)
+      .run(`cancelled in Shopify after ${row.state}`, row.id);
+    console.warn(`[shopify:orders-cancelled] ${o.name || o.id} cancelled but already ${row.state} — flagged for review`);
+    res.status(200).json({ ok: true, flagged: true, state: row.state });
+  } catch (e) { console.error('[shopify:orders-cancelled]', e); res.status(200).send('ok'); }
+});
+
+app.post('/shopify/webhooks/fo-moved', (req, res) => {
+  try {
+    const ctx = shopifyWebhookAuth(req, res); if (!ctx) return;
+    const b = req.body || {};
+    // A fulfilment order moving location can mean it is no longer ours to fulfil.
+    console.log(`[shopify:fo-moved] client=${ctx.it.client_id} fulfillment_order=${b.fulfillment_order?.id || b.id || '?'} ` +
+                `destination_location=${b.destination_location_id || b.fulfillment_order?.assigned_location_id || '?'}`);
+    res.status(200).json({ ok: true });
+  } catch (e) { console.error('[shopify:fo-moved]', e); res.status(200).send('ok'); }
+});
+
+app.post('/shopify/webhooks/app-uninstalled', (req, res) => {
+  try {
+    const ctx = shopifyWebhookAuth(req, res); if (!ctx) return;
+    // The token is dead the moment the app is uninstalled — clear it and mark disconnected
+    // so the UI reports the truth rather than showing a connection that cannot work.
+    db.prepare(`UPDATE client_integration SET status='disconnected', access_token=NULL,
+                  last_error='App uninstalled in Shopify', updated_at=datetime('now')
+                WHERE client_id=? AND provider='shopify'`).run(ctx.it.client_id);
+    console.warn(`[shopify:app-uninstalled] ${ctx.shop} — integration disconnected for client ${ctx.it.client_id}`);
+    res.status(200).json({ ok: true });
+  } catch (e) { console.error('[shopify:app-uninstalled]', e); res.status(200).send('ok'); }
+});
+
+// Manual re-registration, e.g. after changing the routing tag.
+app.post('/shopify/register-webhooks', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+  auditLog('shopify_register_webhooks'), async (req, res) => {
+  try {
+    const clientId = String((req.body || {}).client_id || curClient());
+    res.json(await shopifyRegisterWebhooks(clientId));
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Reconciliation poll: webhooks do get missed ──
 app.post('/shopify/poll', authenticateRequest, requireRole(['admin']), writeOpLimiter, auditLog('shopify_poll'), async (req, res) => {
   try {
@@ -11945,6 +12234,35 @@ app.post('/shopify/poll', authenticateRequest, requireRole(['admin']), writeOpLi
     db.prepare(`UPDATE client_integration SET last_poll_at=datetime('now'), updated_at=datetime('now')
                 WHERE client_id=? AND provider='shopify'`).run(clientId);
     res.json({ fetched: (data.orders || []).length, created, already_present: dupes });
+  } catch (e) { res.status(500).json({ error: String(e.message || e), body: e.body }); }
+});
+
+// ── Live webhook subscriptions, straight from Shopify — proves what is actually registered ──
+app.get('/shopify/webhooks', authenticateRequest, requireRole(['admin']), async (req, res) => {
+  try {
+    const clientId = String(req.query.client_id || curClient());
+    const subs = await shopifyListWebhooks(clientId);
+    const spec = shopifyWebhookSpec();
+    const report = spec.map(sp => {
+      const live = subs.find(w => String(w.topic) === sp.topic && isOurWebhookUri(w.uri));
+      return {
+        topic: sp.topic,
+        expected_uri: SHOPIFY_WEBHOOK_HOST + sp.path,
+        expected_filter: sp.filter || null,
+        registered: !!live,
+        actual_uri: live ? live.uri : null,
+        actual_filter: live ? (live.filter || null) : null,
+        ok: !!live && String(live.uri) === SHOPIFY_WEBHOOK_HOST + sp.path && (live.filter || null) === (sp.filter || null),
+      };
+    });
+    const foreign = subs.filter(w => !isOurWebhookUri(w.uri));
+    res.json({
+      client_id: clientId, api_version: SHOPIFY_API_VERSION, host: SHOPIFY_WEBHOOK_HOST,
+      all_ok: report.every(r => r.ok),
+      subscriptions: report,
+      other_apps_subscriptions: foreign.map(w => ({ topic: w.topic, uri: w.uri, filter: w.filter || null })),
+      unfiltered_order_topics: report.filter(r => r.expected_filter && !r.actual_filter && r.registered).map(r => r.topic),
+    });
   } catch (e) { res.status(500).json({ error: String(e.message || e), body: e.body }); }
 });
 
@@ -12107,6 +12425,13 @@ app.get('/shopify/status', authenticateRequest, (req, res) => {
       last_poll_at: it ? it.last_poll_at : null,
       last_error: it ? it.last_error : null,
       queued_orders: q,
+      api_version: SHOPIFY_API_VERSION,
+      webhook_filters_supported: apiVersionAtLeast(SHOPIFY_API_VERSION, SHOPIFY_WEBHOOK_FILTER_MIN),
+      webhook_host: SHOPIFY_WEBHOOK_HOST || null,
+      order_tag: SHOPIFY_ORDER_TAG,
+      // The webhook host must be the API, not the browser app. If they differ, deliveries
+      // would hit the front end and never reach this server.
+      webhook_host_matches_app_url: !SHOPIFY_APP_URL || SHOPIFY_WEBHOOK_HOST === SHOPIFY_APP_URL,
       unfulfilled_dispatched: db.prepare(`SELECT COUNT(*) n FROM ehp_order WHERE client_id=? AND state='dispatched' AND shopify_fulfilment_id IS NULL`).get(clientId).n,
       callback_url: SHOPIFY_APP_URL ? SHOPIFY_APP_URL + '/shopify/callback' : null,
     });
