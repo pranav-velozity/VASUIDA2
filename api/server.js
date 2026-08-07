@@ -775,12 +775,21 @@ const TENANT_TABLES = [
   } catch (e) { console.error('[migrate:records]', e.message); }
 })();
 
+// PRAGMA table_info returns an expression default as `datetime('now')`, but SQLite only
+// accepts it written as `DEFAULT (datetime('now'))`. Re-emitting it bare is a syntax error,
+// so any default rebuilt from PRAGMA must be re-parenthesised.
+function sqlDefaultLiteral(v) {
+  const t = String(v).trim();
+  return /^\(.*\)$/.test(t) ? t : `(${t})`;
+}
+
 // Drop the hard-coded invoice type CHECK so a fulfilment client can be invoiced at all.
 // SQLite cannot ALTER a constraint, so the table is rebuilt — columns and indexes preserved.
 (function relaxInvoiceTypeCheck(){
   try {
     const row = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='fin_invoices'`).get();
     if (!row || !row.sql || !/CHECK\(type IN/.test(row.sql)) return;      // already relaxed
+    db.exec(`DROP TABLE IF EXISTS "fin_invoices__new";`);   // clear any failed prior attempt
     const info = db.prepare(`PRAGMA table_info(fin_invoices)`).all();
     const cols = info.map(c => c.name);
     const before = db.prepare('SELECT COUNT(*) n FROM fin_invoices').get().n;
@@ -790,7 +799,7 @@ const TENANT_TABLES = [
       if (c.name === 'type') return `"type" TEXT NOT NULL`;
       let d = `"${c.name}" ${c.type || 'TEXT'}`;
       if (c.notnull) d += ' NOT NULL';
-      if (c.dflt_value !== null && c.dflt_value !== undefined) d += ` DEFAULT ${c.dflt_value}`;
+      if (c.dflt_value !== null && c.dflt_value !== undefined) d += ` DEFAULT ${sqlDefaultLiteral(c.dflt_value)}`;
       if (c.pk) d += ' PRIMARY KEY';
       return d;
     });
@@ -832,12 +841,13 @@ function rebuildWithClientPk(table, keyCols) {
       if (c.name === 'client_id') return `"client_id" TEXT NOT NULL DEFAULT 'ICONIC'`;
       let d = `"${c.name}" ${c.type || 'TEXT'}`;
       if (c.notnull) d += ' NOT NULL';
-      if (c.dflt_value !== null && c.dflt_value !== undefined) d += ` DEFAULT ${c.dflt_value}`;
+      if (c.dflt_value !== null && c.dflt_value !== undefined) d += ` DEFAULT ${sqlDefaultLiteral(c.dflt_value)}`;
       return d;
     });
     const selectList = cols.map(c => c === 'client_id' ? `COALESCE("client_id",'ICONIC')` : `"${c}"`).join(',');
     const colList = cols.map(c => `"${c}"`).join(',');
     const pk = ['client_id', ...keyCols].map(c => `"${c}"`).join(',');
+    db.exec(`DROP TABLE IF EXISTS "${table}__new";`);       // clear any failed prior attempt
     db.exec(`CREATE TABLE "${table}__new" (${defs.join(', ')}, PRIMARY KEY (${pk}));`);
     db.exec(`INSERT INTO "${table}__new" (${colList}) SELECT ${selectList} FROM "${table}";`);
     db.exec(`DROP TABLE "${table}"; ALTER TABLE "${table}__new" RENAME TO "${table}";`);
