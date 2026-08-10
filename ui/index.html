@@ -462,7 +462,7 @@ window.__clerkOnLoad = function() {
   }
   .pulse-bar{position:fixed;bottom:0;left:0;right:0;z-index:50;background:var(--pulse-surface);
     border:none;border-top:2px solid var(--pulse-edge);border-left:2px solid var(--pulse-edge);border-right:2px solid var(--pulse-edge);border-bottom:none;
-    border-radius:14px 14px 0 0;padding:12px 24px;display:none;align-items:center;gap:12px;
+    border-radius:14px 14px 0 0;padding:12px 24px;display:none;align-items:center;justify-content:center;gap:12px;
     box-shadow:0 -10px 30px rgba(153,0,51,0.16);margin:0 16px;width:calc(100% - 32px);}
   .pulse-bar.visible{display:flex;}
   .pulse-name{font-family:'ADLaM Display',serif;font-size:14px;color:var(--pulse-text);white-space:nowrap;}
@@ -474,7 +474,7 @@ window.__clerkOnLoad = function() {
   .pulse-input-wrap:hover{border-color:var(--pulse-edge);}
   .pulse-input-wrap:focus{border-color:var(--pulse-edge);box-shadow:0 0 0 3px rgba(153,0,51,0.20);}
   /* Suggested questions on the collapsed bar — the fastest route to a first answer. */
-  .pulse-quick{display:flex;align-items:center;gap:6px;flex:1;flex-wrap:nowrap;overflow:hidden;}
+  .pulse-quick{display:flex;align-items:center;gap:6px;flex:0 0 auto;flex-wrap:nowrap;}
   .pulse-quick .q{font-size:11px;color:#990033;background:rgba(153,0,51,0.05);
     border:1px solid rgba(153,0,51,0.25);border-radius:14px;padding:6px 12px;cursor:pointer;
     font-family:inherit;white-space:nowrap;transition:background .15s,color .15s,border-color .15s;}
@@ -519,7 +519,7 @@ window.__clerkOnLoad = function() {
     box-shadow:0 1px 4px rgba(0,0,0,0.06);}
   .pulse-msg-from{font-size:9px;font-weight:600;color:var(--pulse-dim);margin-bottom:3px;letter-spacing:.05em;}
   .pulse-msg.ai .pulse-msg-from{color:var(--pulse-edge);}
-  .pulse-suggestions{display:flex;gap:7px;padding:0 24px 10px;flex-wrap:wrap;}
+  .pulse-suggestions{display:flex;gap:7px;padding:0 24px 10px;flex-wrap:wrap;justify-content:center;}
   .pulse-sug{font-size:11px;color:#990033;background:rgba(153,0,51,0.05);border:1px solid rgba(153,0,51,0.25);border-radius:16px;padding:6px 12px;cursor:pointer;font-family:inherit;transition:background .15s,color .15s;}
   .pulse-sug:hover{background:var(--pulse-edge);border-color:var(--pulse-edge);color:#fff;}
   .pulse-sug:hover{background:#EBEBED;}
