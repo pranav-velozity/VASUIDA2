@@ -84,10 +84,16 @@
     if (document.getElementById('tenancy-styles')) return;
     const s = document.createElement('style'); s.id = 'tenancy-styles';
     s.textContent = `
-      .tn-wrap{display:flex;align-items:center;gap:8px;margin-right:10px;}
-      .tn-box{display:flex;align-items:center;gap:5px;border:0.5px solid rgba(0,0,0,0.14);border-radius:8px;padding:3px 7px;background:#fff;}
-      .tn-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:${LIGHT};}
-      .tn-sel{border:none;outline:none;background:transparent;font:600 11px/1 inherit;color:${BRAND};cursor:pointer;padding:2px 0;}
+      /* Deliberately quiet: context, not a control to be drawn to. No boxes, no brand
+         colour — it only gains definition on hover. */
+      .tn-wrap{display:flex;align-items:center;gap:14px;margin-right:12px;}
+      .tn-box{display:flex;align-items:baseline;gap:5px;border:none;background:transparent;padding:0;
+              border-bottom:1px solid transparent;transition:border-color .15s;}
+      .tn-box:hover{border-bottom-color:rgba(0,0,0,0.18);}
+      .tn-lbl{font-size:8.5px;text-transform:uppercase;letter-spacing:.08em;color:${LIGHT};font-weight:500;}
+      .tn-sel{border:none;outline:none;background:transparent;font:500 11.5px/1 inherit;color:${MID};
+              cursor:pointer;padding:1px 0;transition:color .15s;}
+      .tn-sel:hover{color:#1C1C1E;}
       .tn-sel:disabled{color:${MID};cursor:default;}
     `;
     document.head.appendChild(s);
