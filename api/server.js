@@ -11510,7 +11510,7 @@ const QTY_SOURCES = ['applied_units', 'carton_delta', 'pallets_received', 'envel
       ['carton_replacement',       'VAS', 'carton_delta',         2, 5, 0],
       ['inbound_pallet',           'VAS', 'pallets_received',     1, 0, 0],
       ['envelope_dispatched',      'VAS', 'envelopes_dispatched', 1, 1, 0],
-      ['customs_clearance',        'SEA', 'manual',               1, 0, 1],
+      ['customs_clearance',        'FREIGHT', 'manual',           1, 0, 1],
       ['sea_container_40ft',       'SEA', 'manual',               1, 1, 0],
       ['sea_container_20ft',       'SEA', 'manual',               1, 2, 0],
     ];
@@ -11546,6 +11546,27 @@ const QTY_SOURCES = ['applied_units', 'carton_delta', 'pallets_received', 'envel
   } catch (e) { console.error('[rates:v3]', e.message); }
 })();
 
+// v4 — customs clearance is billed on both sea and air at the same rate.
+(function rateTemplatesV4(){
+  try {
+    if (db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability='rates_v4'`).get()) return;
+    db.prepare(`UPDATE client_rate SET invoice_type='FREIGHT'
+                WHERE service_code='customs_clearance' AND invoice_type='SEA'`).run();
+    db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled) VALUES ('__meta','rates_v4',1)`).run();
+  } catch (e) { console.error('[rates:v4]', e.message); }
+})();
+
+// Which invoice types a client bills. Driven by capability, NOT by whether rate rows
+// happen to exist: a freight client bills air even when no air rate is configured,
+// because air freight is priced per invoice.
+function clientInvoiceTypes(clientId) {
+  const has = (cap) => !!db.prepare(`SELECT 1 x FROM client_capability
+    WHERE client_id=? AND capability=? AND enabled=1`).get(clientId, cap);
+  const types = ['VAS'];                       // every client bills service work
+  if (has('freight_lanes') || has('transit_clearing')) { types.push('SEA', 'AIR'); }
+  return types;
+}
+
 function clientInvoiceCode(clientId) {
   try {
     const r = db.prepare('SELECT invoice_code FROM client WHERE id=?').get(clientId);
@@ -11567,6 +11588,7 @@ app.get('/finance/rates', authenticateRequest, requireRole(['admin']), (req, res
     const clientId = String(req.query.client_id || curClient());
     res.json({ client_id: clientId,
       invoice_code: clientInvoiceCode(clientId),
+      invoice_types: clientInvoiceTypes(clientId),
       qty_sources: QTY_SOURCES,
       rates: db.prepare(`SELECT * FROM client_rate WHERE client_id=? AND active=1
                          ORDER BY invoice_type, sort_order, service_code`).all(clientId) });
