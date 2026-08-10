@@ -182,11 +182,19 @@
         <div style="font-size:10px;color:${LIGHT};padding-bottom:8px;">Whole orders only — the actual count may land slightly above your target.</div>
       </div>
       <div id="ehp-batchmsg"></div>
-      <table class="ehp"><thead><tr><th>Batch</th><th class="n">Target</th><th class="n">Envelopes</th><th class="n">Orders</th><th>State</th><th class="n">Shopify</th><th>Assembled (CT)</th><th>Dispatched (CT)</th><th></th></tr></thead>
+      <table class="ehp"><thead><tr><th>Batch</th><th class="n">Target</th><th class="n">Envelopes</th><th class="n">Orders</th><th>State</th><th class="n">Labels</th><th class="n">Shopify</th><th>Assembled (CT)</th><th>Dispatched (CT)</th><th></th></tr></thead>
       <tbody>${b.length ? b.map(x => `<tr>
         <td style="font-family:monospace;font-size:10px;">${esc(String(x.id).slice(-8))}</td>
         <td class="n">${nfmt(x.target_envelopes)}</td><td class="n"><b>${nfmt(x.actual_envelopes)}</b></td><td class="n">${nfmt(x.order_count)}</td>
         <td><span class="ehp-chip" style="background:${x.state==='dispatched'?'rgba(52,199,89,.14)':x.state==='assembled'?'rgba(255,208,20,.28)':'rgba(0,0,0,.06)'};color:${x.state==='dispatched'?GREEN:x.state==='assembled'?AMBER_TXT:MID};">${esc(x.state)}</span></td>
+        <td class="n" style="font-size:10px;">${(() => {
+          const f = x.fulfilment || {};
+          const done = f.labelled || 0, tot = f.total || x.order_count || 0;
+          if (!tot) return `<span style="color:${LIGHT}">—</span>`;
+          if (done === 0)   return `<span style="color:${LIGHT}">not printed</span>`;
+          if (done >= tot)  return `<span style="color:${GREEN}">✓ ${nfmt(f.labelled_envelopes||0)}</span>`;
+          return `<span style="color:${AMBER_TXT}">${done}/${tot}</span>`;
+        })()}</td>
         <td class="n" style="font-size:10px;">${x.state==='dispatched'
           ? `<span style="color:${GREEN}">${(x.fulfilment&&x.fulfilment.fulfilled)||0} ok</span>` +
             (((x.fulfilment&&x.fulfilment.not_fulfilled)||0) ? ` · <span style="color:${AMBER_TXT}">${x.fulfilment.not_fulfilled} not sent</span>` : '')
@@ -249,42 +257,133 @@
       } catch (e) { el('ehp-batchmsg').innerHTML = msg('e', e.message || String(e)); }
     }));
     body.querySelectorAll('[data-pick]').forEach(x => x.addEventListener('click', async () => {
+      const batchId = x.getAttribute('data-pick');
       try {
-        const r = await req('/ehp/batch/'+x.getAttribute('data-pick')+'/picklist');
-        const w = window.open('', '_blank');
-        const rows = (r.orders||[]);
-        const totalEnv = rows.reduce((a,o)=>a+(o.envelope_qty||0),0);
-        w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pick list</title><style>
-          body{font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;color:#1C1C1E;margin:28px;}
-          h2{font-size:18px;margin:0 0 4px;color:#990033;} .meta{color:#6E6E73;font-size:12px;margin-bottom:16px;}
-          table{width:100%;border-collapse:collapse;table-layout:auto;}
-          th,td{border:1px solid #ddd;padding:7px 9px;vertical-align:top;text-align:left;
-                white-space:normal;word-break:break-word;overflow-wrap:anywhere;}
-          th{background:#F5F5F7;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#6E6E73;}
-          td.n{text-align:right;white-space:nowrap;} .flag{color:#C8860A;font-weight:600;}
-          col.c-order{width:11%} col.c-env{width:6%} col.c-name{width:20%} col.c-addr{width:31%}
-          col.c-city{width:11%} col.c-state{width:5%} col.c-zip{width:11%} col.c-addr2{width:13%}
-          td.zip{white-space:nowrap;}
-          @media print{body{margin:10mm} th{background:#eee !important;-webkit-print-color-adjust:exact}}
-        </style></head><body>
-        <h2>Pick list</h2>
-        <div class="meta">Batch ${esc(x.getAttribute('data-pick'))} &middot; ${rows.length} order(s) &middot; ${totalEnv} envelope(s) &middot; ${new Date().toLocaleString()}</div>
-        <table>
-          <colgroup><col class="c-order"><col class="c-env"><col class="c-name"><col class="c-addr"><col class="c-addr2"><col class="c-city"><col class="c-state"><col class="c-zip"></colgroup>
-          <thead><tr><th>Order</th><th>Env</th><th>Name</th><th>Address 1</th><th>Address 2</th><th>City</th><th>State</th><th>Zip</th></tr></thead>
-          <tbody>${rows.map(o=>`<tr>
-            <td>${esc(o.order_number)}${o.flagged_high_qty?' <span class="flag">&#9873;</span>':''}</td>
-            <td class="n">${o.envelope_qty}</td>
-            <td>${esc(o.recipient_name)}</td>
-            <td>${esc(o.recipient_address)}</td>
-            <td>${esc(o.recipient_address2 || '')}</td>
-            <td>${esc(o.recipient_city)}</td>
-            <td>${esc(o.recipient_state)}</td>
-            <td class="zip">${esc(o.recipient_postcode)}</td></tr>`).join('')}</tbody>
-        </table></body></html>`);
-        w.document.close();
-      } catch (e) { alert('Pick list failed: ' + (e.message||e)); }
+        const r = await req('/ehp/batch/' + batchId + '/picklist');
+        openPickList(batchId, r);
+      } catch (e) { alert('Pick list failed: ' + (e.message || e)); }
     }));
+  }
+
+  // ── Pick list + envelope labels ──
+  // Labels are 76 x 36 mm, one per envelope: an order for three envelopes prints three
+  // identical labels. Addresses are set in caps, which is the USPS convention for
+  // machine-readable mail.
+  const LABEL_W = '76mm', LABEL_H = '36mm';
+
+  function labelLines(o) {
+    const cityLine = [o.recipient_city, o.recipient_state, o.recipient_postcode].filter(Boolean).join(' ');
+    const country = String(o.recipient_country || '').toUpperCase();
+    return [
+      o.recipient_name || '',
+      o.recipient_address || '',
+      o.recipient_address2 || '',
+      cityLine,
+      (country && country !== 'US' && country !== 'USA') ? country : '',
+    ].filter(Boolean);
+  }
+
+  function openPickList(batchId, data) {
+    const orders = data.orders || [];
+    const w = window.open('', '_blank');
+    if (!w) { alert('Pop-up blocked. Allow pop-ups for Pinpoint to print labels.'); return; }
+
+    const rows = orders.map(o => {
+      const done = !!o.labels_generated_at;
+      return '<tr data-id="' + esc(o.id) + '" data-qty="' + (o.envelope_qty || 1) + '">'
+        + '<td class="c"><input type="checkbox" class="sel" checked></td>'
+        + '<td>' + esc(o.order_number || '') + (o.flagged_high_qty ? ' <span class="flag">&#9873;</span>' : '') + '</td>'
+        + '<td class="n">' + (o.envelope_qty || 1) + '</td>'
+        + '<td>' + esc(o.recipient_name || '') + '</td>'
+        + '<td>' + esc(o.recipient_address || '') + '</td>'
+        + '<td>' + esc(o.recipient_address2 || '') + '</td>'
+        + '<td>' + esc(o.recipient_city || '') + '</td>'
+        + '<td>' + esc(o.recipient_state || '') + '</td>'
+        + '<td class="zip">' + esc(o.recipient_postcode || '') + '</td>'
+        + '<td class="c">' + (done ? '<span class="ok">printed</span>' : '<span class="pend">&mdash;</span>') + '</td>'
+        + '</tr>';
+    }).join('');
+
+    const payload = JSON.stringify(orders.map(o => ({
+      id: o.id, order_number: o.order_number, qty: o.envelope_qty || 1, lines: labelLines(o),
+    })));
+
+    const doc = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pick list &amp; labels</title><style>'
+      + 'body{font:13px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;color:#1C1C1E;margin:24px;}'
+      + 'h2{font-size:17px;margin:0 0 3px;color:#990033;} .meta{color:#6E6E73;font-size:12px;margin-bottom:14px;}'
+      + '.bar{position:sticky;top:0;background:#fff;padding:10px 0;border-bottom:1px solid #eee;display:flex;gap:10px;align-items:center;z-index:5;}'
+      + 'button{border:none;border-radius:8px;padding:9px 15px;font:600 12px inherit;cursor:pointer;}'
+      + '.primary{background:#990033;color:#fff;} .ghost{background:#F5F5F7;color:#6E6E73;}'
+      + 'button:disabled{opacity:.45;cursor:default;}'
+      + 'table{width:100%;border-collapse:collapse;margin-top:14px;}'
+      + 'th,td{border:1px solid #ddd;padding:6px 8px;vertical-align:top;text-align:left;font-size:12px;word-break:break-word;}'
+      + 'th{background:#F5F5F7;font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:#6E6E73;}'
+      + 'td.n,th.n{text-align:right;} td.c,th.c{text-align:center;} td.zip{white-space:nowrap;}'
+      + '.flag{color:#8A6D00;font-weight:600;} .ok{color:#1f7a34;font-weight:600;font-size:11px;} .pend{color:#AEAEB2;}'
+      + '.hint{font-size:11px;color:#6E6E73;}'
+      // labels: exact page size, one label per page
+      + '#labels{display:none;}'
+      + '@media screen{#labels{margin-top:18px;} #labels.show{display:block;}'
+      + '  .label{width:' + LABEL_W + ';height:' + LABEL_H + ';border:1px dashed #bbb;margin:0 0 6px;}}'
+      + '.label{box-sizing:border-box;padding:3.5mm 4mm;overflow:hidden;'
+      + '  font-family:Helvetica,Arial,sans-serif;text-transform:uppercase;}'
+      + '.label .ref{font-size:5.5pt;color:#888;letter-spacing:.04em;margin-bottom:0.6mm;}'
+      + '.label .nm{font-size:9.5pt;font-weight:700;line-height:1.25;}'
+      + '.label .ln{font-size:9pt;line-height:1.28;}'
+      + '@media print{'
+      + '  @page{size:' + LABEL_W + ' ' + LABEL_H + ';margin:0;}'
+      + '  body{margin:0;} .noprint{display:none !important;}'
+      + '  #labels{display:block !important;}'
+      + '  .label{border:none;page-break-after:always;break-after:page;width:' + LABEL_W + ';height:' + LABEL_H + ';}'
+      + '  .label:last-child{page-break-after:auto;break-after:auto;}'
+      + '}</style></head><body>'
+      + '<div class="noprint">'
+      + '<h2>Pick list &amp; envelope labels</h2>'
+      + '<div class="meta">Batch ' + esc(batchId) + ' &middot; ' + orders.length + ' order(s) &middot; '
+      +   (data.envelope_count || 0) + ' envelope(s) &middot; ' + new Date().toLocaleString() + '</div>'
+      + '<div class="bar">'
+      +   '<button class="ghost" id="all">Select all</button>'
+      +   '<button class="ghost" id="none">Clear</button>'
+      +   '<button class="primary" id="print">Print labels</button>'
+      +   '<span class="hint" id="count"></span>'
+      + '</div>'
+      + '<table><thead><tr><th class="c">Print</th><th>Order</th><th class="n">Env</th><th>Name</th>'
+      +   '<th>Address 1</th><th>Address 2</th><th>City</th><th>State</th><th>Zip</th><th class="c">Labels</th></tr></thead>'
+      + '<tbody>' + rows + '</tbody></table>'
+      + '<div class="hint" style="margin-top:10px;">Labels are ' + LABEL_W + ' &times; ' + LABEL_H
+      +   ', one per envelope. In the print dialog choose your label stock, or <strong>Save as PDF</strong>. '
+      +   'Set margins to None and turn off headers and footers so the address sits correctly on the label.</div>'
+      + '</div>'
+      + '<div id="labels"></div>'
+      + '<script>(function(){'
+      + 'var DATA=' + payload + ';'
+      + 'var BATCH=' + JSON.stringify(batchId) + ';'
+      + 'function sel(){return Array.prototype.filter.call(document.querySelectorAll("tbody tr"),function(tr){return tr.querySelector(".sel").checked;});}'
+      + 'function refresh(){var t=sel(),e=0;t.forEach(function(tr){e+=parseInt(tr.getAttribute("data-qty"),10)||1;});'
+      + '  document.getElementById("count").textContent=t.length+" order(s) selected \\u00b7 "+e+" label(s) to print";'
+      + '  document.getElementById("print").disabled=!t.length;'
+      + '  document.getElementById("print").textContent="Print "+e+" label"+(e===1?"":"s");}'
+      + 'document.addEventListener("change",function(ev){if(ev.target.classList.contains("sel"))refresh();});'
+      + 'document.getElementById("all").onclick=function(){document.querySelectorAll(".sel").forEach(function(c){c.checked=true;});refresh();};'
+      + 'document.getElementById("none").onclick=function(){document.querySelectorAll(".sel").forEach(function(c){c.checked=false;});refresh();};'
+      + 'document.getElementById("print").onclick=function(){'
+      + '  var ids=sel().map(function(tr){return tr.getAttribute("data-id");});'
+      + '  var box=document.getElementById("labels"),html="";'
+      + '  ids.forEach(function(id){var o=DATA.filter(function(d){return String(d.id)===String(id);})[0];if(!o)return;'
+      + '    for(var i=1;i<=o.qty;i++){'
+      + '      html+="<div class=\\"label\\"><div class=\\"ref\\">"+(o.order_number||"")+(o.qty>1?(" \\u00b7 "+i+"/"+o.qty):"")+"</div>";'
+      + '      html+="<div class=\\"nm\\">"+(o.lines[0]||"")+"</div>";'
+      + '      for(var k=1;k<o.lines.length;k++){html+="<div class=\\"ln\\">"+o.lines[k]+"</div>";}'
+      + '      html+="</div>";}});'
+      + '  box.innerHTML=html;box.classList.add("show");'
+      + '  setTimeout(function(){window.print();'
+      + '    try{if(window.opener&&window.opener.__ehpMarkLabels)window.opener.__ehpMarkLabels(BATCH,ids);}catch(e){}'
+      + '  },120);};'
+      + 'refresh();'
+      + '})();<\/script></body></html>';
+
+    w.document.write(doc);
+    w.document.close();
   }
 
   // ── Inbound ──
@@ -525,6 +624,21 @@
       catch (e) { el('ehp-syncout').innerHTML = msg('e', e.message || String(e)); el('ehp-retry').disabled = false; }
     });
   }
+
+  // The label window calls this after the print dialog is dismissed, so the floor can see
+  // which orders have had labels produced without keeping a separate record.
+  window.__ehpMarkLabels = async function (batchId, orderIds) {
+    try {
+      const r = await req('/ehp/batch/' + batchId + '/labels-generated',
+        { method: 'POST', body: JSON.stringify({ order_ids: orderIds || [] }) });
+      const m = el('ehp-batchmsg');
+      if (m) m.innerHTML = msg('k', `Labels marked as printed for ${r.marked} order(s) — ${r.with_labels} of ${r.orders} in this batch now have labels.`);
+      if (_tab === 'queue') setTimeout(render, 600);
+    } catch (e) {
+      const m = el('ehp-batchmsg');
+      if (m) m.innerHTML = msg('w', 'Labels printed, but marking them failed: ' + (e.message || e));
+    }
+  };
 
   // ── init ──
   let _liveTimer = null;
