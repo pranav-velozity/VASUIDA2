@@ -317,9 +317,11 @@ async function renderRatesTab(){
     const rows=d.rates||[], sources=d.qty_sources||Object.keys(QTY_LABEL);
     const groups={};
     rows.forEach(r=>{(groups[r.invoice_type||'VAS']=groups[r.invoice_type||'VAS']||[]).push(r);});
+    const GROUP={VAS:'VAS invoice lines',SEA:'Sea invoice lines',AIR:'Air invoice lines',
+                 FREIGHT:'Sea &amp; Air invoice lines'};
     const section=(type,list)=>
       '<div style="margin-top:18px;">'
-      +'<div style="font-size:11px;font-weight:700;color:'+DARK+';text-transform:uppercase;letter-spacing:.06em;">'+esc(type)+' invoice lines</div>'
+      +'<div style="font-size:11px;font-weight:700;color:'+DARK+';text-transform:uppercase;letter-spacing:.06em;">'+(GROUP[type]||esc(type)+' invoice lines')+'</div>'
       +'<div style="font-size:10px;color:'+LIGHT+';margin-bottom:8px;">Each line bills its quantity source × multiplier × rate.</div>'
       +'<table style="width:100%;border-collapse:collapse;">'
       +'<thead><tr>'+['Line','Rate','Quantity from','×','Unit'].map(h=>'<th style="text-align:left;padding:6px 8px;border-bottom:0.5px solid rgba(0,0,0,0.08);font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:'+LIGHT+';">'+h+'</th>').join('')+'<th></th></tr></thead><tbody>'
@@ -413,9 +415,9 @@ async function renderInvoicesTab(){
     // Invoice types come from the client's rate card — a fulfilment client has no sea/air.
     try{
       const rc=await api('/finance/rates');
-      const types=[...new Set((rc.rates||[]).map(r=>r.invoice_type||'VAS'))];
-      _finState.invTypes=['VAS','SEA','AIR'].filter(t=>types.includes(t));
-      if(!_finState.invTypes.length)_finState.invTypes=['VAS'];
+      // Server-derived from capability. Deriving from rate rows was wrong: air freight has
+      // no standing rate, so AIR disappeared from the UI even though ICONIC bills it.
+      _finState.invTypes=(rc.invoice_types&&rc.invoice_types.length)?rc.invoice_types:['VAS','SEA','AIR'];
       _finState.clientId=rc.client_id;
     }catch(e){ _finState.invTypes=['VAS','SEA','AIR']; }
     cont.innerHTML=`
