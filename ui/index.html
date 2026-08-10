@@ -451,7 +451,16 @@ window.__clerkOnLoad = function() {
   .pulse-bar.visible{display:flex;}
   .pulse-name{font-family:'ADLaM Display',serif;font-size:14px;color:#990033;white-space:nowrap;}
   .pulse-divider{width:0.5px;height:18px;background:rgba(0,0,0,0.1);flex-shrink:0;}
-  .pulse-input-wrap{flex:1;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);border-radius:8px;padding:9px 14px;font-size:12px;color:#1C1C1E;cursor:text;font-family:inherit;transition:border-color .15s,box-shadow .15s;}
+  .pulse-input-wrap{flex:1;background:#fff;border:1px solid rgba(153,0,51,0.28);border-radius:9px;padding:10px 14px;font-size:12.5px;color:#1C1C1E;cursor:text;font-family:inherit;transition:border-color .15s,box-shadow .15s,background .15s;box-shadow:inset 0 1px 2px rgba(0,0,0,0.03);}
+  .pulse-input-wrap::placeholder{color:#8E8E93;opacity:1;}
+  .pulse-input-wrap:hover{border-color:rgba(153,0,51,0.5);background:#FFFCFD;}
+  .pulse-input-wrap:focus{border-color:#990033;box-shadow:0 0 0 3px rgba(153,0,51,0.10);}
+  /* Suggested questions on the collapsed bar — the fastest route to a first answer. */
+  .pulse-quick{display:flex;align-items:center;gap:6px;flex-shrink:0;}
+  .pulse-quick .q{font-size:11px;color:#990033;background:rgba(153,0,51,0.06);border:0.5px solid rgba(153,0,51,0.22);
+    border-radius:14px;padding:5px 11px;cursor:pointer;font-family:inherit;white-space:nowrap;transition:background .15s,color .15s;}
+  .pulse-quick .q:hover{background:#990033;color:#fff;}
+  @media (max-width:1180px){ .pulse-quick{display:none;} }
   .pulse-input-wrap::placeholder{color:rgba(153,0,51,0.45);}
   .pulse-input-wrap:focus{outline:none;border-color:rgba(153,0,51,0.35);box-shadow:0 0 0 3px rgba(153,0,51,0.08);}
   .pulse-send{width:32px;height:32px;border-radius:8px;background:#1C1C1E;display:flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer;border:none;}
@@ -6537,6 +6546,7 @@ window.__openPrebookModal = function(){
     <button class="pulse-sug" onclick="pulseSuggest(this)">What's at risk this week?</button>
     <button class="pulse-sug" onclick="pulseSuggest(this)">Which suppliers are behind?</button>
     <button class="pulse-sug" onclick="pulseSuggest(this)">Show week vs last week</button>
+    <!-- replaced at runtime with client-appropriate prompts; these are the ICONIC fallback -->
   </div>
 </div>
 <div class="pulse-bar" id="pulse-bar">
@@ -6552,6 +6562,7 @@ window.__openPrebookModal = function(){
   <button id="pulse-minimize" onclick="togglePulse(false)" aria-label="Minimize Pulse" style="display:none;width:32px;height:32px;border-radius:8px;background:#F5F5F7;border:0.5px solid rgba(0,0,0,0.08);cursor:pointer;flex-shrink:0;align-items:center;justify-content:center;">
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 5l5 5 5-5" stroke="#6E6E73" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
+  <div class="pulse-quick" id="pulse-quick"></div>
   <button class="pulse-send" id="pulse-open-btn" onclick="pulseSendOrOpen()" aria-label="Send or Open Pulse">
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10M8 3l4 4-4 4" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
@@ -6711,6 +6722,90 @@ async function pulseSend(){
 }
 
 // ── Pulse suggestion click ──
+// ── Pulse prompts ──
+// Adoption was low not because Pulse fails to answer, but because an empty box gives no
+// idea what to ask. The placeholder rotates through real questions and the collapsed bar
+// carries two one-click prompts. Both are client-shaped: a fulfilment client has no POs
+// or suppliers, so ICONIC's questions would be nonsense there.
+window.__pulsePrompts = (function(){
+  var ICONIC = [
+    "What's at risk this week?",
+    "Which suppliers are behind?",
+    "Why are units applied below plan?",
+    "Which POs have not been received yet?",
+    "How does this week compare with last week?",
+    "Which lanes are not origin-cleared?",
+    "What should I look at first today?"
+  ];
+  var FULFILMENT = [
+    "Which flavour runs out first?",
+    "Are we on track to lodge within SLA?",
+    "How many envelopes are waiting on a batch?",
+    "What's driving the backlog?",
+    "How many envelopes did we dispatch this week?",
+    "Which orders haven't been fulfilled in Shopify?",
+    "What should I look at first today?"
+  ];
+  var idx = 0, timer = null;
+
+  function isFulfilment(){
+    // The fulfilment Week Hub only renders for clients with envelope fulfilment.
+    return !!document.getElementById('fwh');
+  }
+  function list(){ return isFulfilment() ? FULFILMENT : ICONIC; }
+
+  function paintPlaceholder(){
+    var input = document.getElementById('pulse-input-display');
+    if (!input || input.value) return;                    // never disturb typing
+    if (document.activeElement === input) return;
+    var L = list();
+    input.placeholder = 'Ask Pulse — e.g. "' + L[idx % L.length] + '"';
+    idx++;
+  }
+
+  function paintChips(){
+    var box = document.getElementById('pulse-quick');
+    if (!box) return;
+    var L = list();
+    var picks = [L[0], L[1]];
+    var sig = picks.join('|');
+    if (box.dataset.sig === sig) return;                  // avoid needless re-render
+    box.dataset.sig = sig;
+    box.innerHTML = picks.map(function(q){
+      return '<button class="q" type="button">' + q.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</button>';
+    }).join('');
+    Array.prototype.forEach.call(box.querySelectorAll('.q'), function(b){
+      b.addEventListener('click', function(){ try { pulseSuggest(b); } catch(e){} });
+    });
+  }
+
+  function paintPanelChips(){
+    var box = document.getElementById('pulse-suggestions');
+    if (!box) return;
+    var L = list();
+    var picks = [L[0], L[1], L[2]];
+    var sig = picks.join('|');
+    if (box.dataset.sig === sig) return;
+    box.dataset.sig = sig;
+    box.innerHTML = picks.map(function(q){
+      return '<button class="pulse-sug" onclick="pulseSuggest(this)">'
+        + q.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</button>';
+    }).join('');
+  }
+
+  function start(){
+    paintPlaceholder(); paintChips(); paintPanelChips();
+    if (timer) clearInterval(timer);
+    timer = setInterval(function(){
+      if (document.visibilityState !== 'visible') return;
+      paintPlaceholder(); paintChips(); paintPanelChips();
+    }, 6000);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
+  return { refresh: function(){ paintPlaceholder(); paintChips(); paintPanelChips(); } };
+})();
+
 function pulseSuggest(btn){
   const text = btn.textContent.trim();
   const input = document.getElementById('pulse-input-display');
