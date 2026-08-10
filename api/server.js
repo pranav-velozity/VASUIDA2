@@ -10522,6 +10522,8 @@ try {
   if (!oc.includes('fulfil_error')) db.exec("ALTER TABLE ehp_order ADD COLUMN fulfil_error TEXT");
   if (!oc.includes('shop_domain')) db.exec("ALTER TABLE ehp_order ADD COLUMN shop_domain TEXT");
   if (!oc.includes('recipient_address2')) db.exec("ALTER TABLE ehp_order ADD COLUMN recipient_address2 TEXT");
+  if (!oc.includes('labels_generated_at')) db.exec("ALTER TABLE ehp_order ADD COLUMN labels_generated_at TEXT");
+  if (!oc.includes('labels_generated_by')) db.exec("ALTER TABLE ehp_order ADD COLUMN labels_generated_by TEXT");
   const sk = db.prepare("PRAGMA table_info(ehp_sku)").all().map(c => c.name);
   // A component is something we physically receive and consume. SKUs auto-created from
   // Shopify order lines are product identifiers, not stock — they must not be consumed.
@@ -11241,6 +11243,8 @@ app.get('/ehp/batches', authenticateRequest, (req, res) => {
     const stat = db.prepare(`SELECT
         SUM(CASE WHEN shopify_fulfilment_id IS NOT NULL THEN 1 ELSE 0 END) AS fulfilled,
         SUM(CASE WHEN shopify_fulfilment_id IS NULL AND fulfil_error IS NOT NULL THEN 1 ELSE 0 END) AS not_fulfilled,
+        SUM(CASE WHEN labels_generated_at IS NOT NULL THEN 1 ELSE 0 END) AS labelled,
+        COALESCE(SUM(CASE WHEN labels_generated_at IS NOT NULL THEN envelope_qty ELSE 0 END),0) AS labelled_envelopes,
         COUNT(*) AS total
       FROM ehp_order WHERE batch_id=? AND client_id=?`);
     res.json({ batches: batches.map(b => ({ ...b, fulfilment: stat.get(b.id, c) })) });
@@ -11278,10 +11282,37 @@ app.post('/ehp/batch/:id/dispatch', authenticateRequest, writeOpLimiter, auditLo
 app.get('/ehp/batch/:id/picklist', authenticateRequest, auditLog('view_ehp_picklist'), (req, res) => {
   try {
     const c = ehpGuard(req, res); if (!c) return;
-    const orders = db.prepare(`SELECT order_number, envelope_qty, recipient_name, recipient_address, recipient_address2,
-        recipient_city, recipient_state, recipient_postcode, recipient_country, flagged_high_qty
+    const orders = db.prepare(`SELECT id, order_number, envelope_qty, recipient_name, recipient_address, recipient_address2,
+        recipient_city, recipient_state, recipient_postcode, recipient_country, flagged_high_qty, labels_generated_at
       FROM ehp_order WHERE batch_id=? AND client_id=? ORDER BY order_number`).all(req.params.id, c);
-    res.json({ batch_id: req.params.id, orders });
+    const envelopes = orders.reduce((a, o) => a + (o.envelope_qty || 0), 0);
+    res.json({ batch_id: req.params.id, orders, order_count: orders.length, envelope_count: envelopes });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Record that envelope labels were produced for these orders ──
+// One label per envelope, so an order for three envelopes yields three labels. Recorded
+// per order so the floor can see at a glance what has been printed and what has not.
+app.post('/ehp/batch/:id/labels-generated', authenticateRequest, writeOpLimiter,
+  auditLog('ehp_labels_generated'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const ids = Array.isArray((req.body || {}).order_ids) ? req.body.order_ids : null;
+    const by = (req.body || {}).by || null;
+    let changed = 0;
+    db.transaction(() => {
+      if (ids && ids.length) {
+        const st = db.prepare(`UPDATE ehp_order SET labels_generated_at=datetime('now'), labels_generated_by=?
+                               WHERE id=? AND batch_id=? AND client_id=?`);
+        for (const id of ids) changed += st.run(by, String(id), req.params.id, c).changes;
+      } else {
+        changed = db.prepare(`UPDATE ehp_order SET labels_generated_at=datetime('now'), labels_generated_by=?
+                              WHERE batch_id=? AND client_id=?`).run(by, req.params.id, c).changes;
+      }
+    })();
+    const tot = db.prepare(`SELECT COUNT(*) n, SUM(CASE WHEN labels_generated_at IS NOT NULL THEN 1 ELSE 0 END) done
+                            FROM ehp_order WHERE batch_id=? AND client_id=?`).get(req.params.id, c);
+    res.json({ batch_id: req.params.id, marked: changed, orders: tot.n, with_labels: tot.done || 0 });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
