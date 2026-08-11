@@ -351,8 +351,8 @@
       +   '<th>Address 1</th><th>Address 2</th><th>City</th><th>State</th><th>Zip</th><th class="c">Labels</th></tr></thead>'
       + '<tbody>' + rows + '</tbody></table>'
       + '<div class="hint" style="margin-top:10px;">Labels are ' + LABEL_W + ' &times; ' + LABEL_H
-      +   ', one per envelope. In the print dialog choose your label stock, or <strong>Save as PDF</strong>. '
-      +   'Set margins to None and turn off headers and footers so the address sits correctly on the label.</div>'
+      +   ', one per envelope. <strong>Print labels</strong> downloads a PDF where every page is exactly one label, '
+      +   'so it prints correctly on label stock without changing any print settings.</div>'
       + '</div>'
       + '<div id="labels"></div>'
       + '<script>(function(){'
@@ -368,6 +368,7 @@
       + 'document.getElementById("none").onclick=function(){document.querySelectorAll(".sel").forEach(function(c){c.checked=false;});refresh();};'
       + 'document.getElementById("print").onclick=function(){'
       + '  var ids=sel().map(function(tr){return tr.getAttribute("data-id");});'
+      + '  window.opener.__ehpLabelPdf(BATCH, ids);'
       + '  var box=document.getElementById("labels"),html="";'
       + '  ids.forEach(function(id){var o=DATA.filter(function(d){return String(d.id)===String(id);})[0];if(!o)return;'
       + '    for(var i=1;i<=o.qty;i++){'
@@ -376,9 +377,8 @@
       + '      for(var k=1;k<o.lines.length;k++){html+="<div class=\\"ln\\">"+o.lines[k]+"</div>";}'
       + '      html+="</div>";}});'
       + '  box.innerHTML=html;box.classList.add("show");'
-      + '  setTimeout(function(){window.print();'
-      + '    try{if(window.opener&&window.opener.__ehpMarkLabels)window.opener.__ehpMarkLabels(BATCH,ids);}catch(e){}'
-      + '  },120);};'
+      + '  document.getElementById("count").textContent="PDF generated \\u2014 check your downloads";'
+      + '};'
       + 'refresh();'
       + '})();<\/script></body></html>';
 
@@ -625,8 +625,31 @@
     });
   }
 
-  // The label window calls this after the print dialog is dismissed, so the floor can see
-  // which orders have had labels produced without keeping a separate record.
+  // Fetch the generated label PDF and hand it to the browser as a download. Server-side
+  // generation means the page size is exactly 76 x 36 mm regardless of print settings.
+  window.__ehpLabelPdf = async function (batchId, orderIds) {
+    try {
+      const t = await tok();
+      const h = {}; if (t) h.Authorization = 'Bearer ' + t;
+      if (window.pinpointClient) h['x-pinpoint-client'] = window.pinpointClient;
+      const qs = (orderIds && orderIds.length) ? '?order_ids=' + encodeURIComponent(orderIds.join(',')) : '';
+      const r = await fetch(apiBase() + '/ehp/batch/' + batchId + '/labels.pdf' + qs, { headers: h });
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (await r.text()).slice(0, 200));
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'labels-' + batchId + '.pdf';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      window.__ehpMarkLabels(batchId, orderIds);
+    } catch (e) {
+      const m = el('ehp-batchmsg');
+      if (m) m.innerHTML = msg('e', 'Could not generate labels: ' + (e.message || e));
+      else alert('Could not generate labels: ' + (e.message || e));
+    }
+  };
+
+  // Records which orders have had labels produced, so the floor can see it at a glance.
   window.__ehpMarkLabels = async function (batchId, orderIds) {
     try {
       const r = await req('/ehp/batch/' + batchId + '/labels-generated',
