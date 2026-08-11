@@ -11291,6 +11291,78 @@ app.get('/ehp/batch/:id/picklist', authenticateRequest, auditLog('view_ehp_pickl
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Envelope labels as a real PDF ──
+// Generated server-side at exact page dimensions. The browser print path depended on the
+// operator setting paper size to None/custom in the dialog; if they left it at Letter or
+// A4 the labels came out one per full page. A generated PDF removes that variable: the
+// page IS the label, whatever the print settings.
+app.get('/ehp/batch/:id/labels.pdf', authenticateRequest, auditLog('ehp_labels_pdf'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const only = String(req.query.order_ids || '').split(',').map(x => x.trim()).filter(Boolean);
+    const MM = 72 / 25.4;                                  // points per millimetre
+    const W = Number(req.query.w || 76) * MM;
+    const H = Number(req.query.h || 36) * MM;
+    const PAD_X = 4 * MM, PAD_Y = 3.2 * MM;
+
+    let sql = `SELECT id, order_number, envelope_qty, recipient_name, recipient_address, recipient_address2,
+                      recipient_city, recipient_state, recipient_postcode, recipient_country
+               FROM ehp_order WHERE batch_id=? AND client_id=?`;
+    const params = [req.params.id, c];
+    if (only.length) { sql += ` AND id IN (${only.map(() => '?').join(',')})`; params.push(...only); }
+    sql += ' ORDER BY order_number';
+    const orders = db.prepare(sql).all(...params);
+    if (!orders.length) return res.status(404).json({ error: 'no_orders_for_labels' });
+
+    const PDFDocument = require('pdfkit');
+    // autoFirstPage off so every page — including the first — is added on the same terms.
+    const doc = new PDFDocument({ size: [W, H], margin: 0, autoFirstPage: false });
+    const chunks = [];
+    doc.on('data', ch => chunks.push(ch));
+    doc.on('end', () => {
+      const pdf = Buffer.concat(chunks);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="labels-${req.params.id}.pdf"`);
+      res.setHeader('Content-Length', pdf.length);
+      res.end(pdf);
+    });
+
+    let labelCount = 0;
+    for (const o of orders) {
+      const cityLine = [o.recipient_city, o.recipient_state, o.recipient_postcode].filter(Boolean).join(' ');
+      const country = String(o.recipient_country || '').toUpperCase();
+      // Caps throughout: the USPS convention for machine-readable mail.
+      const lines = [
+        o.recipient_address, o.recipient_address2, cityLine,
+        (country && country !== 'US' && country !== 'USA') ? country : '',
+      ].filter(Boolean).map(x => String(x).toUpperCase());
+      const name = String(o.recipient_name || '').toUpperCase();
+      const qty = Math.max(1, o.envelope_qty || 1);
+
+      for (let i = 1; i <= qty; i++) {
+        doc.addPage({ size: [W, H], margin: 0 });
+        labelCount++;
+        // Small reference line, so a multi-envelope order is identifiable on the floor.
+        doc.font('Helvetica').fontSize(5.5).fillColor('#888888')
+           .text(String(o.order_number || '') + (qty > 1 ? `  ${i}/${qty}` : ''),
+                 PAD_X, PAD_Y, { width: W - PAD_X * 2, lineBreak: false });
+        let y = PAD_Y + 7;
+        doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#000000')
+           .text(name, PAD_X, y, { width: W - PAD_X * 2, lineBreak: false });
+        y += 12;
+        doc.font('Helvetica').fontSize(9);
+        for (const l of lines) {
+          if (y > H - PAD_Y - 4) break;                    // never spill off the label
+          doc.text(l, PAD_X, y, { width: W - PAD_X * 2, lineBreak: false });
+          y += 11;
+        }
+      }
+    }
+    if (!labelCount) doc.addPage({ size: [W, H], margin: 0 });
+    doc.end();
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Record that envelope labels were produced for these orders ──
 // One label per envelope, so an order for three envelopes yields three labels. Recorded
 // per order so the floor can see at a glance what has been printed and what has not.
