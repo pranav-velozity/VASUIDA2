@@ -10524,6 +10524,7 @@ try {
   if (!oc.includes('recipient_address2')) db.exec("ALTER TABLE ehp_order ADD COLUMN recipient_address2 TEXT");
   if (!oc.includes('labels_generated_at')) db.exec("ALTER TABLE ehp_order ADD COLUMN labels_generated_at TEXT");
   if (!oc.includes('labels_generated_by')) db.exec("ALTER TABLE ehp_order ADD COLUMN labels_generated_by TEXT");
+  if (!oc.includes('shopify_tags')) db.exec("ALTER TABLE ehp_order ADD COLUMN shopify_tags TEXT");
   const sk = db.prepare("PRAGMA table_info(ehp_sku)").all().map(c => c.name);
   // A component is something we physically receive and consume. SKUs auto-created from
   // Shopify order lines are product identifiers, not stock — they must not be consumed.
@@ -12121,12 +12122,12 @@ function shopifyUpsertOrder(clientId, o, shopDomain) {
   db.prepare(`INSERT INTO ehp_order
     (id, client_id, shopify_order_id, order_number, placed_at, envelope_qty,
      recipient_name, recipient_address, recipient_address2, recipient_city, recipient_state, recipient_postcode, recipient_country,
-     state, flagged_high_qty, shop_domain)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued', ?, ?)`)
+     state, flagged_high_qty, shop_domain, shopify_tags)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued', ?, ?, ?)`)
     .run(id, clientId, String(o.id), String(o.name || o.order_number || ''), o.created_at || null, envelopes,
          [sa.first_name, sa.last_name].filter(Boolean).join(' ') || (o.customer ? [o.customer.first_name, o.customer.last_name].filter(Boolean).join(' ') : ''),
          sa.address1 || '', sa.address2 || '', sa.city || '', sa.province_code || sa.province || '',
-         sa.zip || '', sa.country_code || 'US', flagged, shopDomain || null);
+         sa.zip || '', sa.country_code || 'US', flagged, shopDomain || null, o.tags == null ? null : String(o.tags));
   // SKUs seen on the order feed the registry
   for (const li of (o.line_items || [])) if (li.sku) ehpEnsureSku(clientId, String(li.sku), { name: li.title, source: 'shopify' });
   return { id, envelopes, flagged: !!flagged };
@@ -12293,10 +12294,18 @@ app.post('/shopify/poll', authenticateRequest, requireRole(['admin']), writeOpLi
     const data = await shopifyApi(clientId, '/orders.json' + q);
     let created = 0, dupes = 0;
     const _it = shopifyIntegration(clientId);
-    for (const o of (data.orders || [])) { const r = shopifyUpsertOrder(clientId, o, _it && _it.shop_domain); r.duplicate ? dupes++ : created++; }
+    let skipped = 0;
+    for (const o of (data.orders || [])) {
+      // Webhook filters are applied by Shopify; the poll fetches everything, so the same
+      // routing rule has to be enforced here or the whole store lands in the queue.
+      if (!shopifyOrderIsRouted(o).routed) { skipped++; continue; }
+      const r = shopifyUpsertOrder(clientId, o, _it && _it.shop_domain);
+      r.duplicate ? dupes++ : created++;
+    }
     db.prepare(`UPDATE client_integration SET last_poll_at=datetime('now'), updated_at=datetime('now')
                 WHERE client_id=? AND provider='shopify'`).run(clientId);
-    res.json({ fetched: (data.orders || []).length, created, already_present: dupes });
+    res.json({ fetched: (data.orders || []).length, created, already_present: dupes,
+               skipped_not_tagged: skipped, routing_tag: SHOPIFY_ORDER_TAG });
   } catch (e) { res.status(500).json({ error: String(e.message || e), body: e.body }); }
 });
 
@@ -12386,6 +12395,71 @@ app.post('/shopify/retry-fulfilments', authenticateRequest, requireRole(['admin'
     }
     res.json({ attempted: rows.length, ok, failed, errors: errors.slice(0, 10) });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Remove orders that should never have been ingested ──
+// The reconciliation poll previously ran without the routing-tag check, so an entire
+// order feed could land in the queue. This re-checks each order's tags against Shopify
+// (rows ingested before tags were stored have none recorded) and removes the untagged.
+// Orders already assembled or dispatched are never deleted — they are reported instead,
+// because physical work may have happened against them.
+app.post('/ehp/purge-untagged', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+  auditLog('ehp_purge_untagged'), async (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const b = req.body || {};
+    const tag = String(b.tag || SHOPIFY_ORDER_TAG).trim().toLowerCase();
+    const rows = db.prepare(`SELECT id, order_number, shopify_order_id, state, shopify_tags, envelope_qty
+                             FROM ehp_order WHERE client_id=? ORDER BY created_at`).all(c);
+
+    const hasTag = (t) => String(t || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean).includes(tag);
+
+    const keep = [], remove = [], blocked = [], unknown = [];
+    for (const r of rows) {
+      if (r.shopify_tags != null) { (hasTag(r.shopify_tags) ? keep : (r.state === 'queued' ? remove : blocked)).push(r); }
+      else unknown.push(r);
+    }
+
+    // Rows predating tag storage: ask Shopify what tags they actually carry.
+    let checked = 0, lookupFailed = 0;
+    if (unknown.length && b.verify !== false) {
+      for (const r of unknown.slice(0, Number(b.max_lookups) || 400)) {
+        try {
+          const d = await shopifyApi(c, `/orders/${r.shopify_order_id}.json?fields=id,tags`);
+          const t = d && d.order ? d.order.tags : null;
+          checked++;
+          db.prepare(`UPDATE ehp_order SET shopify_tags=? WHERE id=?`).run(t == null ? '' : String(t), r.id);
+          if (hasTag(t)) keep.push(r);
+          else if (r.state === 'queued') remove.push(r);
+          else blocked.push(r);
+        } catch (e) { lookupFailed++; }
+      }
+    }
+
+    const summary = {
+      routing_tag: tag,
+      total_orders: rows.length,
+      tagged_keep: keep.length,
+      untagged_removable: remove.length,
+      untagged_but_in_progress: blocked.length,
+      not_checked: Math.max(0, unknown.length - checked - lookupFailed),
+      lookup_failed: lookupFailed,
+      envelopes_to_remove: remove.reduce((a, r) => a + (r.envelope_qty || 0), 0),
+      in_progress_detail: blocked.slice(0, 20).map(r => ({ order: r.order_number, state: r.state })),
+    };
+
+    if (b.confirm !== 'DELETE') {
+      return res.json({ dry_run: true, ...summary,
+        message: 'Send {"confirm":"DELETE"} to remove the untagged orders that are still queued.' });
+    }
+    let deleted = 0;
+    db.transaction(() => {
+      const del = db.prepare(`DELETE FROM ehp_order WHERE id=? AND client_id=? AND state='queued'`);
+      for (const r of remove) deleted += del.run(r.id, c).changes;
+    })();
+    console.log(`[ehp:purge-untagged] ${c} removed ${deleted} untagged order(s); ${blocked.length} left in place (already in progress)`);
+    res.json({ deleted, ...summary });
+  } catch (e) { res.status(500).json({ error: String(e.message || e), body: e.body }); }
 });
 
 // ── Purge fulfilment data (test cleanup). Explicit confirmation required. ──
