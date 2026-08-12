@@ -605,7 +605,8 @@ CREATE TABLE IF NOT EXISTS role_alias (
 
   const capRows = [];
   const ICONIC_CAPS = ['week_hub','receiving_ops','vas_ops','apo_generator','iconic_sftp','transit_clearing','freight_lanes','non_compliance','executive','reports','finance'];
-  const EHP_CAPS    = ['week_hub','receiving_ops','vas_ops','inbound_pallets','envelope_fulfilment','shopify_orders','executive','reports','finance'];
+  // NB: no 'reports' — that page is the ICONIC report set. EHP gets 'fulfilment_geo'.
+  const EHP_CAPS    = ['week_hub','receiving_ops','vas_ops','inbound_pallets','envelope_fulfilment','shopify_orders','executive','fulfilment_geo','finance'];
   for (const c of ICONIC_CAPS) capRows.push(['ICONIC', c]);
   for (const c of EHP_CAPS)    capRows.push(['EHP', c]);
   for (const c of new Set([...ICONIC_CAPS, ...EHP_CAPS])) capRows.push(['VOZ', c]);
@@ -656,6 +657,21 @@ CREATE TABLE IF NOT EXISTS role_alias (
     db.prepare(`INSERT INTO client_capability (client_id, capability, enabled) VALUES ('EHP','executive',0)
                 ON CONFLICT(client_id, capability) DO UPDATE SET enabled=0`).run();
     db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled) VALUES ('__meta','caps_v3',1)`).run();
+  }
+
+  // v4 — the Reports page is a hardcoded ICONIC report set (VAS labelling, transit,
+  // freight lanes, APO). EHP was granted the capability and so was shown reports that
+  // are not theirs. Turn it off and grant the EHP-shaped page instead. Marker-guarded,
+  // so a later manual toggle is never overwritten.
+  const capsV4 = db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability='caps_v4'`).get();
+  if (!capsV4) {
+    const setCap = db.prepare(`INSERT INTO client_capability (client_id, capability, enabled) VALUES (?,?,?)
+                               ON CONFLICT(client_id, capability) DO UPDATE SET enabled=excluded.enabled`);
+    setCap.run('EHP', 'reports', 0);              // ICONIC keeps its Reports page untouched
+    setCap.run('EHP', 'fulfilment_geo', 1);       // EHP map + its own report downloads
+    setCap.run('ICONIC', 'fulfilment_geo', 0);    // present but off — ICONIC has the Live Map
+    setCap.run('VOZ', 'fulfilment_geo', 1);       // internal sees both clients' surfaces
+    db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled) VALUES ('__meta','caps_v4',1)`).run();
   }
 
   ins(`INSERT OR IGNORE INTO role_alias (clerk_role,role) VALUES (?,?)`, [
