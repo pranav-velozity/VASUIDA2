@@ -6679,10 +6679,10 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
           gst_free: 0,
           is_misc: 0
         }));
-        lines.push({ sort_order: lines.length, description:'Customs Processing', unit_label:'Flat Fee', rate:141, quantity:airLanes.length||1, total:141*(airLanes.length||1), gst_free:1, is_misc:0 });
+        lines.push({ sort_order: lines.length, description:'Customs Processing', unit_label:'Flat Fee', rate:_rCustoms, quantity:airLanes.length||1, total:_rCustoms*(airLanes.length||1), gst_free:1, is_misc:0 });
         lines.push({ sort_order: lines.length+1, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
         lines.push({ sort_order: lines.length+2, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
-        const customs = 141 * (airLanes.length||1);
+        const customs = _rCustoms * (airLanes.length||1);
         return res.json({ type:'AIR', week_start, lanes: airLanes, lines, customs, subtotal:0, gst:0, total:customs });
       }
     }
