@@ -11328,6 +11328,67 @@ app.get('/ehp/sku-audit', authenticateRequest, (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ═══════════════════ EHP GEOGRAPHY ═══════════════════
+// Aggregates only. Recipient names and street addresses never leave the database for
+// this feature — the browser receives city/state counts and nothing more.
+
+// US resident population (thousands). Used solely to normalise volume: without it a
+// choropleth ranks states by population and says nothing an org chart could not.
+const US_POP_K = {
+  AL:5158,AK:734,AZ:7497,AR:3089,CA:38965,CO:5878,CT:3617,DE:1032,DC:679,FL:22611,
+  GA:11029,HI:1435,ID:1964,IL:12549,IN:6862,IA:3207,KS:2941,KY:4526,LA:4574,ME:1395,
+  MD:6180,MA:7001,MI:10037,MN:5738,MS:2939,MO:6196,MT:1132,NE:1978,NV:3194,NH:1402,
+  NJ:9291,NM:2114,NY:19571,NC:10835,ND:783,OH:11785,OK:4053,OR:4233,PA:12961,RI:1096,
+  SC:5373,SD:919,TN:7126,TX:30503,UT:3417,VT:647,VA:8716,WA:7812,WV:1770,WI:5911,WY:585
+};
+
+app.get('/ehp/geo', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const { month, from, to } = ehpMonthRange(req.query.month);
+
+    // Dispatched orders only — a queued order has not gone anywhere yet.
+    const rows = db.prepare(`SELECT recipient_state st, recipient_city city, product_line pl,
+                                    COUNT(*) orders, COALESCE(SUM(envelope_qty),0) envelopes
+                             FROM ehp_order
+                             WHERE client_id=? AND fulfilled_at IS NOT NULL
+                               AND date(fulfilled_at) BETWEEN ? AND ?
+                             GROUP BY recipient_state, recipient_city, product_line`).all(c, from, to);
+
+    const stMap = new Map();
+    for (const r of rows) {
+      const k = (r.st || '').toUpperCase().slice(0, 2) || '??';
+      const e = stMap.get(k) || { state: k, orders: 0, envelopes: 0, by_line: {} };
+      e.orders += r.orders; e.envelopes += r.envelopes;
+      e.by_line[r.pl || 'UNMAPPED'] = (e.by_line[r.pl || 'UNMAPPED'] || 0) + r.envelopes;
+      stMap.set(k, e);
+    }
+    const states = Array.from(stMap.values()).map(e => {
+      const pop = US_POP_K[e.state];
+      // Envelopes per 100k residents. This is the number that makes a small state visible.
+      e.per_100k = pop ? Math.round(e.envelopes / (pop / 100) * 10) / 10 : null;
+      e.dominant_line = Object.keys(e.by_line).sort((a, b) => e.by_line[b] - e.by_line[a])[0] || null;
+      return e;
+    }).sort((a, b) => b.envelopes - a.envelopes);
+
+    // City detail for the drill-down, with the same small-cell rollup the CSV uses.
+    const cities = ehpRollupSmallCities(rows.map(r => ({
+      recipient_city: r.city, recipient_state: (r.st || '').toUpperCase().slice(0, 2),
+      product_line: r.pl, orders: r.orders, envelopes: r.envelopes
+    }))).sort((a, b) => b.envelopes - a.envelopes);
+
+    const lines = Array.from(new Set(rows.map(r => r.pl).filter(Boolean)));
+    const totalEnv = states.reduce((a, e) => a + e.envelopes, 0);
+    const months = db.prepare(`SELECT DISTINCT substr(fulfilled_at,1,7) m FROM ehp_order
+                               WHERE client_id=? AND fulfilled_at IS NOT NULL ORDER BY m DESC`).all(c)
+                     .map(x => x.m).filter(Boolean);
+
+    res.json({ client_id: c, month, from, to, product_lines: lines,
+      totals: { envelopes: totalEnv, orders: states.reduce((a, e) => a + e.orders, 0), states: states.length },
+      states, cities, available_months: months, small_cell_min: EHP_SMALL_CELL });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ═══════════════════ EHP CLIENT REPORTING ═══════════════════
 // Self-service downloads for EHP, VelOzity and the KLN floor team. Every query below
 // reads ehp_* tables only, which are client_id-scoped by construction — these reports
