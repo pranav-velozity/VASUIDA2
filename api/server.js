@@ -1086,7 +1086,7 @@ app.get('/pulse/context',
       const stock = db.prepare(`SELECT sku FROM ehp_sku WHERE client_id=? AND active=1 AND is_component=1`).all(_cid)
         .map(r => ({ sku: r.sku, ...ehpEstimatedOnHand(_cid, r.sku) }))
         .map(r => ({ sku: r.sku, estimated_on_hand: r.estimated_on_hand }));
-      const recipe = ehpActiveRecipe(_cid);
+      const recipe = ehpActiveRecipe(_cid, null);
       return res.json({
         client: _cid, model: 'fulfilment', facility: 'VOZ_TX',
         weeks: weekData,
@@ -10552,6 +10552,26 @@ try {
   // A component is something we physically receive and consume. SKUs auto-created from
   // Shopify order lines are product identifiers, not stock — they must not be consumed.
   if (!sk.includes('is_component')) db.exec("ALTER TABLE ehp_sku ADD COLUMN is_component INTEGER NOT NULL DEFAULT 0");
+  // ── Product lines (OxyShred / Fizz Stix) ──
+  // A flavour SKU belongs to one line; a recipe serves one line; an order resolves to a
+  // line via the Shopify product SKU. Nullable everywhere so existing rows stay valid.
+  if (!sk.includes('product_line')) db.exec("ALTER TABLE ehp_sku ADD COLUMN product_line TEXT");
+  if (!rc.includes('product_line')) db.exec("ALTER TABLE ehp_kit_recipe ADD COLUMN product_line TEXT");
+  if (!oc.includes('product_sku'))  db.exec("ALTER TABLE ehp_order ADD COLUMN product_sku TEXT");
+  if (!oc.includes('product_line')) db.exec("ALTER TABLE ehp_order ADD COLUMN product_line TEXT");
+  const bc = db.prepare("PRAGMA table_info(ehp_assembly_batch)").all().map(c => c.name);
+  if (!bc.includes('product_line')) db.exec("ALTER TABLE ehp_assembly_batch ADD COLUMN product_line TEXT");
+  if (!bc.includes('batch_ref'))    db.exec("ALTER TABLE ehp_assembly_batch ADD COLUMN batch_ref TEXT");
+  // qty_per_envelope is meaningless when the split rotates — recipe lines are a POOL of
+  // flavours, not fixed quantities. Kept NOT NULL for compatibility; written as 0.
+  db.exec(`CREATE TABLE IF NOT EXISTS ehp_product_map (
+    client_id    TEXT NOT NULL,
+    shopify_sku  TEXT NOT NULL,
+    product_line TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (client_id, shopify_sku)
+  );`);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_ehp_order_line ON ehp_order(client_id, product_line, state)");
 } catch (e) { console.error('[ehp:recipe-structure]', e.message); }
 
 // Flag (not a block) when a single order asks for an unusual number of envelopes.
@@ -10624,41 +10644,96 @@ function ehpOnHand(clientId, sku) {
            .get(clientId, sku).n;
 }
 
-function ehpActiveRecipe(clientId, onDate) {
+// Shopify sends a product-level SKU (oxyshredstickpack-us), never a flavour SKU. The map
+// is the only place that knows which line it is — deliberately not a field on the recipe,
+// so recipe versioning does not have to re-declare it every time.
+function ehpResolveProductLine(clientId, shopifySku) {
+  if (!shopifySku) return null;
+  try {
+    const r = db.prepare('SELECT product_line FROM ehp_product_map WHERE client_id=? AND shopify_sku=?')
+                .get(clientId, String(shopifySku).trim());
+    return r ? r.product_line : null;
+  } catch (e) { return null; }
+}
+
+// Spread an exact integer stick total across the pool as evenly as possible (largest
+// remainder). 1505 across 3 flavours -> 502/502/501: the sum is always exactly right, so
+// no fraction is ever stored and no drift accumulates. offset rotates who takes the extra.
+function ehpAllocateSticks(total, skus, offset) {
+  const n = (skus || []).length;
+  if (!n || !(total > 0)) return [];
+  const base = Math.floor(total / n);
+  let rem = total - base * n;
+  const off = ((parseInt(offset, 10) || 0) % n + n) % n;
+  const out = skus.map(sku => ({ sku, qty: base }));
+  for (let k = 0; k < rem; k++) out[(off + k) % n].qty += 1;
+  return out.filter(x => x.qty > 0);
+}
+
+// Active recipe for a product line. productLine null keeps the pre-tenancy behaviour of
+// returning whatever single recipe is active, so nothing that has not been made
+// line-aware yet starts returning null.
+function ehpActiveRecipe(clientId, productLine, onDate) {
   const d = onDate || new Date().toISOString().slice(0, 10);
-  const r = db.prepare(`SELECT * FROM ehp_kit_recipe WHERE client_id=? AND active=1
-                        AND effective_from <= ? AND (effective_to IS NULL OR effective_to >= ?)
-                        ORDER BY effective_from DESC LIMIT 1`).get(clientId, d, d);
+  const p = [clientId, d, d];
+  let sql = `SELECT * FROM ehp_kit_recipe WHERE client_id=? AND active=1
+             AND effective_from <= ? AND (effective_to IS NULL OR effective_to >= ?)`;
+  if (productLine) { sql += ' AND product_line=?'; p.push(productLine); }
+  sql += ' ORDER BY effective_from DESC LIMIT 1';
+  const r = db.prepare(sql).get(...p);
   if (!r) return null;
   r.lines = db.prepare('SELECT sku, qty_per_envelope FROM ehp_kit_recipe_line WHERE recipe_id=?').all(r.id);
+  r.pool  = r.lines.map(l => l.sku);                 // flavour pool — order is stable by insert
   return r;
 }
 
 // Build a batch from queued orders. Whole orders only, so hitting a 500 target with a
 // 3-envelope order at the boundary yields 502 — the target is a floor, not a cap.
-function ehpBuildBatch(clientId, facility, targetEnvelopes, createdBy) {
+function ehpBuildBatch(clientId, facility, targetEnvelopes, createdBy, productLine) {
   const target = Math.max(1, parseInt(targetEnvelopes, 10) || 0);
+  const line = productLine ? String(productLine).trim() : null;
+  // A batch is exactly one recipe, so it is exactly one product line. Mixing them would
+  // make the recipe explosion meaningless.
+  if (!line) return { error: 'product_line_required',
+    message: 'Choose a product line — a batch cannot mix OxyShred and Fizz Stix.' };
+  const recipe = ehpActiveRecipe(clientId, line);
+  if (!recipe) return { error: 'no_active_recipe_for_line', product_line: line };
   const queued = db.prepare(`SELECT id, envelope_qty FROM ehp_order
                              WHERE client_id=? AND state='queued' AND batch_id IS NULL
-                             ORDER BY placed_at, created_at`).all(clientId);
-  if (!queued.length) return { error: 'no_queued_orders' };
+                               AND product_line=?
+                             ORDER BY placed_at, created_at`).all(clientId, line);
+  if (!queued.length) return { error: 'no_queued_orders', product_line: line };
   const picked = []; let env = 0;
   for (const o of queued) {
     if (env >= target) break;
     picked.push(o.id); env += (o.envelope_qty || 1);      // never split an order
   }
   const batchId = ehpNewId('bat');
-  const recipe = ehpActiveRecipe(clientId);
+  const ref = ehpBatchRef(clientId, line);
   db.transaction(() => {
     db.prepare(`INSERT INTO ehp_assembly_batch
-      (id, client_id, facility_code, target_envelopes, actual_envelopes, order_count, recipe_id, state, created_by)
-      VALUES (?,?,?,?,?,?,?, 'queued', ?)`)
-      .run(batchId, clientId, facility || null, target, env, picked.length, recipe ? recipe.id : null, createdBy || null);
+      (id, client_id, facility_code, target_envelopes, actual_envelopes, order_count, recipe_id, state, created_by, product_line, batch_ref)
+      VALUES (?,?,?,?,?,?,?, 'queued', ?,?,?)`)
+      .run(batchId, clientId, facility || null, target, env, picked.length, recipe.id, createdBy || null, line, ref);
     const upd = db.prepare(`UPDATE ehp_order SET batch_id=? WHERE id=? AND client_id=?`);
     for (const id of picked) upd.run(batchId, id, clientId);
   })();
-  return { batch_id: batchId, target_envelopes: target, actual_envelopes: env, order_count: picked.length,
-           recipe_id: recipe ? recipe.id : null };
+  return { batch_id: batchId, batch_ref: ref, product_line: line, target_envelopes: target,
+           actual_envelopes: env, order_count: picked.length, recipe_id: recipe.id };
+}
+
+// Human reference for the floor: line code, facility-local date, daily sequence.
+// OXY-260812-01. Legible on a pallet card and sorts correctly.
+function ehpBatchRef(clientId, productLine) {
+  const code = String(productLine || 'GEN').replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase() || 'GEN';
+  const d = todayChicagoISO().replace(/-/g, '').slice(2);       // YYMMDD, facility-local
+  const like = `${code}-${d}-%`;
+  const last = db.prepare(`SELECT batch_ref FROM ehp_assembly_batch
+                           WHERE client_id=? AND batch_ref LIKE ?
+                           ORDER BY batch_ref DESC LIMIT 1`).get(clientId, like);
+  let seq = 1;
+  if (last && last.batch_ref) { const m = last.batch_ref.match(/-(\d+)$/); if (m) seq = parseInt(m[1], 10) + 1; }
+  return `${code}-${d}-${String(seq).padStart(2, '0')}`;
 }
 
 // Mark assembled: explode the recipe and consume inventory.
@@ -10670,8 +10745,8 @@ function ehpAssembleBatch(clientId, batchId, by) {
     ? (() => { const r = db.prepare('SELECT * FROM ehp_kit_recipe WHERE id=?').get(b.recipe_id);
                if (r) r.lines = db.prepare('SELECT sku, qty_per_envelope FROM ehp_kit_recipe_line WHERE recipe_id=?').all(r.id);
                return r; })()
-    : ehpActiveRecipe(clientId);
-  if (!recipe) return { error: 'no_active_recipe' };
+    : ehpActiveRecipe(clientId, b.product_line || null);
+  if (!recipe) return { error: 'no_active_recipe', product_line: b.product_line || null };
   // Periodic inventory: no per-flavour deduction here. Flavour assignment is random on the
   // floor, so posting a fixed split would be fiction. Total sticks used IS known and exact.
   const sticks = (b.actual_envelopes || 0) * (recipe.sticks_per_envelope || 5);
@@ -10684,11 +10759,12 @@ function ehpAssembleBatch(clientId, batchId, by) {
 }
 
 // Envelopes assembled since a given date — drives the estimate between counts.
-function ehpEnvelopesSince(clientId, sinceIso) {
-  const r = db.prepare(`SELECT COALESCE(SUM(actual_envelopes),0) n FROM ehp_assembly_batch
-                        WHERE client_id=? AND assembled_at IS NOT NULL AND assembled_at >= ?`)
-              .get(clientId, sinceIso || '1970-01-01');
-  return r.n || 0;
+function ehpEnvelopesSince(clientId, sinceIso, productLine) {
+  const p = [clientId, sinceIso || '1970-01-01'];
+  let sql = `SELECT COALESCE(SUM(actual_envelopes),0) n FROM ehp_assembly_batch
+             WHERE client_id=? AND assembled_at IS NOT NULL AND assembled_at >= ?`;
+  if (productLine) { sql += ' AND product_line=?'; p.push(productLine); }
+  return db.prepare(sql).get(...p).n || 0;
 }
 
 // Estimated on-hand between counts. With M flavours filling the slots at random, each
@@ -10696,19 +10772,25 @@ function ehpEnvelopesSince(clientId, sinceIso) {
 // fortnightly count replaces it with truth.
 function ehpEstimatedOnHand(clientId, sku) {
   const ledger = ehpOnHand(clientId, sku);
-  const meta = db.prepare('SELECT is_component FROM ehp_sku WHERE client_id=? AND sku=?').get(clientId, sku);
+  const meta = db.prepare('SELECT is_component, product_line FROM ehp_sku WHERE client_id=? AND sku=?').get(clientId, sku);
   if (!meta || !meta.is_component) {
     // Not stocked (e.g. a Shopify product code) — nothing is drawn down against it.
     return { ledger_on_hand: ledger, envelopes_since_count: 0, estimated_used: 0,
              estimated_on_hand: ledger, last_count_at: null, is_component: 0 };
   }
   const lastCount = db.prepare(`SELECT MAX(counted_at) t FROM ehp_stock_count WHERE client_id=? AND sku=?`).get(clientId, sku).t;
-  const recipe = ehpActiveRecipe(clientId);
-  const per = recipe ? (recipe.sticks_per_envelope || 5) / Math.max(1, recipe.distinct_flavours || 3) : 0;
-  const env = ehpEnvelopesSince(clientId, lastCount || '1970-01-01');
+  // Scope to the flavour's own line: a flavour is only drawn down by envelopes of its own
+  // recipe. Dividing six flavours by one global recipe would halve every burn rate.
+  const line = meta.product_line || null;
+  const recipe = ehpActiveRecipe(clientId, line);
+  const pool = recipe && recipe.pool && recipe.pool.length ? recipe.pool.length
+             : Math.max(1, (recipe && recipe.distinct_flavours) || 3);
+  const per = recipe ? (recipe.sticks_per_envelope || 5) / pool : 0;
+  const env = ehpEnvelopesSince(clientId, lastCount || '1970-01-01', line);
   const est = Math.round(env * per);
   return { ledger_on_hand: ledger, envelopes_since_count: env, estimated_used: est,
-           estimated_on_hand: ledger - est, last_count_at: lastCount || null, is_component: 1 };
+           estimated_on_hand: ledger - est, last_count_at: lastCount || null, is_component: 1,
+           product_line: line };
 }
 
 // Close a count period: derive consumption per SKU and reconcile total sticks against
@@ -10726,19 +10808,22 @@ function ehpCloseCountPeriod(clientId, periodId, counts, by) {
       const sku = String(c.sku || '').trim(); if (!sku) continue;
       const counted = parseInt(c.counted_each, 10); if (!Number.isFinite(counted)) continue;
       db.prepare(`UPDATE ehp_sku SET is_component=1 WHERE client_id=? AND sku=?`).run(clientId, sku);
-      const system = ehpOnHand(clientId, sku);                 // opening + receipts (no consumption posted)
-      const derivedUse = system - counted;                     // what the floor actually used
+      const system = ehpOnHand(clientId, sku);                 // receipts MINUS dispatch consumption
+      // Consumption is now posted at dispatch, so the ledger already reflects usage. What
+      // the count contributes is the difference between the book and the shelf — that is
+      // an ADJUSTMENT (shrinkage, damage, miscount), not usage. Posting it as consumption
+      // again would deduct the same sticks twice.
+      const variance = counted - system;
       const cid = ehpNewId('cnt');
       db.prepare(`INSERT INTO ehp_stock_count (id, client_id, sku, counted_each, system_each, variance_each, counted_by, notes, period_id)
                   VALUES (?,?,?,?,?,?,?,?,?)`)
-        .run(cid, clientId, sku, counted, system, counted - system, by || null, c.notes || null, periodId);
-      // Post the derived usage so the ledger equals the counted figure.
-      if (derivedUse !== 0) {
+        .run(cid, clientId, sku, counted, system, variance, by || null, c.notes || null, periodId);
+      if (variance !== 0) {
         db.prepare(`INSERT INTO ehp_inventory_txn (id, client_id, sku, qty_each, txn_type, ref_type, ref_id)
-                    VALUES (?,?,?,?, 'consumption', 'count_period', ?)`)
-          .run(ehpNewId('inv'), clientId, sku, -derivedUse, periodId);
+                    VALUES (?,?,?,?, 'adjustment', 'count_period', ?)`)
+          .run(ehpNewId('inv'), clientId, sku, variance, periodId);
       }
-      lines.push({ sku, system_each: system, counted_each: counted, derived_usage_each: derivedUse,
+      lines.push({ sku, system_each: system, counted_each: counted, variance_each: variance,
                    on_hand_after: ehpOnHand(clientId, sku) });
     }
     db.prepare(`UPDATE ehp_count_period SET status='closed', period_end=?, closed_at=datetime('now'), closed_by=? WHERE id=?`)
@@ -10748,11 +10833,12 @@ function ehpCloseCountPeriod(clientId, periodId, counts, by) {
                           WHERE client_id=? AND assembled_at IS NOT NULL AND date(assembled_at) >= ?`)
                 .get(clientId, per.period_start).n;
   const expected = env * sticksPerEnv;
-  const derived = lines.reduce((a, l) => a + l.derived_usage_each, 0);
+  const adjusted = lines.reduce((a, l) => a + l.variance_each, 0);
   return { period_id: periodId, lines, envelopes_in_period: env,
-           expected_sticks: expected, derived_sticks: derived, variance_sticks: derived - expected,
-           note: derived === expected ? 'Derived usage matches envelopes assembled.'
-                                      : 'Gap between derived usage and envelopes assembled — investigate shrinkage or damage.' };
+           expected_sticks: expected, adjustment_sticks: adjusted,
+           note: adjusted === 0 ? 'Counted stock matches the ledger exactly.'
+               : adjusted < 0  ? 'Shelf is short of the ledger — investigate shrinkage or damage.'
+                               : 'Shelf holds more than the ledger — check for unrecorded receipts or a miscount.' };
 }
 
 // ═══════════════════ SUPPLIER DISCREPANCY REPORT (non-compliance) ═══════════════════
@@ -11192,7 +11278,7 @@ app.patch('/ehp/sku/:sku', authenticateRequest, writeOpLimiter, auditLog('edit_e
   try {
     const c = ehpGuard(req, res); if (!c) return;
     const b = req.body || {}; const f = []; const v = [];
-    for (const k of ['name','format','flavour','eaches_per_inner','inners_per_carton','cartons_per_pallet']) {
+    for (const k of ['name','format','flavour','eaches_per_inner','inners_per_carton','cartons_per_pallet','product_line','is_component']) {
       if (b[k] !== undefined) { f.push(`${k}=?`); v.push(b[k] === '' ? null : b[k]); }
     }
     if (!f.length) return res.status(400).json({ error: 'no editable fields' });
@@ -11223,6 +11309,52 @@ app.get('/ehp/sku-audit', authenticateRequest, (req, res) => {
       })),
       suppressed: db.prepare('SELECT * FROM ehp_sku_suppressed WHERE client_id=? ORDER BY sku').all(c),
     });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Shopify product SKU -> product line ──
+// The only thing that tells Pinpoint an order is OxyShred rather than Fizz Stix.
+app.get('/ehp/product-map', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    // Surface SKUs actually seen on orders, so mapping is a pick rather than a typing exercise.
+    const seen = db.prepare(`SELECT product_sku, COUNT(*) orders, MAX(placed_at) last_seen
+                             FROM ehp_order WHERE client_id=? AND product_sku IS NOT NULL
+                             GROUP BY product_sku ORDER BY orders DESC`).all(c);
+    const map = db.prepare('SELECT * FROM ehp_product_map WHERE client_id=? ORDER BY shopify_sku').all(c);
+    const mapped = new Set(map.map(m => m.shopify_sku));
+    res.json({ client_id: c, map, seen_on_orders: seen,
+               unmapped: seen.filter(x => !mapped.has(x.product_sku)) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/ehp/product-map', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+  auditLog('edit_ehp_product_map'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const b = req.body || {};
+    const sku = String(b.shopify_sku || '').trim();
+    const line = String(b.product_line || '').trim().toUpperCase();
+    if (!sku || !line) return res.status(400).json({ error: 'shopify_sku and product_line required' });
+    db.prepare(`INSERT INTO ehp_product_map (client_id, shopify_sku, product_line) VALUES (?,?,?)
+                ON CONFLICT(client_id, shopify_sku) DO UPDATE SET product_line=excluded.product_line`)
+      .run(c, sku, line);
+    // Backfill queued orders that arrived before the mapping existed. Only queued ones —
+    // anything already batched keeps the line it was processed under.
+    const n = db.prepare(`UPDATE ehp_order SET product_line=?
+                          WHERE client_id=? AND product_sku=? AND state='queued' AND batch_id IS NULL`)
+                .run(line, c, sku).changes;
+    res.json({ client_id: c, shopify_sku: sku, product_line: line, orders_backfilled: n });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.delete('/ehp/product-map/:sku', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+  auditLog('delete_ehp_product_map'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const n = db.prepare('DELETE FROM ehp_product_map WHERE client_id=? AND shopify_sku=?')
+                .run(c, String(req.params.sku || '').trim()).changes;
+    res.json({ client_id: c, shopify_sku: req.params.sku, removed: n > 0 });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -11366,8 +11498,25 @@ app.get('/ehp/queue', authenticateRequest, (req, res) => {
                           FROM ehp_order WHERE client_id=? AND state='queued' AND batch_id IS NULL`).get(c);
     const flagged = db.prepare(`SELECT COUNT(*) n FROM ehp_order
                           WHERE client_id=? AND state='queued' AND flagged_high_qty=1`).get(c).n;
+    // Queue splits by product line, because a batch is one line.
+    const byLine = db.prepare(`SELECT product_line, COUNT(*) orders, COALESCE(SUM(envelope_qty),0) envelopes
+                               FROM ehp_order WHERE client_id=? AND state='queued' AND batch_id IS NULL
+                               GROUP BY product_line ORDER BY product_line`).all(c);
+    const lines = byLine.filter(r => r.product_line).map(r => {
+      const rec = ehpActiveRecipe(c, r.product_line);
+      return { product_line: r.product_line, queued_orders: r.orders, queued_envelopes: r.envelopes,
+               recipe: rec ? { id: rec.id, name: rec.name, sticks_per_envelope: rec.sticks_per_envelope,
+                               distinct_flavours: rec.distinct_flavours, pool: rec.pool } : null,
+               ready: !!(rec && rec.pool && rec.pool.length) };
+    });
+    // Orders whose Shopify SKU has no mapping: visible, never guessed, never batched.
+    const unmapped = db.prepare(`SELECT product_sku, COUNT(*) orders, COALESCE(SUM(envelope_qty),0) envelopes
+                                 FROM ehp_order WHERE client_id=? AND state='queued' AND batch_id IS NULL
+                                   AND (product_line IS NULL OR product_line='')
+                                 GROUP BY product_sku`).all(c);
     const recipe = ehpActiveRecipe(c);
     res.json({ queued_orders: q.orders, queued_envelopes: q.envelopes, flagged_high_qty: flagged,
+               lines, unmapped,
                active_recipe: recipe ? { id: recipe.id, name: recipe.name, lines: recipe.lines } : null });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
@@ -11376,7 +11525,7 @@ app.post('/ehp/batch', authenticateRequest, writeOpLimiter, auditLog('create_ehp
   try {
     const c = ehpGuard(req, res); if (!c) return;
     const b = req.body || {};
-    const r = ehpBuildBatch(c, b.facility_code || 'VOZ_TX', b.target_envelopes, b.created_by);
+    const r = ehpBuildBatch(c, b.facility_code || 'VOZ_TX', b.target_envelopes, b.created_by, b.product_line);
     if (r.error) return res.status(400).json(r);
     res.json(r);
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
@@ -11417,15 +11566,42 @@ app.post('/ehp/batch/:id/dispatch', authenticateRequest, writeOpLimiter, auditLo
     const b = db.prepare('SELECT * FROM ehp_assembly_batch WHERE id=? AND client_id=?').get(req.params.id, c);
     if (!b) return res.status(404).json({ error: 'batch_not_found' });
     if (b.state !== 'assembled') return res.status(409).json({ error: 'batch_not_assembled', state: b.state });
+
+    // Dispatch is where stock leaves the building, so this is where the ledger moves.
+    // Refuse rather than dispatch silently unconsumed: a batch that ships without
+    // deducting anything only surfaces at the next count, weeks later.
+    const recipe = b.recipe_id
+      ? (() => { const r = db.prepare('SELECT * FROM ehp_kit_recipe WHERE id=?').get(b.recipe_id);
+                 if (r) r.pool = db.prepare('SELECT sku FROM ehp_kit_recipe_line WHERE recipe_id=?').all(r.id).map(x => x.sku);
+                 return r; })()
+      : ehpActiveRecipe(c, b.product_line || null);
+    if (!recipe || !recipe.pool || !recipe.pool.length) {
+      return res.status(409).json({ error: 'no_recipe_pool',
+        product_line: b.product_line || null, recipe_id: b.recipe_id || null,
+        message: 'No flavour pool on this batch\'s recipe — set the recipe flavours before dispatching.' });
+    }
+    // Exact integer total, spread across the pool. Rotate the extra stick by how many
+    // batches this line has already dispatched, so no single flavour absorbs it every time.
+    const totalSticks = (b.actual_envelopes || 0) * (recipe.sticks_per_envelope || 5);
+    const prior = db.prepare(`SELECT COUNT(*) n FROM ehp_assembly_batch
+                              WHERE client_id=? AND dispatched_at IS NOT NULL AND product_line IS ?`)
+                    .get(c, b.product_line || null).n;
+    const alloc = ehpAllocateSticks(totalSticks, recipe.pool, prior);
+
     db.transaction(() => {
       db.prepare(`UPDATE ehp_assembly_batch SET state='dispatched', dispatched_at=datetime('now') WHERE id=?`).run(b.id);
       db.prepare(`UPDATE ehp_order SET state='dispatched', fulfilled_at=datetime('now') WHERE batch_id=? AND client_id=?`).run(b.id, c);
+      const ins = db.prepare(`INSERT INTO ehp_inventory_txn (id, client_id, sku, qty_each, txn_type, ref_type, ref_id)
+                              VALUES (?,?,?,?, 'consumption', 'assembly_batch', ?)`);
+      for (const a of alloc) ins.run(ehpNewId('inv'), c, a.sku, -a.qty, b.id);
     })();
     // Mark the orders fulfilled in Shopify. Dispatch already succeeded locally, so a
     // Shopify failure is reported rather than rolled back — retry via /shopify/retry-fulfilments.
     let shop = { skipped: 'not_connected' };
     try { shop = await shopifyFulfilBatch(c, b.id); } catch (e) { shop = { error: String(e.message || e) }; }
-    res.json({ batch_id: b.id, envelopes: b.actual_envelopes, orders: b.order_count, state: 'dispatched', shopify: shop });
+    res.json({ batch_id: b.id, batch_ref: b.batch_ref || null, product_line: b.product_line || null,
+      envelopes: b.actual_envelopes, orders: b.order_count, state: 'dispatched',
+      consumed: { total_sticks: totalSticks, by_flavour: alloc }, shopify: shop });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -11437,7 +11613,27 @@ app.get('/ehp/batch/:id/picklist', authenticateRequest, auditLog('view_ehp_pickl
         recipient_city, recipient_state, recipient_postcode, recipient_country, flagged_high_qty, labels_generated_at
       FROM ehp_order WHERE batch_id=? AND client_id=? ORDER BY order_number`).all(req.params.id, c);
     const envelopes = orders.reduce((a, o) => a + (o.envelope_qty || 0), 0);
-    res.json({ batch_id: req.params.id, orders, order_count: orders.length, envelope_count: envelopes });
+    // What to physically pull. Same allocation the dispatch deduction will use, so the
+    // shelf and the ledger are asked for the same thing.
+    const bat = db.prepare('SELECT * FROM ehp_assembly_batch WHERE id=? AND client_id=?').get(req.params.id, c);
+    let pull = [], recipeInfo = null;
+    if (bat) {
+      const rec = bat.recipe_id
+        ? (() => { const r = db.prepare('SELECT * FROM ehp_kit_recipe WHERE id=?').get(bat.recipe_id);
+                   if (r) r.pool = db.prepare('SELECT sku FROM ehp_kit_recipe_line WHERE recipe_id=?').all(r.id).map(x => x.sku);
+                   return r; })()
+        : ehpActiveRecipe(c, bat.product_line || null);
+      if (rec && rec.pool && rec.pool.length) {
+        const prior = db.prepare(`SELECT COUNT(*) n FROM ehp_assembly_batch
+                                  WHERE client_id=? AND dispatched_at IS NOT NULL AND product_line IS ?`)
+                        .get(c, bat.product_line || null).n;
+        pull = ehpAllocateSticks((bat.actual_envelopes || 0) * (rec.sticks_per_envelope || 5), rec.pool, prior);
+        recipeInfo = { name: rec.name, sticks_per_envelope: rec.sticks_per_envelope, pool: rec.pool };
+      }
+    }
+    res.json({ batch_id: req.params.id, batch_ref: bat ? bat.batch_ref : null,
+      product_line: bat ? bat.product_line : null, recipe: recipeInfo,
+      orders, order_count: orders.length, envelope_count: envelopes, pull });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -11584,9 +11780,16 @@ app.post('/ehp/stock-count', authenticateRequest, writeOpLimiter, auditLog('ehp_
 app.get('/ehp/recipe', authenticateRequest, (req, res) => {
   try {
     const c = ehpGuard(req, res); if (!c) return;
-    const active = ehpActiveRecipe(c);
+    const lines = db.prepare(`SELECT DISTINCT product_line FROM ehp_product_map WHERE client_id=?
+                              UNION SELECT DISTINCT product_line FROM ehp_kit_recipe WHERE client_id=? AND product_line IS NOT NULL`)
+                    .all(c, c).map(r => r.product_line).filter(Boolean);
+    const active = ehpActiveRecipe(c);                       // legacy field: first active
+    const by_line = {};
+    for (const pl of lines) by_line[pl] = ehpActiveRecipe(c, pl);
     const all = db.prepare('SELECT * FROM ehp_kit_recipe WHERE client_id=? ORDER BY effective_from DESC').all(c);
-    res.json({ active, history: all });
+    res.json({ active, product_lines: lines, by_line, history: all,
+      components: db.prepare(`SELECT sku, name, flavour, product_line FROM ehp_sku
+                              WHERE client_id=? AND active=1 AND is_component=1 ORDER BY sku`).all(c) });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -11600,24 +11803,41 @@ app.post('/ehp/recipe', authenticateRequest, writeOpLimiter, auditLog('create_eh
     const parts  = split.split(',').map(x => parseInt(x.trim(), 10)).filter(Number.isFinite);
     if (parts.length !== flav) return res.status(400).json({ error: 'split_pattern must have one number per distinct flavour', split, distinct_flavours: flav });
     if (parts.reduce((a, x) => a + x, 0) !== sticks) return res.status(400).json({ error: 'split_pattern must sum to sticks_per_envelope', split, sticks_per_envelope: sticks });
-    const lines = [];
+    // The flavour POOL. Which flavour fills which slot rotates on the floor, so these are
+    // members, not quantities — qty_per_envelope is stored as 0 and never read.
+    const lines = (Array.isArray(b.flavours) ? b.flavours : (Array.isArray(b.lines) ? b.lines : []))
+      .map(x => (typeof x === 'string' ? x : (x && x.sku)))
+      .map(x => String(x || '').trim()).filter(Boolean);
+    if (lines.length && lines.length !== flav)
+      return res.status(400).json({ error: 'flavour pool must have exactly distinct_flavours members',
+        flavours: lines, distinct_flavours: flav });
+    const productLine = String(b.product_line || '').trim() || null;
+    if (!productLine) return res.status(400).json({ error: 'product_line required',
+      message: 'A recipe serves one product line (e.g. OXYSHRED).' });
     const from = String(b.effective_from || new Date().toISOString().slice(0, 10)).trim();
     const id = ehpNewId('rec');
     db.transaction(() => {
       // Close every currently-open recipe. Previously this only matched recipes starting
       // strictly BEFORE the new one, so a same-day replacement left both open.
+      // Supersede only within this product line — the other line's recipe must stay open.
       db.prepare(`UPDATE ehp_kit_recipe SET effective_to = date(?, '-1 day')
-                  WHERE client_id=? AND effective_to IS NULL AND effective_from <= ?`).run(from, c, from);
+                  WHERE client_id=? AND product_line IS ? AND effective_to IS NULL AND effective_from <= ?`)
+        .run(from, c, productLine, from);
       // A same-day replacement produces a zero-length window — retire it outright.
       db.prepare(`UPDATE ehp_kit_recipe SET active=0
                   WHERE client_id=? AND effective_to IS NOT NULL AND effective_to < effective_from`).run(c);
-      db.prepare(`INSERT INTO ehp_kit_recipe (id, client_id, name, effective_from, notes, sticks_per_envelope, distinct_flavours, split_pattern)
-                  VALUES (?,?,?,?,?,?,?,?)`)
-        .run(id, c, b.name || ('Recipe ' + from), from, b.notes || null, sticks, flav, split);
-      const ins = db.prepare(`INSERT INTO ehp_kit_recipe_line (recipe_id, client_id, sku, qty_per_envelope) VALUES (?,?,?,?)`);
-      for (const l of lines) { ehpEnsureSku(c, String(l.sku).trim(), {}); ins.run(id, c, String(l.sku).trim(), parseInt(l.qty_per_envelope, 10)); }
+      db.prepare(`INSERT INTO ehp_kit_recipe (id, client_id, name, effective_from, notes, sticks_per_envelope, distinct_flavours, split_pattern, product_line)
+                  VALUES (?,?,?,?,?,?,?,?,?)`)
+        .run(id, c, b.name || ('Recipe ' + from), from, b.notes || null, sticks, flav, split, productLine);
+      const ins = db.prepare(`INSERT INTO ehp_kit_recipe_line (recipe_id, client_id, sku, qty_per_envelope) VALUES (?,?,?,0)`);
+      for (const sku of lines) {
+        ehpEnsureSku(c, sku, { source: 'manual' });
+        // A recipe member is by definition stock we consume, and belongs to this line.
+        db.prepare(`UPDATE ehp_sku SET is_component=1, product_line=? WHERE client_id=? AND sku=?`).run(productLine, c, sku);
+        ins.run(id, c, sku);
+      }
     })();
-    res.json(ehpActiveRecipe(c) || { recipe_id: id });
+    res.json(ehpActiveRecipe(c, productLine) || { recipe_id: id });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -12233,10 +12453,28 @@ app.get('/ehp/timeseries', authenticateRequest, (req, res) => {
     }));
 
     // Stock burn-down per component: receipts to date minus estimated usage to date.
+    // Burn rate is per product line: a flavour is only drawn down by its own recipe's
+    // envelopes. One global divisor across six flavours would understate every burn rate.
+    const asmByLine = {};
+    for (const r of db.prepare(`SELECT product_line, date(assembled_at) d, COALESCE(SUM(actual_envelopes),0) e
+        FROM ehp_assembly_batch WHERE client_id=? AND assembled_at IS NOT NULL
+          AND date(assembled_at) BETWEEN ? AND ? GROUP BY product_line, date(assembled_at)`).all(c, from, to)) {
+      (asmByLine[r.product_line || ''] = asmByLine[r.product_line || ''] || {})[r.d] = r.e;
+    }
+    const recipeCache = {};
+    const recipeFor = (pl) => {
+      const k = pl || '';
+      if (!(k in recipeCache)) recipeCache[k] = ehpActiveRecipe(c, pl || null);
+      return recipeCache[k];
+    };
     const recipe = ehpActiveRecipe(c);
-    const perFlavour = recipe ? (recipe.sticks_per_envelope || 5) / Math.max(1, recipe.distinct_flavours || 3) : 0;
-    const comps = db.prepare(`SELECT sku FROM ehp_sku WHERE client_id=? AND active=1 AND is_component=1 ORDER BY sku`).all(c);
-    const inventory = comps.map(({ sku }) => {
+    const comps = db.prepare(`SELECT sku, product_line FROM ehp_sku WHERE client_id=? AND active=1 AND is_component=1 ORDER BY sku`).all(c);
+    const inventory = comps.map(({ sku, product_line }) => {
+      const rec = recipeFor(product_line);
+      const poolN = rec && rec.pool && rec.pool.length ? rec.pool.length
+                  : Math.max(1, (rec && rec.distinct_flavours) || 3);
+      const perFlavour = rec ? (rec.sticks_per_envelope || 5) / poolN : 0;
+      const lineAsm = asmByLine[product_line || ''] || {};
       const recBy = {};
       for (const r of db.prepare(`SELECT date(created_at) d, COALESCE(SUM(qty_each),0) q FROM ehp_inventory_txn
           WHERE client_id=? AND sku=? GROUP BY date(created_at)`).all(c, sku)) recBy[r.d] = r.q;
@@ -12245,14 +12483,14 @@ app.get('/ehp/timeseries', authenticateRequest, (req, res) => {
       let bal = opening, cumEnv = 0;
       const points = days.map(d => {
         bal += (recBy[d] || 0);
-        cumEnv += (asmBy[d] || 0);
+        cumEnv += (lineAsm[d] || 0);
         return { date: d, on_hand: Math.round(bal - cumEnv * perFlavour) };
       });
       // Days of cover at the recent average burn rate.
-      const totalEnv = days.reduce((a, d) => a + (asmBy[d] || 0), 0);
+      const totalEnv = days.reduce((a, d) => a + (lineAsm[d] || 0), 0);
       const perDay = totalEnv / Math.max(1, days.length) * perFlavour;
       const last = points.length ? points[points.length - 1].on_hand : 0;
-      return { sku, points, on_hand: last, daily_burn: Math.round(perDay),
+      return { sku, product_line: product_line || null, points, on_hand: last, daily_burn: Math.round(perDay),
                days_cover: perDay > 0 ? Math.floor(last / perDay) : null };
     });
 
@@ -12616,19 +12854,29 @@ function shopifyUpsertOrder(clientId, o, shopDomain) {
   const flagged = envelopes >= EHP_ENVELOPE_ALERT_QTY ? 1 : 0;
   const existing = db.prepare(`SELECT id FROM ehp_order WHERE client_id=? AND shopify_order_id=?`).get(clientId, String(o.id));
   if (existing) return { id: existing.id, duplicate: true };
+  // The product-level SKU decides which recipe the order needs. One order never carries
+  // both stick packs, so the first line item with a SKU is the order's product.
+  const productSku = (o.line_items || []).map(li => li.sku).find(Boolean) || null;
+  const productLine = ehpResolveProductLine(clientId, productSku);
   const id = ehpNewId('ord');
   db.prepare(`INSERT INTO ehp_order
     (id, client_id, shopify_order_id, order_number, placed_at, envelope_qty,
      recipient_name, recipient_address, recipient_address2, recipient_city, recipient_state, recipient_postcode, recipient_country,
-     state, flagged_high_qty, shop_domain, shopify_tags)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued', ?, ?, ?)`)
+     state, flagged_high_qty, shop_domain, shopify_tags, product_sku, product_line)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued', ?, ?, ?, ?, ?)`)
     .run(id, clientId, String(o.id), String(o.name || o.order_number || ''), o.created_at || null, envelopes,
          [sa.first_name, sa.last_name].filter(Boolean).join(' ') || (o.customer ? [o.customer.first_name, o.customer.last_name].filter(Boolean).join(' ') : ''),
          sa.address1 || '', sa.address2 || '', sa.city || '', sa.province_code || sa.province || '',
-         sa.zip || '', sa.country_code || 'US', flagged, shopDomain || null, o.tags == null ? null : String(o.tags));
-  // SKUs seen on the order feed the registry
-  for (const li of (o.line_items || [])) if (li.sku) ehpEnsureSku(clientId, String(li.sku), { name: li.title, source: 'shopify' });
-  return { id, envelopes, flagged: !!flagged };
+         sa.zip || '', sa.country_code || 'US', flagged, shopDomain || null, o.tags == null ? null : String(o.tags),
+         productSku, productLine);
+  // Deliberately NOT registered in ehp_sku: that table is the stock registry (flavours we
+  // physically receive). A Shopify product code is not stock, and auto-creating it here is
+  // what filled the registry with rows that could never be consumed.
+  if (productSku && !productLine) {
+    console.warn(`[ehp:order] ${o.name || o.id} has unmapped product SKU "${productSku}" — cannot be batched until mapped.`);
+  }
+  return { id, envelopes, flagged: !!flagged, product_sku: productSku, product_line: productLine,
+           unmapped: !!(productSku && !productLine) };
 }
 
 // ── Webhook: orders/create ──
@@ -12717,6 +12965,9 @@ app.post('/shopify/webhooks/orders-updated', (req, res) => {
     }
     const envelopes = (o.line_items || []).reduce((a, li) => a + (parseInt(li.quantity, 10) || 0), 0) || 1;
     const sa = o.shipping_address || o.customer?.default_address || {};
+    const _pSku = (o.line_items || []).map(li => li.sku).find(Boolean) || existing.product_sku || null;
+    const _pLine = ehpResolveProductLine(clientId, _pSku) || existing.product_line || null;
+    db.prepare(`UPDATE ehp_order SET product_sku=?, product_line=? WHERE id=?`).run(_pSku, _pLine, existing.id);
     db.prepare(`UPDATE ehp_order SET envelope_qty=?, recipient_name=?, recipient_address=?, recipient_address2=?,
                   recipient_city=?, recipient_state=?, recipient_postcode=?, recipient_country=?, flagged_high_qty=?
                 WHERE id=?`)
