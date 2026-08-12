@@ -61,6 +61,7 @@
       .ehp-body{padding:16px 20px 22px;}
       .ehp-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px;}
       .ehp-kpi{border:0.5px solid rgba(0,0,0,0.1);border-radius:10px;padding:11px 13px;}
+      .ehp-card{border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:14px 16px;background:#fff;}
       .ehp-kl{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};}
       .ehp-kv{font-size:22px;font-weight:700;color:${DARK};margin-top:3px;}
       .ehp-ks{font-size:10px;color:${MID};}
@@ -168,23 +169,41 @@
     const [q, batches] = await Promise.all([req('/ehp/queue'), req('/ehp/batches')]);
     _cache.recipe = q.active_recipe;
     const b = batches.batches || [];
+    const lines = q.lines || [];
+    const unmapped = q.unmapped || [];
+    // A batch is one product line, so the queue is presented per line rather than as one
+    // pooled number — the pooled figure would suggest a batch that cannot be built.
+    const lineCards = lines.map(l => `
+        <div class="ehp-kpi">
+          <div class="ehp-kl">${esc(l.product_line)}</div>
+          <div class="ehp-kv">${nfmt(l.queued_envelopes)}</div>
+          <div class="ehp-ks">${nfmt(l.queued_orders)} order(s) · ${l.recipe ? esc(l.recipe.name) : '<span style="color:'+RED+'">no recipe</span>'}</div>
+        </div>`).join('');
     body.innerHTML = `
       <div class="ehp-kpis">
-        <div class="ehp-kpi"><div class="ehp-kl">Queued orders</div><div class="ehp-kv">${nfmt(q.queued_orders)}</div><div class="ehp-ks">awaiting a batch</div></div>
+        ${lineCards || `<div class="ehp-kpi"><div class="ehp-kl">Queued orders</div><div class="ehp-kv">${nfmt(q.queued_orders)}</div><div class="ehp-ks">awaiting a batch</div></div>`}
         <div class="ehp-kpi"><div class="ehp-kl">Queued envelopes</div><div class="ehp-kv">${nfmt(q.queued_envelopes)}</div><div class="ehp-ks">billable units</div></div>
         <div class="ehp-kpi"><div class="ehp-kl">Flagged orders</div><div class="ehp-kv" style="color:${q.flagged_high_qty?AMBER_TXT:DARK}">${nfmt(q.flagged_high_qty)}</div><div class="ehp-ks">unusually large</div></div>
-        <div class="ehp-kpi"><div class="ehp-kl">Active recipe</div><div class="ehp-kv" style="font-size:14px;">${q.active_recipe ? esc(q.active_recipe.name) : '—'}</div><div class="ehp-ks">${q.active_recipe ? q.active_recipe.lines.map(l=>l.qty_per_envelope+'× '+l.sku).join(' · ') : 'none set'}</div></div>
       </div>
-      ${!q.active_recipe ? msg('w','No active kit recipe — set one on the Recipe tab before assembling, or consumption cannot be derived.') : ''}
+      ${unmapped.length ? msg('w','<b>'+unmapped.reduce((a,u)=>a+u.orders,0)+' queued order(s) cannot be batched</b> — their Shopify SKU is not mapped to a product line: '
+          + unmapped.map(u=>'<code>'+esc(u.product_sku||'(no SKU)')+'</code> ('+u.orders+')').join(', ')
+          + '. Map them on the Recipe tab.') : ''}
+      ${lines.length && lines.some(l=>!l.ready) ? msg('w','A product line has no flavour pool on its recipe — dispatch will be refused until the flavours are set.') : ''}
+      ${!lines.length && !unmapped.length ? msg('w','No queued orders carry a product line yet. Map the Shopify SKUs on the Recipe tab.') : ''}
       <div style="display:flex;gap:8px;align-items:flex-end;margin:10px 0 4px;">
+        <div><span class="ehp-lbl">Product line</span><select class="ehp-sel" id="ehp-bline" style="width:150px;">
+          ${lines.length ? lines.map(l=>`<option value="${esc(l.product_line)}" ${l.ready?'':'disabled'}>${esc(l.product_line)} (${nfmt(l.queued_envelopes)})</option>`).join('')
+                         : '<option value="">none available</option>'}
+        </select></div>
         <div><span class="ehp-lbl">Envelopes in this batch</span><input class="ehp-in" id="ehp-target" type="number" min="1" step="1" value="500" style="width:130px;"></div>
-        <button class="ehp-btn" id="ehp-mkbatch" ${q.queued_orders?'':'disabled'}>Create batch</button>
+        <button class="ehp-btn" id="ehp-mkbatch" ${lines.some(l=>l.ready)?'':'disabled'}>Create batch</button>
         <div style="font-size:10px;color:${LIGHT};padding-bottom:8px;">Whole orders only — the actual count may land slightly above your target.</div>
       </div>
       <div id="ehp-batchmsg"></div>
-      <table class="ehp"><thead><tr><th>Batch</th><th class="n">Target</th><th class="n">Envelopes</th><th class="n">Orders</th><th>State</th><th class="n">Labels</th><th class="n">Shopify</th><th>Assembled (CT)</th><th>Dispatched (CT)</th><th></th></tr></thead>
+      <table class="ehp"><thead><tr><th>Batch</th><th>Line</th><th class="n">Target</th><th class="n">Envelopes</th><th class="n">Orders</th><th>State</th><th class="n">Labels</th><th class="n">Shopify</th><th>Assembled (CT)</th><th>Dispatched (CT)</th><th></th></tr></thead>
       <tbody>${b.length ? b.map(x => `<tr>
-        <td style="font-family:monospace;font-size:10px;">${esc(String(x.id).slice(-8))}</td>
+        <td style="font-family:monospace;font-size:10px;"><b>${esc(x.batch_ref || String(x.id).slice(-8))}</b></td>
+        <td style="font-size:10px;color:${MID}">${esc(x.product_line || '—')}</td>
         <td class="n">${nfmt(x.target_envelopes)}</td><td class="n"><b>${nfmt(x.actual_envelopes)}</b></td><td class="n">${nfmt(x.order_count)}</td>
         <td><span class="ehp-chip" style="background:${x.state==='dispatched'?'rgba(52,199,89,.14)':x.state==='assembled'?'rgba(255,208,20,.28)':'rgba(0,0,0,.06)'};color:${x.state==='dispatched'?GREEN:x.state==='assembled'?AMBER_TXT:MID};">${esc(x.state)}</span></td>
         <td class="n" style="font-size:10px;">${(() => {
@@ -206,16 +225,18 @@
           ${x.state==='assembled' ? `<button class="ehp-btn g" data-dis="${esc(x.id)}">Dispatch</button>` : ''}
           <button class="ehp-btn g" data-pick="${esc(x.id)}">Pick list</button>
           ${x.state==='dispatched' && ((x.fulfilment&&x.fulfilment.not_fulfilled)||0) ? `<button class="ehp-btn g" data-why="${esc(x.id)}">Why?</button>` : ''}
-        </td></tr>`).join('') : `<tr><td colspan="8" style="color:${LIGHT};text-align:center;padding:18px;">No batches yet.</td></tr>`}
+        </td></tr>`).join('') : `<tr><td colspan="11" style="color:${LIGHT};text-align:center;padding:18px;">No batches yet.</td></tr>`}
       </tbody></table>`;
 
     el('ehp-mkbatch')?.addEventListener('click', async () => {
       const target = parseInt(el('ehp-target').value, 10) || 0;
+      const line = el('ehp-bline') ? el('ehp-bline').value : '';
       if (target < 1) return;
+      if (!line) { el('ehp-batchmsg').innerHTML = msg('e','Choose a product line — a batch cannot mix OxyShred and Fizz Stix.'); return; }
       el('ehp-mkbatch').disabled = true;
       try {
-        const r = await req('/ehp/batch', { method:'POST', body: JSON.stringify({ target_envelopes: target, facility_code:'VOZ_TX' }) });
-        el('ehp-batchmsg').innerHTML = msg('k', `Batch created — ${r.actual_envelopes} envelopes across ${r.order_count} orders (target ${r.target_envelopes}).`);
+        const r = await req('/ehp/batch', { method:'POST', body: JSON.stringify({ target_envelopes: target, facility_code:'VOZ_TX', product_line: line }) });
+        el('ehp-batchmsg').innerHTML = msg('k', `Batch ${esc(r.batch_ref||'')} created — ${r.actual_envelopes} ${esc(r.product_line)} envelopes across ${r.order_count} orders (target ${r.target_envelopes}).`);
         setTimeout(render, 900);
       } catch (e) { el('ehp-batchmsg').innerHTML = msg('e', e.message || String(e)); el('ehp-mkbatch').disabled = false; }
     });
@@ -223,7 +244,7 @@
       x.disabled = true;
       try {
         const r = await req('/ehp/batch/'+x.getAttribute('data-asm')+'/assemble', { method:'POST', body:'{}' });
-        el('ehp-batchmsg').innerHTML = msg('k', `Assembled ${nfmt(r.envelopes)} envelope(s) · ${nfmt(r.sticks_consumed_total||0)} sticks used in total. Per-flavour usage is derived at the next stock count.`);
+        el('ehp-batchmsg').innerHTML = msg('k', `Assembled ${nfmt(r.envelopes)} envelope(s) · ${nfmt(r.sticks_consumed_total||0)} sticks. Stock is deducted on dispatch.`);
         setTimeout(render, 900);
       } catch (e) { el('ehp-batchmsg').innerHTML = msg('e', e.message || String(e)); x.disabled = false; }
     }));
@@ -242,7 +263,11 @@
           shKind = 'w';
         }
         else                     { shTxt = `Shopify: ${sh.ok || 0} order(s) marked fulfilled`; }
-        el('ehp-batchmsg').innerHTML = msg(shKind, `Dispatched ${nfmt(r.envelopes)} envelope(s) across ${nfmt(r.orders)} order(s). ` + shTxt);
+        const cons = r.consumed || {};
+        const consTxt = (cons.by_flavour && cons.by_flavour.length)
+          ? ` Deducted ${nfmt(cons.total_sticks)} sticks — ` + cons.by_flavour.map(f=>esc(f.sku)+' '+nfmt(f.qty)).join(', ') + '.'
+          : '';
+        el('ehp-batchmsg').innerHTML = msg(shKind, `Dispatched ${nfmt(r.envelopes)} ${esc(r.product_line||'')} envelope(s) across ${nfmt(r.orders)} order(s).${consTxt} ` + shTxt);
         console.log('[ehp] dispatch result', r);
         setTimeout(render, 900);
       } catch (e) { el('ehp-batchmsg').innerHTML = msg('e', e.message || String(e)); x.disabled = false; }
@@ -321,6 +346,7 @@
       + 'td.n,th.n{text-align:right;} td.c,th.c{text-align:center;} td.zip{white-space:nowrap;}'
       + '.flag{color:#8A6D00;font-weight:600;} .ok{color:#1f7a34;font-weight:600;font-size:11px;} .pend{color:#AEAEB2;}'
       + '.hint{font-size:11px;color:#6E6E73;}'
+      + '.pull{margin-top:14px;padding:10px 14px;background:#F5F5F7;border-radius:10px;font-size:12px;}'
       // labels: exact page size, one label per page
       + '#labels{display:none;}'
       + '@media screen{#labels{margin-top:18px;} #labels.show{display:block;}'
@@ -339,8 +365,20 @@
       + '}</style></head><body>'
       + '<div class="noprint">'
       + '<h2>Pick list &amp; envelope labels</h2>'
-      + '<div class="meta">Batch ' + esc(batchId) + ' &middot; ' + orders.length + ' order(s) &middot; '
+      + '<div class="meta">Batch ' + esc(data.batch_ref || batchId)
+      +   (data.product_line ? ' &middot; <b>' + esc(data.product_line) + '</b>' : '')
+      +   ' &middot; ' + orders.length + ' order(s) &middot; '
       +   (data.envelope_count || 0) + ' envelope(s) &middot; ' + new Date().toLocaleString() + '</div>'
+      // What to pull off the shelf. Identical to the deduction dispatch will post, so the
+      // floor and the ledger are asked for the same quantities.
+      + ((data.pull && data.pull.length) ? '<div class="pull"><b>Pull from stock</b>'
+          + ' &middot; ' + esc((data.recipe && data.recipe.name) || '')
+          + ' &middot; ' + ((data.recipe && data.recipe.sticks_per_envelope) || 5) + ' sticks per envelope'
+          + '<table style="width:auto;margin-top:6px;"><thead><tr><th>Flavour SKU</th><th class="n">Sticks</th></tr></thead><tbody>'
+          + data.pull.map(f => '<tr><td>' + esc(f.sku) + '</td><td class="n"><b>' + f.qty + '</b></td></tr>').join('')
+          + '</tbody></table>'
+          + '<div class="hint">Any split across these three is fine, so long as every envelope gets all three flavours and five sticks in total.</div>'
+          + '</div>' : '')
       + '<div class="bar">'
       +   '<button class="ghost" id="all">Select all</button>'
       +   '<button class="ghost" id="none">Clear</button>'
@@ -489,9 +527,11 @@
       <div style="font-size:10px;color:${LIGHT};margin-bottom:6px;">Periodic inventory: <b>estimated</b> on-hand between counts (each flavour averages sticks ÷ flavours per envelope). The fortnightly count replaces the estimate with truth.</div>
       <div id="ehp-period"></div>
       <div id="ehp-invmsg"></div>
-      <table class="ehp"><thead><tr><th>SKU</th><th>Flavour</th><th class="n">Ledger</th><th class="n">Est. used</th><th class="n">Est. on hand</th><th class="n">Per inner</th><th class="n">Inner/carton</th><th class="n">Carton/pallet</th><th></th></tr></thead>
+      <table class="ehp"><thead><tr><th>SKU</th><th>Line</th><th>Flavour</th><th class="n">Ledger</th><th class="n">Est. used</th><th class="n">Est. on hand</th><th class="n">Per inner</th><th class="n">Inner/carton</th><th class="n">Carton/pallet</th><th></th></tr></thead>
       <tbody>${rows.length ? rows.map(r=>`<tr>
-        <td><b>${esc(r.sku)}</b></td><td>${esc(r.flavour||'—')}</td>
+        <td><b>${esc(r.sku)}</b></td>
+        <td><input class="ehp-in" data-sku="${esc(r.sku)}" data-f="product_line" value="${esc(r.product_line||'')}" placeholder="line" style="width:96px"></td>
+        <td>${esc(r.flavour||'—')}</td>
         <td class="n">${nfmt(r.ledger_on_hand)}</td>
         <td class="n" style="color:${MID}">${nfmt(r.estimated_used)}</td>
         <td class="n"><b style="color:${(r.estimated_on_hand||0) < 0 ? RED : DARK}">${nfmt(r.estimated_on_hand)}</b></td>
@@ -500,7 +540,7 @@
         <td class="n"><input class="ehp-in" data-sku="${esc(r.sku)}" data-f="cartons_per_pallet" type="number" min="0" value="${r.cartons_per_pallet??''}" style="width:70px;text-align:right"></td>
         <td style="white-space:nowrap"><button class="ehp-btn g" data-save="${esc(r.sku)}">Save</button>
           <button class="ehp-btn g" data-del="${esc(r.sku)}" style="color:${RED};margin-left:4px;">Delete</button></td>
-      </tr>`).join('') : `<tr><td colspan="9" style="color:${LIGHT};text-align:center;padding:18px;">No stocked SKUs yet — they appear automatically on first receipt or order.</td></tr>`}
+      </tr>`).join('') : `<tr><td colspan="10" style="color:${LIGHT};text-align:center;padding:18px;">No stocked SKUs yet — they appear on their first inbound receipt.</td></tr>`}
       </tbody></table>
       ${others.length ? `<div style="margin-top:14px;">
         <div style="font-size:10px;color:${LIGHT};line-height:1.6;margin-bottom:6px;">
@@ -545,7 +585,12 @@
 
     body.querySelectorAll('[data-save]').forEach(b => b.addEventListener('click', async () => {
       const sku = b.getAttribute('data-save'); const patch = {};
-      body.querySelectorAll(`[data-sku="${sku}"]`).forEach(i => { patch[i.getAttribute('data-f')] = i.value === '' ? '' : parseInt(i.value,10); });
+      body.querySelectorAll(`[data-sku="${sku}"]`).forEach(i => {
+        const f = i.getAttribute('data-f');
+        // product_line is text; the pack conversions are integers.
+        patch[f] = f === 'product_line' ? i.value.trim().toUpperCase()
+                 : (i.value === '' ? '' : parseInt(i.value,10));
+      });
       b.disabled = true;
       try { await req('/ehp/sku/'+encodeURIComponent(sku), { method:'PATCH', body: JSON.stringify(patch) });
             el('ehp-invmsg').innerHTML = msg('k', `Conversions saved for ${esc(sku)}.`); }
@@ -594,36 +639,133 @@
 
   // ── Recipe (structure only — which flavour fills which slot is decided on the floor) ──
   async function renderRecipe(body) {
-    const d = await req('/ehp/recipe');
-    const a = d.active;
+    const [d, pm] = await Promise.all([req('/ehp/recipe'), req('/ehp/product-map').catch(()=>({}))]);
+    const byLine = d.by_line || {};
+    const lineNames = d.product_lines || [];
+    const comps = d.components || [];
+    const map = pm.map || [], unmappedSkus = pm.unmapped || [];
+
+    // One card per product line: its active recipe and its flavour pool.
+    const lineCard = (pl) => {
+      const a = byLine[pl];
+      const pool = (a && a.pool) || [];
+      return `<div class="ehp-card" style="margin-top:12px;">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;">
+          <div style="font-size:13px;font-weight:700;color:${DARK};">${esc(pl)}</div>
+          <div style="font-size:10px;color:${LIGHT};">${a ? esc(a.name)+' — from '+esc(a.effective_from) : 'no active recipe'}</div>
+        </div>
+        <div style="font-size:12px;color:${MID};margin-top:3px;">
+          ${a ? esc((a.sticks_per_envelope||5)+' sticks · '+(a.distinct_flavours||3)+' flavours · nominal split '+(a.split_pattern||'')) : '—'}
+        </div>
+        <div style="margin-top:6px;font-size:11px;">Flavour pool:
+          ${pool.length ? pool.map(x=>`<span class="ehp-chip" style="background:rgba(0,0,0,.05);color:${DARK};margin-right:4px;">${esc(x)}</span>`).join('')
+                        : `<span style="color:${RED}">not set — dispatch will be refused</span>`}
+        </div>
+      </div>`;
+    };
+
+    const flavourPicker = (idx) => `<select class="ehp-sel" data-pool="${idx}" style="width:190px;">
+        <option value="">— choose flavour SKU —</option>
+        ${comps.map(c=>`<option value="${esc(c.sku)}">${esc(c.sku)}${c.flavour?' ('+esc(c.flavour)+')':''}</option>`).join('')}
+      </select>`;
+
     body.innerHTML = `
-      <div class="ehp-kpis"><div class="ehp-kpi" style="grid-column:span 2;">
-        <div class="ehp-kl">Active structure</div>
-        <div class="ehp-kv" style="font-size:15px;">${a ? esc(a.sticks_per_envelope + ' sticks · ' + a.distinct_flavours + ' flavours · ' + (a.split_pattern||'')) : 'None'}</div>
-        <div class="ehp-ks">${a ? esc(a.name) + ' — from ' + esc(a.effective_from) : 'Set the envelope structure before assembling.'}</div>
-      </div></div>
-      ${msg('w','Flavours are not fixed. The recipe defines the pattern only — 5 sticks across 3 distinct flavours, split 2/2/1. Actual per-flavour usage is derived at each stock count.')}
-      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;">
-        <div><span class="ehp-lbl">Sticks per envelope</span><input class="ehp-in" id="ehp-sticks" type="number" min="1" value="${a?a.sticks_per_envelope:5}" style="width:110px"></div>
-        <div><span class="ehp-lbl">Distinct flavours</span><input class="ehp-in" id="ehp-flav" type="number" min="1" value="${a?a.distinct_flavours:3}" style="width:110px"></div>
-        <div><span class="ehp-lbl">Split pattern</span><input class="ehp-in" id="ehp-split" value="${a?esc(a.split_pattern||'2,2,1'):'2,2,1'}" placeholder="2,2,1" style="width:120px"></div>
-        <div><span class="ehp-lbl">Name</span><input class="ehp-in" id="ehp-rname" placeholder="Standard sample envelope"></div>
-        <div><span class="ehp-lbl">Effective from</span><input class="ehp-in" id="ehp-rfrom" type="date" value="${new Date().toISOString().slice(0,10)}"></div>
-        <button class="ehp-btn" id="ehp-rsave">Save new version</button>
+      ${msg('w','Within an envelope the split rotates — all three of the line\'s flavours appear and the sticks total five, but not always in the same proportion. Stock is therefore deducted evenly across the pool (5 ÷ 3) and trued up at each cycle count.')}
+      ${lineNames.length ? lineNames.map(lineCard).join('') : msg('w','No product lines yet — map a Shopify SKU below, then create a recipe for that line.')}
+
+      <div class="ehp-card" style="margin-top:16px;">
+        <div style="font-size:12px;font-weight:700;color:${DARK};margin-bottom:8px;">New recipe version</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+          <div><span class="ehp-lbl">Product line</span><input class="ehp-in" id="ehp-rline" list="ehp-lines" placeholder="OXYSHRED" style="width:140px">
+            <datalist id="ehp-lines">${lineNames.map(l=>`<option value="${esc(l)}">`).join('')}</datalist></div>
+          <div><span class="ehp-lbl">Sticks per envelope</span><input class="ehp-in" id="ehp-sticks" type="number" min="1" value="5" style="width:110px"></div>
+          <div><span class="ehp-lbl">Distinct flavours</span><input class="ehp-in" id="ehp-flav" type="number" min="1" value="3" style="width:110px"></div>
+          <div><span class="ehp-lbl">Nominal split</span><input class="ehp-in" id="ehp-split" value="2,2,1" placeholder="2,2,1" style="width:110px"></div>
+          <div><span class="ehp-lbl">Name</span><input class="ehp-in" id="ehp-rname" placeholder="OxyShred sample envelope"></div>
+          <div><span class="ehp-lbl">Effective from</span><input class="ehp-in" id="ehp-rfrom" type="date" value="${new Date().toISOString().slice(0,10)}"></div>
+        </div>
+        <div style="margin-top:10px;">
+          <span class="ehp-lbl">Flavour pool — the three flavours this line consumes</span>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;">${[0,1,2].map(flavourPicker).join('')}</div>
+          <div style="font-size:10px;color:${LIGHT};margin-top:4px;">Flavours must already exist as stocked SKUs. Add them on the Inventory tab or via an inbound receipt first.</div>
+        </div>
+        <button class="ehp-btn" id="ehp-rsave" style="margin-top:12px;">Save new version</button>
+        <div id="ehp-rmsg"></div>
       </div>
-      <div id="ehp-rmsg"></div>
-      ${(d.history||[]).length ? `<table class="ehp" style="margin-top:16px"><thead><tr><th>Version</th><th>Structure</th><th>From</th><th>To</th></tr></thead><tbody>${d.history.map(h=>`<tr><td>${esc(h.name)}</td><td>${esc((h.sticks_per_envelope||5)+' / '+(h.distinct_flavours||3)+' / '+(h.split_pattern||''))}</td><td>${esc(h.effective_from)}</td><td>${esc(h.effective_to||'current')}</td></tr>`).join('')}</tbody></table>`:''}`;
+
+      <div class="ehp-card" style="margin-top:16px;">
+        <div style="font-size:12px;font-weight:700;color:${DARK};">Shopify SKU &rarr; product line</div>
+        <div style="font-size:10px;color:${LIGHT};margin-bottom:8px;">Shopify sends a product SKU (e.g. <code>oxyshredstickpack-us</code>), never a flavour. This map is the only thing that tells Pinpoint which recipe an order needs.</div>
+        ${unmappedSkus.length ? msg('w','Seen on orders but not mapped: '+unmappedSkus.map(u=>'<code>'+esc(u.product_sku)+'</code> ('+u.orders+' order(s))').join(', ')) : ''}
+        <table class="ehp"><thead><tr><th>Shopify SKU</th><th>Product line</th><th class="n">Orders seen</th><th></th></tr></thead><tbody>
+          ${map.map(m=>{
+            const seen = (pm.seen_on_orders||[]).find(x=>x.product_sku===m.shopify_sku);
+            return `<tr><td><b>${esc(m.shopify_sku)}</b></td><td>${esc(m.product_line)}</td>
+              <td class="n">${nfmt(seen?seen.orders:0)}</td>
+              <td style="text-align:right"><button class="ehp-btn g" data-unmap="${esc(m.shopify_sku)}" style="color:${RED}">Remove</button></td></tr>`;
+          }).join('')}
+          ${unmappedSkus.map(u=>`<tr><td><b>${esc(u.product_sku)}</b></td>
+            <td><input class="ehp-in" data-mapline="${esc(u.product_sku)}" list="ehp-lines" placeholder="OXYSHRED" style="width:130px"></td>
+            <td class="n">${nfmt(u.orders)}</td>
+            <td style="text-align:right"><button class="ehp-btn g" data-map="${esc(u.product_sku)}">Map</button></td></tr>`).join('')}
+          ${(!map.length && !unmappedSkus.length) ? `<tr><td colspan="4" style="color:${LIGHT};text-align:center;padding:14px;">No Shopify SKUs seen yet.</td></tr>` : ''}
+        </tbody></table>
+        <div style="display:flex;gap:8px;align-items:flex-end;margin-top:10px;">
+          <div><span class="ehp-lbl">Shopify SKU</span><input class="ehp-in" id="ehp-newsku" placeholder="oxyshredstickpack-us" style="width:210px"></div>
+          <div><span class="ehp-lbl">Product line</span><input class="ehp-in" id="ehp-newline" list="ehp-lines" placeholder="OXYSHRED" style="width:140px"></div>
+          <button class="ehp-btn g" id="ehp-addmap">Add mapping</button>
+        </div>
+        <div id="ehp-mapmsg"></div>
+      </div>
+
+      ${(d.history||[]).length ? `<table class="ehp" style="margin-top:16px"><thead><tr><th>Version</th><th>Line</th><th>Structure</th><th>From</th><th>To</th></tr></thead><tbody>${d.history.map(h=>`<tr><td>${esc(h.name)}</td><td>${esc(h.product_line||'—')}</td><td>${esc((h.sticks_per_envelope||5)+' / '+(h.distinct_flavours||3)+' / '+(h.split_pattern||''))}</td><td>${esc(h.effective_from)}</td><td>${esc(h.effective_to||'current')}</td></tr>`).join('')}</tbody></table>`:''}`;
+
     el('ehp-rsave').addEventListener('click', async () => {
+      const pool = Array.from(body.querySelectorAll('[data-pool]')).map(x=>x.value).filter(Boolean);
+      const line = (el('ehp-rline').value || '').trim().toUpperCase();
+      if (!line) { el('ehp-rmsg').innerHTML = msg('e','Product line is required — a recipe serves one line.'); return; }
+      const want = parseInt(el('ehp-flav').value,10) || 3;
+      if (pool.length && pool.length !== want) {
+        el('ehp-rmsg').innerHTML = msg('e', `Pick exactly ${want} flavour(s) — ${pool.length} chosen.`); return;
+      }
+      if (new Set(pool).size !== pool.length) { el('ehp-rmsg').innerHTML = msg('e','The same flavour is selected twice.'); return; }
       try {
         await req('/ehp/recipe', { method:'POST', body: JSON.stringify({
+          product_line: line,
           name: el('ehp-rname').value || null, effective_from: el('ehp-rfrom').value,
           sticks_per_envelope: parseInt(el('ehp-sticks').value,10),
-          distinct_flavours: parseInt(el('ehp-flav').value,10),
-          split_pattern: el('ehp-split').value }) });
-        el('ehp-rmsg').innerHTML = msg('k','Structure saved.');
+          distinct_flavours: want,
+          split_pattern: el('ehp-split').value,
+          flavours: pool }) });
+        el('ehp-rmsg').innerHTML = msg('k','Recipe saved for ' + esc(line) + '.');
         setTimeout(render, 900);
       } catch (e) { el('ehp-rmsg').innerHTML = msg('e', e.message || String(e)); }
     });
+
+    async function saveMap(sku, line) {
+      if (!sku || !line) { el('ehp-mapmsg').innerHTML = msg('e','Both the Shopify SKU and the product line are required.'); return; }
+      try {
+        const r = await req('/ehp/product-map', { method:'POST',
+          body: JSON.stringify({ shopify_sku: sku, product_line: line.toUpperCase() }) });
+        el('ehp-mapmsg').innerHTML = msg('k', `Mapped ${esc(sku)} to ${esc(r.product_line)}.` +
+          (r.orders_backfilled ? ` ${r.orders_backfilled} queued order(s) updated.` : ''));
+        setTimeout(render, 900);
+      } catch (e) { el('ehp-mapmsg').innerHTML = msg('e', e.message || String(e)); }
+    }
+    body.querySelectorAll('[data-map]').forEach(b => b.addEventListener('click', () => {
+      const sku = b.getAttribute('data-map');
+      const inp = body.querySelector('[data-mapline="' + sku.replace(/"/g,'\\"') + '"]');
+      saveMap(sku, inp ? inp.value.trim() : '');
+    }));
+    el('ehp-addmap')?.addEventListener('click', () =>
+      saveMap((el('ehp-newsku').value||'').trim(), (el('ehp-newline').value||'').trim()));
+    body.querySelectorAll('[data-unmap]').forEach(b => b.addEventListener('click', async () => {
+      const sku = b.getAttribute('data-unmap');
+      if (!confirm('Remove the mapping for ' + sku + '?\n\nNew orders with this SKU will not be batchable until it is mapped again.')) return;
+      try { await req('/ehp/product-map/' + encodeURIComponent(sku), { method:'DELETE' });
+            setTimeout(render, 700); }
+      catch (e) { el('ehp-mapmsg').innerHTML = msg('e', e.message || String(e)); }
+    }));
   }
 
   // ── Shopify integration ──
