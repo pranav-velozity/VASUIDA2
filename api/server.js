@@ -778,6 +778,22 @@ const TENANT_TABLES = [
 // PRAGMA table_info returns an expression default as `datetime('now')`, but SQLite only
 // accepts it written as `DEFAULT (datetime('now'))`. Re-emitting it bare is a syntax error,
 // so any default rebuilt from PRAGMA must be re-parenthesised.
+// Rebuilding a table means DROPping it, and DROP fires ON DELETE CASCADE against every
+// child table. better-sqlite3 enables foreign keys by default, so a rebuild of a parent
+// silently deletes its children unless enforcement is suspended for the operation.
+// This wrapper makes that impossible to forget.
+function withForeignKeysOff(label, fn) {
+  const was = db.pragma('foreign_keys', { simple: true });
+  try {
+    db.pragma('foreign_keys = OFF');
+    return fn();
+  } finally {
+    db.pragma('foreign_keys = ' + (was ? 'ON' : 'OFF'));
+    const check = db.pragma('foreign_key_check', { simple: false });
+    if (check && check.length) console.error(`[migrate:${label}] foreign key violations after rebuild:`, check.slice(0, 5));
+  }
+}
+
 function sqlDefaultLiteral(v) {
   const t = String(v).trim();
   return /^\(.*\)$/.test(t) ? t : `(${t})`;
@@ -790,6 +806,7 @@ function sqlDefaultLiteral(v) {
     const row = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='fin_invoices'`).get();
     if (!row || !row.sql || !/CHECK\(type IN/.test(row.sql)) return;      // already relaxed
     db.exec(`DROP TABLE IF EXISTS "fin_invoices__new";`);   // clear any failed prior attempt
+    const childRowsBefore = db.prepare('SELECT COUNT(*) n FROM fin_invoice_lines').get().n;
     const info = db.prepare(`PRAGMA table_info(fin_invoices)`).all();
     const cols = info.map(c => c.name);
     const before = db.prepare('SELECT COUNT(*) n FROM fin_invoices').get().n;
@@ -804,12 +821,16 @@ function sqlDefaultLiteral(v) {
       return d;
     });
     const list = cols.map(c => `"${c}"`).join(',');
-    db.exec(`CREATE TABLE "fin_invoices__new" (${defs.join(', ')}, UNIQUE(ref_number));`);
-    db.exec(`INSERT INTO "fin_invoices__new" (${list}) SELECT ${list} FROM fin_invoices;`);
-    db.exec(`DROP TABLE fin_invoices; ALTER TABLE "fin_invoices__new" RENAME TO fin_invoices;`);
-    for (const i of idx) { try { db.exec(i.sql); } catch (e) {} }
+    withForeignKeysOff('fin_invoices', () => {
+      db.exec(`CREATE TABLE "fin_invoices__new" (${defs.join(', ')}, UNIQUE(ref_number));`);
+      db.exec(`INSERT INTO "fin_invoices__new" (${list}) SELECT ${list} FROM fin_invoices;`);
+      db.exec(`DROP TABLE fin_invoices; ALTER TABLE "fin_invoices__new" RENAME TO fin_invoices;`);
+      for (const i of idx) { try { db.exec(i.sql); } catch (e) {} }
+    });
     const after = db.prepare('SELECT COUNT(*) n FROM fin_invoices').get().n;
-    console.log(`[migrate:fin_invoices] type CHECK removed; rows ${before} -> ${after}` + (before === after ? ' OK' : ' \u26a0 COUNT MISMATCH'));
+    const childRowsAfter = db.prepare('SELECT COUNT(*) n FROM fin_invoice_lines').get().n;
+    console.log(`[migrate:fin_invoices] type CHECK removed; rows ${before} -> ${after}` + (before === after ? ' OK' : ' \u26a0 COUNT MISMATCH')
+      + `; invoice lines ${childRowsBefore} -> ${childRowsAfter}` + (childRowsBefore === childRowsAfter ? ' OK' : ' \u26a0 CHILD ROWS LOST'));
   } catch (e) { console.error('[migrate:fin_invoices]', e.message); }
 })();
 
@@ -848,11 +869,13 @@ function rebuildWithClientPk(table, keyCols) {
     const colList = cols.map(c => `"${c}"`).join(',');
     const pk = ['client_id', ...keyCols].map(c => `"${c}"`).join(',');
     db.exec(`DROP TABLE IF EXISTS "${table}__new";`);       // clear any failed prior attempt
-    db.exec(`CREATE TABLE "${table}__new" (${defs.join(', ')}, PRIMARY KEY (${pk}));`);
-    db.exec(`INSERT INTO "${table}__new" (${colList}) SELECT ${selectList} FROM "${table}";`);
-    db.exec(`DROP TABLE "${table}"; ALTER TABLE "${table}__new" RENAME TO "${table}";`);
-    for (const i of idx) { try { db.exec(i.sql); } catch (e) { /* index may already exist */ } }
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_client ON "${table}"(client_id);`);
+    withForeignKeysOff(table, () => {
+      db.exec(`CREATE TABLE "${table}__new" (${defs.join(', ')}, PRIMARY KEY (${pk}));`);
+      db.exec(`INSERT INTO "${table}__new" (${colList}) SELECT ${selectList} FROM "${table}";`);
+      db.exec(`DROP TABLE "${table}"; ALTER TABLE "${table}__new" RENAME TO "${table}";`);
+      for (const i of idx) { try { db.exec(i.sql); } catch (e) { /* index may already exist */ } }
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_client ON "${table}"(client_id);`);
+    });
     const after = db.prepare(`SELECT COUNT(*) n FROM "${table}"`).get().n;
     console.log(`[migrate:${table}] PK -> (client_id, ${keyCols.join(', ')}); rows ${before} -> ${after}` + (before === after ? ' OK' : ' \u26a0 COUNT MISMATCH'));
   } catch (e) { console.error(`[migrate:${table}]`, e.message); }
@@ -11499,6 +11522,55 @@ app.post('/ehp/count-period/:id/close', authenticateRequest, writeOpLimiter, aud
     const id = ehpNewId('per');
     db.prepare(`INSERT INTO ehp_count_period (id, client_id, period_start) VALUES (?,?,date('now'))`).run(id, c);
     res.json({ ...r, next_period_id: id });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Rebuild missing invoice lines from surviving headers ──
+// A table rebuild dropped fin_invoices while ON DELETE CASCADE was active, deleting every
+// invoice line. The headers survived with correct subtotal/gst/total, so a single
+// reconstructed line per invoice restores the figures the reports depend on. This is a
+// reconstruction, not the original detail: each line is marked as such.
+app.post('/finance/rebuild-missing-lines', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+  auditLog('finance_rebuild_lines'), (req, res) => {
+  try {
+    const b = req.body || {};
+    const missing = db.prepare(`SELECT i.* FROM fin_invoices i
+      WHERE NOT EXISTS (SELECT 1 FROM fin_invoice_lines l WHERE l.invoice_id = i.id)
+      ORDER BY i.week_start`).all();
+
+    const plan = missing.map(i => ({
+      ref: i.ref_number, type: i.type, status: i.status, week_start: i.week_start,
+      subtotal: i.subtotal, total: i.total,
+      line_value: (i.subtotal != null && i.subtotal !== 0) ? i.subtotal
+                  : Math.round(((i.total || 0) - (i.gst || 0) - (i.customs || 0)) * 100) / 100,
+    }));
+
+    if (b.confirm !== 'REBUILD') {
+      return res.json({ dry_run: true, invoices_missing_lines: missing.length,
+        total_value_to_restore: Math.round(plan.reduce((a, p) => a + (p.line_value || 0), 0) * 100) / 100,
+        sample: plan.slice(0, 10),
+        message: 'Send {"confirm":"REBUILD"} to insert one reconstructed line per invoice.' });
+    }
+
+    let created = 0;
+    const ins = db.prepare(`INSERT INTO fin_invoice_lines
+      (id, invoice_id, sort_order, description, unit_label, rate, quantity, total, gst_free, is_misc, created_at)
+      VALUES (?,?,0,?,?,?,1,?,0,0,datetime('now'))`);
+    db.transaction(() => {
+      for (const p of plan) {
+        const inv = missing.find(m => m.ref_number === p.ref);
+        const val = p.line_value || 0;
+        const label = p.type === 'VAS' ? 'VAS services (reconstructed)'
+                    : p.type === 'SEA' ? 'Door to door via sea (reconstructed)'
+                    : p.type === 'AIR' ? 'Door to door via air (reconstructed)'
+                                       : 'Services (reconstructed)';
+        ins.run(randomUUID(), inv.id, label, 'Per Invoice', val, val);
+        created++;
+      }
+    })();
+    console.log(`[finance] reconstructed ${created} invoice line(s) after cascade loss`);
+    res.json({ created, invoices_repaired: plan.length,
+      value_restored: Math.round(plan.reduce((a, p) => a + (p.line_value || 0), 0) * 100) / 100 });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
