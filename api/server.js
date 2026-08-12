@@ -10559,10 +10559,46 @@ const EHP_ENVELOPE_ALERT_QTY = Number(process.env.EHP_ENVELOPE_ALERT_QTY || 5);
 
 function ehpNewId(p) { return (p || 'ehp') + '_' + crypto.randomBytes(10).toString('hex'); }
 
+// Deleting a SKU is not enough on its own: ehpEnsureSku auto-creates one on every
+// sighting, so a code that keeps arriving on Shopify orders would simply reappear. A
+// tombstone records the operator's decision and survives the next webhook.
+db.exec(`
+CREATE TABLE IF NOT EXISTS ehp_sku_suppressed (
+  client_id  TEXT NOT NULL,
+  sku        TEXT NOT NULL,
+  reason     TEXT,
+  created_by TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (client_id, sku)
+);
+`);
+
+function ehpSkuSuppressed(clientId, sku) {
+  try { return !!db.prepare('SELECT 1 x FROM ehp_sku_suppressed WHERE client_id=? AND sku=?').get(clientId, sku); }
+  catch (e) { return false; }
+}
+
+// Everything that points at a SKU. Drives both the audit and the delete guard, so the
+// two can never disagree about what "unreferenced" means.
+function ehpSkuRefs(clientId, sku) {
+  const n = (sql) => { try { return db.prepare(sql).get(clientId, sku).n; } catch (e) { return 0; } };
+  const refs = {
+    receipt_lines:  n('SELECT COUNT(*) n FROM ehp_receipt_line   WHERE client_id=? AND sku=?'),
+    inventory_txns: n('SELECT COUNT(*) n FROM ehp_inventory_txn  WHERE client_id=? AND sku=?'),
+    recipe_lines:   n('SELECT COUNT(*) n FROM ehp_kit_recipe_line WHERE client_id=? AND sku=?'),
+    stock_counts:   n('SELECT COUNT(*) n FROM ehp_stock_count    WHERE client_id=? AND sku=?'),
+  };
+  refs.total = refs.receipt_lines + refs.inventory_txns + refs.recipe_lines + refs.stock_counts;
+  return refs;
+}
+
 // Auto-create a SKU on first sighting; never overwrite existing conversions.
 function ehpEnsureSku(clientId, sku, extra) {
   if (!sku) return null;
   const e = extra || {};
+  // A suppressed SKU was deliberately removed. Orders still ingest normally; the code
+  // just stops re-registering itself until someone restores it.
+  if (ehpSkuSuppressed(clientId, sku)) return null;
   db.prepare(`INSERT OR IGNORE INTO ehp_sku (client_id, sku, name, format, flavour, source)
               VALUES (?,?,?,?,?,?)`)
     .run(clientId, sku, e.name || null, e.format || null, e.flavour || null, e.source || 'auto');
@@ -11160,9 +11196,100 @@ app.patch('/ehp/sku/:sku', authenticateRequest, writeOpLimiter, auditLog('edit_e
       if (b[k] !== undefined) { f.push(`${k}=?`); v.push(b[k] === '' ? null : b[k]); }
     }
     if (!f.length) return res.status(400).json({ error: 'no editable fields' });
+    if (ehpSkuSuppressed(c, req.params.sku))
+      return res.status(409).json({ error: 'sku_suppressed', sku: req.params.sku,
+        message: 'This SKU was deleted. Restore it before editing.' });
     ehpEnsureSku(c, req.params.sku, { source: 'manual' });
     db.prepare(`UPDATE ehp_sku SET ${f.join(',')} WHERE client_id=? AND sku=?`).run(...v, c, req.params.sku);
     res.json(db.prepare('SELECT * FROM ehp_sku WHERE client_id=? AND sku=?').get(c, req.params.sku));
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── SKU audit: what each registry row actually is, and what points at it. ──
+// Read-only. Answers "is this junk from a Shopify order line, or real stock?" before
+// anything is deleted.
+app.get('/ehp/sku-audit', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const rows = db.prepare('SELECT * FROM ehp_sku WHERE client_id=? ORDER BY sku').all(c);
+    res.json({
+      client_id: c,
+      skus: rows.map(r => ({
+        sku: r.sku, name: r.name, flavour: r.flavour, format: r.format,
+        source: r.source, active: r.active, is_component: r.is_component,
+        ledger_on_hand: ehpOnHand(c, r.sku),
+        refs: ehpSkuRefs(c, r.sku),
+        safe_to_delete: ehpSkuRefs(c, r.sku).total === 0,
+      })),
+      suppressed: db.prepare('SELECT * FROM ehp_sku_suppressed WHERE client_id=? ORDER BY sku').all(c),
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── DELETE /ehp/sku/:sku ──
+// Dry run by default: returns what would be removed. Requires confirm=DELETE to act.
+// An unreferenced SKU is removed outright. A referenced one is refused unless
+// cascade=1 is sent as well, because that discards receipt, ledger and count history.
+app.delete('/ehp/sku/:sku', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+  auditLog('delete_ehp_sku'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const sku = String(req.params.sku || '').trim();
+    if (!sku) return res.status(400).json({ error: 'sku required' });
+    const b = req.body || {};
+    const confirm = String(b.confirm || req.query.confirm || '');
+    const cascade = String(b.cascade || req.query.cascade || '') === '1';
+    const suppress = String(b.suppress || req.query.suppress || '1') !== '0';
+
+    const row = db.prepare('SELECT * FROM ehp_sku WHERE client_id=? AND sku=?').get(c, sku);
+    const refs = ehpSkuRefs(c, sku);
+    const onHand = ehpOnHand(c, sku);
+
+    if (confirm !== 'DELETE') {
+      return res.json({ dry_run: true, client_id: c, sku, exists: !!row,
+        ledger_on_hand: onHand, refs,
+        would_delete: refs.total === 0 ? ['ehp_sku row'] : (cascade
+          ? ['ehp_sku row', 'receipt lines', 'inventory txns', 'recipe lines', 'stock counts']
+          : []),
+        blocked: refs.total > 0 && !cascade,
+        message: refs.total === 0
+          ? 'Unreferenced. Send {"confirm":"DELETE"} to remove.'
+          : 'Referenced by existing records. Send {"confirm":"DELETE","cascade":"1"} to remove those too.' });
+    }
+
+    if (refs.total > 0 && !cascade) {
+      return res.status(409).json({ error: 'sku_referenced', sku, refs, ledger_on_hand: onHand,
+        message: 'Send cascade=1 to also delete the referencing records.' });
+    }
+
+    const deleted = {};
+    db.transaction(() => {
+      if (cascade) {
+        deleted.receipt_lines  = db.prepare('DELETE FROM ehp_receipt_line   WHERE client_id=? AND sku=?').run(c, sku).changes;
+        deleted.inventory_txns = db.prepare('DELETE FROM ehp_inventory_txn  WHERE client_id=? AND sku=?').run(c, sku).changes;
+        deleted.recipe_lines   = db.prepare('DELETE FROM ehp_kit_recipe_line WHERE client_id=? AND sku=?').run(c, sku).changes;
+        deleted.stock_counts   = db.prepare('DELETE FROM ehp_stock_count    WHERE client_id=? AND sku=?').run(c, sku).changes;
+      }
+      deleted.sku = db.prepare('DELETE FROM ehp_sku WHERE client_id=? AND sku=?').run(c, sku).changes;
+      if (suppress) {
+        db.prepare(`INSERT OR REPLACE INTO ehp_sku_suppressed (client_id, sku, reason, created_by)
+                    VALUES (?,?,?,?)`).run(c, sku, b.reason || null, (req.auth && req.auth.userId) || null);
+      }
+    })();
+    console.log(`[ehp:sku] deleted ${sku} for ${c} (cascade=${cascade}, suppress=${suppress})`);
+    res.json({ client_id: c, sku, deleted, suppressed: suppress, cascade });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Lift a suppression. Does not recreate the row — the next receipt or order does that.
+app.post('/ehp/sku/:sku/restore', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+  auditLog('restore_ehp_sku'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const sku = String(req.params.sku || '').trim();
+    const n = db.prepare('DELETE FROM ehp_sku_suppressed WHERE client_id=? AND sku=?').run(c, sku).changes;
+    res.json({ client_id: c, sku, restored: n > 0,
+      note: 'The SKU re-registers on its next receipt or order line.' });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
