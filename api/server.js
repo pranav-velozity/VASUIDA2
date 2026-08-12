@@ -11328,6 +11328,273 @@ app.get('/ehp/sku-audit', authenticateRequest, (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ═══════════════════ EHP CLIENT REPORTING ═══════════════════
+// Self-service downloads for EHP, VelOzity and the KLN floor team. Every query below
+// reads ehp_* tables only, which are client_id-scoped by construction — these reports
+// cannot reach another client's data the way the ICONIC report set can.
+// Quantities only: no rates, no line values, no totals. That is what makes the same
+// pack safe to hand to a warehouse partner as to the client.
+
+// Calendar month -> inclusive date bounds. Reports are month-based by agreement, even
+// though invoicing runs on week-blocks.
+function ehpMonthRange(month) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(month || '').trim());
+  const now = new Date();
+  const y = m ? parseInt(m[1], 10) : now.getUTCFullYear();
+  const mo = m ? parseInt(m[2], 10) : (now.getUTCMonth() + 1);
+  const pad = (n) => String(n).padStart(2, '0');
+  const last = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+  return { month: `${y}-${pad(mo)}`, from: `${y}-${pad(mo)}-01`, to: `${y}-${pad(mo)}-${pad(last)}` };
+}
+
+function csvCell(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function sendCsv(res, filename, headers, rows) {
+  const out = [headers.map(csvCell).join(',')]
+    .concat(rows.map(r => r.map(csvCell).join(',')))
+    .join('\r\n');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send('\uFEFF' + out);          // BOM so Excel reads UTF-8 correctly
+}
+
+// A city + line + month cell with only one or two envelopes behind it is effectively one
+// household, which is an address by another name. Roll those into a state-level "Other"
+// so the file can be shared without anyone having to think about it.
+const EHP_SMALL_CELL = Number(process.env.EHP_SMALL_CELL_MIN || 5);
+function ehpRollupSmallCities(rows) {
+  const keep = [], other = new Map();
+  for (const r of rows) {
+    if ((r.envelopes || 0) >= EHP_SMALL_CELL) { keep.push(r); continue; }
+    const k = (r.recipient_state || '??') + '|' + (r.product_line || '');
+    const acc = other.get(k) || { recipient_city: 'Other (small cities)', recipient_state: r.recipient_state || '',
+                                  product_line: r.product_line || '', orders: 0, envelopes: 0 };
+    acc.orders += (r.orders || 0); acc.envelopes += (r.envelopes || 0);
+    other.set(k, acc);
+  }
+  return keep.concat(Array.from(other.values()).filter(x => x.envelopes > 0));
+}
+
+// Report catalogue — drives the download tiles. Adding a report here makes it appear in
+// the UI without a frontend change.
+const EHP_REPORTS = [
+  { id: 'reconciliation',   name: 'Monthly reconciliation pack', format: 'xlsx',
+    desc: 'Envelopes dispatched, sticks consumed by flavour, yield against standard, closing stock and count variance. Companion to the monthly invoice.' },
+  { id: 'dispatch-register', name: 'Dispatch register', format: 'csv',
+    desc: 'Every batch dispatched in the month: date, reference, product line, envelopes and orders.' },
+  { id: 'inventory-cover',  name: 'Inventory & days of cover', format: 'csv',
+    desc: 'Closing stock per flavour with burn rate and days of cover at month end.' },
+  { id: 'count-variance',   name: 'Cycle count variance', format: 'csv',
+    desc: 'Counted versus ledger at each cycle count, with the adjustment posted.' },
+  { id: 'geography',        name: 'Geographic summary', format: 'csv',
+    desc: 'Envelopes by city, state and product line. Small cities are grouped for privacy.' },
+  { id: 'sla',              name: 'Lodgement SLA performance', format: 'csv',
+    desc: 'Order placed to USPS lodgement, by week and product line.' },
+  { id: 'inbound-receipts', name: 'Inbound receipt log', format: 'csv',
+    desc: 'Pallets received and product booked in, with the pack conversion applied.' },
+];
+
+app.get('/ehp/reports', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const r = ehpMonthRange(req.query.month);
+    // Months that actually have activity, so the picker never offers an empty file.
+    const months = db.prepare(`SELECT DISTINCT substr(dispatched_at,1,7) m FROM ehp_assembly_batch
+                               WHERE client_id=? AND dispatched_at IS NOT NULL ORDER BY m DESC`).all(c)
+                     .map(x => x.m).filter(Boolean);
+    res.json({ client_id: c, reports: EHP_REPORTS, month: r.month, available_months: months });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.get('/ehp/report/:id', authenticateRequest, auditLog('ehp_report_download'), async (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const { month, from, to } = ehpMonthRange(req.query.month);
+    const id = String(req.params.id || '');
+    const tag = `${c}_${month}`;
+
+    // Batches dispatched in the month — the spine of most reports.
+    const batches = db.prepare(`SELECT * FROM ehp_assembly_batch
+                                WHERE client_id=? AND dispatched_at IS NOT NULL
+                                  AND date(dispatched_at) BETWEEN ? AND ?
+                                ORDER BY dispatched_at`).all(c, from, to);
+
+    if (id === 'dispatch-register') {
+      return sendCsv(res, `EHP_Dispatch_Register_${tag}.csv`,
+        ['Dispatched (UTC)', 'Batch reference', 'Product line', 'Facility', 'Orders', 'Envelopes', 'Assembled (UTC)'],
+        batches.map(b => [b.dispatched_at, b.batch_ref || b.id, b.product_line || '', b.facility_code || '',
+                          b.order_count || 0, b.actual_envelopes || 0, b.assembled_at || '']));
+    }
+
+    if (id === 'geography') {
+      const rows = db.prepare(`SELECT o.recipient_city, o.recipient_state, o.product_line,
+                                      COUNT(*) orders, COALESCE(SUM(o.envelope_qty),0) envelopes
+                               FROM ehp_order o
+                               WHERE o.client_id=? AND o.fulfilled_at IS NOT NULL
+                                 AND date(o.fulfilled_at) BETWEEN ? AND ?
+                               GROUP BY o.recipient_city, o.recipient_state, o.product_line`).all(c, from, to);
+      const rolled = ehpRollupSmallCities(rows)
+        .sort((a, b) => (b.envelopes - a.envelopes) || String(a.recipient_state).localeCompare(String(b.recipient_state)));
+      return sendCsv(res, `EHP_Geographic_Summary_${tag}.csv`,
+        ['City', 'State', 'Product line', 'Orders', 'Envelopes'],
+        rolled.map(r => [r.recipient_city || '', r.recipient_state || '', r.product_line || '', r.orders, r.envelopes]));
+    }
+
+    if (id === 'sla') {
+      const rows = db.prepare(`SELECT strftime('%Y-W%W', o.placed_at) wk, o.product_line,
+                                      COUNT(*) orders,
+                                      ROUND(AVG(julianday(o.fulfilled_at) - julianday(o.placed_at)), 2) avg_days,
+                                      ROUND(MAX(julianday(o.fulfilled_at) - julianday(o.placed_at)), 2) worst_days
+                               FROM ehp_order o
+                               WHERE o.client_id=? AND o.fulfilled_at IS NOT NULL AND o.placed_at IS NOT NULL
+                                 AND date(o.fulfilled_at) BETWEEN ? AND ?
+                               GROUP BY wk, o.product_line ORDER BY wk, o.product_line`).all(c, from, to);
+      const sla = clientSettings(c).sla_lodge_days || 3;
+      return sendCsv(res, `EHP_Lodgement_SLA_${tag}.csv`,
+        ['Week', 'Product line', 'Orders', 'Avg days to lodge', 'Worst days', `SLA target (days)`, 'Within SLA'],
+        rows.map(r => [r.wk, r.product_line || '', r.orders, r.avg_days, r.worst_days, sla,
+                       r.avg_days != null && r.avg_days <= sla ? 'Yes' : 'No']));
+    }
+
+    if (id === 'count-variance') {
+      const rows = db.prepare(`SELECT sc.*, sk.product_line FROM ehp_stock_count sc
+                               LEFT JOIN ehp_sku sk ON sk.client_id=sc.client_id AND sk.sku=sc.sku
+                               WHERE sc.client_id=? AND date(sc.counted_at) BETWEEN ? AND ?
+                               ORDER BY sc.counted_at, sc.sku`).all(c, from, to);
+      return sendCsv(res, `EHP_Cycle_Count_Variance_${tag}.csv`,
+        ['Counted at', 'Flavour SKU', 'Product line', 'Ledger (sticks)', 'Counted (sticks)', 'Variance', 'Counted by', 'Notes'],
+        rows.map(r => [r.counted_at, r.sku, r.product_line || '', r.system_each, r.counted_each,
+                       r.variance_each, r.counted_by || '', r.notes || '']));
+    }
+
+    if (id === 'inbound-receipts') {
+      const rows = db.prepare(`SELECT pr.received_date_local, pr.reference, pr.pallets, pr.facility_code,
+                                      rl.sku, rl.qty_entered, rl.uom_entered, rl.qty_each, rl.lot_code, rl.expiry_date
+                               FROM ehp_pallet_receipt pr
+                               LEFT JOIN ehp_receipt_line rl ON rl.receipt_id = pr.id
+                               WHERE pr.client_id=? AND pr.received_date_local BETWEEN ? AND ?
+                               ORDER BY pr.received_date_local, rl.sku`).all(c, from, to);
+      return sendCsv(res, `EHP_Inbound_Receipts_${tag}.csv`,
+        ['Received', 'Reference', 'Facility', 'Pallets', 'Flavour SKU', 'Qty entered', 'UoM', 'Sticks (normalised)', 'Lot', 'Expiry'],
+        rows.map(r => [r.received_date_local, r.reference || '', r.facility_code || '', r.pallets || 0,
+                       r.sku || '', r.qty_entered != null ? r.qty_entered : '', r.uom_entered || '',
+                       r.qty_each != null ? r.qty_each : '', r.lot_code || '', r.expiry_date || '']));
+    }
+
+    if (id === 'inventory-cover') {
+      const comps = db.prepare(`SELECT sku, name, flavour, product_line FROM ehp_sku
+                                WHERE client_id=? AND active=1 AND is_component=1 ORDER BY product_line, sku`).all(c);
+      const rows = comps.map(k => {
+        const est = ehpEstimatedOnHand(c, k.sku);
+        const env = batches.filter(b => (b.product_line || '') === (k.product_line || ''))
+                           .reduce((a, b) => a + (b.actual_envelopes || 0), 0);
+        const rec = ehpActiveRecipe(c, k.product_line || null);
+        const poolN = rec && rec.pool && rec.pool.length ? rec.pool.length : Math.max(1, (rec && rec.distinct_flavours) || 3);
+        const used = Math.round(env * ((rec ? rec.sticks_per_envelope : 5) || 5) / poolN);
+        const perDay = used / 30;
+        return [k.sku, k.flavour || k.name || '', k.product_line || '', est.ledger_on_hand,
+                used, perDay ? Math.round(perDay) : 0,
+                perDay > 0 ? Math.floor(est.ledger_on_hand / perDay) : ''];
+      });
+      return sendCsv(res, `EHP_Inventory_Cover_${tag}.csv`,
+        ['Flavour SKU', 'Flavour', 'Product line', 'Closing stock (sticks)', 'Consumed in month',
+         'Avg daily burn', 'Days of cover'], rows);
+    }
+
+    if (id === 'reconciliation') {
+      const wb = new ExcelJS.Workbook();
+      wb.creator = 'VelOzity Pinpoint';
+      const head = (ws, cols) => { ws.columns = cols; ws.getRow(1).font = { bold: true }; };
+
+      // 1. Envelopes dispatched — ties to the invoiced quantity.
+      const s1 = wb.addWorksheet('Envelopes dispatched');
+      head(s1, [{ header: 'Dispatched', key: 'd', width: 22 }, { header: 'Batch reference', key: 'r', width: 18 },
+                { header: 'Product line', key: 'p', width: 14 }, { header: 'Orders', key: 'o', width: 10 },
+                { header: 'Envelopes', key: 'e', width: 12 }]);
+      batches.forEach(b => s1.addRow({ d: b.dispatched_at, r: b.batch_ref || b.id, p: b.product_line || '',
+                                       o: b.order_count || 0, e: b.actual_envelopes || 0 }));
+      const totalEnv = batches.reduce((a, b) => a + (b.actual_envelopes || 0), 0);
+      s1.addRow({}); s1.addRow({ r: 'TOTAL', e: totalEnv }).font = { bold: true };
+
+      // 2. Sticks consumed by flavour — straight from the ledger, not derived.
+      const cons = db.prepare(`SELECT t.sku, sk.flavour, sk.product_line, COALESCE(SUM(-t.qty_each),0) sticks
+                               FROM ehp_inventory_txn t
+                               LEFT JOIN ehp_sku sk ON sk.client_id=t.client_id AND sk.sku=t.sku
+                               WHERE t.client_id=? AND t.txn_type='consumption'
+                                 AND date(t.created_at) BETWEEN ? AND ?
+                               GROUP BY t.sku ORDER BY sk.product_line, t.sku`).all(c, from, to);
+      const s2 = wb.addWorksheet('Sticks consumed');
+      head(s2, [{ header: 'Flavour SKU', key: 's', width: 20 }, { header: 'Flavour', key: 'f', width: 18 },
+                { header: 'Product line', key: 'p', width: 14 }, { header: 'Sticks consumed', key: 'q', width: 16 }]);
+      cons.forEach(r => s2.addRow({ s: r.sku, f: r.flavour || '', p: r.product_line || '', q: r.sticks }));
+      const totalSticks = cons.reduce((a, r) => a + (r.sticks || 0), 0);
+      s2.addRow({}); s2.addRow({ f: 'TOTAL', q: totalSticks }).font = { bold: true };
+
+      // 3. Yield against standard. Only a real measurement since consumption started
+      // posting at dispatch — previously usage was derived from the count, so expected
+      // and actual were the same number by construction.
+      const s3 = wb.addWorksheet('Yield against standard');
+      head(s3, [{ header: 'Product line', key: 'p', width: 16 }, { header: 'Envelopes', key: 'e', width: 12 },
+                { header: 'Standard sticks/envelope', key: 'std', width: 22 },
+                { header: 'Expected sticks', key: 'x', width: 15 },
+                { header: 'Actual sticks', key: 'a', width: 14 },
+                { header: 'Variance', key: 'v', width: 12 }, { header: 'Yield %', key: 'y', width: 10 }]);
+      const lines = Array.from(new Set(batches.map(b => b.product_line).filter(Boolean)));
+      for (const pl of lines) {
+        const rec = ehpActiveRecipe(c, pl);
+        const std = (rec && rec.sticks_per_envelope) || 5;
+        const env = batches.filter(b => b.product_line === pl).reduce((a, b) => a + (b.actual_envelopes || 0), 0);
+        const act = cons.filter(r => r.product_line === pl).reduce((a, r) => a + (r.sticks || 0), 0);
+        const exp = env * std;
+        s3.addRow({ p: pl, e: env, std, x: exp, a: act, v: act - exp,
+                    y: exp ? Math.round(act / exp * 1000) / 10 : '' });
+      }
+      s3.addRow({});
+      s3.addRow({ p: 'Variance is sticks issued above or below the standard recipe. Cycle count adjustments are on the next sheet.' });
+
+      // 4. Closing stock and days of cover.
+      const s4 = wb.addWorksheet('Stock and cover');
+      head(s4, [{ header: 'Flavour SKU', key: 's', width: 20 }, { header: 'Flavour', key: 'f', width: 18 },
+                { header: 'Product line', key: 'p', width: 14 },
+                { header: 'Closing stock (sticks)', key: 'q', width: 20 },
+                { header: 'Avg daily burn', key: 'b', width: 15 }, { header: 'Days of cover', key: 'd', width: 14 }]);
+      const comps = db.prepare(`SELECT sku, name, flavour, product_line FROM ehp_sku
+                                WHERE client_id=? AND active=1 AND is_component=1 ORDER BY product_line, sku`).all(c);
+      for (const k of comps) {
+        const oh = ehpOnHand(c, k.sku);
+        const used = (cons.find(r => r.sku === k.sku) || {}).sticks || 0;
+        const perDay = used / 30;
+        s4.addRow({ s: k.sku, f: k.flavour || k.name || '', p: k.product_line || '', q: oh,
+                    b: Math.round(perDay), d: perDay > 0 ? Math.floor(oh / perDay) : '' });
+      }
+
+      // 5. Cycle count variance.
+      const counts = db.prepare(`SELECT sc.*, sk.product_line FROM ehp_stock_count sc
+                                 LEFT JOIN ehp_sku sk ON sk.client_id=sc.client_id AND sk.sku=sc.sku
+                                 WHERE sc.client_id=? AND date(sc.counted_at) BETWEEN ? AND ?
+                                 ORDER BY sc.counted_at`).all(c, from, to);
+      const s5 = wb.addWorksheet('Cycle count variance');
+      head(s5, [{ header: 'Counted at', key: 'd', width: 22 }, { header: 'Flavour SKU', key: 's', width: 20 },
+                { header: 'Product line', key: 'p', width: 14 }, { header: 'Ledger', key: 'l', width: 12 },
+                { header: 'Counted', key: 'c', width: 12 }, { header: 'Adjustment', key: 'v', width: 12 },
+                { header: 'Notes', key: 'n', width: 30 }]);
+      counts.forEach(r => s5.addRow({ d: r.counted_at, s: r.sku, p: r.product_line || '',
+                                      l: r.system_each, c: r.counted_each, v: r.variance_each, n: r.notes || '' }));
+      if (!counts.length) s5.addRow({ d: 'No cycle count was performed in this period.' });
+
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="EHP_Reconciliation_${tag}.xlsx"`);
+      await wb.xlsx.write(res);
+      return res.end();
+    }
+
+    return res.status(404).json({ error: 'unknown_report', id, available: EHP_REPORTS.map(r => r.id) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Shopify product SKU -> product line ──
 // The only thing that tells Pinpoint an order is OxyShred rather than Fizz Stix.
 app.get('/ehp/product-map', authenticateRequest, (req, res) => {
