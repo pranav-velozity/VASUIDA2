@@ -11525,6 +11525,73 @@ app.post('/ehp/count-period/:id/close', authenticateRequest, writeOpLimiter, aud
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Export / import invoice lines ──
+// Lets the real line detail be lifted off a restored disk snapshot and re-applied to the
+// current database, so recovering the lines does not mean losing everything since.
+app.get('/finance/export-lines', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const lines = db.prepare(`SELECT l.*, i.ref_number FROM fin_invoice_lines l
+      JOIN fin_invoices i ON i.id = l.invoice_id ORDER BY i.ref_number, l.sort_order`).all();
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename="invoice-lines-backup.json"');
+    res.end(JSON.stringify({
+      exported_at: new Date().toISOString(),
+      line_count: lines.length,
+      invoice_count: new Set(lines.map(l => l.ref_number)).size,
+      value: Math.round(lines.reduce((a, l) => a + (l.total || 0), 0) * 100) / 100,
+      lines,
+    }, null, 1));
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Re-applies exported lines. Matched by ref_number, because invoice ids are stable but
+// matching on them alone would silently skip anything renumbered. Only invoices that
+// currently have NO lines are touched, so this can never overwrite live data.
+app.post('/finance/import-lines', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+  auditLog('finance_import_lines'), (req, res) => {
+  try {
+    const b = req.body || {};
+    const incoming = Array.isArray(b.lines) ? b.lines : (b.payload && b.payload.lines) || null;
+    if (!incoming) return res.status(400).json({ error: 'expected {lines:[...]} from /finance/export-lines' });
+
+    const byRef = {};
+    for (const l of incoming) { (byRef[l.ref_number] = byRef[l.ref_number] || []).push(l); }
+
+    const report = { invoices_in_file: Object.keys(byRef).length, lines_in_file: incoming.length,
+                     matched: 0, skipped_has_lines: 0, skipped_no_invoice: 0, lines_created: 0 };
+    const plan = [];
+    for (const [ref, ls] of Object.entries(byRef)) {
+      const inv = db.prepare('SELECT id FROM fin_invoices WHERE ref_number=?').get(ref);
+      if (!inv) { report.skipped_no_invoice++; continue; }
+      const has = db.prepare('SELECT COUNT(*) n FROM fin_invoice_lines WHERE invoice_id=?').get(inv.id).n;
+      if (has > 0) { report.skipped_has_lines++; continue; }
+      report.matched++;
+      plan.push({ invoice_id: inv.id, ref, lines: ls });
+    }
+
+    if (b.confirm !== 'IMPORT') {
+      return res.json({ dry_run: true, ...report,
+        would_create: plan.reduce((a, p) => a + p.lines.length, 0),
+        value: Math.round(plan.reduce((a, p) => a + p.lines.reduce((x, l) => x + (l.total || 0), 0), 0) * 100) / 100,
+        message: 'Send the same payload with {"confirm":"IMPORT"} to restore these lines.' });
+    }
+
+    const ins = db.prepare(`INSERT INTO fin_invoice_lines
+      (id, invoice_id, sort_order, description, unit_label, rate, quantity, total, gst_free, is_misc, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+    db.transaction(() => {
+      for (const p of plan) for (const l of p.lines) {
+        ins.run(l.id || randomUUID(), p.invoice_id, l.sort_order || 0, l.description || '',
+                l.unit_label || '', l.rate || 0, l.quantity || 0, l.total || 0,
+                l.gst_free ? 1 : 0, l.is_misc ? 1 : 0, l.created_at || new Date().toISOString());
+        report.lines_created++;
+      }
+    })();
+    console.log(`[finance] imported ${report.lines_created} invoice line(s) across ${report.matched} invoice(s)`);
+    res.json(report);
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Rebuild missing invoice lines from surviving headers ──
 // A table rebuild dropped fin_invoices while ON DELETE CASCADE was active, deleting every
 // invoice line. The headers survived with correct subtotal/gst/total, so a single
