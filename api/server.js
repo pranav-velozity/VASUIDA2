@@ -11502,6 +11502,50 @@ app.post('/ehp/count-period/:id/close', authenticateRequest, writeOpLimiter, aud
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Finance integrity: what is actually stored on invoices ──
+// Read-only. Reports totals, nulls and line linkage so a display problem can be told
+// apart from a data problem without guessing.
+app.get('/finance/integrity', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const cols = db.prepare('PRAGMA table_info(fin_invoices)').all().map(c => c.name);
+    const totals = db.prepare(`SELECT COUNT(*) n,
+        SUM(CASE WHEN total IS NULL THEN 1 ELSE 0 END) null_total,
+        SUM(CASE WHEN total = 0 THEN 1 ELSE 0 END) zero_total,
+        SUM(CASE WHEN subtotal IS NULL THEN 1 ELSE 0 END) null_subtotal,
+        SUM(CASE WHEN subtotal = 0 THEN 1 ELSE 0 END) zero_subtotal,
+        SUM(CASE WHEN client_id IS NULL THEN 1 ELSE 0 END) null_client,
+        ROUND(SUM(COALESCE(total,0)),2) sum_total
+      FROM fin_invoices`).get();
+    const byType = db.prepare(`SELECT type, status, COUNT(*) n, ROUND(SUM(COALESCE(total,0)),2) sum_total,
+        SUM(CASE WHEN total=0 OR total IS NULL THEN 1 ELSE 0 END) zeroes
+      FROM fin_invoices GROUP BY type, status ORDER BY type, status`).all();
+    const lineStats = db.prepare(`SELECT COUNT(*) n,
+        SUM(CASE WHEN total IS NULL OR total=0 THEN 1 ELSE 0 END) zero_lines
+      FROM fin_invoice_lines`).get();
+    const orphanLines = db.prepare(`SELECT COUNT(*) n FROM fin_invoice_lines l
+      WHERE NOT EXISTS (SELECT 1 FROM fin_invoices i WHERE i.id = l.invoice_id)`).get().n;
+    const invNoLines = db.prepare(`SELECT COUNT(*) n FROM fin_invoices i
+      WHERE NOT EXISTS (SELECT 1 FROM fin_invoice_lines l WHERE l.invoice_id = i.id)`).get().n;
+    // Invoices whose stored total disagrees with the sum of their lines
+    const mismatched = db.prepare(`SELECT i.ref_number, i.type, i.status, i.total,
+        ROUND(COALESCE((SELECT SUM(l.total) FROM fin_invoice_lines l WHERE l.invoice_id=i.id),0),2) line_sum
+      FROM fin_invoices i
+      WHERE ABS(COALESCE(i.total,0) - COALESCE((SELECT SUM(l.total) FROM fin_invoice_lines l WHERE l.invoice_id=i.id),0)) > 0.01
+      ORDER BY i.week_start DESC LIMIT 15`).all();
+    const recent = db.prepare(`SELECT ref_number, type, status, week_start, subtotal, gst, total, client_id
+      FROM fin_invoices ORDER BY week_start DESC, ref_number DESC LIMIT 12`).all();
+    res.json({
+      columns: cols,
+      has_client_id: cols.includes('client_id'),
+      invoices: totals,
+      by_type_status: byType,
+      lines: { ...lineStats, orphaned: orphanLines, invoices_with_no_lines: invNoLines },
+      total_vs_lines_mismatch: mismatched,
+      recent,
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Per-client service rates (billing defaults) ──
 // Generic by design: any client with the relevant capability gets its own rate card.
 db.exec(`
