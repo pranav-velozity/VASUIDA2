@@ -11704,6 +11704,59 @@ app.post('/finance/rebuild-missing-lines', authenticateRequest, requireRole(['ad
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Indexes matching the client-scoped query patterns ──
+// Adding client_id to every WHERE clause changed the shape of nearly every query, but the
+// only new index was on client_id alone. With one dominant client every row matches it, so
+// it cannot narrow anything and the planner falls back to scanning. These composites cover
+// the queries the app actually runs.
+(function tenancyIndexes(){
+  try {
+    const t0 = Date.now();
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_records_client_date_status ON records(client_id, date_local, status);
+      CREATE INDEX IF NOT EXISTS idx_records_client_po          ON records(client_id, po_number);
+      CREATE INDEX IF NOT EXISTS idx_records_client_status_done ON records(client_id, status, completed_at);
+      CREATE INDEX IF NOT EXISTS idx_records_client_bin         ON records(client_id, mobile_bin);
+      CREATE INDEX IF NOT EXISTS idx_receiving_client_week      ON receiving(client_id, week_start);
+      CREATE INDEX IF NOT EXISTS idx_flow_week_client_week      ON flow_week(client_id, week_start);
+      CREATE INDEX IF NOT EXISTS idx_fin_inv_client_type_week   ON fin_invoices(client_id, type, week_start);
+      CREATE INDEX IF NOT EXISTS idx_fin_lines_inv_desc         ON fin_invoice_lines(invoice_id, description);
+    `);
+    // Give the query planner statistics; without these it guesses at selectivity.
+    db.exec('ANALYZE;');
+    console.log(`[perf] tenancy indexes ensured + ANALYZE in ${Date.now() - t0}ms`);
+  } catch (e) { console.error('[perf:indexes]', e.message); }
+})();
+
+// ── Query timing: which calls are actually slow ──
+app.get('/perf/probe', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const c = curClient();
+    const ws = String(req.query.week || '').trim() || db.prepare('SELECT MAX(week_start) w FROM plans WHERE client_id=?').get(c)?.w;
+    const we = (() => { const d = new Date(ws + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 6); return d.toISOString().slice(0,10); })();
+    const time = (label, fn) => { const t0 = process.hrtime.bigint(); let n = null;
+      try { n = fn(); } catch (e) { n = 'ERR ' + e.message; }
+      return { query: label, ms: Number(process.hrtime.bigint() - t0) / 1e6, result: n }; };
+
+    const probes = [
+      time('records count for week', () => db.prepare(`SELECT COUNT(*) n FROM records WHERE client_id=? AND date_local BETWEEN ? AND ? AND status='complete'`).get(c, ws, we).n),
+      time('records total', () => db.prepare('SELECT COUNT(*) n FROM records').get().n),
+      time('records by PO for week', () => db.prepare(`SELECT COUNT(DISTINCT po_number) n FROM records WHERE client_id=? AND date_local BETWEEN ? AND ?`).get(c, ws, we).n),
+      time('distinct bins for week', () => db.prepare(`SELECT COUNT(DISTINCT mobile_bin) n FROM records WHERE client_id=? AND date_local BETWEEN ? AND ? AND status='complete'`).get(c, ws, we).n),
+      time('plan for week', () => { const r = db.prepare('SELECT length(data) n FROM plans WHERE client_id=? AND week_start=?').get(c, ws); return r ? r.n : 0; }),
+      time('receiving for week', () => db.prepare('SELECT COUNT(*) n FROM receiving WHERE client_id=? AND week_start=?').get(c, ws).n),
+      time('invoices + lines', () => db.prepare(`SELECT COUNT(*) n FROM fin_invoices i JOIN fin_invoice_lines l ON l.invoice_id=i.id WHERE i.client_id=?`).get(c).n),
+    ];
+    const plan = db.prepare(`EXPLAIN QUERY PLAN SELECT COUNT(*) FROM records WHERE client_id=? AND date_local BETWEEN ? AND ? AND status='complete'`).all(c, ws, we);
+    res.json({ client: c, week: ws,
+      total_ms: Math.round(probes.reduce((a, p) => a + p.ms, 0) * 100) / 100,
+      probes: probes.map(p => ({ ...p, ms: Math.round(p.ms * 100) / 100 })),
+      main_query_plan: plan.map(r => r.detail),
+      indexes_on_records: db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='records'`).all().map(r => r.name),
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Finance integrity: what is actually stored on invoices ──
 // Read-only. Reports totals, nulls and line linkage so a display problem can be told
 // apart from a data problem without guessing.
