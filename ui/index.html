@@ -253,6 +253,30 @@
 
 <!-- 🔐 Clerk Authentication With New Publishable key  -->
 <script>
+// ── Request coalescing ──
+// The boot sequence issues ~54 calls, several of them identical and concurrent (the same
+// plan week and records summary were each fetched twice within a second). This collapses
+// duplicate in-flight GETs to the same URL into a single request. Deliberately narrow:
+// GET only, and the entry is dropped as soon as the response settles, so nothing is
+// cached across time and no call site had to change.
+(function(){
+  const _origFetch = window.fetch.bind(window);
+  const inflight = new Map();
+  window.fetch = function(input, init){
+    try {
+      const method = ((init && init.method) || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      if (method !== 'GET' || !url) return _origFetch(input, init);
+      const key = url;
+      if (inflight.has(key)) return inflight.get(key).then(r => r.clone());
+      const p = _origFetch(input, init).finally(() => { inflight.delete(key); });
+      inflight.set(key, p);
+      return p.then(r => r.clone());
+    } catch (e) { return _origFetch(input, init); }
+  };
+})();
+</script>
+<script>
 // Safe Clerk onload — waits for initializeClerkAuth to be defined before calling it
 // Prevents ReferenceError when Clerk loads before body scripts finish parsing
 window.__clerkOnLoad = function() {
@@ -2808,8 +2832,15 @@ document.getElementById('btn-exec-csv')?.addEventListener('click', () => {
       renderOpsInsights(v);
     } catch (e) {}
 
-  // ── Trigger flipper insight refresh for this week ──
-  try { refreshFlipperInsights(ws); } catch(e) { console.warn('[Flipper] refresh failed:', e); }
+  // ── Flipper insight: deferred off the critical path ──
+  // This is an AI call taking several seconds. Run once the page is loaded and idle so it
+  // never competes with the data the user is waiting for.
+  (function deferFlipper(){
+    const go = () => { try { refreshFlipperInsights(ws); } catch(e) { console.warn('[Flipper] refresh failed:', e); } };
+    const idle = () => (window.requestIdleCallback ? requestIdleCallback(go, { timeout: 4000 }) : setTimeout(go, 1200));
+    if (document.readyState === 'complete') idle();
+    else window.addEventListener('load', idle, { once: true });
+  })();
 };
 
 
@@ -5297,7 +5328,19 @@ window.addEventListener('state:ready', () => {
   // Runs once per session — skips if cache already warmed.
   if (!window._pulseCacheWarmed) {
     window._pulseCacheWarmed = true;
-    setTimeout(async function pulseCacheWarm() {
+    // Warm on first intent to use Pulse, not on every page load. Most sessions never open
+    // it, so this was ~5s of connection contention for no benefit.
+    const armWarm = (run) => {
+      const input = document.getElementById('pulse-input-display');
+      const bar = document.getElementById('pulse-bar');
+      let fired = false;
+      const fire = () => { if (fired) return; fired = true; run(); };
+      if (input) { input.addEventListener('focus', fire, { once: true }); input.addEventListener('input', fire, { once: true }); }
+      if (bar) bar.addEventListener('mouseenter', fire, { once: true });
+      // Fallback: if the page has been open and idle for a while, warm anyway.
+      setTimeout(fire, 45000);
+    };
+    armWarm(async function pulseCacheWarm() {
       try {
         // First load the 12-week context
         await pulseLoadContext();
@@ -5325,7 +5368,7 @@ window.addEventListener('state:ready', () => {
         // Silent fail — pre-warm is best-effort, won't affect user experience
         console.warn('[Pulse] cache pre-warm failed silently:', e.message);
       }
-    }, 3000); // wait 3s after state:ready so page load completes first
+    });
   }
 });
 
