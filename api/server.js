@@ -11525,6 +11525,69 @@ app.post('/ehp/count-period/:id/close', authenticateRequest, writeOpLimiter, aud
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Explain a month's VAS cost per unit, term by term ──
+// Read-only. Shows the invoices counted, the lines behind them, the applied units and the
+// division, so a wrong figure can be traced to its input rather than guessed at.
+app.get('/finance/explain-vas', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const mk = String(req.query.month || '').trim();          // YYYY-MM
+    if (!/^\d{4}-\d{2}$/.test(mk)) return res.status(400).json({ error: 'month=YYYY-MM required' });
+
+    const invs = db.prepare(`SELECT id, ref_number, status, week_start, subtotal, total, client_id
+      FROM fin_invoices WHERE type='VAS' AND substr(week_start,1,7)=? ORDER BY week_start`).all(mk);
+
+    let vasRev = 0, cartonRev = 0;
+    const detail = invs.map(i => {
+      const lines = db.prepare('SELECT description, total, quantity FROM fin_invoice_lines WHERE invoice_id=?').all(i.id);
+      let v = 0, cr = 0;
+      for (const l of lines) {
+        if (String(l.description || '').toLowerCase().includes('carton replacement')) cr += l.total || 0;
+        else v += l.total || 0;
+      }
+      vasRev += v; cartonRev += cr;
+      return { ref: i.ref_number, status: i.status, week_start: i.week_start, subtotal: i.subtotal,
+               line_count: lines.length, counted_as_vas: Math.round(v * 100) / 100,
+               counted_as_carton: Math.round(cr * 100) / 100,
+               descriptions: lines.map(l => l.description) };
+    });
+
+    // Applied units, by the same rule the report uses
+    const weekStarts = db.prepare(`SELECT DISTINCT week_start FROM plans WHERE substr(week_start,1,7)=?`).all(mk).map(r => r.week_start);
+    const perWeek = [];
+    let appliedUnits = 0;
+    for (const ws of weekStarts) {
+      const we = new Date(ws + 'T00:00:00Z'); we.setUTCDate(we.getUTCDate() + 6);
+      const to = we.toISOString().slice(0, 10);
+      const n = db.prepare(`SELECT COUNT(*) n FROM records
+        WHERE date_local BETWEEN ? AND ? AND status='complete'`).get(ws, to).n;
+      appliedUnits += n;
+      perWeek.push({ week_start: ws, units: n });
+    }
+
+    res.json({
+      month: mk,
+      vas_invoices: invs.length,
+      vas_revenue_counted: Math.round(vasRev * 100) / 100,
+      carton_excluded: Math.round(cartonRev * 100) / 100,
+      applied_units: appliedUnits,
+      cost_per_unit: appliedUnits ? Math.round(vasRev / appliedUnits * 10000) / 10000 : null,
+      weeks: perWeek,
+      invoices: detail,
+      note: 'cost_per_unit = vas_revenue_counted / applied_units. If the figure looks low, check whether applied_units is inflated by a duplicate upload.',
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Invoices whose stored total is zero — these predate the line loss and are worth a look.
+app.get('/finance/zero-invoices', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    res.json({ invoices: db.prepare(`SELECT ref_number, type, status, week_start, invoice_date,
+        subtotal, gst, total, client_id,
+        (SELECT COUNT(*) FROM fin_invoice_lines l WHERE l.invoice_id=i.id) line_count
+      FROM fin_invoices i WHERE COALESCE(total,0)=0 ORDER BY week_start`).all() });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Export / import invoice lines ──
 // Lets the real line detail be lifted off a restored disk snapshot and re-applied to the
 // current database, so recovering the lines does not mean losing everything since.
