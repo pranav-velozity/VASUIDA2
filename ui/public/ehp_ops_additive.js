@@ -481,6 +481,10 @@
     const all = d.skus || [];
     const rows = all.filter(r => r.is_component);          // stocked items
     const others = all.filter(r => !r.is_component);       // Shopify product codes, not stock
+    // Reference counts drive the delete confirmation, so the operator sees what goes
+    // with the SKU before agreeing to it. Optional: an older API just omits the panel.
+    let audit = null; try { audit = await req('/ehp/sku-audit'); } catch (e) {}
+    const refsOf = (sku) => { const a = (audit && audit.skus || []).find(x => x.sku === sku); return a ? a.refs : null; };
     body.innerHTML = `
       <div style="font-size:10px;color:${LIGHT};margin-bottom:6px;">Periodic inventory: <b>estimated</b> on-hand between counts (each flavour averages sticks ÷ flavours per envelope). The fortnightly count replaces the estimate with truth.</div>
       <div id="ehp-period"></div>
@@ -494,12 +498,28 @@
         <td class="n"><input class="ehp-in" data-sku="${esc(r.sku)}" data-f="eaches_per_inner" type="number" min="0" value="${r.eaches_per_inner??''}" style="width:70px;text-align:right"></td>
         <td class="n"><input class="ehp-in" data-sku="${esc(r.sku)}" data-f="inners_per_carton" type="number" min="0" value="${r.inners_per_carton??''}" style="width:70px;text-align:right"></td>
         <td class="n"><input class="ehp-in" data-sku="${esc(r.sku)}" data-f="cartons_per_pallet" type="number" min="0" value="${r.cartons_per_pallet??''}" style="width:70px;text-align:right"></td>
-        <td style="white-space:nowrap"><button class="ehp-btn g" data-save="${esc(r.sku)}">Save</button></td>
+        <td style="white-space:nowrap"><button class="ehp-btn g" data-save="${esc(r.sku)}">Save</button>
+          <button class="ehp-btn g" data-del="${esc(r.sku)}" style="color:${RED};margin-left:4px;">Delete</button></td>
       </tr>`).join('') : `<tr><td colspan="9" style="color:${LIGHT};text-align:center;padding:18px;">No stocked SKUs yet — they appear automatically on first receipt or order.</td></tr>`}
       </tbody></table>
-      ${others.length ? `<div style="margin-top:14px;font-size:10px;color:${LIGHT};line-height:1.6;">
-        <b>${others.length} SKU(s) seen on Shopify orders but never received into stock</b> — not consumed and not counted:
-        ${others.map(o=>esc(o.sku)).join(', ')}.<br>They become stocked items the first time they appear on an inbound receipt.
+      ${others.length ? `<div style="margin-top:14px;">
+        <div style="font-size:10px;color:${LIGHT};line-height:1.6;margin-bottom:6px;">
+          <b>${others.length} SKU(s) seen on Shopify orders but never received into stock</b> — not consumed and not counted.
+          They become stocked items the first time they appear on an inbound receipt.
+        </div>
+        <table class="ehp"><tbody>${others.map(o=>`<tr>
+          <td><b>${esc(o.sku)}</b></td>
+          <td style="color:${MID}">${esc(o.name||'—')}</td>
+          <td style="color:${LIGHT}">${esc(o.source||'')}</td>
+          <td style="text-align:right;white-space:nowrap"><button class="ehp-btn g" data-del="${esc(o.sku)}" style="color:${RED}">Delete</button></td>
+        </tr>`).join('')}</tbody></table>
+      </div>` : ''}
+      ${(audit && (audit.suppressed||[]).length) ? `<div style="margin-top:14px;font-size:10px;color:${LIGHT};">
+        <b>Deleted SKUs</b> — these will not re-register from Shopify orders:
+        <table class="ehp"><tbody>${audit.suppressed.map(s=>`<tr>
+          <td><b>${esc(s.sku)}</b></td><td style="color:${MID}">${esc(s.reason||'')}</td>
+          <td style="text-align:right"><button class="ehp-btn g" data-restore="${esc(s.sku)}">Restore</button></td>
+        </tr>`).join('')}</tbody></table>
       </div>` : ''}`;
     try {
       const cp = await req('/ehp/count-period');
@@ -531,6 +551,44 @@
             el('ehp-invmsg').innerHTML = msg('k', `Conversions saved for ${esc(sku)}.`); }
       catch (e) { el('ehp-invmsg').innerHTML = msg('e', e.message||String(e)); }
       b.disabled = false;
+    }));
+
+    // Delete: two steps always. The first click reports what is attached to the SKU;
+    // only a second, explicit confirmation removes anything.
+    body.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
+      const sku = b.getAttribute('data-del');
+      const rf = refsOf(sku);
+      const attached = rf ? rf.total : null;
+      let cascade = false;
+      if (attached === null) {
+        if (!confirm('Delete SKU ' + sku + '?\n\nReference check unavailable — the server will refuse if records point at it.')) return;
+      } else if (attached === 0) {
+        if (!confirm('Delete SKU ' + sku + '?\n\nNothing references it. The registry row is removed and the code will not re-register from Shopify orders.')) return;
+      } else {
+        const detail = ['receipt lines: ' + rf.receipt_lines, 'inventory txns: ' + rf.inventory_txns,
+                        'recipe lines: ' + rf.recipe_lines, 'stock counts: ' + rf.stock_counts].join('\n');
+        if (!confirm('SKU ' + sku + ' is referenced by ' + attached + ' record(s):\n\n' + detail +
+                     '\n\nDeleting it removes ALL of the above. This cannot be undone. Continue?')) return;
+        if (!confirm('Confirm again: permanently delete ' + sku + ' and its ' + attached + ' referencing record(s)?')) return;
+        cascade = true;
+      }
+      b.disabled = true;
+      try {
+        const r = await req('/ehp/sku/' + encodeURIComponent(sku),
+          { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE', cascade: cascade ? '1' : '0' }) });
+        el('ehp-invmsg').innerHTML = msg('k', 'Deleted ' + esc(sku) + '.' +
+          (r.deleted && r.deleted.inventory_txns ? ' Removed ' + r.deleted.inventory_txns + ' ledger entr(ies).' : ''));
+        setTimeout(render, 900);
+      } catch (e) { el('ehp-invmsg').innerHTML = msg('e', e.message||String(e)); b.disabled = false; }
+    }));
+
+    body.querySelectorAll('[data-restore]').forEach(b => b.addEventListener('click', async () => {
+      const sku = b.getAttribute('data-restore');
+      b.disabled = true;
+      try { await req('/ehp/sku/' + encodeURIComponent(sku) + '/restore', { method: 'POST', body: '{}' });
+            el('ehp-invmsg').innerHTML = msg('k', esc(sku) + ' restored — it re-registers on its next receipt or order.');
+            setTimeout(render, 900); }
+      catch (e) { el('ehp-invmsg').innerHTML = msg('e', e.message||String(e)); b.disabled = false; }
     }));
   }
 
