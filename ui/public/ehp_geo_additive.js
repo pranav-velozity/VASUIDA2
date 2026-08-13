@@ -74,6 +74,14 @@
          fixed Pulse bar (z-index 50). Rather than raising .pulse-bar globally — shared CSS that
          would change layering on every ICONIC overlay too — lift it only while this page is open,
          and reserve room at the foot of the scroll so the bar never sits on top of a report tile. */
+      /* The page behind keeps its own scrollbar otherwise, so the overlay shows two. */
+      body.eg-open{overflow:hidden;}
+      /* Pulse is styled to float: side margins, rounded top corners, a three-sided border
+         and a red glow. Over normal page content that reads as a docked bar; against this
+         flat white sheet the margins make it a floating box and the glow reads as a second
+         outline just outside the border. Dock it flush while this page is open. */
+      body.eg-open #pulse-bar{margin:0;width:100%;border-radius:0;
+                              border-left:none;border-right:none;box-shadow:none;}
       body.eg-open #pulse-panel{z-index:9601;}
       .eg-body{padding:20px 28px 36px;overflow:auto;flex:1 1 auto;max-width:1560px;width:100%;margin:0 auto;}
       .eg-grid2{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:22px;align-items:start;}
@@ -611,7 +619,7 @@
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);      // the active client can change via the picker
     if (location.hash === '#ehp-geo') setTimeout(open, 600);
-    console.log('[ehp-geo] module v5 loaded');
+    console.log('[ehp-geo] module v6 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
