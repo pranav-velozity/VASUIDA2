@@ -73,14 +73,22 @@
       @media (max-width:1080px){ .eg-grid2{grid-template-columns:1fr;} }
       /* Analytics strip — sits under the maps so the layout holds whether one product
          line is present or two. */
-      .eg-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-top:14px;}
+      .eg-strip{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;}
+      @media (max-width:520px){ .eg-strip{grid-template-columns:1fr;} }
       .eg-stat{border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:13px 15px;}
       .eg-sl{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};}
       .eg-sv{font-size:22px;font-weight:700;color:${DARK};letter-spacing:-0.02em;margin-top:3px;
              font-variant-numeric:tabular-nums;}
       .eg-ss{font-size:10px;color:${LIGHT};margin-top:2px;line-height:1.4;}
-      .eg-maps{display:grid;grid-template-columns:repeat(auto-fit,minmax(0,1fr));gap:16px;}
-      @media (max-width:760px){ .eg-maps{grid-template-columns:1fr;} }
+      /* Top row: cartogram(s) on the left at a fixed sensible size, live metrics filling the
+         space beside them. Unbounded width made the state tiles 90px and the map ate the page. */
+      .eg-top{display:grid;grid-template-columns:minmax(0,auto) minmax(0,1fr);gap:16px;align-items:start;}
+      @media (max-width:1100px){ .eg-top{grid-template-columns:1fr;} }
+      .eg-maps{display:flex;gap:14px;flex-wrap:wrap;}
+      .eg-maps > .eg-card{width:430px;max-width:100%;}
+      .eg-maps svg{width:100%;max-width:400px;height:auto;display:block;margin-top:10px;}
+      .eg-two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start;}
+      @media (max-width:900px){ .eg-two{grid-template-columns:1fr;} }
       .eg-card{border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:14px 16px;}
       .eg-ml{font-size:12px;font-weight:700;color:${DARK};}
       .eg-mv{font-size:10px;color:${LIGHT};margin-top:1px;}
@@ -350,15 +358,31 @@
                           .reduce((a, r) => a + r.envelopes, 0))
     }));
     const max = Math.max(1, ...series.flatMap(x => x.pts));
-    const W = 560, H = 90, pad = 4;
-    const X = i => days.length > 1 ? pad + i * (W - pad * 2) / (days.length - 1) : W / 2;
-    const Y = v => H - pad - (v / max) * (H - pad * 2);
-    const paths = series.map(sr => {
-      const d = sr.pts.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join('');
-      const area = `${d}L${X(sr.pts.length-1).toFixed(1)},${H-pad}L${X(0).toFixed(1)},${H-pad}Z`;
-      const col = `hsl(${sr.hue.h} ${sr.hue.s}% 46%)`;
-      return `<path d="${area}" fill="${col}" opacity="0.10"/><path d="${d}" fill="none" stroke="${col}" stroke-width="1.8" stroke-linejoin="round"/>`;
-    }).join('');
+    const W = 560, H = 96, pad = 6;
+    const Y = v => H - pad - (v / max) * (H - pad * 2 - 8);
+    let body;
+    if (days.length < 3) {
+      // A line through one or two points draws nothing useful. Bars read correctly from
+      // the first day of activity.
+      const slot = (W - pad * 2) / days.length;
+      const bw = Math.min(46, slot / (series.length + 0.6));
+      body = days.map((d, i) => series.map((sr, k) => {
+        const v = sr.pts[i]; if (!v) return '';
+        const x = pad + i * slot + slot / 2 - (series.length * bw) / 2 + k * bw;
+        const y = Y(v);
+        return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(bw-3).toFixed(1)}" height="${(H-pad-y).toFixed(1)}"
+                  rx="3" fill="hsl(${sr.hue.h} ${sr.hue.s}% 46%)"><title>${esc(d)} — ${nfmt(v)}</title></rect>`;
+      }).join('')).join('');
+    } else {
+      const X = i => pad + i * (W - pad * 2) / (days.length - 1);
+      body = series.map(sr => {
+        const d = sr.pts.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join('');
+        const area = `${d}L${X(sr.pts.length-1).toFixed(1)},${H-pad}L${X(0).toFixed(1)},${H-pad}Z`;
+        const col = `hsl(${sr.hue.h} ${sr.hue.s}% 46%)`;
+        return `<path d="${area}" fill="${col}" opacity="0.10"/><path d="${d}" fill="none" stroke="${col}" stroke-width="1.8" stroke-linejoin="round"/>`;
+      }).join('');
+    }
+    const paths = body + `<line x1="${pad}" y1="${H-pad}" x2="${W-pad}" y2="${H-pad}" stroke="rgba(0,0,0,0.10)" stroke-width="1"/>`;
     const legend = series.filter(x => x.line).map(sr =>
       `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:12px;">
         <span style="width:8px;height:8px;border-radius:2px;background:hsl(${sr.hue.h} ${sr.hue.s}% 46%);"></span>
@@ -366,13 +390,12 @@
     return `<div style="display:flex;justify-content:space-between;align-items:baseline;">
         <div class="eg-ml">Dispatch trend</div><div>${legend}</div></div>
       <div class="eg-mv">${days.length} day(s) with activity · peak ${nfmt(max)} envelopes</div>
-      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:96px;margin-top:8px;">${paths}</svg>`;
+      <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;margin-top:8px;">${paths}</svg>`;
   }
 
   function strip() {
     const tot = _data.totals || {}, prev = _data.previous || {}, rep = _data.repeat || {};
     const delta = prev.envelopes ? Math.round((tot.envelopes - prev.envelopes) / prev.envelopes * 100) : null;
-    const topCities = (_data.cities || []).sort((a, b) => b.envelopes - a.envelopes).slice(0, 5);
     return `
       <div class="eg-strip">
         <div class="eg-stat">
@@ -397,8 +420,12 @@
           <div class="eg-ss">${nfmt(tot.orders)} orders dispatched</div>
         </div>
       </div>
-      <div class="eg-card" style="margin-top:12px;">${trendChart()}</div>
-      <div class="eg-card" style="margin-top:12px;">
+      <div class="eg-card" style="margin-top:12px;">${trendChart()}</div>`;
+  }
+
+  function topCitiesCard() {
+    const topCities = (_data.cities || []).sort((a, b) => b.envelopes - a.envelopes).slice(0, 8);
+    return `<div class="eg-card">
         <div class="eg-ml">Top cities</div>
         <div class="eg-mv">Cities under ${_data.small_cell_min} envelopes are grouped</div>
         <table class="eg-tbl"><thead><tr><th>City</th><th>State</th><th>Line</th><th class="n">Envelopes</th></tr></thead>
@@ -412,13 +439,13 @@
 
   // ── render ──
   function statePanel() {
-    if (!_sel) return `<div class="eg-note" style="padding:10px 2px;">Select a state to see its cities and product mix.</div>`;
+    if (!_sel) return `<div class="eg-note" style="padding:14px 2px;">Click any state to see its cities, orders and product mix.</div>`;
     const s = (_data.states || []).find(x => x.state === _sel);
-    if (!s) return `<div class="eg-note" style="padding:10px 2px;">No dispatches to ${esc(_sel)} in this month.</div>`;
+    if (!s) return `<div class="eg-note" style="padding:14px 2px;">No dispatches to ${esc(_sel)} in this month.</div>`;
     const cities = (_data.cities || []).filter(c => c.recipient_state === _sel)
       .sort((a, b) => b.envelopes - a.envelopes).slice(0, 12);
     return `
-      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px;">
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin:10px 0 6px;">
         <div><div class="eg-mv">Envelopes</div><div style="font-size:18px;font-weight:700;color:${DARK};">${nfmt(s.envelopes)}</div></div>
         <div><div class="eg-mv">Orders</div><div style="font-size:18px;font-weight:700;color:${DARK};">${nfmt(s.orders)}</div></div>
         <div><div class="eg-mv">Per 100k</div><div style="font-size:18px;font-weight:700;color:${DARK};">${s.per_100k != null ? s.per_100k : '—'}</div></div>
@@ -453,10 +480,19 @@
 
       <div class="eg-grid2">
         <div>
-          <div class="eg-maps">${maps}</div>
-          ${strip()}
-          <div class="eg-sec">${_sel ? esc(_sel) : 'State detail'}</div>
-          <div class="eg-card">${statePanel()}</div>
+          <div class="eg-top">
+            <div class="eg-maps">${maps}</div>
+            <div>${strip()}</div>
+          </div>
+          <div class="eg-sec">Detail</div>
+          <div class="eg-two">
+            ${topCitiesCard()}
+            <div class="eg-card">
+              <div class="eg-ml">${_sel ? esc(_sel) : 'State detail'}</div>
+              <div class="eg-mv">${_sel ? 'Cities and product mix' : 'Select a state on the map'}</div>
+              ${statePanel()}
+            </div>
+          </div>
         </div>
         <div>
           <div class="eg-sec" style="margin-top:0;">Insights</div>
@@ -539,7 +575,7 @@
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);      // the active client can change via the picker
     if (location.hash === '#ehp-geo') setTimeout(open, 600);
-    console.log('[ehp-geo] module v2 loaded');
+    console.log('[ehp-geo] module v3 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
