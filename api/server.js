@@ -981,6 +981,48 @@ try {
   db.transaction(()=>{ for(const r of rows) ins.run(r[0],r[1],r[2],r[3],r[4]); })();
 })();
 
+// ── Non-compliance remedy type ──
+// nc_category.rate was left NULL by design ("dormant in Phase 1"), so nothing has ever
+// been priced. Charges now come from the client rate card instead, which needs to know
+// WHICH remedy was performed — grain correlates with it but does not determine it, since
+// a carton-grain fault can be remedied by relabelling rather than re-boxing.
+(function ncRemedyMigration(){
+  try {
+    const cols = db.prepare("PRAGMA table_info(nc_incident)").all().map(c => c.name);
+    if (!cols.includes('remedy_type')) {
+      db.exec("ALTER TABLE nc_incident ADD COLUMN remedy_type TEXT");
+      // Backfill from grain: unit-grain work is relabelling, carton-grain is replacement.
+      // A best guess, but it prices historic weeks rather than leaving them blank, and
+      // any row can be corrected individually afterwards.
+      const n = db.prepare(`UPDATE nc_incident SET remedy_type =
+                              CASE WHEN grain='unit' THEN 'labelling' ELSE 'carton_replacement' END
+                            WHERE remedy_type IS NULL`).run().changes;
+      console.log(`[nc:migration] remedy_type added; ${n} existing incident(s) backfilled from grain`);
+    }
+    db.exec("CREATE INDEX IF NOT EXISTS idx_nc_incident_remedy ON nc_incident(week_start, supplier, remedy_type)");
+  } catch (e) { console.error('[nc:remedy-migration]', e.message); }
+})();
+
+// Charge for one incident, priced from the client rate card rather than nc_category.rate.
+//   labelling          -> vas_base_processing  (per unit)
+//   carton_replacement -> carton_replacement   (per carton)
+// Returns null when the incident is not chargeable or has no remedy recorded, so callers
+// can distinguish "no charge" from "zero".
+const NC_REMEDY = {
+  labelling:          { code: 'vas_base_processing', fallback: 0.21, unit: 'unit',   label: 'Labelling' },
+  carton_replacement: { code: 'carton_replacement',  fallback: 1.10, unit: 'carton', label: 'Carton replacement' },
+};
+function ncRemedyRate(clientId, remedy) {
+  const m = NC_REMEDY[remedy]; if (!m) return null;
+  return rateFor(clientId, m.code, m.fallback);
+}
+function ncIncidentCost(clientId, inc) {
+  if (!inc || !inc.chargeable) return null;
+  const rate = ncRemedyRate(clientId, inc.remedy_type);
+  if (rate == null) return null;
+  return Math.round(rate * (inc.qty || 0) * 100) / 100;
+}
+
 
 
 
@@ -10297,12 +10339,18 @@ app.post('/nc/incident', authenticateRequest, writeOpLimiter, auditLog('create_n
     }
     const id = ncNewId();
     const chargeable = (b.chargeable === false || b.chargeable === 0 || b.chargeable === 'false') ? 0 : 1;
+    // Which remedy was performed decides the rate. Default from grain so existing callers
+    // keep working, but it is an explicit field the capture form now asks for.
+    let remedy = String(b.remedy_type || '').trim();
+    if (!NC_REMEDY[remedy]) remedy = (grain === 'unit') ? 'labelling' : 'carton_replacement';
+    const _c = curClient();
+    const cost = chargeable ? Math.round(ncRemedyRate(_c, remedy) * qty * 100) / 100 : null;
     db.prepare(`INSERT INTO nc_incident
-      (id,week_start,facility,supplier,po_number,sku,category_id,grain,qty,corrective_action,status,resolution_comment,cost,chargeable,needs_review,created_by,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`)
+      (id,week_start,facility,supplier,po_number,sku,category_id,grain,qty,corrective_action,status,resolution_comment,cost,chargeable,needs_review,created_by,remedy_type,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`)
       .run(id, week, b.facility||null, supplier, po, sku, cat.id, grain, qty,
            b.corrective_action||null, (b.status==='resolved'?'resolved':'open'), b.resolution_comment||null,
-           null, chargeable, 0, b.created_by||null);
+           cost, chargeable, 0, b.created_by||null, remedy);
     res.json(db.prepare('SELECT * FROM nc_incident WHERE id=?').get(id));
   } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
 });
@@ -10330,9 +10378,18 @@ app.patch('/nc/incident/:id', authenticateRequest, writeOpLimiter, auditLog('edi
       }
       fields.push('qty=?'); vals.push(q);
     }
+    if (b.remedy_type !== undefined) {
+      const r = String(b.remedy_type || '').trim();
+      if (!NC_REMEDY[r]) return res.status(400).json({ error: 'remedy_type must be labelling or carton_replacement' });
+      fields.push('remedy_type=?'); vals.push(r);
+    }
     if (!fields.length) return res.status(400).json({ error: 'no editable fields' });
     fields.push(`updated_at=datetime('now')`);
     db.prepare(`UPDATE nc_incident SET ${fields.join(',')} WHERE id=?`).run(...vals, req.params.id);
+    // Reprice from the stored row so cost always matches qty x rate x chargeable, whichever
+    // of the three just moved.
+    const after = db.prepare('SELECT * FROM nc_incident WHERE id=?').get(req.params.id);
+    db.prepare('UPDATE nc_incident SET cost=? WHERE id=?').run(ncIncidentCost(curClient(), after), req.params.id);
     res.json(db.prepare('SELECT * FROM nc_incident WHERE id=?').get(req.params.id));
   } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
 });
@@ -10879,6 +10936,113 @@ app.post('/report/supplier-discrepancy/auth', authenticateRequest, (req, res) =>
   res.json({ token, cost });
 });
 
+// ── XLSX sibling of the non-compliance PDF ──
+// Same token gate, so cost columns follow the same password rule as the PDF. One row per
+// incident: the PDF is for reading, this is for reconciling against the invoice.
+app.get('/report/supplier-discrepancy.xlsx',
+  (req, res, next) => {
+    _cleanNcTokens();
+    const t = _ncReportTokens.get(req.query.token);
+    if (!t) return res.status(403).json({ error: 'Invalid or expired token' });
+    req._ncCost = !!t.cost; setRequestClient(t.client); next();
+  },
+  async (req, res) => {
+  try {
+    const week = String(req.query.week || '').trim();
+    const supplier = String(req.query.supplier || '').trim();
+    const showCost = req._ncCost;
+    if (!week) return res.status(400).json({ error: 'week required' });
+    const c = curClient();
+
+    const cats = new Map(); for (const x of db.prepare('SELECT * FROM nc_category').all()) cats.set(x.id, x);
+    // All weeks up to and including the selected one, so the sheet doubles as the
+    // cost-to-date record rather than needing one download per week.
+    const p = [week]; let sql = 'SELECT * FROM nc_incident WHERE week_start<=?';
+    if (supplier) { sql += ' AND supplier=?'; p.push(supplier); }
+    sql += ' ORDER BY week_start, supplier, po_number, created_at';
+    const rows = db.prepare(sql).all(...p);
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'VelOzity Pinpoint';
+    const ws = wb.addWorksheet('Non-compliance');
+    const cols = [
+      { header: 'Week',                key: 'wk',  width: 12 },
+      { header: 'Supplier',            key: 'sup', width: 34 },
+      { header: 'PO',                  key: 'po',  width: 15 },
+      { header: 'SKU',                 key: 'sku', width: 16 },
+      { header: 'Issue description',   key: 'iss', width: 34 },
+      { header: 'Units / cartons',     key: 'qty', width: 15 },
+      { header: 'Grain',               key: 'gr',  width: 10 },
+      { header: 'Remedy',              key: 'rem', width: 20 },
+      { header: 'Status',              key: 'st',  width: 11 },
+      { header: 'Chargeable',          key: 'ch',  width: 12 },
+    ];
+    if (showCost) cols.push(
+      { header: 'Rate', key: 'rate', width: 10 },
+      { header: 'Total cost', key: 'cost', width: 13 });
+    ws.columns = cols;
+    ws.getRow(1).font = { bold: true };
+    ws.views = [{ state: 'frozen', ySplit: 1 }];
+
+    let total = 0;
+    for (const i of rows) {
+      const cat = cats.get(i.category_id);
+      const rem = NC_REMEDY[i.remedy_type];
+      const rate = i.chargeable ? ncRemedyRate(c, i.remedy_type) : null;
+      const cost = ncIncidentCost(c, i);
+      if (cost != null) total += cost;
+      const r = {
+        wk: i.week_start, sup: i.supplier, po: i.po_number, sku: i.sku || '',
+        iss: cat ? cat.label : i.category_id,
+        qty: i.qty, gr: i.grain === 'carton' ? 'carton' : 'unit',
+        rem: rem ? rem.label : '—',
+        st: i.status, ch: i.chargeable ? 'Yes' : 'No',
+      };
+      if (showCost) { r.rate = rate == null ? '' : rate; r.cost = cost == null ? '' : cost; }
+      ws.addRow(r);
+    }
+    if (showCost) {
+      ws.getColumn('rate').numFmt = '#,##0.00';
+      ws.getColumn('cost').numFmt = '#,##0.00';
+      ws.addRow({});
+      ws.addRow({ rem: 'TOTAL', cost: Math.round(total * 100) / 100 }).font = { bold: true };
+    }
+    if (!rows.length) ws.addRow({ sup: 'No non-compliance incidents recorded up to this week.' });
+
+    // Per-supplier rollup — what actually goes on an invoice conversation.
+    const s2 = wb.addWorksheet('By supplier');
+    const s2cols = [
+      { header: 'Supplier', key: 'sup', width: 34 },
+      { header: 'Incidents', key: 'n', width: 11 },
+      { header: 'Units relabelled', key: 'lbl', width: 17 },
+      { header: 'Cartons replaced', key: 'ctn', width: 17 },
+      { header: 'Weeks affected', key: 'wks', width: 15 },
+    ];
+    if (showCost) s2cols.push({ header: 'Total cost', key: 'cost', width: 13 });
+    s2.columns = s2cols; s2.getRow(1).font = { bold: true };
+    const agg = new Map();
+    for (const i of rows) {
+      if (!agg.has(i.supplier)) agg.set(i.supplier, { n: 0, lbl: 0, ctn: 0, cost: 0, weeks: new Set() });
+      const a = agg.get(i.supplier); a.n++; a.weeks.add(i.week_start);
+      if (i.remedy_type === 'labelling') a.lbl += i.qty;
+      else if (i.remedy_type === 'carton_replacement') a.ctn += i.qty;
+      const cst = ncIncidentCost(c, i); if (cst != null) a.cost += cst;
+    }
+    for (const [sup, a] of Array.from(agg.entries()).sort((x, y) => y[1].cost - x[1].cost)) {
+      const r = { sup, n: a.n, lbl: a.lbl, ctn: a.ctn, wks: a.weeks.size };
+      if (showCost) r.cost = Math.round(a.cost * 100) / 100;
+      s2.addRow(r);
+    }
+    if (showCost) s2.getColumn('cost').numFmt = '#,##0.00';
+
+    const tag = `${week}${supplier ? '_' + supplier.replace(/[^A-Za-z0-9]+/g, '_').slice(0, 24) : ''}`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="VelOzity_NonCompliance_${tag}.xlsx"`);
+    await wb.xlsx.write(res);
+    return res.end();
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 app.get('/report/supplier-discrepancy',
   (req, res, next) => {
     _cleanNcTokens();
@@ -10899,8 +11063,12 @@ app.get('/report/supplier-discrepancy',
     const incidents = db.prepare(sql).all(...p);
     const ids = incidents.map(i => i.id); const imgBy = new Map();
     if (ids.length) { const im = db.prepare('SELECT * FROM nc_incident_image WHERE incident_id IN (' + ids.map(() => '?').join(',') + ')').all(...ids); for (const x of im) { if (!imgBy.has(x.incident_id)) imgBy.set(x.incident_id, []); imgBy.get(x.incident_id).push(x); } }
-    const costOf = i => { if (!i.chargeable) return 0; const c = cats.get(i.category_id); return (c && c.rate != null) ? c.rate * i.qty : null; };
-    const hasChargeableRate = i => !!i.chargeable && (cats.get(i.category_id) || {}).rate != null;
+    // Priced from the client rate card via remedy_type. nc_category.rate stays NULL and
+    // is no longer consulted — it was never populated.
+    const _ncClient = curClient();
+    const costOf = i => { if (!i.chargeable) return 0; const c = ncIncidentCost(_ncClient, i); return c == null ? null : c; };
+    const hasChargeableRate = i => !!i.chargeable && !!NC_REMEDY[i.remedy_type];
+    const remedyOf = i => (NC_REMEDY[i.remedy_type] || {}).label || '—';
     const labelOf = i => { const c = cats.get(i.category_id); return c ? c.label : i.category_id; };
     const photosHtml = i => (imgBy.get(i.id) || []).slice(0, 3).map(x => `<img class="ph" src="${_ncEh(R2PUB + '/' + x.r2_key)}" alt="">`).join('');
 
@@ -10913,10 +11081,16 @@ app.get('/report/supplier-discrepancy',
     const reconTot = recon.reduce((a, r) => { a.legacy += r.legacy; a.categorized += r.categorized; a.uncategorized += r.uncategorized; return a; }, { legacy: 0, categorized: 0, uncategorized: 0 });
 
     // cost-to-date + per-supplier summary across all weeks up to this one
-    const ctdP = [week]; let ctdSql = 'SELECT i.supplier, i.week_start, i.qty, i.chargeable, c.rate FROM nc_incident i LEFT JOIN nc_category c ON c.id=i.category_id WHERE i.week_start<=?'; if (supplier) { ctdSql += ' AND i.supplier=?'; ctdP.push(supplier); }
+    const ctdP = [week]; let ctdSql = 'SELECT supplier, week_start, qty, chargeable, remedy_type, grain FROM nc_incident WHERE week_start<=?'; if (supplier) { ctdSql += ' AND supplier=?'; ctdP.push(supplier); }
     const ctd = db.prepare(ctdSql).all(...ctdP);
     const supAgg = new Map();
-    for (const r of ctd) { if (!supAgg.has(r.supplier)) supAgg.set(r.supplier, { count: 0, cost: 0, hasCost: false, weeks: new Set() }); const o = supAgg.get(r.supplier); o.count++; o.weeks.add(r.week_start); if (r.chargeable && r.rate != null) { o.cost += r.rate * r.qty; o.hasCost = true; } }
+    for (const r of ctd) {
+      if (!supAgg.has(r.supplier)) supAgg.set(r.supplier, { count: 0, cost: 0, hasCost: false, weeks: new Set(), labelling: 0, cartons: 0 });
+      const o = supAgg.get(r.supplier); o.count++; o.weeks.add(r.week_start);
+      if (r.remedy_type === 'labelling') o.labelling += r.qty; else if (r.remedy_type === 'carton_replacement') o.cartons += r.qty;
+      const c = ncIncidentCost(_ncClient, r);
+      if (c != null) { o.cost += c; o.hasCost = true; }
+    }
 
     const costHead = showCost ? '<th class="num">Cost</th>' : '';
     const costCell = i => { if (!showCost) return ''; if (!i.chargeable) return '<td class="num muted">no charge</td>'; const c = costOf(i); return `<td class="num">${c == null ? '—' : _ncMoney(c)}</td>`; };
@@ -10935,14 +11109,28 @@ app.get('/report/supplier-discrepancy',
     if (!incidents.length) {
       supSection = `<p class="empty">No non-compliance incidents logged for ${_ncEh(_ncFmtWeek(week))}${supplier ? ' for ' + _ncEh(supplier) : ''}.</p>`;
     } else {
+      // One page per supplier. A single continuous list made it impossible to send a
+      // supplier their own section without redacting the rest of the document.
       for (const [sup, list] of bySup) {
-        supSection += `<div class="sup"><div class="sup-h">${_ncEh(sup)} <span class="sup-n">${list.length} incident(s)</span></div>
-          <table><thead><tr><th>Category</th><th>PO</th><th>SKU</th><th class="num">Qty</th><th>Corrective action</th><th>Status</th><th>Evidence</th>${costHead}</tr></thead><tbody>
+        const lblUnits = list.filter(i => i.remedy_type === 'labelling').reduce((a, i) => a + i.qty, 0);
+        const ctnUnits = list.filter(i => i.remedy_type === 'carton_replacement').reduce((a, i) => a + i.qty, 0);
+        const supCost  = list.reduce((a, i) => { const c = costOf(i); return c == null ? a : a + c; }, 0);
+        const supHasCost = list.some(hasChargeableRate);
+        const agg = supAgg.get(sup);
+        supSection += `<div class="sup"><div class="sup-h">${_ncEh(sup)} <span class="sup-n">${list.length} incident(s) this week</span></div>
+          <div class="kpis supk">
+            <div class="kpi"><div class="kl">Labelling</div><div class="kv">${lblUnits.toLocaleString()}</div><div class="ks">units relabelled</div></div>
+            <div class="kpi"><div class="kl">Carton replacement</div><div class="kv">${ctnUnits.toLocaleString()}</div><div class="ks">cartons replaced</div></div>
+            ${showCost ? `<div class="kpi"><div class="kl">Charge (this week)</div><div class="kv">${supHasCost ? _ncMoney(supCost) : '—'}</div><div class="ks">${supHasCost ? '' : 'no chargeable remedy'}</div></div>` : ''}
+            ${showCost && agg ? `<div class="kpi"><div class="kl">Charge to date</div><div class="kv">${agg.hasCost ? _ncMoney(agg.cost) : '—'}</div><div class="ks">across ${agg.weeks.size} week(s)</div></div>` : ''}
+          </div>
+          <table><thead><tr><th>Category</th><th>PO</th><th>SKU</th><th class="num">Qty</th><th>Remedy</th><th>Corrective action</th><th>Status</th><th>Evidence</th>${costHead}</tr></thead><tbody>
           ${list.map(i => `<tr>
             <td>${_ncEh(labelOf(i))}${i.needs_review ? ' <span class="rev">⚑ review</span>' : ''}</td>
             <td>${_ncEh(i.po_number)}</td>
             <td>${_ncEh(i.sku || '—')}</td>
             <td class="num">${i.qty} ${i.grain === 'carton' ? 'ctn' : 'un'}</td>
+            <td>${_ncEh(remedyOf(i))}</td>
             <td>${_ncEh(i.corrective_action || '—')}</td>
             <td>${_ncEh(i.status)}</td>
             <td class="phc">${photosHtml(i) || '<span class="muted">—</span>'}</td>
@@ -10992,7 +11180,12 @@ th{font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:#AEAEB2;fon
 .about{border:0.5px solid rgba(0,0,0,0.08);border-radius:10px;padding:14px 16px;font-size:10px;color:#6E6E73;margin-top:16px;}
 .close{min-height:50vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:#AEAEB2;}
 .close .ct{font-family:'DM Serif Display',serif;font-size:34px;color:#C7C7CC;}
-@media print{.page{page-break-before:always;} .wrap{padding:24px;} }
+@media print{.page{page-break-before:always;} .wrap{padding:24px;}
+  /* Supplier blocks paginate too, so a single supplier's pages can be extracted and sent
+     without exposing anyone else's incidents. */
+  .sup{page-break-before:always;} .sup:first-of-type{page-break-before:avoid;}
+  .sup{page-break-inside:avoid;} }
+.supk{margin:10px 0 12px;}
 </style></head><body>
 <div class="wrap">
   <div class="cover">
@@ -11008,7 +11201,7 @@ th{font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:#AEAEB2;fon
     <div class="about"><b>About this report.</b> Non-compliance identified by VelOzity at receiving/VAS, by vendor. Rework categories are counted <b>per affected unit</b>; delivery-failure categories <b>per affected carton</b>. ${showCost ? 'Cost columns reflect per-category charges (blank where a rate is not yet set).' : 'Cost columns are omitted from this copy.'} Replaced-carton reasons reconcile against the receiving count (see Carton Reconciliation).</div>
   </div>
 
-  <div class="page sec"><h2 class="sec-t">By Supplier</h2><div class="sec-s">Incidents, affected quantity and photo evidence</div>${supSection}</div>
+  <div class="page sec"><h2 class="sec-t">By Supplier</h2><div class="sec-s">One page per supplier — incidents, remedy, affected quantity and photo evidence</div>${supSection}</div>
   <div class="page sec"><h2 class="sec-t">By Category</h2><div class="sec-s">Where the issues cluster across suppliers</div>${catSection}</div>
   <div class="page sec"><h2 class="sec-t">Carton Reconciliation</h2><div class="sec-s">Categorised vs uncategorised replaced cartons</div>${reconSection}</div>
   <div class="page sec"><h2 class="sec-t">Trend &amp; Cost to Date</h2><div class="sec-s">Per-supplier running totals</div>${trendSection}</div>
