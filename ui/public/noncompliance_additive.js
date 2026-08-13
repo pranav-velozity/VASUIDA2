@@ -245,6 +245,16 @@
         <div id="nc-sku-wrap" style="display:none;"><div class="nc-lbl">SKU</div><select class="nc-sel" id="nc-sku" disabled><option value="">Select PO first</option></select></div>
         <div><div class="nc-lbl" id="nc-qty-lbl">Quantity</div><input class="nc-in" id="nc-qty" type="number" min="1" step="1" value="1"></div>
       </div>
+      <div style="margin-bottom:12px;"><div class="nc-lbl">Remedy performed</div>
+        <select class="nc-sel" id="nc-remedy">
+          <option value="labelling">Labelling — charged per unit</option>
+          <option value="carton_replacement">Carton replacement — charged per carton</option>
+        </select>
+        <div style="font-size:10px;color:${LIGHT};margin-top:4px;" id="nc-remedy-note">
+          This decides the rate applied. It defaults from the category but can be changed —
+          a carton fault fixed by relabelling is charged as labelling.
+        </div>
+      </div>
       <div style="margin-bottom:12px;"><div class="nc-lbl">Corrective action / VAS done</div><textarea class="nc-ta" id="nc-action" placeholder="e.g. relabelled, transferred to mobile bin…"></textarea></div>
       <div style="margin-bottom:12px;"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:${DARK};"><input type="checkbox" id="nc-chargeable" checked style="accent-color:${BRAND};"> Chargeable <span style="color:${LIGHT};font-size:10px;">— impacts invoice. Leave on unless this issue isn't billable.</span></label></div>
       <div style="margin-bottom:12px;"><div class="nc-lbl">Photos</div>
@@ -265,11 +275,17 @@
       skuSel.disabled = true; skuSel.innerHTML = '<option value="">Select PO first</option>';
     });
     poSel.addEventListener('change', () => refreshSku());
+    const remSel = el('nc-remedy');
+    let _remTouched = false;
+    if (remSel) remSel.addEventListener('change', () => { _remTouched = true; });
     catSel.addEventListener('change', () => {
       const opt = catSel.selectedOptions[0];
       const grain = opt ? opt.getAttribute('data-grain') : '';
       skuWrap.style.display = grain === 'unit' ? '' : 'none';
       qtyLbl.textContent = grain === 'carton' ? 'Cartons' : (grain === 'unit' ? 'Units' : 'Quantity');
+      // Suggest the usual remedy for this grain, but stop suggesting once the user has
+      // chosen for themselves — otherwise a later category change silently overwrites them.
+      if (remSel && !_remTouched && grain) remSel.value = (grain === 'unit') ? 'labelling' : 'carton_replacement';
       if (grain === 'unit') refreshSku();
     });
     function refreshSku() {
@@ -323,6 +339,7 @@
       week_start: currentWeek(), supplier, po_number: po, category_id: catId, qty,
       sku: grain === 'unit' ? sku : null,
       corrective_action: el('nc-action').value.trim() || null,
+      remedy_type: el('nc-remedy') ? el('nc-remedy').value : undefined,
       chargeable: el('nc-chargeable') ? el('nc-chargeable').checked : true,
       created_by: (window.state && window.state.userName) || null,
     };
