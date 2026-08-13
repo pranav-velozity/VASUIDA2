@@ -59,8 +59,10 @@
     if (el('ehpgeo-styles')) return;
     const s = document.createElement('style'); s.id = 'ehpgeo-styles';
     s.textContent = `
-      .eg-ov{position:fixed;inset:0;background:#fff;z-index:9500;display:flex;
-             align-items:stretch;justify-content:center;}
+      /* Ends above the Pulse bar rather than covering it. Floating Pulse over an opaque
+         sheet exposed its own top/left/right border as a stray outline. */
+      .eg-ov{position:fixed;top:0;left:0;right:0;bottom:0;background:#fff;z-index:9500;
+             display:flex;align-items:stretch;justify-content:center;}
       .eg-panel{background:#fff;width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden;}
       .eg-head{display:flex;justify-content:space-between;align-items:center;gap:14px;
                padding:16px 28px;border-bottom:0.5px solid rgba(0,0,0,0.08);flex:0 0 auto;}
@@ -72,32 +74,38 @@
          fixed Pulse bar (z-index 50). Rather than raising .pulse-bar globally — shared CSS that
          would change layering on every ICONIC overlay too — lift it only while this page is open,
          and reserve room at the foot of the scroll so the bar never sits on top of a report tile. */
-      body.eg-open #pulse-bar{z-index:9600;}
       body.eg-open #pulse-panel{z-index:9601;}
-      .eg-body{padding:20px 28px 132px;overflow:auto;flex:1 1 auto;max-width:1680px;width:100%;margin:0 auto;}
+      .eg-body{padding:20px 28px 36px;overflow:auto;flex:1 1 auto;max-width:1560px;width:100%;margin:0 auto;}
       .eg-grid2{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:22px;align-items:start;}
       @media (max-width:1080px){ .eg-grid2{grid-template-columns:1fr;} }
       /* Analytics strip — sits under the maps so the layout holds whether one product
          line is present or two. */
-      .eg-strip{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;}
+      .eg-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px;}
+      @media (max-width:900px){ .eg-strip{grid-template-columns:repeat(2,minmax(0,1fr));} }
       @media (max-width:520px){ .eg-strip{grid-template-columns:1fr;} }
-      .eg-stat{border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:13px 15px;}
+      .eg-stat{border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:12px 14px;min-height:82px;
+               display:flex;flex-direction:column;justify-content:space-between;}
       .eg-sl{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};}
-      .eg-sv{font-size:22px;font-weight:700;color:${DARK};letter-spacing:-0.02em;margin-top:3px;
-             font-variant-numeric:tabular-nums;}
-      .eg-ss{font-size:10px;color:${LIGHT};margin-top:2px;line-height:1.4;}
+      .eg-sv{font-size:21px;font-weight:700;color:${DARK};letter-spacing:-0.02em;margin-top:2px;
+             font-variant-numeric:tabular-nums;line-height:1.1;}
+      .eg-ss{font-size:10px;color:${LIGHT};margin-top:4px;line-height:1.35;}
       /* Top row: cartogram(s) on the left at a fixed sensible size, live metrics filling the
          space beside them. Unbounded width made the state tiles 90px and the map ate the page. */
-      .eg-top{display:grid;grid-template-columns:minmax(0,auto) minmax(0,1fr);gap:16px;align-items:start;}
+      .eg-top{display:grid;grid-template-columns:minmax(0,auto) minmax(0,1fr);gap:14px;align-items:stretch;}
       @media (max-width:1100px){ .eg-top{grid-template-columns:1fr;} }
       .eg-maps{display:flex;gap:14px;flex-wrap:wrap;}
-      .eg-maps > .eg-card{width:430px;max-width:100%;}
-      .eg-maps svg{width:100%;max-width:400px;height:auto;display:block;margin-top:10px;}
-      .eg-two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start;}
+      .eg-maps > .eg-card{width:404px;max-width:100%;}
+      .eg-maps svg{width:100%;max-width:372px;height:auto;display:block;margin-top:auto;
+                   margin-bottom:auto;align-self:center;}
+      .eg-two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:stretch;}
       @media (max-width:900px){ .eg-two{grid-template-columns:1fr;} }
-      .eg-card{border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:14px 16px;}
-      .eg-ml{font-size:12px;font-weight:700;color:${DARK};}
-      .eg-mv{font-size:10px;color:${LIGHT};margin-top:1px;}
+      /* Every panel on the page is this card. One border weight, one radius, one padding —
+         the previous mix of sizes is what made the layout read as loose. */
+      .eg-card{border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:14px 16px;
+               background:#fff;display:flex;flex-direction:column;}
+      .eg-ml{font-size:12px;font-weight:700;color:${DARK};letter-spacing:-0.005em;}
+      .eg-mv{font-size:10px;color:${LIGHT};margin-top:2px;}
+      .eg-sec{}
       .eg-cell{cursor:pointer;transition:opacity .12s;}
       .eg-cell:hover{opacity:.72;}
       .eg-ab{font-size:8.5px;font-weight:600;pointer-events:none;}
@@ -117,7 +125,7 @@
       @media (max-width:1180px){ .eg-tiles{grid-template-columns:repeat(2,minmax(0,1fr));} }
       @media (max-width:620px){ .eg-tiles{grid-template-columns:1fr;} }
       .eg-tile{text-align:left;border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:14px 15px;
-               background:#fff;cursor:pointer;display:flex;flex-direction:column;min-height:118px;
+               background:#fff;cursor:pointer;display:flex;flex-direction:column;height:128px;
                transition:border-color .16s ease,transform .16s ease,box-shadow .16s ease;}
       .eg-tile:hover{border-color:rgba(0,0,0,0.22);transform:translateY(-4px);
                      box-shadow:0 10px 24px rgba(0,0,0,0.09);}
@@ -128,7 +136,10 @@
               display:flex;align-items:center;justify-content:center;color:${MID};}
       .eg-tile:hover .eg-ico{background:${DARK};color:#fff;}
       .eg-tn{font-size:12px;font-weight:600;color:${DARK};line-height:1.3;flex:1;}
-      .eg-td{font-size:10px;color:${LIGHT};margin-top:8px;line-height:1.45;flex:1;}
+      /* Clamped so a long description can never make one tile taller than its neighbour. */
+      .eg-td{font-size:10px;color:${LIGHT};margin-top:9px;line-height:1.45;flex:1;overflow:hidden;
+             display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;}
+      .eg-thead{min-height:34px;}
       .eg-fmt{font-size:8.5px;font-weight:700;color:${LIGHT};letter-spacing:.05em;}
       .eg-tbl{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px;}
       .eg-tbl th{text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:${LIGHT};
@@ -136,8 +147,8 @@
       .eg-tbl td{padding:5px 6px;border-bottom:0.5px solid rgba(0,0,0,0.05);color:${DARK};}
       .eg-tbl td.n{text-align:right;font-variant-numeric:tabular-nums;}
       .eg-note{font-size:10px;color:${LIGHT};line-height:1.5;}
-      .eg-sec{font-size:11px;font-weight:700;color:${DARK};margin:20px 0 8px;
-              text-transform:uppercase;letter-spacing:.06em;}
+      .eg-sec{font-size:10px;font-weight:700;color:${LIGHT};margin:20px 0 9px;
+              text-transform:uppercase;letter-spacing:.07em;}
     `;
     document.head.appendChild(s);
   }
@@ -364,17 +375,19 @@
                           .reduce((a, r) => a + r.envelopes, 0))
     }));
     const max = Math.max(1, ...series.flatMap(x => x.pts));
-    const W = 560, H = 96, pad = 6;
+    const W = 560, H = 132, pad = 8;
     const Y = v => H - pad - (v / max) * (H - pad * 2 - 8);
     let body;
     if (days.length < 3) {
       // A line through one or two points draws nothing useful. Bars read correctly from
       // the first day of activity.
-      const slot = (W - pad * 2) / days.length;
-      const bw = Math.min(46, slot / (series.length + 0.6));
+      // Cap the bar width: one day of data spread across the full card reads as a slab,
+      // not a chart.
+      const slot = (W - pad * 2) / Math.max(days.length, 6);
+      const bw = Math.min(26, slot / (series.length + 0.4));
       body = days.map((d, i) => series.map((sr, k) => {
         const v = sr.pts[i]; if (!v) return '';
-        const x = pad + i * slot + slot / 2 - (series.length * bw) / 2 + k * bw;
+        const x = pad + (i + 0.5) * slot - (series.length * bw) / 2 + k * bw;
         const y = Y(v);
         return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(bw-3).toFixed(1)}" height="${(H-pad-y).toFixed(1)}"
                   rx="3" fill="hsl(${sr.hue.h} ${sr.hue.s}% 46%)"><title>${esc(d)} — ${nfmt(v)}</title></rect>`;
@@ -396,7 +409,8 @@
     return `<div style="display:flex;justify-content:space-between;align-items:baseline;">
         <div class="eg-ml">Dispatch trend</div><div>${legend}</div></div>
       <div class="eg-mv">${days.length} day(s) with activity · peak ${nfmt(max)} envelopes</div>
-      <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;margin-top:8px;">${paths}</svg>`;
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMax meet"
+           style="width:100%;height:148px;margin-top:auto;">${paths}</svg>`;
   }
 
   function strip() {
@@ -425,8 +439,7 @@
           <div class="eg-sv">${tot.orders ? (Math.round(tot.envelopes / tot.orders * 100) / 100) : '—'}</div>
           <div class="eg-ss">${nfmt(tot.orders)} orders dispatched</div>
         </div>
-      </div>
-      <div class="eg-card" style="margin-top:12px;">${trendChart()}</div>`;
+      </div>`;
   }
 
   function topCitiesCard() {
@@ -486,9 +499,10 @@
 
       <div class="eg-grid2">
         <div>
+          ${strip()}
           <div class="eg-top">
             <div class="eg-maps">${maps}</div>
-            <div>${strip()}</div>
+            <div class="eg-card">${trendChart()}</div>
           </div>
           <div class="eg-sec">Detail</div>
           <div class="eg-two">
@@ -501,7 +515,7 @@
           </div>
         </div>
         <div>
-          <div class="eg-sec" style="margin-top:0;">Insights</div>
+          <div class="eg-sec" style="margin:0 0 9px;">Insights</div>
           <div class="eg-ins">${insights().map(insightCard).join('')}</div>
         </div>
       </div>
@@ -552,9 +566,19 @@
     }
   }
 
+  // The Pulse bar is fixed to the bottom with its own border. Rather than paint over it,
+  // stop the overlay where it starts — measured, since its height is not fixed in CSS.
+  function fitToPulse() {
+    const o = document.querySelector('.eg-ov'); if (!o) return;
+    const pb = document.getElementById('pulse-bar');
+    const visible = pb && getComputedStyle(pb).display !== 'none';
+    o.style.bottom = visible ? pb.offsetHeight + 'px' : '0px';
+  }
+
   function close(){
     const o = document.querySelector('.eg-ov'); if (o) o.remove();
     document.body.classList.remove('eg-open');
+    window.removeEventListener('resize', fitToPulse);
   }
   function open() {
     styles();
@@ -571,6 +595,8 @@
     </div>`;
     document.body.appendChild(o);
     document.body.classList.add('eg-open');
+    fitToPulse();
+    window.addEventListener('resize', fitToPulse);
     el('eg-close').addEventListener('click', close);
     document.addEventListener('keydown', function esc2(ev){
       if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', esc2); }
@@ -585,7 +611,7 @@
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);      // the active client can change via the picker
     if (location.hash === '#ehp-geo') setTimeout(open, 600);
-    console.log('[ehp-geo] module v4 loaded');
+    console.log('[ehp-geo] module v5 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
