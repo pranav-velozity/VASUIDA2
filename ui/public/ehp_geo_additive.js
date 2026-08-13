@@ -59,22 +59,27 @@
     if (el('ehpgeo-styles')) return;
     const s = document.createElement('style'); s.id = 'ehpgeo-styles';
     s.textContent = `
-      .eg-ov{position:fixed;inset:0;background:rgba(0,0,0,0.34);z-index:9500;display:flex;
-             align-items:center;justify-content:center;padding:24px;
-             -webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);}
-      .eg-panel{background:#fff;border-radius:16px;width:min(1280px,100%);max-height:100%;
-                display:flex;flex-direction:column;overflow:hidden;
-                box-shadow:0 18px 60px rgba(0,0,0,0.22);}
+      .eg-ov{position:fixed;inset:0;background:#fff;z-index:9500;display:flex;
+             align-items:stretch;justify-content:center;}
+      .eg-panel{background:#fff;width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden;}
       .eg-head{display:flex;justify-content:space-between;align-items:center;gap:14px;
-               padding:16px 20px;border-bottom:0.5px solid rgba(0,0,0,0.08);}
+               padding:16px 28px;border-bottom:0.5px solid rgba(0,0,0,0.08);flex:0 0 auto;}
       .eg-t{font-size:15px;font-weight:700;color:${DARK};letter-spacing:-0.01em;}
       .eg-s{font-size:11px;color:${LIGHT};margin-top:2px;}
       .eg-x{background:none;border:none;font-size:22px;color:${LIGHT};cursor:pointer;line-height:1;padding:0 4px;}
       .eg-x:hover{color:${DARK};}
-      .eg-body{padding:18px 20px 22px;overflow:auto;}
-      .eg-grid2{display:grid;grid-template-columns:1fr 300px;gap:20px;align-items:start;}
+      .eg-body{padding:20px 28px 32px;overflow:auto;flex:1 1 auto;max-width:1680px;width:100%;margin:0 auto;}
+      .eg-grid2{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:22px;align-items:start;}
       @media (max-width:1080px){ .eg-grid2{grid-template-columns:1fr;} }
-      .eg-maps{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+      /* Analytics strip — sits under the maps so the layout holds whether one product
+         line is present or two. */
+      .eg-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-top:14px;}
+      .eg-stat{border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:13px 15px;}
+      .eg-sl{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};}
+      .eg-sv{font-size:22px;font-weight:700;color:${DARK};letter-spacing:-0.02em;margin-top:3px;
+             font-variant-numeric:tabular-nums;}
+      .eg-ss{font-size:10px;color:${LIGHT};margin-top:2px;line-height:1.4;}
+      .eg-maps{display:grid;grid-template-columns:repeat(auto-fit,minmax(0,1fr));gap:16px;}
       @media (max-width:760px){ .eg-maps{grid-template-columns:1fr;} }
       .eg-card{border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:14px 16px;}
       .eg-ml{font-size:12px;font-weight:700;color:${DARK};}
@@ -93,13 +98,23 @@
       .eg-it{font-size:12px;font-weight:600;color:${DARK};margin:5px 0 4px;line-height:1.3;}
       .eg-io{font-size:11px;color:${MID};line-height:1.45;}
       .eg-ia{font-size:10px;color:${MID};background:#F9F9FB;border-radius:7px;padding:7px 9px;margin-top:7px;line-height:1.45;}
-      .eg-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin-top:8px;}
-      .eg-tile{text-align:left;border:0.5px solid rgba(0,0,0,0.1);border-radius:11px;padding:12px 14px;
-               background:#fff;cursor:pointer;transition:border-color .12s,transform .12s;}
-      .eg-tile:hover{border-color:rgba(0,0,0,0.28);transform:translateY(-1px);}
-      .eg-tile:disabled{opacity:.5;cursor:default;transform:none;}
-      .eg-tn{font-size:12px;font-weight:600;color:${DARK};display:flex;justify-content:space-between;gap:6px;}
-      .eg-td{font-size:10px;color:${LIGHT};margin-top:4px;line-height:1.4;}
+      /* Four across at every usable width, so eight reports are always two even rows. */
+      .eg-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:8px;}
+      @media (max-width:1180px){ .eg-tiles{grid-template-columns:repeat(2,minmax(0,1fr));} }
+      @media (max-width:620px){ .eg-tiles{grid-template-columns:1fr;} }
+      .eg-tile{text-align:left;border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:14px 15px;
+               background:#fff;cursor:pointer;display:flex;flex-direction:column;min-height:118px;
+               transition:border-color .16s ease,transform .16s ease,box-shadow .16s ease;}
+      .eg-tile:hover{border-color:rgba(0,0,0,0.22);transform:translateY(-4px);
+                     box-shadow:0 10px 24px rgba(0,0,0,0.09);}
+      .eg-tile:active{transform:translateY(-1px);}
+      .eg-tile:disabled{opacity:.5;cursor:default;transform:none;box-shadow:none;}
+      .eg-thead{display:flex;align-items:flex-start;gap:9px;}
+      .eg-ico{flex:0 0 auto;width:26px;height:26px;border-radius:7px;background:#F5F5F7;
+              display:flex;align-items:center;justify-content:center;color:${MID};}
+      .eg-tile:hover .eg-ico{background:${DARK};color:#fff;}
+      .eg-tn{font-size:12px;font-weight:600;color:${DARK};line-height:1.3;flex:1;}
+      .eg-td{font-size:10px;color:${LIGHT};margin-top:8px;line-height:1.45;flex:1;}
       .eg-fmt{font-size:8.5px;font-weight:700;color:${LIGHT};letter-spacing:.05em;}
       .eg-tbl{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px;}
       .eg-tbl th{text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:${LIGHT};
@@ -186,12 +201,33 @@
   // ── insights: computed from the aggregates already on screen ──
   // Deterministic on purpose. A client-facing panel that says "AI unavailable" is worse
   // than one showing plainer numbers, so this is the floor, not the fallback.
+  // Below this, geographic statements are arithmetic on noise — two envelopes will always
+  // be "100% concentrated in the top five states". Integrity findings are exempt: those
+  // are true at any volume.
+  const MIN_FOR_GEO = 50;
+
   function insights() {
     const st = _data.states || [], out = [];
     const total = _data.totals.envelopes || 0;
+    const rep = _data.repeat || {};
+
     if (!total) return [{ cat: 'coverage', col: LIGHT, title: 'No dispatches in this period',
       obs: 'Nothing was lodged with USPS in the selected month.',
       act: 'Pick a different month, or check the Assembly tab for batches still awaiting dispatch.' }];
+
+    if (total < MIN_FOR_GEO) {
+      const early = [];
+      const unmappedEarly = st.reduce((a, s) => a + (s.by_line.UNMAPPED || 0), 0);
+      if (unmappedEarly) early.push({ cat: 'integrity', col: RED,
+        title: `${nfmt(unmappedEarly)} envelope(s) have no product line`,
+        obs: 'These dispatched before their Shopify SKU was mapped, so they are absent from the per-line views.',
+        act: 'Map the SKU on EHP Ops → Recipe. Historic orders keep the line they were processed under.' });
+      early.push({ cat: 'coverage', col: LIGHT,
+        title: 'Too little volume for geographic analysis',
+        obs: `${nfmt(total)} envelope(s) across ${st.length} state(s). Share and concentration figures at this volume describe the sample, not the market.`,
+        act: `Geographic insights start once around ${MIN_FOR_GEO} envelopes have dispatched in a month.` });
+      return early;
+    }
 
     const ranked = st.filter(s => s.per_100k != null).sort((a, b) => b.per_100k - a.per_100k);
     const natlPer100k = ranked.length
@@ -238,12 +274,23 @@
       obs: 'These dispatched before their Shopify SKU was mapped, so they are absent from the per-line views.',
       act: 'Map the SKU on EHP Ops → Recipe. Historic orders keep the line they were processed under.' });
 
-    const conc = st.slice(0, 5).reduce((a, s) => a + s.envelopes, 0) / total;
-    out.push({ cat: 'coverage', col: conc > 0.6 ? AMBER : GREEN,
-      title: conc > 0.6 ? 'Volume is concentrated in five states' : 'Volume is well spread',
-      obs: `The top five states account for ${Math.round(conc * 100)}% of envelopes across ${st.length} states in total.`,
-      act: conc > 0.6 ? 'A narrow footprint makes the campaign sensitive to a single region going quiet.'
-                      : 'Broad distribution suggests national reach rather than a few concentrated pockets.' });
+    if (rep.rate_pct >= 8 && rep.distinct_addresses >= 40) {
+      out.push({ cat: 'repeat demand', col: rep.rate_pct >= 20 ? AMBER : '#2E7D9E',
+        title: `${rep.rate_pct}% of addresses have sampled more than once`,
+        obs: `${nfmt(rep.addresses_repeating)} of ${nfmt(rep.distinct_addresses)} distinct addresses have taken more than one free sample.`,
+        act: rep.rate_pct >= 20
+          ? 'At this level it is worth checking whether the campaign is being gamed as well as read as demand.'
+          : 'Repeat requests are the closest signal to intent available here — Pinpoint holds no paid-order data, so this is not a conversion rate.' });
+    }
+
+    if (st.length >= 5) {
+      const conc = st.slice(0, 5).reduce((a, s) => a + s.envelopes, 0) / total;
+      out.push({ cat: 'coverage', col: conc > 0.6 ? AMBER : GREEN,
+        title: conc > 0.6 ? 'Volume is concentrated in five states' : 'Volume is well spread',
+        obs: `The top five of ${st.length} states with volume account for ${Math.round(conc * 100)}% of envelopes.`,
+        act: conc > 0.6 ? 'A narrow footprint makes the campaign sensitive to a single region going quiet.'
+                        : 'Broad distribution suggests national reach rather than a few concentrated pockets.' });
+    }
 
     return out.slice(0, 5);
   }
@@ -256,6 +303,22 @@
       <div class="eg-ia">${esc(i.act)}</div>
     </div>`;
   }
+
+  // ── report icons ──
+  // Line icons only; a filled or coloured set would compete with the map for attention.
+  const ICONS = {
+    'reconciliation':    '<path d="M4 3h11l5 5v13H4z"/><path d="M15 3v5h5"/><path d="M8 13h8M8 17h5"/>',
+    'dispatch-register': '<path d="M3 7h13v9H3z"/><path d="M16 10h3l2 3v3h-5z"/><circle cx="7" cy="18" r="1.6"/><circle cx="18" cy="18" r="1.6"/>',
+    'inventory-cover':   '<path d="M3 8l9-5 9 5v8l-9 5-9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/>',
+    'count-variance':    '<path d="M4 20V10M10 20V4M16 20v-7M22 20h-20"/>',
+    'geography':         '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.7 4 5.8 4 9s-1.4 6.3-4 9c-2.6-2.7-4-5.8-4-9s1.4-6.3 4-9z"/>',
+    'sla':               '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2M9 2h6"/>',
+    'inbound-receipts':  '<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/>',
+    'stock-ledger':      '<path d="M4 4h16v16H4z"/><path d="M4 9h16M4 15h16M9 4v16"/>',
+  };
+  const icon = (id) => `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      ${ICONS[id] || ICONS['reconciliation']}</svg>`;
 
   // ── downloads ──
   let _reports = [];
@@ -271,6 +334,80 @@
     a.download = `EHP_${name.replace(/[^A-Za-z0-9]+/g, '_')}_${_month}.${fmt}`;
     document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+  }
+
+  // ── dispatch trend ──
+  // A plain area sparkline per line. Enough to see shape and cadence; anything more
+  // elaborate would compete with the cartogram.
+  function trendChart() {
+    const t = _data.trend || [];
+    if (!t.length) return `<div class="eg-note" style="padding:16px 2px;">No dispatches yet this month.</div>`;
+    const days = Array.from(new Set(t.map(r => r.d))).sort();
+    const lines = (_data.product_lines || []).length ? _data.product_lines.slice(0, 2) : [null];
+    const series = lines.map((l, i) => ({
+      line: l, hue: LINE_HUES[i] || LINE_HUES[0],
+      pts: days.map(d => t.filter(r => r.d === d && (l == null || r.pl === l))
+                          .reduce((a, r) => a + r.envelopes, 0))
+    }));
+    const max = Math.max(1, ...series.flatMap(x => x.pts));
+    const W = 560, H = 90, pad = 4;
+    const X = i => days.length > 1 ? pad + i * (W - pad * 2) / (days.length - 1) : W / 2;
+    const Y = v => H - pad - (v / max) * (H - pad * 2);
+    const paths = series.map(sr => {
+      const d = sr.pts.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join('');
+      const area = `${d}L${X(sr.pts.length-1).toFixed(1)},${H-pad}L${X(0).toFixed(1)},${H-pad}Z`;
+      const col = `hsl(${sr.hue.h} ${sr.hue.s}% 46%)`;
+      return `<path d="${area}" fill="${col}" opacity="0.10"/><path d="${d}" fill="none" stroke="${col}" stroke-width="1.8" stroke-linejoin="round"/>`;
+    }).join('');
+    const legend = series.filter(x => x.line).map(sr =>
+      `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:12px;">
+        <span style="width:8px;height:8px;border-radius:2px;background:hsl(${sr.hue.h} ${sr.hue.s}% 46%);"></span>
+        <span style="font-size:10px;color:${MID};">${esc(sr.line)}</span></span>`).join('');
+    return `<div style="display:flex;justify-content:space-between;align-items:baseline;">
+        <div class="eg-ml">Dispatch trend</div><div>${legend}</div></div>
+      <div class="eg-mv">${days.length} day(s) with activity · peak ${nfmt(max)} envelopes</div>
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:96px;margin-top:8px;">${paths}</svg>`;
+  }
+
+  function strip() {
+    const tot = _data.totals || {}, prev = _data.previous || {}, rep = _data.repeat || {};
+    const delta = prev.envelopes ? Math.round((tot.envelopes - prev.envelopes) / prev.envelopes * 100) : null;
+    const topCities = (_data.cities || []).sort((a, b) => b.envelopes - a.envelopes).slice(0, 5);
+    return `
+      <div class="eg-strip">
+        <div class="eg-stat">
+          <div class="eg-sl">Envelopes</div>
+          <div class="eg-sv">${nfmt(tot.envelopes)}</div>
+          <div class="eg-ss">${delta == null ? 'No prior month to compare'
+            : `${delta >= 0 ? '+' : ''}${delta}% vs ${esc(prev.month)}`}</div>
+        </div>
+        <div class="eg-stat">
+          <div class="eg-sl">States reached</div>
+          <div class="eg-sv">${nfmt(tot.states)}</div>
+          <div class="eg-ss">${prev.states ? `${prev.states} last month` : 'of 51 possible'}</div>
+        </div>
+        <div class="eg-stat">
+          <div class="eg-sl">Repeat requests</div>
+          <div class="eg-sv">${rep.rate_pct != null ? rep.rate_pct + '%' : '—'}</div>
+          <div class="eg-ss">${nfmt(rep.addresses_repeating)} of ${nfmt(rep.distinct_addresses)} addresses have sampled more than once</div>
+        </div>
+        <div class="eg-stat">
+          <div class="eg-sl">Avg envelopes / order</div>
+          <div class="eg-sv">${tot.orders ? (Math.round(tot.envelopes / tot.orders * 100) / 100) : '—'}</div>
+          <div class="eg-ss">${nfmt(tot.orders)} orders dispatched</div>
+        </div>
+      </div>
+      <div class="eg-card" style="margin-top:12px;">${trendChart()}</div>
+      <div class="eg-card" style="margin-top:12px;">
+        <div class="eg-ml">Top cities</div>
+        <div class="eg-mv">Cities under ${_data.small_cell_min} envelopes are grouped</div>
+        <table class="eg-tbl"><thead><tr><th>City</th><th>State</th><th>Line</th><th class="n">Envelopes</th></tr></thead>
+        <tbody>${topCities.length ? topCities.map(c => `<tr>
+          <td>${esc(c.recipient_city || '—')}</td><td style="color:${MID}">${esc(c.recipient_state || '')}</td>
+          <td style="color:${MID}">${esc(c.product_line || '—')}</td>
+          <td class="n">${nfmt(c.envelopes)}</td></tr>`).join('')
+          : `<tr><td colspan="4" style="color:${LIGHT};text-align:center;padding:12px;">No city detail yet.</td></tr>`}</tbody></table>
+      </div>`;
   }
 
   // ── render ──
@@ -317,6 +454,7 @@
       <div class="eg-grid2">
         <div>
           <div class="eg-maps">${maps}</div>
+          ${strip()}
           <div class="eg-sec">${_sel ? esc(_sel) : 'State detail'}</div>
           <div class="eg-card">${statePanel()}</div>
         </div>
@@ -329,7 +467,11 @@
       <div class="eg-sec">Reports &amp; downloads</div>
       <div class="eg-tiles">
         ${_reports.map(r => `<button class="eg-tile" data-rep="${esc(r.id)}" data-rn="${esc(r.name)}" data-rf="${esc(r.format)}">
-          <div class="eg-tn"><span>${esc(r.name)}</span><span class="eg-fmt">${esc(r.format.toUpperCase())}</span></div>
+          <div class="eg-thead">
+            <span class="eg-ico">${icon(r.id)}</span>
+            <span class="eg-tn">${esc(r.name)}</span>
+            <span class="eg-fmt">${esc(r.format.toUpperCase())}</span>
+          </div>
           <div class="eg-td">${esc(r.desc)}</div>
         </button>`).join('')}
       </div>
@@ -345,7 +487,7 @@
       paint();
     }));
     body.querySelectorAll('[data-rep]').forEach(b => b.addEventListener('click', async () => {
-      const label = b.querySelector('.eg-tn span');
+      const label = b.querySelector('.eg-tn');
       const orig = label.textContent;
       b.disabled = true; label.textContent = 'Preparing…';
       try { await download(b.getAttribute('data-rep'), b.getAttribute('data-rn'), b.getAttribute('data-rf')); }
@@ -397,7 +539,7 @@
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);      // the active client can change via the picker
     if (location.hash === '#ehp-geo') setTimeout(open, 600);
-    console.log('[ehp-geo] module v1 loaded');
+    console.log('[ehp-geo] module v2 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
