@@ -60,8 +60,11 @@
       .ehp-tab.on{border-color:${BRAND};color:${BRAND};}
       .ehp-body{padding:16px 20px 22px;}
       .ehp-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px;}
-      .ehp-kpi{border:0.5px solid rgba(0,0,0,0.1);border-radius:10px;padding:11px 13px;}
-      .ehp-card{border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:14px 16px;background:#fff;}
+      .ehp-kpi{border:0.5px solid rgba(0,0,0,0.1);border-radius:10px;padding:11px 13px;
+               background:#fff;box-shadow:0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.06);}
+      /* Raised by default, matching the Week Hub and Geography pages. */
+      .ehp-card{border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:14px 16px;background:#fff;
+                box-shadow:0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.06);}
       .ehp-kl{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};}
       .ehp-kv{font-size:22px;font-weight:700;color:${DARK};margin-top:3px;}
       .ehp-ks{font-size:10px;color:${MID};}

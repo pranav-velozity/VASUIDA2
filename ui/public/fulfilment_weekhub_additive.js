@@ -38,13 +38,17 @@
     s.textContent = `
       #fwh{margin:14px 0 20px;}
       .fwh-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px;}
-      .fwh-kpi{background:#fff;border:0.5px solid rgba(0,0,0,0.09);border-radius:12px;padding:13px 15px;}
+      .fwh-kpi{background:#fff;border:0.5px solid rgba(0,0,0,0.09);border-radius:12px;padding:13px 15px;
+               box-shadow:0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.06);}
       .fwh-kl{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};}
       .fwh-kv{font-size:26px;font-weight:700;color:${DARK};margin-top:4px;letter-spacing:-0.02em;}
       .fwh-ks{font-size:10px;color:${MID};margin-top:1px;}
       .fwh-grid{display:grid;grid-template-columns:1.4fr 1fr;gap:12px;align-items:start;}
       @media (max-width:1100px){.fwh-grid{grid-template-columns:1fr;}}
-      .fwh-card{background:#fff;border:0.5px solid rgba(0,0,0,0.09);border-radius:12px;padding:15px 17px;}
+      /* Tiles sit raised rather than flat on the page background — the flat treatment read
+         as loosely grouped rectangles rather than as distinct cards. */
+      .fwh-card{background:#fff;border:0.5px solid rgba(0,0,0,0.09);border-radius:12px;padding:15px 17px;
+                box-shadow:0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.06);}
       .fwh-t{font-size:13px;font-weight:700;color:${DARK};display:flex;align-items:center;justify-content:space-between;gap:8px;}
       .fwh-cfg{background:none;border:none;color:${LIGHT};cursor:pointer;font-size:12px;padding:2px 4px;border-radius:5px;}
       .fwh-cfg:hover{background:#F5F5F7;color:${BRAND};}
@@ -540,7 +544,8 @@
   }
 
   function skeleton() {
-    const box = 'background:#fff;border:0.5px solid rgba(0,0,0,0.09);border-radius:12px;';
+    const box = 'background:#fff;border:0.5px solid rgba(0,0,0,0.09);border-radius:12px;'
+                + 'box-shadow:0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.06);';
     return `<div class="fwh-kpis">${Array(5).fill(0).map(()=>`<div class="fwh-kpi" style="${box}">
       <div class="fwh-kl" style="opacity:.35">&nbsp;</div>
       <div class="fwh-kv" style="color:${LIGHT};opacity:.35">&mdash;</div>

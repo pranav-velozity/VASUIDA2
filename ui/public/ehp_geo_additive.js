@@ -19,6 +19,9 @@
     { h: 196, s: 64 },   // second line — teal/blue family
   ];
   const NEUTRAL = { h: 220, s: 8 };
+  // Cards sit raised by default rather than flat-on-white. Kept soft and low so the page
+  // still reads as one surface — hover adds travel on top of this, not a first shadow.
+  const LIFT = '0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.06)';
 
   let _enabled = false, _capClient = null;
   let _month = null, _mode = 'volume', _sel = null, _data = null;
@@ -59,9 +62,7 @@
     if (el('ehpgeo-styles')) return;
     const s = document.createElement('style'); s.id = 'ehpgeo-styles';
     s.textContent = `
-      /* Ends above the Pulse bar rather than covering it. Floating Pulse over an opaque
-         sheet exposed its own top/left/right border as a stray outline. */
-      .eg-ov{position:fixed;top:0;left:0;right:0;bottom:0;background:#fff;z-index:9500;
+            .eg-ov{position:fixed;inset:0;background:#fff;z-index:9500;
              display:flex;align-items:stretch;justify-content:center;}
       .eg-panel{background:#fff;width:100%;height:100%;display:flex;flex-direction:column;overflow:hidden;}
       .eg-head{display:flex;justify-content:space-between;align-items:center;gap:14px;
@@ -76,14 +77,17 @@
          and reserve room at the foot of the scroll so the bar never sits on top of a report tile. */
       /* The page behind keeps its own scrollbar otherwise, so the overlay shows two. */
       body.eg-open{overflow:hidden;}
-      /* Pulse is styled to float: side margins, rounded top corners, a three-sided border
-         and a red glow. Over normal page content that reads as a docked bar; against this
-         flat white sheet the margins make it a floating box and the glow reads as a second
-         outline just outside the border. Dock it flush while this page is open. */
-      body.eg-open #pulse-bar{margin:0;width:100%;border-radius:0;
+      /* Pulse layering. #pulse-panel is fixed at bottom:57px with a 2px border and
+         max-height:0 when closed — normally an invisible sliver tucked behind the bar.
+         Lift it ABOVE the bar and that sliver becomes a second red outline, which is
+         exactly what was happening. Bar on top, panel just beneath it, both above the
+         overlay, and both docked flush so the floating treatment does not read as a box
+         against this flat white sheet. */
+      body.eg-open #pulse-bar{z-index:9600;margin:0;width:100%;border-radius:0;
                               border-left:none;border-right:none;box-shadow:none;}
-      body.eg-open #pulse-panel{z-index:9601;}
-      .eg-body{padding:20px 28px 36px;overflow:auto;flex:1 1 auto;max-width:1560px;width:100%;margin:0 auto;}
+      body.eg-open #pulse-panel{z-index:9599;left:0;right:0;border-radius:0;
+                                border-left:none;border-right:none;}
+      .eg-body{padding:20px 28px 104px;overflow:auto;flex:1 1 auto;max-width:1560px;width:100%;margin:0 auto;}
       .eg-grid2{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:22px;align-items:start;}
       @media (max-width:1080px){ .eg-grid2{grid-template-columns:1fr;} }
       /* Analytics strip — sits under the maps so the layout holds whether one product
@@ -92,7 +96,7 @@
       @media (max-width:900px){ .eg-strip{grid-template-columns:repeat(2,minmax(0,1fr));} }
       @media (max-width:520px){ .eg-strip{grid-template-columns:1fr;} }
       .eg-stat{border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:12px 14px;min-height:82px;
-               display:flex;flex-direction:column;justify-content:space-between;}
+               display:flex;flex-direction:column;justify-content:space-between;box-shadow:${LIFT};}
       .eg-sl{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};}
       .eg-sv{font-size:21px;font-weight:700;color:${DARK};letter-spacing:-0.02em;margin-top:2px;
              font-variant-numeric:tabular-nums;line-height:1.1;}
@@ -110,7 +114,7 @@
       /* Every panel on the page is this card. One border weight, one radius, one padding —
          the previous mix of sizes is what made the layout read as loose. */
       .eg-card{border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:14px 16px;
-               background:#fff;display:flex;flex-direction:column;}
+               background:#fff;display:flex;flex-direction:column;box-shadow:${LIFT};}
       .eg-ml{font-size:12px;font-weight:700;color:${DARK};letter-spacing:-0.005em;}
       .eg-mv{font-size:10px;color:${LIGHT};margin-top:2px;}
       .eg-sec{}
@@ -123,7 +127,8 @@
       .eg-seg button.on{background:${DARK};color:#fff;}
       .eg-sel-in{border:0.5px solid rgba(0,0,0,0.16);border-radius:8px;padding:5px 9px;font-size:11px;color:${DARK};background:#fff;}
       .eg-ins{display:flex;flex-direction:column;gap:9px;}
-      .eg-ic{border:0.5px solid rgba(0,0,0,0.08);border-radius:10px;padding:12px 13px;background:#fff;}
+      .eg-ic{border:0.5px solid rgba(0,0,0,0.08);border-radius:10px;padding:12px 13px;background:#fff;
+             box-shadow:${LIFT};}
       .eg-icat{font-size:8.5px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;}
       .eg-it{font-size:12px;font-weight:600;color:${DARK};margin:5px 0 4px;line-height:1.3;}
       .eg-io{font-size:11px;color:${MID};line-height:1.45;}
@@ -134,9 +139,10 @@
       @media (max-width:620px){ .eg-tiles{grid-template-columns:1fr;} }
       .eg-tile{text-align:left;border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:14px 15px;
                background:#fff;cursor:pointer;display:flex;flex-direction:column;height:128px;
+               box-shadow:${LIFT};
                transition:border-color .16s ease,transform .16s ease,box-shadow .16s ease;}
       .eg-tile:hover{border-color:rgba(0,0,0,0.22);transform:translateY(-4px);
-                     box-shadow:0 10px 24px rgba(0,0,0,0.09);}
+                     box-shadow:0 12px 26px rgba(0,0,0,0.11);}
       .eg-tile:active{transform:translateY(-1px);}
       .eg-tile:disabled{opacity:.5;cursor:default;transform:none;box-shadow:none;}
       .eg-thead{display:flex;align-items:flex-start;gap:9px;}
@@ -574,19 +580,9 @@
     }
   }
 
-  // The Pulse bar is fixed to the bottom with its own border. Rather than paint over it,
-  // stop the overlay where it starts — measured, since its height is not fixed in CSS.
-  function fitToPulse() {
-    const o = document.querySelector('.eg-ov'); if (!o) return;
-    const pb = document.getElementById('pulse-bar');
-    const visible = pb && getComputedStyle(pb).display !== 'none';
-    o.style.bottom = visible ? pb.offsetHeight + 'px' : '0px';
-  }
-
   function close(){
     const o = document.querySelector('.eg-ov'); if (o) o.remove();
     document.body.classList.remove('eg-open');
-    window.removeEventListener('resize', fitToPulse);
   }
   function open() {
     styles();
@@ -603,8 +599,6 @@
     </div>`;
     document.body.appendChild(o);
     document.body.classList.add('eg-open');
-    fitToPulse();
-    window.addEventListener('resize', fitToPulse);
     el('eg-close').addEventListener('click', close);
     document.addEventListener('keydown', function esc2(ev){
       if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', esc2); }
@@ -619,7 +613,7 @@
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);      // the active client can change via the picker
     if (location.hash === '#ehp-geo') setTimeout(open, 600);
-    console.log('[ehp-geo] module v6 loaded');
+    console.log('[ehp-geo] module v7 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
