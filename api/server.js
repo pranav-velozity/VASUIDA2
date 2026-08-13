@@ -11379,12 +11379,50 @@ app.get('/ehp/geo', authenticateRequest, (req, res) => {
 
     const lines = Array.from(new Set(rows.map(r => r.pl).filter(Boolean)));
     const totalEnv = states.reduce((a, e) => a + e.envelopes, 0);
+
+    // Daily dispatch trend, split by line — fills the gap beside the map with something
+    // measured rather than modelled.
+    const trend = db.prepare(`SELECT date(fulfilled_at) d, product_line pl,
+                                     COALESCE(SUM(envelope_qty),0) envelopes
+                              FROM ehp_order
+                              WHERE client_id=? AND fulfilled_at IS NOT NULL
+                                AND date(fulfilled_at) BETWEEN ? AND ?
+                              GROUP BY d, product_line ORDER BY d`).all(c, from, to);
+
+    // Repeat-request rate: addresses that have taken more than one free sample. Only the
+    // COUNT leaves the database — no address, no hash, nothing re-identifiable.
+    // This is deliberately not a conversion metric. Pinpoint has no paid-order data, so
+    // any "predicted conversion" would be invented. This is a real interest/abuse signal.
+    const rep = db.prepare(`SELECT COUNT(*) addrs, COALESCE(SUM(n),0) orders FROM (
+                              SELECT COUNT(*) n FROM ehp_order
+                              WHERE client_id=? AND fulfilled_at IS NOT NULL
+                                AND recipient_address IS NOT NULL AND recipient_address<>''
+                              GROUP BY lower(trim(recipient_address)), lower(trim(recipient_city)), recipient_state
+                              HAVING COUNT(*) > 1)`).get(c);
+    const distinctAddrs = db.prepare(`SELECT COUNT(*) n FROM (
+                              SELECT 1 FROM ehp_order
+                              WHERE client_id=? AND fulfilled_at IS NOT NULL
+                                AND recipient_address IS NOT NULL AND recipient_address<>''
+                              GROUP BY lower(trim(recipient_address)), lower(trim(recipient_city)), recipient_state)`).get(c).n;
+
+    // Prior calendar month, for a like-for-like movement figure.
+    const pm = new Date(Date.UTC(Number(month.slice(0,4)), Number(month.slice(5,7)) - 1, 1));
+    pm.setUTCMonth(pm.getUTCMonth() - 1);
+    const prevKey = `${pm.getUTCFullYear()}-${String(pm.getUTCMonth()+1).padStart(2,'0')}`;
+    const prev = db.prepare(`SELECT COALESCE(SUM(envelope_qty),0) e, COUNT(DISTINCT recipient_state) st
+                             FROM ehp_order WHERE client_id=? AND fulfilled_at IS NOT NULL
+                               AND substr(fulfilled_at,1,7)=?`).get(c, prevKey);
     const months = db.prepare(`SELECT DISTINCT substr(fulfilled_at,1,7) m FROM ehp_order
                                WHERE client_id=? AND fulfilled_at IS NOT NULL ORDER BY m DESC`).all(c)
                      .map(x => x.m).filter(Boolean);
 
     res.json({ client_id: c, month, from, to, product_lines: lines,
       totals: { envelopes: totalEnv, orders: states.reduce((a, e) => a + e.orders, 0), states: states.length },
+      trend,
+      repeat: { addresses_repeating: rep.addrs || 0, repeat_orders: rep.orders || 0,
+                distinct_addresses: distinctAddrs,
+                rate_pct: distinctAddrs ? Math.round((rep.addrs || 0) / distinctAddrs * 1000) / 10 : 0 },
+      previous: { month: prevKey, envelopes: prev.e || 0, states: prev.st || 0 },
       states, cities, available_months: months, small_cell_min: EHP_SMALL_CELL });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
@@ -11456,6 +11494,8 @@ const EHP_REPORTS = [
     desc: 'Order placed to USPS lodgement, by week and product line.' },
   { id: 'inbound-receipts', name: 'Inbound receipt log', format: 'csv',
     desc: 'Pallets received and product booked in, with the pack conversion applied.' },
+  { id: 'stock-ledger',     name: 'Stock movement ledger', format: 'csv',
+    desc: 'Every receipt, consumption and adjustment posted in the month, per flavour.' },
 ];
 
 app.get('/ehp/reports', authenticateRequest, (req, res) => {
@@ -11543,6 +11583,19 @@ app.get('/ehp/report/:id', authenticateRequest, auditLog('ehp_report_download'),
         rows.map(r => [r.received_date_local, r.reference || '', r.facility_code || '', r.pallets || 0,
                        r.sku || '', r.qty_entered != null ? r.qty_entered : '', r.uom_entered || '',
                        r.qty_each != null ? r.qty_each : '', r.lot_code || '', r.expiry_date || '']));
+    }
+
+    if (id === 'stock-ledger') {
+      const rows = db.prepare(`SELECT t.created_at, t.sku, sk.flavour, sk.product_line, t.txn_type,
+                                      t.qty_each, t.ref_type, t.ref_id, t.lot_code
+                               FROM ehp_inventory_txn t
+                               LEFT JOIN ehp_sku sk ON sk.client_id=t.client_id AND sk.sku=t.sku
+                               WHERE t.client_id=? AND date(t.created_at) BETWEEN ? AND ?
+                               ORDER BY t.created_at, t.sku`).all(c, from, to);
+      return sendCsv(res, `EHP_Stock_Ledger_${tag}.csv`,
+        ['Posted at', 'Flavour SKU', 'Flavour', 'Product line', 'Movement', 'Sticks (signed)', 'Source', 'Reference', 'Lot'],
+        rows.map(r => [r.created_at, r.sku, r.flavour || '', r.product_line || '', r.txn_type,
+                       r.qty_each, r.ref_type || '', r.ref_id || '', r.lot_code || '']));
     }
 
     if (id === 'inventory-cover') {
