@@ -3734,7 +3734,9 @@ function groupTransitRows(rows, threshold) {
 function groupReceivingRows(rows, threshold) {
   const buckets = new Map();
   for (const r of rows) {
-    const key = `${r.supplier}||${r.status}`;
+    // Mode is part of the key: a supplier shipping both Air and Sea must not collapse
+    // into one row, or the Air/Sea split above it becomes meaningless.
+    const key = `${r.mode || 'Unspecified'}||${r.supplier}||${r.status}`;
     if (!buckets.has(key)) buckets.set(key, []);
     buckets.get(key).push(r);
   }
@@ -3752,6 +3754,7 @@ function groupReceivingRows(rows, threshold) {
         is_grouped: true,
         member_count: members.length,
         supplier: members[0].supplier,
+        mode: members[0].mode || 'Unspecified',
         status: members[0].status,
         note,
         pos: members.map(m => m.po_number),
@@ -3764,6 +3767,17 @@ function groupReceivingRows(rows, threshold) {
     }
   }
   return out;
+}
+
+// Normalise whatever the plan sheet carried into Air / Sea. Anything unrecognised
+// returns null so it lands in the Unspecified bucket rather than silently becoming Sea.
+function emailFreightMode(planRow) {
+  const raw = String(planRow?.freight_type ?? planRow?.freight ?? planRow?.mode ?? '')
+    .trim().toLowerCase();
+  if (!raw) return null;
+  if (raw.startsWith('air')) return 'Air';
+  if (raw.startsWith('sea') || raw.startsWith('ocean') || raw.startsWith('fcl') || raw.startsWith('lcl')) return 'Sea';
+  return null;
 }
 
 function buildReceivingRows(ws, planRows, summary) {
@@ -3788,12 +3802,27 @@ function buildReceivingRows(ws, planRows, summary) {
   // which surfaced a single SKU's quantity as if it were the whole PO.
   const targetByPo = new Map();
   const firstRowByPo = new Map();
+  // A plan is PO x SKU, so freight_type is per SKU row and can disagree within one PO.
+  // Tally the modes and take the majority rather than trusting the first row — and keep
+  // POs with no mode at all visible under "Unspecified" instead of dropping them.
+  const modeVotesByPo = new Map();
   for (const p of planRows) {
     const po = String(p?.po_number || '').trim().toUpperCase();
     if (!po) continue;
     targetByPo.set(po, (targetByPo.get(po) || 0) + (Number(p?.target_qty || 0)));
     if (!firstRowByPo.has(po)) firstRowByPo.set(po, p);
+    const m = emailFreightMode(p);
+    if (m) {
+      if (!modeVotesByPo.has(po)) modeVotesByPo.set(po, new Map());
+      const v = modeVotesByPo.get(po);
+      v.set(m, (v.get(m) || 0) + 1);
+    }
   }
+  const modeOfPo = (po) => {
+    const v = modeVotesByPo.get(po);
+    if (!v || !v.size) return 'Unspecified';
+    return Array.from(v.entries()).sort((a, b) => b[1] - a[1])[0][0];
+  };
 
   for (const [po, p] of firstRowByPo.entries()) {
     if (seen.has(po)) continue;
@@ -3813,6 +3842,7 @@ function buildReceivingRows(ws, planRows, summary) {
       type: 'receiving',
       po_number: po,
       supplier,
+      mode: modeOfPo(po),
       target_qty: target,
       cartons_received: recv ? recv.cartons_received : 0,
       status,
@@ -4305,6 +4335,9 @@ function renderEmailHtml(report, narrative) {
     attribution: `font-size: 11px; color: ${mutedColor}; margin: 0 0 24px 0; padding: 0 4px; font-style: italic;`,
     h2: `font-size: 15px; color: #111827; margin: 24px 0 8px 0; padding-bottom: 6px; border-bottom: 1px solid ${borderColor};`,
     sectionHeader: `color: ${mutedColor}; font-size: 12px; margin: 10px 0 6px 0;`,
+    // One level in from the section header — Air/Sea sits between Receiving and supplier.
+    modeHeader: `color: ${mutedColor}; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+                 text-transform: uppercase; margin: 12px 0 4px 10px;`,
 
     // Row: a table wrapper so the badge can align right without absolute positioning
     rowTableOff: `width: 100%; margin: 6px 0; border-collapse: separate; border-spacing: 0; background: #fef2f2; border: 1px solid ${borderColor}; border-left: 3px solid ${offTrackColor}; border-radius: 4px;`,
@@ -4393,7 +4426,13 @@ function renderEmailHtml(report, narrative) {
         ? `Receiving · ${totalPOs} POs · <strong style="color:${offTrackColor}">${offPOs} off-track</strong>`
         : `Receiving · ${totalPOs} POs · all on track`;
       parts.push(`<div style="${S.sectionHeader}">${header}</div>`);
-      for (const r of wk.receiving) parts.push(renderReceivingRow(r));
+      for (const grp of splitReceivingByMode(wk.receiving)) {
+        const sub = grp.off > 0
+          ? `${escHtml(grp.mode)} · ${grp.total} POs · <strong style="color:${offTrackColor}">${grp.off} off-track</strong>`
+          : `${escHtml(grp.mode)} · ${grp.total} POs · all on track`;
+        parts.push(`<div style="${S.modeHeader}">${sub}</div>`);
+        for (const r of grp.rows) parts.push(renderReceivingRow(r));
+      }
     }
 
     if (wk.vas && wk.vas.has_data) {
@@ -4467,6 +4506,27 @@ function renderEmailHtml(report, narrative) {
 </body></html>`;
 }
 
+// Split receiving into Air / Sea / Unspecified, each supplier-sorted with off-track
+// first. Air ships in days and Sea in weeks, so a mixed list buries the urgent ones.
+// Empty modes are dropped rather than printed as empty headings.
+function splitReceivingByMode(rows) {
+  const order = ['Air', 'Sea', 'Unspecified'];
+  const out = [];
+  for (const mode of order) {
+    const list = (rows || []).filter(r => (r.mode || 'Unspecified') === mode);
+    if (!list.length) continue;
+    list.sort((a, b) => {
+      if ((a.status === 'off_track') !== (b.status === 'off_track')) return a.status === 'off_track' ? -1 : 1;
+      return String(a.supplier || '').localeCompare(String(b.supplier || ''));
+    });
+    const total = list.reduce((n, r) => n + (r.is_grouped ? r.member_count : 1), 0);
+    const off = list.filter(r => r.status === 'off_track')
+                    .reduce((n, r) => n + (r.is_grouped ? r.member_count : 1), 0);
+    out.push({ mode, rows: list, total, off });
+  }
+  return out;
+}
+
 // Small title-case helper: first letter up, rest unchanged.
 function capitalize(s) {
   const t = String(s || '').trim();
@@ -4491,16 +4551,19 @@ function renderEmailText(report, narrative) {
       const totalPOs = wk.receiving.reduce((s, r) => s + (r.is_grouped ? r.member_count : 1), 0);
       const offPOs = wk.receiving.filter(r => r.status === 'off_track').reduce((s, r) => s + (r.is_grouped ? r.member_count : 1), 0);
       lines.push(`  Receiving: ${totalPOs} POs — ${offPOs} off-track, ${totalPOs - offPOs} on track`);
-      for (const r of wk.receiving) {
-        const tag = r.status === 'off_track' ? 'OFF-TRACK' : 'on track';
-        if (r.is_grouped) {
-          const poList = r.pos.slice(0, 10).join(', ') + (r.pos.length > 10 ? ` +${r.pos.length - 10} more` : '');
-          lines.push(`    [${tag}] ${capitalize(r.note)}`);
-          lines.push(`      ${r.supplier} · ${r.target_qty}u planned`);
-          lines.push(`      POs: ${poList}`);
-        } else {
-          lines.push(`    [${tag}] ${capitalize(r.note)}`);
-          lines.push(`      PO ${r.po_number} · ${r.supplier} · ${r.target_qty}u`);
+      for (const grp of splitReceivingByMode(wk.receiving)) {
+        lines.push(`    ── ${grp.mode.toUpperCase()} · ${grp.total} POs · ${grp.off} off-track ──`);
+        for (const r of grp.rows) {
+          const tag = r.status === 'off_track' ? 'OFF-TRACK' : 'on track';
+          if (r.is_grouped) {
+            const poList = r.pos.slice(0, 10).join(', ') + (r.pos.length > 10 ? ` +${r.pos.length - 10} more` : '');
+            lines.push(`      [${tag}] ${capitalize(r.note)}`);
+            lines.push(`        ${r.supplier} · ${r.target_qty}u planned`);
+            lines.push(`        POs: ${poList}`);
+          } else {
+            lines.push(`      [${tag}] ${capitalize(r.note)}`);
+            lines.push(`        PO ${r.po_number} · ${r.supplier} · ${r.target_qty}u`);
+          }
         }
       }
     }
