@@ -68,7 +68,13 @@
       .eg-s{font-size:11px;color:${LIGHT};margin-top:2px;}
       .eg-x{background:none;border:none;font-size:22px;color:${LIGHT};cursor:pointer;line-height:1;padding:0 4px;}
       .eg-x:hover{color:${DARK};}
-      .eg-body{padding:20px 28px 32px;overflow:auto;flex:1 1 auto;max-width:1680px;width:100%;margin:0 auto;}
+      /* The overlay is an opaque full-viewport surface at z-index 9500, which paints over the
+         fixed Pulse bar (z-index 50). Rather than raising .pulse-bar globally — shared CSS that
+         would change layering on every ICONIC overlay too — lift it only while this page is open,
+         and reserve room at the foot of the scroll so the bar never sits on top of a report tile. */
+      body.eg-open #pulse-bar{z-index:9600;}
+      body.eg-open #pulse-panel{z-index:9601;}
+      .eg-body{padding:20px 28px 132px;overflow:auto;flex:1 1 auto;max-width:1680px;width:100%;margin:0 auto;}
       .eg-grid2{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:22px;align-items:start;}
       @media (max-width:1080px){ .eg-grid2{grid-template-columns:1fr;} }
       /* Analytics strip — sits under the maps so the layout holds whether one product
@@ -546,7 +552,10 @@
     }
   }
 
-  function close(){ const o = document.querySelector('.eg-ov'); if (o) o.remove(); }
+  function close(){
+    const o = document.querySelector('.eg-ov'); if (o) o.remove();
+    document.body.classList.remove('eg-open');
+  }
   function open() {
     styles();
     if (document.querySelector('.eg-ov')) return;
@@ -561,6 +570,7 @@
       <div class="eg-body" id="eg-body">Loading…</div>
     </div>`;
     document.body.appendChild(o);
+    document.body.classList.add('eg-open');
     el('eg-close').addEventListener('click', close);
     document.addEventListener('keydown', function esc2(ev){
       if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', esc2); }
@@ -575,7 +585,7 @@
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(refreshEnabled, 15000);      // the active client can change via the picker
     if (location.hash === '#ehp-geo') setTimeout(open, 600);
-    console.log('[ehp-geo] module v3 loaded');
+    console.log('[ehp-geo] module v4 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
