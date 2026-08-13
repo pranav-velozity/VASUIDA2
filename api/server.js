@@ -10999,6 +10999,213 @@ app.post('/report/supplier-discrepancy/auth', authenticateRequest, (req, res) =>
   res.json({ token, cost });
 });
 
+// ═══════════════════ AIR PO REPORT ═══════════════════
+// One row per air PO for a week, baseline against actual across the whole journey:
+// receiving, VAS completion, the six transit/clearing stages, and last-mile delivery.
+//
+// Transit and clearing are LANE-level, not PO-level — a lane is supplier||zendesk||Air and
+// several POs ride the same one. Those columns therefore repeat identically across the POs
+// sharing a lane. That is correct, not duplicated data, which is why the lane reference is
+// on every row and the sheet carries a note saying so.
+
+function _apDays(baseIso, actIso) {
+  const b = String(baseIso || '').slice(0, 10), a = String(actIso || '').slice(0, 10);
+  if (!b || !a) return null;
+  const bd = Date.parse(b + 'T00:00:00Z'), ad = Date.parse(a + 'T00:00:00Z');
+  if (!isFinite(bd) || !isFinite(ad)) return null;
+  return Math.round((ad - bd) / 86400000);      // positive = late
+}
+const _apDate = (v) => String(v || '').slice(0, 10) || '';
+
+app.get('/report/air-pos', authenticateRequest, auditLog('download_air_po_report'), async (req, res) => {
+  try {
+    const ws = String(req.query.week || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) return res.status(400).json({ error: 'week required as YYYY-MM-DD (Monday)' });
+
+    const planRow = planDataFor(ws);
+    const planRows = planRow ? (safeJsonParse(planRow.data, []) || []) : [];
+    if (!planRows.length) return res.status(404).json({ error: 'no_plan_for_week', week_start: ws });
+
+    // ── Air POs only, with their lane and planned units ──
+    const poMap = new Map();
+    for (const p of planRows) {
+      if (emailFreightMode(p) !== 'Air') continue;
+      const po = String(p?.po_number || '').trim().toUpperCase();
+      if (!po) continue;
+      if (!poMap.has(po)) {
+        poMap.set(po, {
+          po, supplier: String(p?.supplier_name ?? p?.supplier ?? 'Unknown').trim() || 'Unknown',
+          zendesk: String(p?.zendesk_ticket ?? p?.zendesk ?? '').trim(),
+          lane: emailPlanRowLaneKey(p), units: 0, due: p?.due_date || null,
+        });
+      }
+      poMap.get(po).units += Number(p?.target_qty || 0);
+    }
+    const pos = Array.from(poMap.values()).sort((a, b) =>
+      String(a.supplier).localeCompare(String(b.supplier)) || a.po.localeCompare(b.po));
+
+    // ── Receiving actuals ──
+    const recv = new Map();
+    for (const r of db.prepare('SELECT po_number, received_at_local, cartons_received FROM receiving WHERE week_start=?').all(ws))
+      recv.set(String(r.po_number || '').trim().toUpperCase(), r);
+
+    // ── VAS completion: last unit applied against this PO ──
+    const vasDone = new Map();
+    if (pos.length) {
+      const ph = pos.map(() => '?').join(',');
+      for (const r of db.prepare(`SELECT po_number, MAX(completed_at) done, COUNT(*) n FROM records
+                                  WHERE status='complete' AND po_number IN (${ph}) GROUP BY po_number`)
+                        .all(...pos.map(x => x.po)))
+        vasDone.set(String(r.po_number || '').trim().toUpperCase(), r);
+    }
+
+    // ── Lane baselines and actuals ──
+    const snapByLane = {};
+    for (const r of db.prepare('SELECT * FROM lane_planned_snapshots WHERE week_start=?').all(ws))
+      snapByLane[r.lane_key] = r;
+    const actByLane = {};
+    for (const a of db.prepare('SELECT * FROM lane_actual_dates WHERE week_start=?').all(ws)) {
+      (actByLane[a.lane_key] = actByLane[a.lane_key] || {})[a.stage] = a.actual_at;
+    }
+
+    // ── Last mile: containers carry a scheduled date and a delivered date ──
+    // scheduled_local is the booking; delivery_local is the confirmed drop.
+    const flowRows = db.prepare('SELECT data FROM flow_week WHERE week_start=?').all(ws);
+    const containers = [];
+    let receipts = {};
+    for (const fr of flowRows) {
+      const d = safeJsonParse(fr.data, {}) || {};
+      const arr = Array.isArray(d.intl_weekcontainers) ? d.intl_weekcontainers
+                : (d.intl_weekcontainers && Array.isArray(d.intl_weekcontainers.containers) ? d.intl_weekcontainers.containers : []);
+      containers.push(...(arr || []));
+      if (d.lastmile_receipts && typeof d.lastmile_receipts === 'object') Object.assign(receipts, d.lastmile_receipts);
+    }
+    const lastMileForPo = (po) => {
+      const mine = containers.filter(c => Array.isArray(c.pos) && c.pos.some(x => String(x).trim().toUpperCase() === po));
+      let sched = null, deliv = null, ids = [];
+      for (const c of mine) {
+        ids.push(String(c.container_id || c.container || '').trim() || '—');
+        const uid = String(c.container_uid || c.uid || '').trim();
+        const cid = String(c.container_id || c.container || '').trim();
+        const rc = (uid && receipts[uid]) || (cid && receipts[cid]) || null;
+        const sc = (rc && rc.scheduled_local) || c.scheduled_local || null;
+        const dl = (rc && (rc.delivery_local || rc.delivered_at || rc.delivered_local)) || c.delivery_local || c.delivered_at || null;
+        if (sc && (!sched || sc < sched)) sched = sc;          // earliest booking
+        if (dl && (!deliv || dl > deliv)) deliv = dl;          // last drop completes the PO
+      }
+      return { sched, deliv, containers: Array.from(new Set(ids)).join(', ') };
+    };
+
+    // Receiving is due Monday noon Shanghai; VAS by Friday noon Shanghai — the same
+    // basis the exception email uses, so the two documents agree.
+    const recvDue = ws;
+    const vasDue  = _apDate(new Date(Date.parse(ws + 'T00:00:00Z') + 4 * 86400000).toISOString());
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'VelOzity Pinpoint';
+    const sh = wb.addWorksheet('Air POs');
+    sh.columns = [
+      { header: 'PO',                 key: 'po',   width: 15 },
+      { header: 'Supplier',           key: 'sup',  width: 32 },
+      { header: 'Zendesk',            key: 'zd',   width: 12 },
+      { header: 'Lane',               key: 'lane', width: 34 },
+      { header: 'Units planned',      key: 'un',   width: 13 },
+      { header: 'Receiving due',      key: 'rdu',  width: 13 },
+      { header: 'Received',           key: 'rac',  width: 13 },
+      { header: 'Recv var (d)',       key: 'rvar', width: 12 },
+      { header: 'Cartons',            key: 'ctn',  width: 9 },
+      { header: 'VAS due',            key: 'vdu',  width: 12 },
+      { header: 'VAS completed',      key: 'vac',  width: 14 },
+      { header: 'VAS var (d)',        key: 'vvar', width: 11 },
+      { header: 'Units applied',      key: 'vun',  width: 12 },
+      { header: 'Packing list (base)',key: 'p1b',  width: 17 },
+      { header: 'Packing list (act)', key: 'p1a',  width: 17 },
+      { header: 'Origin clear (base)',key: 'p2b',  width: 17 },
+      { header: 'Origin clear (act)', key: 'p2a',  width: 17 },
+      { header: 'Departed (base)',    key: 'p3b',  width: 15 },
+      { header: 'Departed (act)',     key: 'p3a',  width: 15 },
+      { header: 'Arrived (base)',     key: 'p4b',  width: 15 },
+      { header: 'Arrived (act)',      key: 'p4a',  width: 15 },
+      { header: 'Dest clear (base)',  key: 'p5b',  width: 16 },
+      { header: 'Dest clear (act)',   key: 'p5a',  width: 16 },
+      { header: 'FC receipt (base)',  key: 'p6b',  width: 16 },
+      { header: 'FC receipt (act)',   key: 'p6a',  width: 16 },
+      { header: 'FC var (d)',         key: 'fvar', width: 11 },
+      { header: 'Delivery scheduled', key: 'dsc',  width: 17 },
+      { header: 'Delivered',          key: 'dac',  width: 13 },
+      { header: 'Delivery var (d)',   key: 'dvar', width: 15 },
+      { header: 'Containers',         key: 'cont', width: 22 },
+    ];
+    sh.getRow(1).font = { bold: true };
+    sh.views = [{ state: 'frozen', xSplit: 2, ySplit: 1 }];
+
+    const STAGES = [
+      ['packing_list_ready', 'planned_packing_list_ready_at', 'p1'],
+      ['origin_cleared',     'planned_origin_cleared_at',     'p2'],
+      ['departed',           'planned_departed_at',           'p3'],
+      ['arrived',            'planned_arrived_at',            'p4'],
+      ['dest_cleared',       'planned_dest_cleared_at',       'p5'],
+      ['fc_receipt',         'planned_fc_receipt_at',         'p6'],
+    ];
+
+    for (const x of pos) {
+      const rc = recv.get(x.po) || null;
+      const vd = vasDone.get(x.po) || null;
+      const snap = snapByLane[x.lane] || {};
+      const act = actByLane[x.lane] || {};
+      const lm = lastMileForPo(x.po);
+
+      const row = {
+        po: x.po, sup: x.supplier, zd: x.zendesk || '', lane: x.lane, un: x.units,
+        rdu: _apDate(x.due || recvDue),
+        rac: _apDate(rc && rc.received_at_local),
+        rvar: _apDays(x.due || recvDue, rc && rc.received_at_local),
+        ctn: rc ? (rc.cartons_received || 0) : 0,
+        vdu: vasDue,
+        vac: _apDate(vd && vd.done),
+        vvar: _apDays(vasDue, vd && vd.done),
+        vun: vd ? vd.n : 0,
+        dsc: _apDate(lm.sched), dac: _apDate(lm.deliv),
+        dvar: _apDays(lm.sched, lm.deliv),
+        cont: lm.containers,
+      };
+      for (const [stage, planCol, k] of STAGES) {
+        row[k + 'b'] = _apDate(snap[planCol]);
+        row[k + 'a'] = _apDate(act[stage]);
+      }
+      row.fvar = _apDays(snap.planned_fc_receipt_at, act.fc_receipt);
+      sh.addRow(row);
+    }
+
+    if (!pos.length) sh.addRow({ po: 'No air POs on the plan for this week.' });
+
+    // Highlight late milestones — an ops sheet is read for exceptions, not for the dates
+    // that went to plan.
+    const lateCols = ['rvar', 'vvar', 'fvar', 'dvar'];
+    sh.eachRow((r, i) => {
+      if (i === 1) return;
+      for (const k of lateCols) {
+        const cell = r.getCell(sh.getColumn(k).number);
+        if (typeof cell.value === 'number' && cell.value > 0) {
+          cell.font = { color: { argb: 'FFB33F40' }, bold: true };
+        }
+      }
+    });
+
+    sh.addRow({});
+    sh.addRow({ po: 'Note:', sup: 'Transit and clearing dates are lane-level (supplier + Zendesk + Air). POs sharing a lane show the same dates — this is expected, not duplication.' }).font = { italic: true };
+    sh.addRow({ po: '', sup: 'Variance is actual minus baseline in days. Positive is late. Blank means one of the two dates is not yet recorded.' }).font = { italic: true };
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="VelOzity_Air_POs_${ws}.xlsx"`);
+    await wb.xlsx.write(res);
+    return res.end();
+  } catch (e) {
+    console.error('[GET /report/air-pos]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 // ── XLSX sibling of the non-compliance PDF ──
 // Same token gate, so cost columns follow the same password rule as the PDF. One row per
 // incident: the PDF is for reading, this is for reconciling against the invoice.
