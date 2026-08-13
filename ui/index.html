@@ -7755,6 +7755,7 @@ function renderReportsPage(container){
         ${reportCard('Stock Status','Planned vs actual received vs in-transit status per PO × SKU across a week or date range.','XLSX','Admin · Client','__stock-status-direct__')}
         ${reportCard('Cost Utilisation Report','Monthly cost analysis — VAS, sea and air freight unit economics, carton replacement. 4-month trend.','PDF','Admin only','__cost-util-direct__')}
         ${reportCard('Monthly Client Report','Monthly client-facing XLSX: Shipping Data and VAS Dashboard — one row per container, with transit dates, utilization, and costs.','XLSX','Admin only','__monthly-client-direct__')}
+        ${reportCard('Air PO Milestone Report','Every air PO for the week with baseline against actual: receiving, VAS completion, the six transit and clearing stages, and last-mile delivery. Variance in days, late milestones highlighted.','XLSX','Admin · Ops','__air-po-report-direct__')}
         ${reportCard('Supplier Discrepancy Reporting','Weekly vendor non-compliance — rework and delivery-failure categories, affected qty, photo evidence and carton reconciliation. One page per supplier; Excel companion for reconciliation. Cost columns password-gated.','PDF · XLSX','Admin · Client','__supplier-discrepancy-direct__')}
       </div>
     </div>
@@ -7867,6 +7868,23 @@ function renderReportsPage(container){
       }
       if(proxyId === '__monthly-client-direct__'){
         window._monthlyClientOpenModal();
+        return;
+      }
+      if(proxyId === '__air-po-report-direct__'){
+        const wk = prompt('Report week — Monday date (YYYY-MM-DD):', (window.state && window.state.weekStart) || '');
+        if(!wk) return;
+        (async () => {
+          const _b = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/, '');
+          let _t = null; if (window.Clerk?.session) { try { _t = await window.Clerk.session.getToken(); } catch(_){} }
+          try {
+            const r = await fetch(`${_b}/report/air-pos?week=${encodeURIComponent(wk)}`, { headers: _t ? {'Authorization':'Bearer '+_t} : {} });
+            if(!r.ok){ const e = await r.json().catch(()=>({})); alert(e.error === 'no_plan_for_week' ? 'No plan uploaded for that week.' : ('Could not generate: ' + (e.error || r.status))); return; }
+            const blob = await r.blob(); const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob); a.download = `VelOzity_Air_POs_${wk}.xlsx`;
+            document.body.appendChild(a); a.click();
+            setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+          } catch(e){ alert('Request failed: ' + e.message); }
+        })();
         return;
       }
       if(proxyId === '__supplier-discrepancy-direct__'){
