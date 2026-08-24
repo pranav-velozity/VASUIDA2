@@ -13328,6 +13328,12 @@ app.get('/ehp/timeseries', authenticateRequest, (req, res) => {
       return recipeCache[k];
     };
     const recipe = ehpActiveRecipe(c);
+    // Headline per-flavour figure for the response. The per-LINE value is computed inside
+    // comps.map() below and shadows this one there; without this outer binding the
+    // response line at the end of the handler throws and the whole endpoint 500s.
+    const _defPool = recipe && recipe.pool && recipe.pool.length
+                   ? recipe.pool.length : Math.max(1, (recipe && recipe.distinct_flavours) || 3);
+    const perFlavour = recipe ? (recipe.sticks_per_envelope || 5) / _defPool : 0;
     const comps = db.prepare(`SELECT sku, product_line FROM ehp_sku WHERE client_id=? AND active=1 AND is_component=1 ORDER BY sku`).all(c);
     const inventory = comps.map(({ sku, product_line }) => {
       const rec = recipeFor(product_line);
