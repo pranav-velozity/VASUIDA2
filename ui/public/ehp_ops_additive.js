@@ -240,6 +240,7 @@
       try {
         const r = await req('/ehp/batch', { method:'POST', body: JSON.stringify({ target_envelopes: target, facility_code:'VOZ_TX', product_line: line }) });
         el('ehp-batchmsg').innerHTML = msg('k', `Batch ${esc(r.batch_ref||'')} created — ${r.actual_envelopes} ${esc(r.product_line)} envelopes across ${r.order_count} orders (target ${r.target_envelopes}).`);
+        window.dispatchEvent(new CustomEvent('ehp:changed'));
         setTimeout(render, 900);
       } catch (e) { el('ehp-batchmsg').innerHTML = msg('e', e.message || String(e)); el('ehp-mkbatch').disabled = false; }
     });
@@ -248,6 +249,7 @@
       try {
         const r = await req('/ehp/batch/'+x.getAttribute('data-asm')+'/assemble', { method:'POST', body:'{}' });
         el('ehp-batchmsg').innerHTML = msg('k', `Assembled ${nfmt(r.envelopes)} envelope(s) · ${nfmt(r.sticks_consumed_total||0)} sticks. Stock is deducted on dispatch.`);
+        window.dispatchEvent(new CustomEvent('ehp:changed'));
         setTimeout(render, 900);
       } catch (e) { el('ehp-batchmsg').innerHTML = msg('e', e.message || String(e)); x.disabled = false; }
     }));
@@ -271,6 +273,7 @@
           ? ` Deducted ${nfmt(cons.total_sticks)} sticks — ` + cons.by_flavour.map(f=>esc(f.sku)+' '+nfmt(f.qty)).join(', ') + '.'
           : '';
         el('ehp-batchmsg').innerHTML = msg(shKind, `Dispatched ${nfmt(r.envelopes)} ${esc(r.product_line||'')} envelope(s) across ${nfmt(r.orders)} order(s).${consTxt} ` + shTxt);
+        window.dispatchEvent(new CustomEvent('ehp:changed'));
         console.log('[ehp] dispatch result', r);
         setTimeout(render, 900);
       } catch (e) { el('ehp-batchmsg').innerHTML = msg('e', e.message || String(e)); x.disabled = false; }
@@ -512,6 +515,7 @@
       if (r.warnings?.length) out += msg('w', 'No pack conversion set for: ' + r.warnings.map(w=>w.sku+' ('+w.uom+')').join(', ') + '. Quantity recorded at face value — set the conversion on the Inventory tab.');
       el('ehp-inmsg').innerHTML = out;
       _lines = [{}]; drawLines();
+      window.dispatchEvent(new CustomEvent('ehp:changed'));
     } catch (e) { el('ehp-inmsg').innerHTML = msg('e', e.message || String(e)); }
     el('ehp-save').disabled = false;
   }

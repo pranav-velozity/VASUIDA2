@@ -170,6 +170,10 @@
     _busy = false;
   }
 
+  // render() skips a week it has already drawn, so a receipt saved on another tab left the
+  // tile showing a stale figure. Other EHP modules raise this after a write.
+  window.addEventListener('ehp:changed', () => { _lastWeek = null; render(true); });
+
   const _prev = {};
   function shortTs(v) {
     if (!v) return '';
@@ -439,7 +443,9 @@
     ] }, options: baseOpts });
 
     // 2. days of cover — radial gauges, one per flavour
-    const cover = (ts.inventory || []).filter(i => i.days_cover !== null).slice(0, 6);
+    // Keep flavours with no burn rate. Filtering them out meant freshly received stock
+    // showed nothing at all, which is the moment you most want to see it.
+    const cover = (ts.inventory || []).filter(i => (i.days_cover !== null) || (i.on_hand || 0) > 0).slice(0, 6);
     const wrap = el('fwh-gauges');
     if (wrap && cover.length) {
       const _cfg = ts.settings || {};
@@ -452,13 +458,15 @@
       const cfg = ts.settings || {};
       const crit = cfg.cover_critical_days || 10, warn = cfg.cover_warning_days || 30;
       cover.forEach((i, k) => {
+        const noBurn = i.days_cover === null;
         const days = Math.max(0, i.days_cover || 0);
-        const col = i.status === 'critical' ? RED : i.status === 'warning' ? AMBER
+        const col = noBurn ? '#34C759'
+                  : i.status === 'critical' ? RED : i.status === 'warning' ? AMBER
                   : days <= crit ? RED : days <= warn ? AMBER : '#34C759';
         mkChart('fwh-g-' + k, {
           type: 'doughnut',
           data: { labels: ['Days of cover', 'Remaining scale'],
-                  datasets: [{ data: [Math.min(days, FULL), Math.max(0, FULL - days)],
+                  datasets: [{ data: noBurn ? [FULL, 0] : [Math.min(days, FULL), Math.max(0, FULL - days)],
                     backgroundColor: [col, 'rgba(0,0,0,.06)'], borderWidth: 0 }] },
           options: { responsive: true, maintainAspectRatio: false, cutout: '72%',
             rotation: -110, circumference: 220,
@@ -472,16 +480,16 @@
               ctx.save();
               ctx.textAlign = 'center'; ctx.fillStyle = col;
               ctx.font = '700 21px -apple-system,Segoe UI,Roboto,sans-serif';
-              ctx.fillText(String(days), x, y);
+              ctx.fillText(noBurn ? nf(i.on_hand || 0) : String(days), x, y);
               ctx.fillStyle = '#AEAEB2'; ctx.font = '500 9px -apple-system,Segoe UI,Roboto,sans-serif';
-              ctx.fillText('days', x, y + 13);
+              ctx.fillText(noBurn ? 'in stock' : 'days', x, y + 13);
               ctx.restore();
             },
           }],
         });
       });
     } else if (wrap) {
-      wrap.innerHTML = `<div class="fwh-none">No burn rate yet &mdash; assemble a batch to establish one.</div>`;
+      wrap.innerHTML = `<div class="fwh-none">No stocked flavours yet &mdash; record an inbound receipt to establish stock.</div>`;
     }
 
     // 3. stock burn-down per flavour
