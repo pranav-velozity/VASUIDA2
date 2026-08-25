@@ -7,6 +7,22 @@ const Anthropic = require('@anthropic-ai/sdk');
 
 // ── Anthropic client (lazy-init so server starts even if key not set) ──
 let _anthropic = null;
+// Returns true when the request may spend money on the model. Two independent controls:
+//   PULSE_DISABLED=1     — hard off, including scheduled jobs. Nothing calls the API.
+//   x-pulse-enabled: 1   — per-request opt-in from the browser. Absent means no call.
+// Browser-initiated AI must send the header; anything that forgets it is refused rather
+// than silently charged, which is the failure mode that matters here.
+function aiAllowed(req, res, opts) {
+  if (String(process.env.PULSE_DISABLED || '') === '1') {
+    if (res) res.status(409).json({ error: 'pulse_disabled', message: 'AI features are switched off.' });
+    return false;
+  }
+  if (opts && opts.serverInitiated) return true;      // cron / email narrative
+  if (String(req.headers['x-pulse-enabled'] || '') === '1') return true;
+  if (res) res.status(409).json({ error: 'pulse_off', message: 'Turn Pulse on to use AI features.' });
+  return false;
+}
+
 function getAnthropic() {
   if (!_anthropic) {
     const key = process.env.ANTHROPIC_API_KEY;
@@ -1490,6 +1506,7 @@ app.post('/pulse/chat',
   aiLimiter,
   async (req, res) => {
   try {
+    if (!aiAllowed(req, res)) return;
     const { messages, pulseContext, currentWeek } = req.body || {};
     if (!messages || !Array.isArray(messages) || !messages.length) {
       return res.status(400).json({ error: 'messages array required' });
@@ -1703,6 +1720,7 @@ app.post('/ai/pulse',
   aiLimiter,
   async (req, res) => {
   try {
+    if (!aiAllowed(req, res)) return;
     const { weeks, facility } = req.body || {};
     if (!weeks || !Array.isArray(weeks) || !weeks.length) {
       return res.status(400).json({ error: 'weeks array required' });
@@ -4078,6 +4096,9 @@ function buildLastMileRow({ ws, laneKey, row, containers, flowBlob, summary }) {
 // ---- Pulse narrative ----
 
 async function generatePulseNarrative(report) {
+  // Scheduled, so no per-request opt-in exists. PULSE_DISABLED still stops it, and the
+  // caller falls back to the template narrative rather than failing the email.
+  if (String(process.env.PULSE_DISABLED || '') === '1') throw new Error('pulse_disabled');
   const facts = summarizeFactsForPulse(report);
   // Deterministic templated fallback — used when Pulse fails or returns bad output.
   const fallback = buildTemplatedNarrative(report);
@@ -7369,6 +7390,7 @@ app.get('/finance/summary', authenticateRequest, requireRole(['admin']), (req, r
 
 // ── POST /finance/insights — AI-powered P&L analysis ──
 app.post('/finance/insights', authenticateRequest, requireRole(['admin']), aiLimiter, async (req, res) => {
+  if (!aiAllowed(req, res)) return;
   try {
     const { pl_data } = req.body || {};
     if (!pl_data) return res.status(400).json({ error: 'pl_data required' });
@@ -7469,6 +7491,7 @@ function collabUserFromReq(req) {
 }
 
 async function pulseReplyToThread(threadId, contextSnippet, question) {
+  if (String(process.env.PULSE_DISABLED || '') === '1') throw new Error('pulse_disabled');
   try {
     // ── Build real ops context from DB (same as /pulse/chat) ──
     const opsLines = [];
@@ -10098,6 +10121,7 @@ app.get('/report/cost-utilisation/insights', (req, res) => {
 
 // ── POST /report/cost-utilisation/insights — Pulse AI insights per section
 app.post('/report/cost-utilisation/insights', (req, res) => {
+  if (!aiAllowed(req, res)) return;
   // Synchronous wrapper ensures Express catches all errors as JSON
   const run = async () => {
     const { section, data } = req.body || {};
@@ -11674,6 +11698,7 @@ async function aqNotifyQuoted(quoteId, origin) {
     ['Quoted price', `${q.currency} ${Number(q.sell_amount).toFixed(2)}`],
     ['Valid until', q.valid_until],
   ];
+  const AQ_EXCL = 'All-inclusive air freight. Excludes GST and customs clearance charges.';
   const btn = (href, label, bg, col, br) =>
     `<a href="${href}" style="display:inline-block;padding:12px 26px;border-radius:9px;
       background:${bg};color:${col};border:1px solid ${br};text-decoration:none;
@@ -11690,13 +11715,16 @@ async function aqNotifyQuoted(quoteId, origin) {
   // before anyone read the message.
   // aqClientInsights has no access to the cost table by construction.
   const insights = aqClientInsights(q);
-  const html = aqMailShell(`Air freight quote — ${q.ref}`, rows, cta,
+  const html = aqMailShell(`Air freight quote — ${q.ref}`, rows,
+    `<div style="margin-top:14px;padding:10px 12px;background:#FBF6F8;border-radius:8px;
+       font-size:12px;color:#1C1C1E;text-align:center;"><b>${escHtml(AQ_EXCL)}</b></div>` + cta,
     'Approving opens a confirmation page. Chargeable weight is the greater of gross and volumetric weight, which is what air freight is billed on.',
     insights);
   await aqMail(process.env.AIR_QUOTE_CLIENT_EMAIL_TO,
     `Air freight quote ${q.ref} — ${q.vendor_raw}, ${q.week_label || q.week_start}`, html,
     (insights.length ? insights.map(t => '• ' + t).join('\n') + '\n\n' : '')
       + rows.filter(r => r[1] != null).map(r => `${r[0]}: ${r[1]}`).join('\n')
+      + `\n\n${AQ_EXCL}`
       + `\n\nApprove: ${link('approve')}\nDecline: ${link('decline')}`);
 }
 
@@ -12196,7 +12224,7 @@ app.get('/air-quote/decide', (req, res) => {
     <div class="chg">
       <div style="font-size:10px;color:var(--mid);text-transform:uppercase;letter-spacing:.06em;font-weight:600;">Quoted price</div>
       <b>${escHtml(q.currency)} ${Number(q.sell_amount).toFixed(2)}</b>
-      <div class="n">All inclusive.</div>
+      <div class="n">All-inclusive air freight. <b>Excludes GST and customs clearance charges.</b></div>
     </div>
   </div>
 
