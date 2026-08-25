@@ -11031,6 +11031,7 @@ CREATE TABLE IF NOT EXISTS air_quote (
   sell_amount     REAL,                      -- the only price a client ever sees
   currency        TEXT NOT NULL DEFAULT 'AUD',
   valid_until     TEXT,
+  rfq_sent_at     TEXT,                      -- when the partner was asked to price it
   released_at     TEXT, released_by TEXT,
   decided_at      TEXT, decided_by TEXT, decision_note TEXT,
   created_by      TEXT, created_by_name TEXT,
@@ -11080,6 +11081,11 @@ CREATE TABLE IF NOT EXISTS air_quote_event (
 );
 CREATE INDEX IF NOT EXISTS idx_air_quote_event_q ON air_quote_event(quote_id, created_at);
 `);
+
+try {
+  const _aqc = db.prepare("PRAGMA table_info(air_quote)").all().map(c => c.name);
+  if (!_aqc.includes('rfq_sent_at')) db.exec("ALTER TABLE air_quote ADD COLUMN rfq_sent_at TEXT");
+} catch (e) { console.error('[air-quote:migration]', e.message); }
 
 function aqNewId(p) { return (p || 'aq') + '_' + crypto.randomBytes(10).toString('hex'); }
 
@@ -11136,6 +11142,7 @@ function aqPublic(q) {
     quoted_amount: (q.state === 'quoted' || q.state === 'approved' || q.state === 'declined' || q.state === 'expired')
              ? q.sell_amount : null,
     currency: q.currency, valid_until: q.valid_until,
+    rfq_sent_at: q.rfq_sent_at,
     released_at: q.released_at, decided_at: q.decided_at, decision_note: q.decision_note,
     created_at: q.created_at,
   };
@@ -11158,7 +11165,7 @@ function aqExpireStale(clientId) {
 // ── Client: raise a request ──
 // Week is chosen in the modal, not inherited from the page — quotes run weeks ahead of the
 // plan upload, so there is nothing to pre-fill from and every value is typed.
-app.post('/air-quotes', authenticateRequest, writeOpLimiter, auditLog('create_air_quote'), (req, res) => {
+app.post('/air-quotes', authenticateRequest, writeOpLimiter, auditLog('create_air_quote'), async (req, res) => {
   try {
     const c = curClient();
     const b = req.body || {};
@@ -11192,8 +11199,19 @@ app.post('/air-quotes', authenticateRequest, writeOpLimiter, auditLog('create_ai
            (req.auth && req.auth.userId) || null, String(b.created_by_name || '').trim() || null);
 
     aqEvent(id, null, 'submitted', (req.auth && req.auth.userId) || null, 'client', `${vendor} · ${cartons} ctn`);
+
+    // Straight out to the partner — no human step. Nothing is decided at this point, so a
+    // manual "send RFQ" only delayed the one thing on the critical path. A send failure is
+    // recorded on the event and surfaced in review; it never blocks the client's request.
+    let rfq = null;
+    try {
+      const fresh = db.prepare('SELECT * FROM air_quote WHERE id=?').get(id);
+      rfq = await aqSendRfq(fresh, { origin: `${req.protocol}://${req.get('host')}`,
+                                     actor: (req.auth && req.auth.userId) || null, actorRole: 'client' });
+    } catch (e) { console.error('[air-quote:auto-rfq]', e.message); }
+
     const q = db.prepare('SELECT * FROM air_quote WHERE id=?').get(id);
-    res.json(aqPublic(q));
+    res.json({ ...aqPublic(q), rfq_dispatched: !!(rfq && rfq.resend_id) });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -11349,6 +11367,63 @@ app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), (re
 });
 
 // ── Internal: issue the partner's RFQ link ──
+// Issue a partner link and email it. Extracted so the RFQ can fire automatically the
+// moment a client submits — a human step here only added delay, since the request is
+// complete on arrival and there is nothing for a reviewer to decide yet.
+//
+// The partner is deliberately NOT shown the chargeable weight. They compute it themselves
+// from gross and CBM as part of pricing; handing them our figure invites a debate about
+// our arithmetic instead of a rate, and the number is our own cross-check.
+async function aqSendRfq(quote, opts) {
+  const o = opts || {};
+  const days = Math.max(1, parseInt(o.expires_days, 10) || 14);
+  const token = crypto.randomBytes(24).toString('hex');
+  db.prepare(`INSERT INTO air_quote_token (token, quote_id, purpose, expires_at)
+              VALUES (?,?, 'partner_cost', datetime('now', ?))`).run(token, quote.id, `+${days} days`);
+
+  const base = String(process.env.PUBLIC_API_URL || o.origin || '').replace(/\/+$/, '');
+  const link = `${base}/air-quote/cost?token=${token}`;
+  const to = parseEmailList(o.to || process.env.AIR_QUOTE_PARTNER_EMAIL_TO);
+  const from = process.env.EXCEPTION_EMAIL_FROM;
+  let sent = null, sendError = null;
+
+  if (to.length && from) {
+    const subj = `RFQ ${quote.ref} — air freight, ${quote.week_label || quote.week_start}, ${quote.vendor_raw}`;
+    const lines = [
+      `Air freight RFQ ${quote.ref}`, '',
+      `Shipping week: ${quote.week_label || quote.week_start}`,
+      `Vendor: ${quote.vendor_raw}`,
+      `Cartons: ${quote.cartons}`,
+      `Gross weight: ${quote.gross_weight_kg} kg`,
+      `CBM: ${quote.cbm}`,
+      quote.origin ? `Origin: ${quote.origin}` : null,
+      quote.destination ? `Destination: ${quote.destination}` : null,
+      quote.client_note ? `Note: ${quote.client_note}` : null,
+      '', 'Please enter your all-inclusive cost here:', link,
+      '', `This link expires in ${days} days.`,
+    ].filter(Boolean);
+    const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:14px;color:#1C1C1E;">`
+      + lines.map(l => l === '' ? '<div style="height:10px"></div>'
+          : (l === link ? `<div><a href="${link}">${link}</a></div>` : `<div>${escHtml(l)}</div>`)).join('')
+      + `</div>`;
+    try {
+      const r = await sendViaResend({ from, replyTo: process.env.EXCEPTION_EMAIL_REPLY_TO || undefined,
+                                      to, subject: subj, html, text: lines.join('\n') });
+      sent = r.id;
+    } catch (e) { sendError = String(e.message || e); }
+  }
+
+  // rfq_sent_at records the ask, whether or not the email left the building — the reviewer
+  // needs to know when the partner was engaged, and a send failure is shown separately.
+  db.prepare(`UPDATE air_quote SET state='rfq_sent', rfq_sent_at=datetime('now'),
+              updated_at=datetime('now') WHERE id=? AND state IN ('submitted','rfq_sent')`).run(quote.id);
+  aqEvent(quote.id, quote.state, 'rfq_sent', o.actor || 'system', o.actorRole || 'system',
+          sent ? `RFQ emailed to ${to.join(', ')}` : (sendError || 'link issued, no email sent'));
+
+  return { link, expires_days: days, emailed_to: to, resend_id: sent, email_error: sendError };
+}
+
+// Manual reissue — for an expired link, a bounced address, or a second partner contact.
 app.post('/air-quotes/:id/rfq', authenticateRequest, requireRole(['admin']), writeOpLimiter,
   auditLog('send_air_quote_rfq'), async (req, res) => {
   try {
@@ -11357,54 +11432,13 @@ app.post('/air-quotes/:id/rfq', authenticateRequest, requireRole(['admin']), wri
     if (!q) return res.status(404).json({ error: 'not_found' });
     if (!['submitted', 'rfq_sent', 'costed'].includes(q.state))
       return res.status(409).json({ error: 'not_rfq_able', state: q.state });
-
-    const days = Math.max(1, parseInt((req.body || {}).expires_days, 10) || 14);
-    const token = crypto.randomBytes(24).toString('hex');
-    db.prepare(`INSERT INTO air_quote_token (token, quote_id, purpose, expires_at)
-                VALUES (?,?, 'partner_cost', datetime('now', ?))`).run(token, q.id, `+${days} days`);
-    if (q.state === 'submitted') {
-      db.prepare(`UPDATE air_quote SET state='rfq_sent', updated_at=datetime('now') WHERE id=?`).run(q.id);
-      aqEvent(q.id, 'submitted', 'rfq_sent', (req.auth && req.auth.userId) || null, 'internal', null);
-    }
-
-    // The partner page is served by THIS app, so the link must use the API origin — not the
-    // SPA host. Falls back to the request's own origin when the env var is unset.
-    const base = String(process.env.PUBLIC_API_URL || process.env.PUBLIC_APP_URL || '').replace(/\/+$/, '')
-              || `${req.protocol}://${req.get('host')}`;
-    const link = `${base}/air-quote/cost?token=${token}`;
-    const to = parseEmailList((req.body || {}).to || process.env.AIR_QUOTE_PARTNER_EMAIL_TO);
-    const from = process.env.EXCEPTION_EMAIL_FROM;
-    let sent = null, sendError = null;
-    if (to.length && from) {
-      const subj = `RFQ ${q.ref} — air freight, ${q.week_label || q.week_start}, ${q.vendor_raw}`;
-      const lines = [
-        `Air freight RFQ ${q.ref}`, '',
-        `Shipping week: ${q.week_label || q.week_start}`,
-        `Vendor: ${q.vendor_raw}`,
-        `Cartons: ${q.cartons}`,
-        `Gross weight: ${q.gross_weight_kg} kg`,
-        `CBM: ${q.cbm}`,
-        `Chargeable weight: ${q.chargeable_kg} kg`,
-        q.origin ? `Origin: ${q.origin}` : null,
-        q.destination ? `Destination: ${q.destination}` : null,
-        q.client_note ? `Note: ${q.client_note}` : null,
-        '', 'Please enter your all-inclusive cost here:', link,
-        '', `This link expires in ${days} days.`,
-      ].filter(Boolean);
-      const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:14px;color:#1C1C1E;">`
-        + lines.map(l => l === '' ? '<div style="height:10px"></div>'
-            : (l === link ? `<div><a href="${link}">${link}</a></div>` : `<div>${escHtml(l)}</div>`)).join('')
-        + `</div>`;
-      try {
-        const r = await sendViaResend({ from, replyTo: process.env.EXCEPTION_EMAIL_REPLY_TO || undefined,
-                                        to, subject: subj, html, text: lines.join('\n') });
-        sent = r.id;
-      } catch (e) { sendError = String(e.message || e); }
-    }
-    aqEvent(q.id, q.state, 'rfq_sent', (req.auth && req.auth.userId) || null, 'internal',
-            sent ? `RFQ emailed to ${to.join(', ')}` : (sendError || 'link issued, no email sent'));
-    res.json({ quote_id: q.id, ref: q.ref, link, expires_days: days,
-               emailed_to: to, resend_id: sent, email_error: sendError });
+    const r = await aqSendRfq(q, {
+      expires_days: (req.body || {}).expires_days,
+      to: (req.body || {}).to,
+      origin: `${req.protocol}://${req.get('host')}`,
+      actor: (req.auth && req.auth.userId) || null, actorRole: 'internal',
+    });
+    res.json({ quote_id: q.id, ref: q.ref, ...r });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -11487,7 +11521,7 @@ app.get('/air-quote/cost', (req, res) => {
     if (String(req.query.format || '') === 'json') {
       return res.json({ ref: q.ref, week: q.week_label || q.week_start, vendor: q.vendor_raw,
         cartons: q.cartons, gross_weight_kg: q.gross_weight_kg, cbm: q.cbm,
-        chargeable_kg: q.chargeable_kg, origin: q.origin, destination: q.destination,
+        origin: q.origin, destination: q.destination,
         note: q.client_note, currency: q.currency,
         submitted: ex.cost_amount != null ? {
           cost_amount: ex.cost_amount, cost_currency: ex.cost_currency,
@@ -11504,8 +11538,6 @@ app.get('/air-quote/cost', (req, res) => {
     }
 
     const row = (k, v) => v == null || v === '' ? '' : `<dt>${escHtml(k)}</dt><dd>${escHtml(String(v))}</dd>`;
-    const volumetric = Math.round((q.cbm || 0) * AQ_VOLUMETRIC_KG_PER_CBM * 100) / 100;
-    const basis = volumetric > (q.gross_weight_kg || 0) ? 'volumetric' : 'gross';
     const resubmit = ex.cost_amount != null;
 
     const body = `
@@ -11522,13 +11554,7 @@ app.get('/air-quote/cost', (req, res) => {
       ${row('Origin', q.origin)}
       ${row('Destination', q.destination)}
     </dl>
-    <div class="chg">
-      <div style="font-size:10px;color:var(--mid);text-transform:uppercase;letter-spacing:.06em;font-weight:600;">Chargeable weight</div>
-      <b>${escHtml(String(q.chargeable_kg))} kg</b>
-      <div class="n">Greater of gross (${escHtml(String(q.gross_weight_kg || 0))} kg) and volumetric
-        (${escHtml(String(volumetric))} kg at ${AQ_VOLUMETRIC_KG_PER_CBM} kg/CBM) &mdash; ${basis} applies.</div>
-    </div>
-    ${q.client_note ? `<div style="margin-top:12px;font-size:12px;color:var(--mid);"><b>Note:</b> ${escHtml(q.client_note)}</div>` : ''}
+    ${q.client_note ? `<div style="margin-top:14px;font-size:12px;color:var(--mid);"><b>Note:</b> ${escHtml(q.client_note)}</div>` : ''}
   </div>
 
   <div class="card">
