@@ -139,7 +139,7 @@
         <div class="aqi-sec">Queue &middot; ${list.length} quote(s)</div>
         ${list.length ? `<table class="aqi"><thead><tr>
             <th>Ref</th><th>Week</th><th>Sent to partner</th><th>Vendor</th><th class="n">Chargeable kg</th>
-            <th class="n">Cost</th><th class="n">Sell</th><th class="n">$/kg</th><th>Status</th>
+            <th class="n">Cost</th><th class="n">Sell</th><th class="n">/kg</th><th class="n">/unit</th><th>Status</th>
           </tr></thead><tbody>${list.map(x => `<tr data-q="${esc(x.id)}" class="${x.id === _sel ? 'sel' : ''}">
             <td><b>${esc(x.ref || '')}</b></td>
             <td style="color:${MID}">${esc(x.week_label || x.week_start)}</td>
@@ -149,6 +149,8 @@
             <td class="n">${x.cost == null ? '—' : money(x.cost, x.cost_currency)}</td>
             <td class="n">${x.sell_preview == null ? '—' : money(x.sell_preview, x.currency)}</td>
             <td class="n">${x.sell_per_kg == null ? '—' : x.sell_per_kg.toFixed(2)}</td>
+            <td class="n">${x.sell_per_unit == null
+              ? `<span style="color:${LIGHT}">NA</span>` : x.sell_per_unit.toFixed(2)}</td>
             <td>${pill(x.state)}</td></tr>`).join('')}</tbody></table>`
           : `<div class="aqi-none">No quote requests yet.</div>`}
       </div>
@@ -217,7 +219,9 @@
           </div>
           <div class="aqi-s" style="margin-top:8px;">
             ${q.sell_per_kg == null ? '' : `<b>${q.sell_per_kg.toFixed(2)}</b> per chargeable kg`}
-            ${bench ? ` &middot; this vendor averages <b>${bench.toFixed(2)}</b> on approved quotes` : ''}
+            &middot; ${q.sell_per_unit == null ? '<b>NA</b> per unit (no unit count given)'
+              : `<b>${q.sell_per_unit.toFixed(2)}</b> per unit`}
+            ${bench ? `<br>This vendor averages <b>${bench.toFixed(2)}</b> per kg on approved quotes.` : ''}
           </div>
           ${off != null && Math.abs(off) > 0.25
             ? `<div class="aqi-warn">${off > 0 ? 'Above' : 'Below'} this vendor's average by ${Math.abs(Math.round(off * 100))}% — worth a look before releasing.</div>` : ''}
@@ -238,6 +242,13 @@
           ${q.state === 'quoted' ? `<div class="aqi-s" style="margin-top:6px;">Already with the client${q.valid_until ? ` until ${esc(q.valid_until)}` : ''}. Re-releasing replaces the price they see.</div>` : ''}
           <div id="aqi-msg"></div>` : ''}
       `}
+      ${['approved', 'declined'].includes(q.state) ? `
+        <div style="margin-top:16px;padding-top:14px;border-top:.5px solid rgba(0,0,0,.08);">
+          <button class="aqi-btn g" id="aqi-purge" style="width:100%;color:${RED};border-color:rgba(179,63,64,.3);">
+            Delete this quote</button>
+          <div class="aqi-s" style="margin-top:5px;">Removes an agreed price and its history. Password required.</div>
+          <div id="aqi-pmsg"></div>
+        </div>` : ''}
       <div class="aqi-s" style="margin-top:12px;">
         Requested by ${esc(q.created_by_email || q.created_by_name || 'unknown')}
         on ${esc(String(q.created_at || '').slice(0, 10))}
@@ -268,6 +279,26 @@
         await load();
       } catch (e) { err(e.message || String(e)); rfq.disabled = false; }
       _busy = false;
+    });
+
+    const purge = el('aqi-purge');
+    if (purge) purge.addEventListener('click', async () => {
+      const q = (_data.quotes || []).find(x => x.id === _sel) || {};
+      if (!confirm(`Delete ${q.ref}?\n\n${q.vendor_raw || ''} · ${q.week_label || q.week_start || ''}\n`
+        + `This quote was ${q.state}. Its price, partner cost and full history will be removed permanently.`)) return;
+      const pw = prompt('Enter the deletion password:');
+      if (!pw) return;
+      purge.disabled = true;
+      try {
+        await req('/air-quotes/' + encodeURIComponent(_sel) + '/purge',
+          { method: 'POST', body: JSON.stringify({ password: pw }) });
+        _sel = null; await load();
+      } catch (e) {
+        const m = el('aqi-pmsg');
+        const t = e.message === 'bad_password' ? 'Incorrect password.' : (e.message || String(e));
+        if (m) m.innerHTML = `<div class="aqi-msg" style="background:rgba(179,63,64,.10);color:${RED};">${esc(t)}</div>`;
+        purge.disabled = false;
+      }
     });
 
     const rel = el('aqi-release');
@@ -336,7 +367,7 @@
     window.addEventListener('state:ready', load);
     setInterval(load, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v4 loaded');
+    console.log('[air-quote-review] module v5 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
