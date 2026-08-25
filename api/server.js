@@ -11047,7 +11047,9 @@ CREATE TABLE IF NOT EXISTS air_quote (
   rfq_sent_at     TEXT,                      -- when the partner was asked to price it
   released_at     TEXT, released_by TEXT,
   decided_at      TEXT, decided_by TEXT, decision_note TEXT,
-  created_by      TEXT, created_by_name TEXT,
+  created_by      TEXT, created_by_name TEXT, created_by_email TEXT,
+  decided_by_email TEXT, decided_by_name TEXT,
+  decided_via     TEXT,                      -- 'pinpoint' | 'email'
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -11101,7 +11103,27 @@ try {
   if (!_aqc.includes('rfq_sent_at')) db.exec("ALTER TABLE air_quote ADD COLUMN rfq_sent_at TEXT");
   const _aqk = db.prepare("PRAGMA table_info(air_quote_cost)").all().map(c => c.name);
   if (!_aqk.includes('transit_mode')) db.exec("ALTER TABLE air_quote_cost ADD COLUMN transit_mode TEXT");
+  // Who asked and who agreed. A dispute turns on these, so they are stored on the quote
+  // rather than reconstructed from the event log.
+  for (const col of ['created_by_email', 'decided_by_email', 'decided_by_name', 'decided_via']) {
+    if (!_aqc.includes(col)) db.exec(`ALTER TABLE air_quote ADD COLUMN ${col} TEXT`);
+  }
 } catch (e) { console.error('[air-quote:migration]', e.message); }
+
+// Clerk's full user object is already on req.user, so identity costs nothing extra here.
+function aqUserEmail(req) {
+  try {
+    const u = req.user;
+    return (u && ((u.primaryEmailAddress && u.primaryEmailAddress.emailAddress)
+      || (u.emailAddresses && u.emailAddresses[0] && u.emailAddresses[0].emailAddress))) || null;
+  } catch (e) { return null; }
+}
+function aqUserName(req) {
+  try {
+    const u = req.user; if (!u) return null;
+    return [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.username || null;
+  } catch (e) { return null; }
+}
 
 // How the freight moves. The client needs this to tell a courier movement from VelOzity
 // managed air — it changes what they can expect on tracking and handover, so it is one of
@@ -11170,6 +11192,9 @@ function aqPublic(q) {
     transit_mode: q.transit_mode || null,
     transit_label: q.transit_mode ? (AQ_TRANSIT[q.transit_mode] || q.transit_mode) : null,
     released_at: q.released_at, decided_at: q.decided_at, decision_note: q.decision_note,
+    requested_by: q.created_by_email || q.created_by_name || null,
+    decided_by: q.decided_by_email || q.decided_by_name || null,
+    decided_via: q.decided_via || null,
     created_at: q.created_at,
   };
 }
@@ -11216,13 +11241,14 @@ app.post('/air-quotes', authenticateRequest, writeOpLimiter, auditLog('create_ai
     db.prepare(`INSERT INTO air_quote
       (id, client_id, ref, week_start, week_label, vendor_raw, vendor_key, cartons, units,
        gross_weight_kg, cbm, chargeable_kg, origin, destination, client_note, state,
-       created_by, created_by_name)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'submitted', ?, ?)`)
+       created_by, created_by_name, created_by_email)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'submitted', ?, ?, ?)`)
       .run(id, c, ref, ws, String(b.week_label || '').trim() || null, vendor, aqVendorKey(vendor),
            cartons, units, gross, cbm, aqChargeableKg(gross, cbm),
            String(b.origin || '').trim() || null, String(b.destination || '').trim() || null,
            String(b.client_note || '').trim() || null,
-           (req.auth && req.auth.userId) || null, String(b.created_by_name || '').trim() || null);
+           (req.auth && req.auth.userId) || null,
+           String(b.created_by_name || '').trim() || aqUserName(req), aqUserEmail(req));
 
     aqEvent(id, null, 'submitted', (req.auth && req.auth.userId) || null, 'client', `${vendor} · ${cartons} ctn`);
 
@@ -11339,10 +11365,14 @@ app.post('/air-quotes/:id/decision', authenticateRequest, writeOpLimiter, auditL
       return res.status(409).json({ error: 'quote_expired', valid_until: q.valid_until });
 
     const to = d === 'approve' ? 'approved' : 'declined';
+    const who = aqUserEmail(req);
     db.prepare(`UPDATE air_quote SET state=?, decided_at=datetime('now'), decided_by=?, decision_note=?,
+                decided_by_email=?, decided_by_name=?, decided_via='pinpoint',
                 updated_at=datetime('now') WHERE id=?`)
-      .run(to, (req.auth && req.auth.userId) || null, String((req.body || {}).note || '').trim() || null, q.id);
-    aqEvent(q.id, 'quoted', to, (req.auth && req.auth.userId) || null, 'client', null);
+      .run(to, (req.auth && req.auth.userId) || null, String((req.body || {}).note || '').trim() || null,
+           who, aqUserName(req), q.id);
+    aqEvent(q.id, 'quoted', to, who || (req.auth && req.auth.userId) || null, 'client', 'via Pinpoint');
+    aqNotifyDecision(q.id).catch(e => console.error('[air-quote:notify-decision]', e.message));
     res.json(aqPublic(db.prepare(`SELECT q.*, k.transit_mode FROM air_quote q
       LEFT JOIN air_quote_cost k ON k.quote_id=q.id WHERE q.id=?`).get(q.id)));
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
@@ -11428,6 +11458,141 @@ app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), (re
 });
 
 // ── Internal: issue the partner's RFQ link ──
+// ── Notifications ──
+// Every send is best-effort: a mail failure is logged but never rolls back the state change
+// that triggered it. A quote that moved but whose email bounced is recoverable; a quote
+// that failed to move because of a mail outage is not.
+
+function aqMailShell(title, rows, cta, footer) {
+  const line = (k, v) => v == null || v === '' ? '' :
+    `<tr><td style="padding:4px 0;color:#6E6E73;font-size:13px;">${escHtml(k)}</td>
+         <td style="padding:4px 0;text-align:right;font-size:13px;color:#1C1C1E;">${escHtml(String(v))}</td></tr>`;
+  return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+      background:#F5F5F7;padding:24px;">
+    <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:14px;padding:24px 26px;">
+      <div style="font-size:17px;font-weight:700;color:#1C1C1E;margin-bottom:14px;">${escHtml(title)}</div>
+      <table style="width:100%;border-collapse:collapse;">${rows.map(r => line(r[0], r[1])).join('')}</table>
+      ${cta || ''}
+      ${footer ? `<div style="margin-top:18px;font-size:11px;color:#AEAEB2;line-height:1.5;">${footer}</div>` : ''}
+    </div></div>`;
+}
+
+async function aqMail(to, subject, html, text) {
+  const list = parseEmailList(to);
+  const from = process.env.EXCEPTION_EMAIL_FROM;
+  if (!list.length || !from) return { skipped: true };
+  try {
+    const r = await sendViaResend({ from, replyTo: process.env.EXCEPTION_EMAIL_REPLY_TO || undefined,
+                                    to: list, subject, html, text });
+    return { id: r.id, to: list };
+  } catch (e) { console.error('[air-quote:mail]', subject, e.message); return { error: String(e.message || e) }; }
+}
+
+const aqFullRow = (id) => db.prepare(`SELECT q.*, k.cost_amount, k.cost_currency, k.markup_pct,
+    k.transit_mode, k.partner_name, k.partner_note FROM air_quote q
+    LEFT JOIN air_quote_cost k ON k.quote_id=q.id WHERE q.id=?`).get(id);
+
+// Partner has priced it — internal needs to review. Cost and margin are fine here.
+async function aqNotifyCosted(quoteId) {
+  const q = aqFullRow(quoteId); if (!q) return;
+  const sell = aqSell(q.cost_amount, q.markup_pct);
+  const gm = sell > 0 ? Math.round((sell - q.cost_amount) / sell * 1000) / 10 : null;
+  const rows = [
+    ['Reference', q.ref], ['Shipping week', q.week_label || q.week_start], ['Vendor', q.vendor_raw],
+    ['Cartons', q.cartons], ['Chargeable weight', q.chargeable_kg + ' kg'],
+    ['Transit', AQ_TRANSIT[q.transit_mode] || q.transit_mode],
+    ['Partner cost', `${q.cost_currency || 'AUD'} ${Number(q.cost_amount).toFixed(2)}`],
+    ['Markup', q.markup_pct + '%'],
+    ['Sell price', `${q.currency} ${sell.toFixed(2)}`],
+    ['Gross margin', gm == null ? null : gm + '%'],
+    ['Priced by', q.partner_name],
+  ];
+  const html = aqMailShell(`Ready to review — ${q.ref}`, rows, '',
+    'Open Quote Review in Pinpoint to set the markup and release it to the client. Nothing is sent until you do.');
+  await aqMail(process.env.AIR_QUOTE_INTERNAL_EMAIL_TO,
+    `Air quote ready to review — ${q.ref}, ${q.vendor_raw}`, html,
+    rows.filter(r => r[1] != null).map(r => `${r[0]}: ${r[1]}`).join('\n'));
+}
+
+// Released to the client. Sell price only — no cost, no markup, no margin.
+async function aqNotifyQuoted(quoteId, origin) {
+  const q = aqFullRow(quoteId); if (!q) return;
+  const token = crypto.randomBytes(24).toString('hex');
+  const days = 30;
+  db.prepare(`INSERT INTO air_quote_token (token, quote_id, purpose, expires_at)
+              VALUES (?,?, 'client_decision', datetime('now', ?))`).run(token, q.id, `+${days} days`);
+  const base = String(process.env.PUBLIC_API_URL || origin || '').replace(/\/+$/, '');
+  const app = String(process.env.PUBLIC_APP_URL || '').replace(/\/+$/, '');
+  const link = (a) => `${base}/air-quote/decide?token=${token}&action=${a}`;
+
+  const vol = Math.round((q.cbm || 0) * AQ_VOLUMETRIC_KG_PER_CBM * 100) / 100;
+  const rows = [
+    ['Reference', q.ref], ['Shipping week', q.week_label || q.week_start], ['Vendor', q.vendor_raw],
+    ['Cartons', q.cartons], ['Units', q.units || null],
+    ['Gross weight', q.gross_weight_kg + ' kg'], ['Volume', q.cbm + ' CBM'],
+    ['Chargeable weight', `${q.chargeable_kg} kg (${vol > q.gross_weight_kg ? 'volumetric' : 'gross'})`],
+    ['Transit', AQ_TRANSIT[q.transit_mode] || q.transit_mode],
+    ['Quoted price', `${q.currency} ${Number(q.sell_amount).toFixed(2)}`],
+    ['Valid until', q.valid_until],
+  ];
+  const btn = (href, label, bg, col, br) =>
+    `<a href="${href}" style="display:inline-block;padding:12px 26px;border-radius:9px;
+      background:${bg};color:${col};border:1px solid ${br};text-decoration:none;
+      font-size:14px;font-weight:600;">${label}</a>`;
+  const cta = `<div style="margin-top:20px;text-align:center;">
+      ${btn(link('approve'), 'Approve', '#990033', '#fff', '#990033')}
+      <span style="display:inline-block;width:10px;"></span>
+      ${btn(link('decline'), 'Decline', '#fff', '#6E6E73', 'rgba(0,0,0,.18)')}
+    </div>
+    ${app ? `<div style="margin-top:14px;text-align:center;font-size:12px;">
+      <a href="${app}" style="color:#6E6E73;">or review it in Pinpoint</a></div>` : ''}`;
+  // Both buttons open a confirmation page rather than acting on the click. Mail security
+  // scanners prefetch links; a one-click GET that approved would be triggered by a scanner
+  // before anyone read the message.
+  const html = aqMailShell(`Air freight quote — ${q.ref}`, rows, cta,
+    'Approving opens a confirmation page. Chargeable weight is the greater of gross and volumetric weight, which is what air freight is billed on.');
+  await aqMail(process.env.AIR_QUOTE_CLIENT_EMAIL_TO,
+    `Air freight quote ${q.ref} — ${q.vendor_raw}, ${q.week_label || q.week_start}`, html,
+    rows.filter(r => r[1] != null).map(r => `${r[0]}: ${r[1]}`).join('\n')
+      + `\n\nApprove: ${link('approve')}\nDecline: ${link('decline')}`);
+}
+
+// Decision made. Internal gets the full picture; the partner gets a go / no-go so they
+// stop holding space on a shipment that is not happening.
+async function aqNotifyDecision(quoteId) {
+  const q = aqFullRow(quoteId); if (!q) return;
+  const approved = q.state === 'approved';
+  const who = q.decided_by_email || q.decided_by_name || 'the client';
+  const base = [
+    ['Reference', q.ref], ['Shipping week', q.week_label || q.week_start], ['Vendor', q.vendor_raw],
+    ['Cartons', q.cartons], ['Chargeable weight', q.chargeable_kg + ' kg'],
+    ['Transit', AQ_TRANSIT[q.transit_mode] || q.transit_mode],
+  ];
+
+  const internalRows = base.concat([
+    ['Quoted price', `${q.currency} ${Number(q.sell_amount || 0).toFixed(2)}`],
+    ['Partner cost', q.cost_amount == null ? null : `${q.cost_currency || 'AUD'} ${Number(q.cost_amount).toFixed(2)}`],
+    ['Markup', q.markup_pct == null ? null : q.markup_pct + '%'],
+    ['Requested by', q.created_by_email || q.created_by_name],
+    ['Decided by', who], ['Decided at', q.decided_at],
+    ['Via', q.decided_via === 'email' ? 'email link' : 'Pinpoint'],
+    ['Reason', q.decision_note],
+  ]);
+  await aqMail(process.env.AIR_QUOTE_INTERNAL_EMAIL_TO,
+    `Air quote ${approved ? 'APPROVED' : 'declined'} — ${q.ref}, ${q.vendor_raw}`,
+    aqMailShell(`Client ${approved ? 'approved' : 'declined'} ${q.ref}`, internalRows, '', ''),
+    internalRows.filter(r => r[1] != null).map(r => `${r[0]}: ${r[1]}`).join('\n'));
+
+  // The partner never sees the sell price — only whether to proceed.
+  await aqMail(process.env.AIR_QUOTE_PARTNER_EMAIL_TO,
+    `${approved ? 'Proceed' : 'Not proceeding'} — ${q.ref}, ${q.vendor_raw}`,
+    aqMailShell(approved ? `Approved — please proceed with ${q.ref}` : `Not proceeding with ${q.ref}`,
+      base, '',
+      approved ? 'The client has approved this shipment. Please proceed and confirm the booking.'
+               : 'This shipment is not going ahead. No space needs to be held.'),
+    base.filter(r => r[1] != null).map(r => `${r[0]}: ${r[1]}`).join('\n'));
+}
+
 // Issue a partner link and email it. Extracted so the RFQ can fire automatically the
 // moment a client submits — a human step here only added delay, since the request is
 // complete on arrival and there is nothing for a reviewer to decide yet.
@@ -11718,7 +11883,135 @@ app.post('/air-quote/cost', writeOpLimiter, (req, res) => {
     db.prepare(`UPDATE air_quote SET state='pending_review', updated_at=datetime('now') WHERE id=?`).run(q.id);
     db.prepare(`UPDATE air_quote_token SET used_at=datetime('now') WHERE token=?`).run(t.token);
     aqEvent(q.id, q.state, 'pending_review', String(b.partner_name || 'partner'), 'partner', 'cost submitted');
+    aqNotifyCosted(q.id).catch(e => console.error('[air-quote:notify-costed]', e.message));
     res.json({ ok: true, ref: q.ref, message: 'Cost received. Thank you.' });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Client: decide from the email link ──
+// A confirmation page, never a one-click GET. Mail scanners prefetch links; if the click
+// itself approved, Defender or Mimecast would commit the spend before anyone read it.
+app.get('/air-quote/decide', (req, res) => {
+  const fail = (msg) => res.status(403).type('html').send(aqPartnerPage(
+    `<div class="card done"><div class="tick" style="color:#B33F40">&#9888;</div>
+     <h1 style="margin-top:10px">${escHtml(msg)}</h1>
+     <div class="sub" style="margin-top:6px">You can still review this quote in Pinpoint.</div></div>`,
+    'Link unavailable'));
+  try {
+    const t = db.prepare(`SELECT * FROM air_quote_token WHERE token=? AND purpose='client_decision'`)
+                .get(String(req.query.token || ''));
+    if (!t) return fail('This link is not valid.');
+    if (t.used_at) return fail('This quote has already been decided.');
+    if (t.expires_at < new Date().toISOString().slice(0, 19).replace('T', ' '))
+      return fail('This link has expired.');
+    const q = aqFullRow(t.quote_id);
+    if (!q) return fail('This quote no longer exists.');
+    if (q.state !== 'quoted') return fail(`This quote is ${q.state} and can no longer be decided here.`);
+
+    const pre = String(req.query.action || '').toLowerCase() === 'decline' ? 'decline' : 'approve';
+    const vol = Math.round((q.cbm || 0) * AQ_VOLUMETRIC_KG_PER_CBM * 100) / 100;
+    const row = (k, v) => v == null || v === '' ? '' : `<dt>${escHtml(k)}</dt><dd>${escHtml(String(v))}</dd>`;
+
+    const body = `
+  <div class="card">
+    <h1>Air freight quote</h1>
+    <div class="sub">Confirm your decision below.</div>
+    <div class="ref">${escHtml(q.ref)}</div>
+    <dl style="margin-top:16px;">
+      ${row('Shipping week', q.week_label || q.week_start)}
+      ${row('Vendor', q.vendor_raw)}
+      ${row('Cartons', q.cartons)}
+      ${row('Units', q.units)}
+      ${row('Gross weight', q.gross_weight_kg + ' kg')}
+      ${row('Volume', q.cbm + ' CBM')}
+      ${row('Chargeable weight', q.chargeable_kg + ' kg (' + (vol > q.gross_weight_kg ? 'volumetric' : 'gross') + ')')}
+      ${row('Transit', AQ_TRANSIT[q.transit_mode] || q.transit_mode)}
+      ${row('Valid until', q.valid_until)}
+    </dl>
+    <div class="chg">
+      <div style="font-size:10px;color:var(--mid);text-transform:uppercase;letter-spacing:.06em;font-weight:600;">Quoted price</div>
+      <b>${escHtml(q.currency)} ${Number(q.sell_amount).toFixed(2)}</b>
+      <div class="n">All inclusive.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <label for="who">Your email</label>
+    <input id="who" type="email" inputmode="email" placeholder="name@company.com" autocomplete="email">
+    <label for="note">Note <span style="font-weight:400;color:#AEAEB2">(optional)</span></label>
+    <textarea id="note" placeholder="Anything to add"></textarea>
+    <button id="go-ok" style="margin-top:16px;">Approve this quote</button>
+    <button id="go-no" style="margin-top:9px;background:#fff;color:#6E6E73;border:1px solid rgba(0,0,0,.18);">Decline</button>
+    <div class="msg" id="msg"></div>
+  </div>
+
+  <script>
+  (function(){
+    var m=document.getElementById('msg'), tok=${aqJsEmbed(String(req.query.token || ''))};
+    function show(k,t){ m.className='msg '+k; m.textContent=t; }
+    ${pre === 'decline' ? "document.getElementById('go-no').focus();" : "document.getElementById('go-ok').focus();"}
+    async function send(decision, btn){
+      var who=document.getElementById('who').value.trim();
+      if(!who || who.indexOf('@')<0){ show('err','Enter your email so the decision can be recorded against you.'); return; }
+      var all=[document.getElementById('go-ok'),document.getElementById('go-no')];
+      all.forEach(function(b){ b.disabled=true; });
+      btn.textContent='Submitting\u2026';
+      try{
+        var r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({token:tok,decision:decision,decided_by_email:who,
+            note:document.getElementById('note').value||null})});
+        var j=await r.json();
+        if(!r.ok){ show('err', j.error||('Error '+r.status)); all.forEach(function(b){ b.disabled=false; }); return; }
+        document.querySelector('.wrap').innerHTML =
+          '<div class="card done"><div class="tick">\u2713</div>'+
+          '<h1 style="margin-top:10px">Quote '+(decision==='approve'?'approved':'declined')+'</h1>'+
+          '<div class="sub" style="margin-top:6px">Thank you. We have let the team know.</div></div>';
+      }catch(e){ show('err','Could not submit: '+e.message); all.forEach(function(b){ b.disabled=false; }); }
+    }
+    document.getElementById('go-ok').addEventListener('click',function(){ send('approve',this); });
+    document.getElementById('go-no').addEventListener('click',function(){ send('decline',this); });
+  })();
+  </script>`;
+    res.type('html').send(aqPartnerPage(body, `Quote ${q.ref}`));
+  } catch (e) {
+    console.error('[GET /air-quote/decide]', e);
+    res.status(500).type('html').send(aqPartnerPage(
+      `<div class="card done"><h1>Something went wrong</h1></div>`, 'Error'));
+  }
+});
+
+app.post('/air-quote/decide', writeOpLimiter, (req, res) => {
+  try {
+    const b = req.body || {};
+    const t = db.prepare(`SELECT * FROM air_quote_token WHERE token=? AND purpose='client_decision'`)
+                .get(String(b.token || ''));
+    if (!t) return res.status(403).json({ error: 'invalid_token' });
+    if (t.used_at) return res.status(409).json({ error: 'already_decided' });
+    if (t.expires_at < new Date().toISOString().slice(0, 19).replace('T', ' '))
+      return res.status(403).json({ error: 'expired_token' });
+    const q = db.prepare('SELECT * FROM air_quote WHERE id=?').get(t.quote_id);
+    if (!q) return res.status(404).json({ error: 'not_found' });
+    if (q.state !== 'quoted') return res.status(409).json({ error: 'not_awaiting_decision', state: q.state });
+
+    const d = String(b.decision || '').toLowerCase();
+    if (d !== 'approve' && d !== 'decline') return res.status(400).json({ error: 'decision must be approve or decline' });
+    const email = String(b.decided_by_email || '').trim();
+    if (!email || email.indexOf('@') < 0) return res.status(400).json({ error: 'a valid email is required' });
+    const today = new Date().toISOString().slice(0, 10);
+    if (d === 'approve' && q.valid_until && q.valid_until < today)
+      return res.status(409).json({ error: 'quote_expired', valid_until: q.valid_until });
+
+    const to = d === 'approve' ? 'approved' : 'declined';
+    db.transaction(() => {
+      db.prepare(`UPDATE air_quote SET state=?, decided_at=datetime('now'), decided_by=?,
+                  decided_by_email=?, decided_via='email', decision_note=?, updated_at=datetime('now')
+                  WHERE id=?`).run(to, email, email, String(b.note || '').trim() || null, q.id);
+      // Single use — a forwarded link cannot reverse a decision that has been made.
+      db.prepare(`UPDATE air_quote_token SET used_at=datetime('now') WHERE quote_id=? AND purpose='client_decision'`).run(q.id);
+    })();
+    aqEvent(q.id, 'quoted', to, email, 'client', 'via email link');
+    aqNotifyDecision(q.id).catch(e => console.error('[air-quote:notify-decision]', e.message));
+    res.json({ ok: true, ref: q.ref, state: to });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -11755,6 +12048,8 @@ app.post('/air-quotes/:id/release', authenticateRequest, requireRole(['admin']),
       .run(sell, validUntil, (req.auth && req.auth.userId) || null, q.id);
     aqEvent(q.id, q.state, 'quoted', (req.auth && req.auth.userId) || null, 'internal',
             `markup ${markup}% (${overridden ? 'override' : 'rate card'}) · sell ${sell}`);
+    aqNotifyQuoted(q.id, `${req.protocol}://${req.get('host')}`)
+      .catch(e => console.error('[air-quote:notify-quoted]', e.message));
 
     res.json({ quote_id: q.id, ref: q.ref, sell_amount: sell, markup_pct: markup,
                markup_source: overridden ? 'override' : 'rate_card', valid_until: validUntil,
