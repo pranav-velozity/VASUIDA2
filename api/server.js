@@ -11109,6 +11109,8 @@ CREATE TABLE IF NOT EXISTS air_quote (
   ref             TEXT,                      -- human reference, e.g. AQ-2609-014
   week_start      TEXT NOT NULL,             -- Monday of the shipping week being quoted
   week_label      TEXT,                      -- 'Week 40' as the client thinks of it
+  zendesk_ticket  TEXT,                      -- raw, as typed; also a lane-key component
+  po_numbers      TEXT,                      -- free text: one PO or several
   vendor_raw      TEXT NOT NULL,             -- exactly as typed
   vendor_key      TEXT NOT NULL,             -- normalised, for grouping only
   cartons         INTEGER NOT NULL DEFAULT 0,
@@ -11184,8 +11186,20 @@ try {
   if (!_aqk.includes('transit_mode')) db.exec("ALTER TABLE air_quote_cost ADD COLUMN transit_mode TEXT");
   // Who asked and who agreed. A dispute turns on these, so they are stored on the quote
   // rather than reconstructed from the event log.
-  for (const col of ['created_by_email', 'decided_by_email', 'decided_by_name', 'decided_via']) {
+  for (const col of ['created_by_email', 'decided_by_email', 'decided_by_name', 'decided_via',
+                     'zendesk_ticket', 'po_numbers']) {
     if (!_aqc.includes(col)) db.exec(`ALTER TABLE air_quote ADD COLUMN ${col} TEXT`);
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_air_quote_zendesk ON air_quote(client_id, zendesk_ticket)");
+  // Everything is priced and sold in USD, and no FX is applied anywhere — markup is a
+  // multiplier. An AUD label was therefore never a different price, only a wrong label.
+  // Normalise the lot rather than leaving two currencies in circulation.
+  const _usdAll = db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability='aq_usd_v2'`).get();
+  if (!_usdAll) {
+    const a = db.prepare(`UPDATE air_quote SET currency='USD' WHERE currency<>'USD'`).run().changes;
+    const b = db.prepare(`UPDATE air_quote_cost SET cost_currency='USD' WHERE cost_currency<>'USD'`).run().changes;
+    db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled) VALUES ('__meta','aq_usd_v2',1)`).run();
+    if (a || b) console.log(`[air-quote:migration] normalised ${a} quote(s) and ${b} cost row(s) to USD`);
   }
   // One-time: quotes raised under the old AUD default that have not been decided yet.
   // Decided quotes are left alone — they are a record of what was agreed, right or wrong.
@@ -11266,7 +11280,8 @@ function aqEvent(quoteId, from, to, actor, role, detail) {
 function aqPublic(q) {
   if (!q) return null;
   return {
-    id: q.id, ref: q.ref, week_start: q.week_start, week_label: q.week_label,
+    id: q.id, ref: q.ref, zendesk_ticket: q.zendesk_ticket, po_numbers: q.po_numbers,
+    week_start: q.week_start, week_label: q.week_label,
     vendor: q.vendor_raw, cartons: q.cartons, units: q.units,
     gross_weight_kg: q.gross_weight_kg, cbm: q.cbm, chargeable_kg: q.chargeable_kg,
     origin: q.origin, destination: q.destination, client_note: q.client_note,
@@ -11319,22 +11334,26 @@ app.post('/air-quotes', authenticateRequest, writeOpLimiter, auditLog('create_ai
     const units = b.units == null || b.units === '' ? null : Math.max(0, parseInt(b.units, 10) || 0);
 
     const id = aqNewId('aq');
-    // Reference: AQ-YYWW-NN, sequenced within the shipping week so it sorts naturally.
-    const wk = String(b.week_label || '').replace(/\D/g, '') || ws.slice(5, 7) + ws.slice(8, 10);
-    const like = `AQ-${ws.slice(2, 4)}${wk}-%`;
-    const last = db.prepare(`SELECT ref FROM air_quote WHERE client_id=? AND ref LIKE ? ORDER BY ref DESC LIMIT 1`).get(c, like);
-    let seq = 1; if (last && last.ref) { const m = last.ref.match(/-(\d+)$/); if (m) seq = parseInt(m[1], 10) + 1; }
-    const ref = `AQ-${ws.slice(2, 4)}${wk}-${String(seq).padStart(2, '0')}`;
+    // Reference is the Zendesk ticket, so the quote, the lane and the PO milestones all
+    // key off the same number. A ticket can spawn more than one quote — a revised carton
+    // count, a split shipment — so the second and later get a suffix.
+    const zd = String(b.zendesk_ticket || '').trim();
+    if (!zd) return res.status(400).json({ error: 'zendesk_ticket required' });
+    const zdKey = zd.replace(/[^A-Za-z0-9-]/g, '');
+    const priorN = db.prepare(`SELECT COUNT(*) n FROM air_quote WHERE client_id=? AND zendesk_ticket=?`)
+                     .get(c, zd).n;
+    const ref = priorN === 0 ? `AQ-${zdKey}` : `AQ-${zdKey}-${String(priorN + 1).padStart(2, '0')}`;
 
     db.prepare(`INSERT INTO air_quote
-      (id, client_id, ref, week_start, week_label, vendor_raw, vendor_key, cartons, units,
-       gross_weight_kg, cbm, chargeable_kg, origin, destination, client_note, state,
+      (id, client_id, ref, zendesk_ticket, po_numbers, week_start, week_label, vendor_raw, vendor_key,
+       cartons, units, gross_weight_kg, cbm, chargeable_kg, origin, destination, client_note, state,
        created_by, created_by_name, created_by_email)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'submitted', ?, ?, ?)`)
-      .run(id, c, ref, ws, String(b.week_label || '').trim() || null, vendor, aqVendorKey(vendor),
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'submitted', ?, ?, ?)`)
+      .run(id, c, ref, zd, String(b.po_numbers || b.client_note || '').trim() || null,
+           ws, String(b.week_label || '').trim() || null, vendor, aqVendorKey(vendor),
            cartons, units, gross, cbm, aqChargeableKg(gross, cbm),
            String(b.origin || '').trim() || null, String(b.destination || '').trim() || null,
-           String(b.client_note || '').trim() || null,
+           String(b.po_numbers || b.client_note || '').trim() || null,
            (req.auth && req.auth.userId) || null,
            String(b.created_by_name || '').trim() || aqUserName(req), aqUserEmail(req));
 
@@ -11703,10 +11722,11 @@ async function aqNotifyCosted(quoteId, origin) {
   const sell = aqSell(q.cost_amount, q.markup_pct);
   const gm = sell > 0 ? Math.round((sell - q.cost_amount) / sell * 1000) / 10 : null;
   const rows = [
-    ['Reference', q.ref], ['Shipping week', q.week_label || q.week_start], ['Vendor', q.vendor_raw],
+    ['Reference', q.ref], ['Zendesk', q.zendesk_ticket], ['PO number(s)', q.po_numbers],
+    ['Shipping week', q.week_label || q.week_start], ['Vendor', q.vendor_raw],
     ['Cartons', q.cartons], ['Chargeable weight', q.chargeable_kg + ' kg'],
     ['Transit', AQ_TRANSIT[q.transit_mode] || q.transit_mode],
-    ['Partner cost', `${q.cost_currency || 'AUD'} ${Number(q.cost_amount).toFixed(2)}`],
+    ['Partner cost', `USD ${Number(q.cost_amount).toFixed(2)}`],
     ['Markup', q.markup_pct + '%'],
     ['Sell price', `${q.currency} ${sell.toFixed(2)}`],
     ['Gross margin', gm == null ? null : gm + '%'],
@@ -11745,7 +11765,8 @@ async function aqNotifyQuoted(quoteId, origin) {
 
   const vol = Math.round((q.cbm || 0) * AQ_VOLUMETRIC_KG_PER_CBM * 100) / 100;
   const rows = [
-    ['Reference', q.ref], ['Shipping week', q.week_label || q.week_start], ['Vendor', q.vendor_raw],
+    ['Reference', q.ref], ['Zendesk', q.zendesk_ticket], ['PO number(s)', q.po_numbers],
+    ['Shipping week', q.week_label || q.week_start], ['Vendor', q.vendor_raw],
     ['Cartons', q.cartons], ['Units', q.units || null],
     ['Gross weight', q.gross_weight_kg + ' kg'], ['Volume', q.cbm + ' CBM'],
     ['Chargeable weight', `${q.chargeable_kg} kg (${vol > q.gross_weight_kg ? 'volumetric' : 'gross'})`],
@@ -11753,7 +11774,7 @@ async function aqNotifyQuoted(quoteId, origin) {
     ['Quoted price', `${q.currency} ${Number(q.sell_amount).toFixed(2)}`],
     ['Valid until', q.valid_until],
   ];
-  const AQ_EXCL = 'All-inclusive air freight. Excludes GST and customs clearance charges.';
+  const AQ_EXCL = 'Door-to-door all-inclusive air freight. Excludes GST and customs clearance charges.';
   const btn = (href, label, bg, col, br) =>
     `<a href="${href}" style="display:inline-block;padding:12px 26px;border-radius:9px;
       background:${bg};color:${col};border:1px solid ${br};text-decoration:none;
@@ -11768,8 +11789,9 @@ async function aqNotifyQuoted(quoteId, origin) {
   // Both buttons open a confirmation page rather than acting on the click. Mail security
   // scanners prefetch links; a one-click GET that approved would be triggered by a scanner
   // before anyone read the message.
-  // aqClientInsights has no access to the cost table by construction.
-  const insights = aqClientInsights(q);
+  // Client insights are off by default. aqClientInsights() is intentionally left in place
+  // and still cost-blind; pass it below to switch them back on.
+  const insights = [];
   const html = aqMailShell(`Air freight quote — ${q.ref}`, rows,
     `<div style="margin-top:14px;padding:10px 12px;background:#FBF6F8;border-radius:8px;
        font-size:12px;color:#1C1C1E;text-align:center;"><b>${escHtml(AQ_EXCL)}</b></div>` + cta,
@@ -11790,14 +11812,15 @@ async function aqNotifyDecision(quoteId) {
   const approved = q.state === 'approved';
   const who = q.decided_by_email || q.decided_by_name || 'the client';
   const base = [
-    ['Reference', q.ref], ['Shipping week', q.week_label || q.week_start], ['Vendor', q.vendor_raw],
+    ['Reference', q.ref], ['Zendesk', q.zendesk_ticket], ['PO number(s)', q.po_numbers],
+    ['Shipping week', q.week_label || q.week_start], ['Vendor', q.vendor_raw],
     ['Cartons', q.cartons], ['Chargeable weight', q.chargeable_kg + ' kg'],
     ['Transit', AQ_TRANSIT[q.transit_mode] || q.transit_mode],
   ];
 
   const internalRows = base.concat([
     ['Quoted price', `${q.currency} ${Number(q.sell_amount || 0).toFixed(2)}`],
-    ['Partner cost', q.cost_amount == null ? null : `${q.cost_currency || 'AUD'} ${Number(q.cost_amount).toFixed(2)}`],
+    ['Partner cost', q.cost_amount == null ? null : `USD ${Number(q.cost_amount).toFixed(2)}`],
     ['Markup', q.markup_pct == null ? null : q.markup_pct + '%'],
     ['Requested by', q.created_by_email || q.created_by_name],
     ['Decided by', who], ['Decided at', q.decided_at],
@@ -11843,6 +11866,8 @@ async function aqSendRfq(quote, opts) {
     const subj = `RFQ ${quote.ref} — air freight, ${quote.week_label || quote.week_start}, ${quote.vendor_raw}`;
     const lines = [
       `Air freight RFQ ${quote.ref}`, '',
+      quote.zendesk_ticket ? `Zendesk: ${quote.zendesk_ticket}` : null,
+      quote.po_numbers ? `PO number(s): ${quote.po_numbers}` : null,
       `Shipping week: ${quote.week_label || quote.week_start}`,
       `Vendor: ${quote.vendor_raw}`,
       `Cartons: ${quote.cartons}`,
@@ -11998,6 +12023,8 @@ app.get('/air-quote/cost', (req, res) => {
     <div class="sub">Please provide your all-inclusive cost.</div>
     <div class="ref">${escHtml(q.ref)}</div>
     <dl style="margin-top:16px;">
+      ${row('Zendesk', q.zendesk_ticket)}
+      ${row('PO number(s)', q.po_numbers)}
       ${row('Shipping week', q.week_label || q.week_start)}
       ${row('Vendor', q.vendor_raw)}
       ${row('Cartons', q.cartons)}
@@ -12011,15 +12038,9 @@ app.get('/air-quote/cost', (req, res) => {
 
   <div class="card">
     ${resubmit ? `<div class="msg ok" style="margin:0 0 6px;">A cost of ${escHtml(String(ex.cost_amount))} ${escHtml(ex.cost_currency || q.currency)} is already on file. Submitting again replaces it.</div>` : ''}
-    <label for="cost">All-inclusive cost</label>
-    <div class="row">
-      <input id="cost" type="number" min="0" step="0.01" inputmode="decimal"
-             placeholder="0.00" value="${ex.cost_amount != null ? escHtml(String(ex.cost_amount)) : ''}">
-      <select id="cur">
-        ${['USD','AUD','CNY','HKD','EUR','GBP'].map(x =>
-          `<option value="${x}" ${(ex.cost_currency || q.currency || 'USD') === x ? 'selected' : ''}>${x}</option>`).join('')}
-      </select>
-    </div>
+    <label for="cost">All-inclusive cost (USD)</label>
+    <input id="cost" type="number" min="0" step="0.01" inputmode="decimal"
+           placeholder="0.00" value="${ex.cost_amount != null ? escHtml(String(ex.cost_amount)) : ''}">
     <label for="transit">Transit</label>
     <select id="transit">
       <option value="">— select —</option>
@@ -12049,7 +12070,7 @@ app.get('/air-quote/cost', (req, res) => {
       try{
         var r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({token:${aqJsEmbed(String(req.query.token || ''))},
-            cost_amount:v, transit_mode:tm, cost_currency:document.getElementById('cur').value,
+            cost_amount:v, transit_mode:tm, cost_currency:'USD',
             cost_valid_until:document.getElementById('valid').value||null,
             partner_name:document.getElementById('who').value||null,
             partner_note:document.getElementById('note').value||null})});
@@ -12101,7 +12122,7 @@ app.post('/air-quote/cost', writeOpLimiter, (req, res) => {
         costed_by=excluded.costed_by, transit_mode=excluded.transit_mode,
         updated_at=datetime('now')`)
       .run(q.id, String(b.partner_name || '').trim() || null, Math.round(cost * 100) / 100,
-           String(b.cost_currency || q.currency).trim(), String(b.cost_valid_until || '').trim() || null,
+           'USD', String(b.cost_valid_until || '').trim() || null,
            String(b.partner_note || '').trim() || null, String(b.partner_name || '').trim() || null,
            dflt, dflt, transit);
 
@@ -12149,6 +12170,8 @@ app.get('/air-quote/release', (req, res) => {
     <div class="sub">Internal &mdash; confirm before the client sees this price.</div>
     <div class="ref">${escHtml(q.ref)}</div>
     <dl style="margin-top:16px;">
+      ${row('Zendesk', q.zendesk_ticket)}
+      ${row('PO number(s)', q.po_numbers)}
       ${row('Shipping week', q.week_label || q.week_start)}
       ${row('Vendor', q.vendor_raw)}
       ${row('Cartons', q.cartons)}
@@ -12266,6 +12289,8 @@ app.get('/air-quote/decide', (req, res) => {
     <div class="sub">Confirm your decision below.</div>
     <div class="ref">${escHtml(q.ref)}</div>
     <dl style="margin-top:16px;">
+      ${row('Zendesk', q.zendesk_ticket)}
+      ${row('PO number(s)', q.po_numbers)}
       ${row('Shipping week', q.week_label || q.week_start)}
       ${row('Vendor', q.vendor_raw)}
       ${row('Cartons', q.cartons)}
@@ -12279,7 +12304,7 @@ app.get('/air-quote/decide', (req, res) => {
     <div class="chg">
       <div style="font-size:10px;color:var(--mid);text-transform:uppercase;letter-spacing:.06em;font-weight:600;">Quoted price</div>
       <b>${escHtml(q.currency)} ${Number(q.sell_amount).toFixed(2)}</b>
-      <div class="n">All-inclusive air freight. <b>Excludes GST and customs clearance charges.</b></div>
+      <div class="n"><b>Door-to-door all-inclusive air freight.</b> Excludes GST and customs clearance charges.</div>
     </div>
   </div>
 
