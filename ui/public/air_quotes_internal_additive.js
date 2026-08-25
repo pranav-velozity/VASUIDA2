@@ -134,7 +134,22 @@
     const q = list.find(x => x.id === _sel) || list.find(x => x.state === 'pending_review' || x.state === 'costed') || list[0] || null;
     _sel = q ? q.id : null;
 
-    body.innerHTML = `<div class="aqi-grid">
+    const ins = _data.insights || [], bands = _data.win_bands || [];
+    body.innerHTML = `
+    ${(ins.length || bands.length) ? `<div class="aqi-card" style="margin-bottom:16px;">
+      <div class="aqi-sec">Pricing intelligence</div>
+      ${ins.map(t => `<div style="font-size:12px;color:${DARK};line-height:1.55;margin-bottom:6px;">
+        <span style="color:${BRAND};font-weight:700;">&bull;</span> ${esc(t)}</div>`).join('')}
+      ${bands.length ? `<div style="display:grid;grid-template-columns:repeat(${bands.length},minmax(0,1fr));gap:10px;margin-top:10px;">
+        ${bands.map(b => `<div style="border:.5px solid rgba(0,0,0,.09);border-radius:9px;padding:8px 10px;">
+          <div style="font-size:8px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};">${esc(b.band)} /kg</div>
+          <div style="font-size:16px;font-weight:700;color:${b.win_pct >= 70 ? GREEN : b.win_pct >= 40 ? AMBER : RED};margin-top:2px;">${b.win_pct}%</div>
+          <div style="font-size:9px;color:${LIGHT};">won &middot; ${b.n} decided</div>
+        </div>`).join('')}
+      </div>
+      <div class="aqi-s" style="margin-top:7px;">Bands are terciles of decided quotes. Internal only &mdash; never shown to the client or the partner.</div>` : ''}
+    </div>` : ''}
+    <div class="aqi-grid">
       <div class="aqi-card">
         <div class="aqi-sec">Queue &middot; ${list.length} quote(s)</div>
         ${list.length ? `<table class="aqi"><thead><tr>
@@ -367,7 +382,7 @@
     window.addEventListener('state:ready', load);
     setInterval(load, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v5 loaded');
+    console.log('[air-quote-review] module v6 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
