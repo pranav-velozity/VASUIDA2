@@ -11319,6 +11319,36 @@ app.post('/air-quotes/:id/decision', authenticateRequest, writeOpLimiter, auditL
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Client: withdraw a request ──
+// Allowed until a decision exists. Once approved or declined the quote is a commercial
+// record — the decision, the price and who made it are the things a dispute turns on, so
+// those rows are never removable from this endpoint.
+//
+// Deletes are explicit rather than relying on FK cascade: PRAGMA foreign_keys is not
+// guaranteed on, and a silently orphaned cost row is worse than a verbose delete.
+app.delete('/air-quotes/:id', authenticateRequest, writeOpLimiter, auditLog('delete_air_quote'), (req, res) => {
+  try {
+    const c = curClient();
+    const q = db.prepare('SELECT * FROM air_quote WHERE id=? AND client_id=?').get(req.params.id, c);
+    if (!q) return res.status(404).json({ error: 'not_found' });
+    if (['approved', 'declined'].includes(q.state))
+      return res.status(409).json({ error: 'already_decided', state: q.state,
+        message: 'A quote that has been approved or declined is a commercial record and cannot be withdrawn.' });
+
+    const hadCost = !!db.prepare('SELECT 1 x FROM air_quote_cost WHERE quote_id=?').get(q.id);
+    db.transaction(() => {
+      // Invalidate any partner link first, so a magic link already in an inbox cannot post
+      // a cost against a quote that no longer exists.
+      db.prepare('DELETE FROM air_quote_token WHERE quote_id=?').run(q.id);
+      db.prepare('DELETE FROM air_quote_cost  WHERE quote_id=?').run(q.id);
+      db.prepare('DELETE FROM air_quote_event WHERE quote_id=?').run(q.id);
+      db.prepare('DELETE FROM air_quote       WHERE id=?').run(q.id);
+    })();
+    console.log(`[air-quote] ${q.ref} withdrawn from state ${q.state}${hadCost ? ' (partner had already priced it)' : ''}`);
+    res.json({ id: q.id, ref: q.ref, deleted: true, had_partner_cost: hadCost });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Internal: the review queue ──
 // Admin only. This is the one surface where cost and margin are visible.
 app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), (req, res) => {
