@@ -242,6 +242,7 @@
       return `<div class="aq-none">No quotes yet. Use <b>New request</b> above &mdash; you can raise one for any upcoming week without waiting for the plan.</div>`;
     return `
       ${tilesHtml()}
+      <div class="aq-s" style="margin:0 0 8px;">All quoted prices are all-inclusive air freight and <b>exclude GST and customs clearance charges</b>.</div>
       ${open.length ? `<div class="aq-sec">Open</div>
         <table class="aq">${TH}<tbody>${rowsHtml(open, true)}</tbody></table>` : ''}
       ${hist.length ? `<div class="aq-sec">History</div>
@@ -287,7 +288,7 @@
   function formHtml() {
     const weeks = weekOptions();
     return `
-      <div class="aq-s" style="margin-bottom:2px;">Choose any upcoming week &mdash; the plan doesn't need to be uploaded yet.</div>
+      <div class="aq-s" style="margin-bottom:2px;">Choose any upcoming week &mdash; the plan doesn't need to be uploaded yet. Quotes are all-inclusive air freight and exclude GST and customs clearance charges.</div>
 
       <label class="aq-lbl" for="aq-week">Shipping week</label>
       <select class="aq-in" id="aq-week">
@@ -453,7 +454,7 @@
     window.addEventListener('air-quotes:changed', load);
     setInterval(check, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v8 loaded');
+    console.log('[air-quotes] module v9 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
