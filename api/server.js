@@ -6125,6 +6125,25 @@ app.put('/plan/weeks/:mondayISO',
   (req, res) => {
   const monday = String(req.params.mondayISO);
   const arr = normalizePlanArray(req.body, monday);
+  // A plan sheet without a facility column silently blanks every facility-filtered view —
+  // charts render empty, Executive refuses to load, and nothing errors, so it looks like a
+  // code fault rather than a missing column. Stamp it at ingest instead: the query
+  // parameter if given, otherwise the single facility mapped to this client.
+  const _facStamp = (() => {
+    const q = normFacility(req.query.facility || '');
+    if (q) return q;
+    try {
+      const rows = db.prepare('SELECT facility_code FROM client_facility WHERE client_id=?').all(curClient());
+      return rows.length === 1 ? rows[0].facility_code : '';   // ambiguous: leave it alone
+    } catch (e) { return ''; }
+  })();
+  let _stamped = 0;
+  if (_facStamp) {
+    for (const r of arr) {
+      if (r && !String(r.facility_name || r.facility || '').trim()) { r.facility_name = _facStamp; _stamped++; }
+    }
+    if (_stamped) console.log(`[plan-upload] stamped facility ${_facStamp} on ${_stamped} row(s) for ${monday}`);
+  }
   db.prepare(`
     INSERT INTO plans(week_start, data, updated_at, client_id)
     VALUES(?, ?, datetime('now'), ?)
@@ -6142,6 +6161,39 @@ app.put('/plan/weeks/:mondayISO',
     console.error('[plan-upload→snapshots] failed (non-fatal):', e.message || e);
   }
   return res.json(arr);
+});
+
+// Repair a plan already stored without a facility. Same rule as the upload path, applied
+// to a week that is already in the database — avoids a re-upload just to add one column.
+app.post('/plan/weeks/:mondayISO/stamp-facility',
+  authenticateRequest, requireRole(['admin']), writeOpLimiter, auditLog('stamp_plan_facility'),
+  (req, res) => {
+  try {
+    const monday = String(req.params.mondayISO);
+    const c = curClient();
+    const row = db.prepare('SELECT data FROM plans WHERE client_id=? AND week_start=?').get(c, monday);
+    if (!row) return res.status(404).json({ error: 'no_plan_for_week', week_start: monday });
+
+    let fac = normFacility((req.body || {}).facility || req.query.facility || '');
+    if (!fac) {
+      const rows = db.prepare('SELECT facility_code FROM client_facility WHERE client_id=?').all(c);
+      if (rows.length === 1) fac = rows[0].facility_code;
+    }
+    if (!fac) return res.status(400).json({ error: 'facility_required',
+      message: 'This client maps to more than one facility — pass one explicitly.' });
+
+    const arr = safeJsonParse(row.data, []) || [];
+    let n = 0;
+    for (const r of arr) {
+      if (r && !String(r.facility_name || r.facility || '').trim()) { r.facility_name = fac; n++; }
+    }
+    if (!n) return res.json({ week_start: monday, facility: fac, stamped: 0,
+      message: 'Every row already carries a facility.' });
+    db.prepare(`UPDATE plans SET data=?, updated_at=datetime('now') WHERE client_id=? AND week_start=?`)
+      .run(JSON.stringify(arr), c, monday);
+    console.log(`[plan-repair] stamped facility ${fac} on ${n} row(s) for ${monday}`);
+    res.json({ week_start: monday, facility: fac, stamped: n, total_rows: arr.length });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
 app.post('/plan/weeks/:mondayISO/zero',
