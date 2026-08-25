@@ -238,7 +238,15 @@
           ${q.state === 'quoted' ? `<div class="aqi-s" style="margin-top:6px;">Already with the client${q.valid_until ? ` until ${esc(q.valid_until)}` : ''}. Re-releasing replaces the price they see.</div>` : ''}
           <div id="aqi-msg"></div>` : ''}
       `}
-      ${q.decided_at ? `<div class="aqi-s" style="margin-top:12px;">Client ${q.state} on ${esc(String(q.decided_at).slice(0, 10))}${q.decision_note ? ` — ${esc(q.decision_note)}` : ''}</div>` : ''}
+      <div class="aqi-s" style="margin-top:12px;">
+        Requested by ${esc(q.created_by_email || q.created_by_name || 'unknown')}
+        on ${esc(String(q.created_at || '').slice(0, 10))}
+        ${q.decided_at ? `<br>${q.state === 'approved' ? 'Approved' : q.state === 'declined' ? 'Declined' : q.state}
+          by ${esc(q.decided_by_email || q.decided_by_name || 'unknown')}
+          on ${esc(String(q.decided_at).slice(0, 10))}
+          <span style="color:${LIGHT}">(${esc(q.decided_via === 'email' ? 'email link' : 'Pinpoint')})</span>
+          ${q.decision_note ? `<br>&ldquo;${esc(q.decision_note)}&rdquo;` : ''}` : ''}
+      </div>
     </div>`;
   }
 
@@ -328,7 +336,7 @@
     window.addEventListener('state:ready', load);
     setInterval(load, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v3 loaded');
+    console.log('[air-quote-review] module v4 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

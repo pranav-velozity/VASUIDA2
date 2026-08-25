@@ -221,7 +221,7 @@
         ${q.state === 'quoted'
           ? `<button class="aq-btn" data-ok="${esc(q.id)}" style="padding:5px 10px;">Approve</button>
              <button class="aq-btn g" data-no="${esc(q.id)}" style="padding:5px 10px;margin-left:4px;">Decline</button>`
-          : (q.decided_at ? `<span style="color:${LIGHT};font-size:10px;">${esc(String(q.decided_at).slice(0, 10))}</span>` : '')}
+          : (q.decided_at ? `<span style="color:${LIGHT};font-size:10px;" title="${esc(q.decided_by || '')}">${esc(String(q.decided_at).slice(0, 10))}${q.decided_by ? `<br>${esc(String(q.decided_by).split('@')[0])}` : ''}</span>` : '')}
         ${!['approved', 'declined'].includes(q.state)
           ? `<button class="aq-del" data-del="${esc(q.id)}" title="Withdraw this request">&times;</button>` : ''}
       </td></tr>`).join('');
@@ -448,7 +448,7 @@
     window.addEventListener('air-quotes:changed', load);
     setInterval(check, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v6 loaded');
+    console.log('[air-quotes] module v7 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
