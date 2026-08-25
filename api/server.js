@@ -74,8 +74,21 @@ const corsOptions = {
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-pinpoint-client']
 };
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
+// Same-origin requests still carry an Origin header on POST/PUT/DELETE. The allow list
+// holds the SPA hosts, not the API's own, so a page served BY this app posting back to it
+// was rejected — and a rejected CORS callback throws, which Express renders as an HTML
+// error page. Anything expecting JSON then fails on "Unexpected token '<'".
+// Everything else keeps the existing options untouched.
+const corsDelegate = (req, cb) => {
+  const origin = req.headers.origin, host = req.headers.host;
+  if (origin && host) {
+    try { if (new URL(origin).host === host) return cb(null, { ...corsOptions, origin: true }); }
+    catch (e) { /* malformed Origin — fall through to the allow list */ }
+  }
+  cb(null, corsOptions);
+};
+app.use(cors(corsDelegate));
+app.options('*', cors(corsDelegate));
 app.use(express.json({ limit: '100mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
 // 🔐 Rate Limiting
@@ -11055,6 +11068,7 @@ CREATE TABLE IF NOT EXISTS air_quote_cost (
   markup_default  REAL,                      -- what the rate card said at the time
   markup_source   TEXT,                      -- 'rate_card' | 'override'
   markup_reason   TEXT,
+  transit_mode    TEXT,                      -- 'DHL' | 'VOZAIR' — set by the partner
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -11085,7 +11099,17 @@ CREATE INDEX IF NOT EXISTS idx_air_quote_event_q ON air_quote_event(quote_id, cr
 try {
   const _aqc = db.prepare("PRAGMA table_info(air_quote)").all().map(c => c.name);
   if (!_aqc.includes('rfq_sent_at')) db.exec("ALTER TABLE air_quote ADD COLUMN rfq_sent_at TEXT");
+  const _aqk = db.prepare("PRAGMA table_info(air_quote_cost)").all().map(c => c.name);
+  if (!_aqk.includes('transit_mode')) db.exec("ALTER TABLE air_quote_cost ADD COLUMN transit_mode TEXT");
 } catch (e) { console.error('[air-quote:migration]', e.message); }
+
+// How the freight moves. The client needs this to tell a courier movement from VelOzity
+// managed air — it changes what they can expect on tracking and handover, so it is one of
+// the few partner-supplied fields that IS client-visible.
+const AQ_TRANSIT = {
+  DHL:    'Courier — DHL',
+  VOZAIR: 'VOZAIR — VelOzity managed air',
+};
 
 function aqNewId(p) { return (p || 'aq') + '_' + crypto.randomBytes(10).toString('hex'); }
 
@@ -11143,6 +11167,8 @@ function aqPublic(q) {
              ? q.sell_amount : null,
     currency: q.currency, valid_until: q.valid_until,
     rfq_sent_at: q.rfq_sent_at,
+    transit_mode: q.transit_mode || null,
+    transit_label: q.transit_mode ? (AQ_TRANSIT[q.transit_mode] || q.transit_mode) : null,
     released_at: q.released_at, decided_at: q.decided_at, decision_note: q.decision_note,
     created_at: q.created_at,
   };
@@ -11221,7 +11247,9 @@ app.get('/air-quotes', authenticateRequest, (req, res) => {
   try {
     const c = curClient();
     aqExpireStale(c);
-    const rows = db.prepare(`SELECT * FROM air_quote WHERE client_id=? ORDER BY week_start DESC, created_at DESC`).all(c);
+    const rows = db.prepare(`SELECT q.*, k.transit_mode FROM air_quote q
+                             LEFT JOIN air_quote_cost k ON k.quote_id = q.id
+                             WHERE q.client_id=? ORDER BY q.week_start DESC, q.created_at DESC`).all(c);
     const open = rows.filter(q => ['submitted','rfq_sent','costed','pending_review','quoted'].includes(q.state));
     const history = rows.filter(q => ['approved','declined','expired'].includes(q.state));
 
@@ -11315,7 +11343,8 @@ app.post('/air-quotes/:id/decision', authenticateRequest, writeOpLimiter, auditL
                 updated_at=datetime('now') WHERE id=?`)
       .run(to, (req.auth && req.auth.userId) || null, String((req.body || {}).note || '').trim() || null, q.id);
     aqEvent(q.id, 'quoted', to, (req.auth && req.auth.userId) || null, 'client', null);
-    res.json(aqPublic(db.prepare('SELECT * FROM air_quote WHERE id=?').get(q.id)));
+    res.json(aqPublic(db.prepare(`SELECT q.*, k.transit_mode FROM air_quote q
+      LEFT JOIN air_quote_cost k ON k.quote_id=q.id WHERE q.id=?`).get(q.id)));
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -11382,6 +11411,8 @@ app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), (re
           ...q,
           cost: k.cost_amount ?? null, cost_currency: k.cost_currency || q.currency,
           partner_name: k.partner_name || null, partner_note: k.partner_note || null,
+          transit_mode: k.transit_mode || null,
+          transit_label: k.transit_mode ? (AQ_TRANSIT[k.transit_mode] || k.transit_mode) : null,
           cost_valid_until: k.cost_valid_until || null,
           markup_pct: markup, markup_default_pct: dflt,
           markup_source: k.markup_source || 'rate_card', markup_reason: k.markup_reason || null,
@@ -11554,7 +11585,7 @@ app.get('/air-quote/cost', (req, res) => {
         origin: q.origin, destination: q.destination,
         note: q.client_note, currency: q.currency,
         submitted: ex.cost_amount != null ? {
-          cost_amount: ex.cost_amount, cost_currency: ex.cost_currency,
+          cost_amount: ex.cost_amount, transit_mode: ex.transit_mode, cost_currency: ex.cost_currency,
           cost_valid_until: ex.cost_valid_until, partner_note: ex.partner_note,
           partner_name: ex.partner_name } : null });
     }
@@ -11598,6 +11629,12 @@ app.get('/air-quote/cost', (req, res) => {
           `<option value="${x}" ${(ex.cost_currency || q.currency) === x ? 'selected' : ''}>${x}</option>`).join('')}
       </select>
     </div>
+    <label for="transit">Transit</label>
+    <select id="transit">
+      <option value="">— select —</option>
+      ${Object.entries(AQ_TRANSIT).map(([k, v]) =>
+        `<option value="${k}" ${ex.transit_mode === k ? 'selected' : ''}>${escHtml(v)}</option>`).join('')}
+    </select>
     <label for="valid">Rate valid until</label>
     <input id="valid" type="date" value="${escHtml(ex.cost_valid_until || '')}">
     <label for="who">Your name</label>
@@ -11615,11 +11652,13 @@ app.get('/air-quote/cost', (req, res) => {
     b.addEventListener('click', async function(){
       var v=parseFloat(document.getElementById('cost').value);
       if(!(v>0)){ show('err','Enter a cost greater than zero.'); return; }
+      var tm=document.getElementById('transit').value;
+      if(!tm){ show('err','Choose how the freight will move.'); return; }
       b.disabled=true; b.textContent='Submitting\u2026';
       try{
         var r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({token:${aqJsEmbed(String(req.query.token || ''))},
-            cost_amount:v, cost_currency:document.getElementById('cur').value,
+            cost_amount:v, transit_mode:tm, cost_currency:document.getElementById('cur').value,
             cost_valid_until:document.getElementById('valid').value||null,
             partner_name:document.getElementById('who').value||null,
             partner_note:document.getElementById('note').value||null})});
@@ -11657,20 +11696,23 @@ app.post('/air-quote/cost', writeOpLimiter, (req, res) => {
 
     const cost = Number(b.cost_amount);
     if (!isFinite(cost) || cost <= 0) return res.status(400).json({ error: 'cost_amount must be a positive number' });
+    const transit = String(b.transit_mode || '').trim().toUpperCase();
+    if (!AQ_TRANSIT[transit]) return res.status(400).json({ error: 'transit_mode must be DHL or VOZAIR' });
     const dflt = aqMarkupDefault(q.client_id);
     db.prepare(`INSERT INTO air_quote_cost
       (quote_id, partner_name, cost_amount, cost_currency, cost_valid_until, partner_note,
-       costed_at, costed_by, markup_pct, markup_default, markup_source, updated_at)
-      VALUES (?,?,?,?,?,?, datetime('now'), ?, ?, ?, 'rate_card', datetime('now'))
+       costed_at, costed_by, markup_pct, markup_default, markup_source, transit_mode, updated_at)
+      VALUES (?,?,?,?,?,?, datetime('now'), ?, ?, ?, 'rate_card', ?, datetime('now'))
       ON CONFLICT(quote_id) DO UPDATE SET
         partner_name=excluded.partner_name, cost_amount=excluded.cost_amount,
         cost_currency=excluded.cost_currency, cost_valid_until=excluded.cost_valid_until,
         partner_note=excluded.partner_note, costed_at=excluded.costed_at,
-        costed_by=excluded.costed_by, updated_at=datetime('now')`)
+        costed_by=excluded.costed_by, transit_mode=excluded.transit_mode,
+        updated_at=datetime('now')`)
       .run(q.id, String(b.partner_name || '').trim() || null, Math.round(cost * 100) / 100,
            String(b.cost_currency || q.currency).trim(), String(b.cost_valid_until || '').trim() || null,
            String(b.partner_note || '').trim() || null, String(b.partner_name || '').trim() || null,
-           dflt, dflt);
+           dflt, dflt, transit);
 
     // Straight to review — a costed quote is never released to the client automatically.
     db.prepare(`UPDATE air_quote SET state='pending_review', updated_at=datetime('now') WHERE id=?`).run(q.id);
