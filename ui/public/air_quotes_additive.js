@@ -91,11 +91,17 @@
               font:600 12px inherit;padding:8px 14px;cursor:pointer;}
       .aq-btn.g{background:#fff;color:${DARK};border:.5px solid rgba(0,0,0,.16);}
       .aq-btn:disabled{opacity:.55;cursor:default;}
-      .aq-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin:12px 0 4px;}
-      .aq-tile{border:.5px solid rgba(0,0,0,.09);border-radius:11px;padding:11px 13px;box-shadow:${LIFT};}
-      .aq-tl{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};}
-      .aq-tv{font-size:19px;font-weight:700;color:${DARK};margin-top:2px;font-variant-numeric:tabular-nums;letter-spacing:-.02em;}
-      .aq-ts{font-size:10px;color:${LIGHT};margin-top:2px;}
+      /* Three across, two even rows. Six tiles in an auto-fit grid reflowed to an odd
+         trailing row at most widths, which is what made it look unfinished. */
+      .aq-tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0 4px;}
+      @media (max-width:640px){ .aq-tiles{grid-template-columns:repeat(2,minmax(0,1fr));} }
+      .aq-tile{border:.5px solid rgba(0,0,0,.09);border-radius:9px;padding:8px 10px;box-shadow:${LIFT};
+               min-height:0;}
+      .aq-tl{font-size:8px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};
+             line-height:1.2;}
+      .aq-tv{font-size:15px;font-weight:700;color:${DARK};margin-top:2px;font-variant-numeric:tabular-nums;
+             letter-spacing:-.02em;line-height:1.15;}
+      .aq-ts{font-size:9px;color:${LIGHT};margin-top:1px;line-height:1.25;}
       table.aq{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px;}
       table.aq th{text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.05em;
                   color:${LIGHT};font-weight:600;padding:6px;border-bottom:.5px solid rgba(0,0,0,.08);}
@@ -200,7 +206,6 @@
         ${tile('Per unit', t.per_unit == null ? '—' : money(t.per_unit, cur),
                t.per_unit == null ? 'no unit counts entered' : t.per_unit_basis + ' of ' + t.approved_count + ' quotes')}
         ${tile('Approval rate', t.approval_rate_pct == null ? '—' : t.approval_rate_pct + '%', '')}
-        ${tile('Avg turnaround', t.avg_turnaround_hours == null ? '—' : Math.round(t.avg_turnaround_hours) + 'h', 'request to quote')}
       </div>
       <div class="aq-s" style="margin:2px 0 10px;">Averages cover approved quotes only, over a rolling ${t.window_weeks} weeks. Air rates move seasonally &mdash; read them against the trend, not as a fixed benchmark.</div>`;
   }
@@ -448,7 +453,7 @@
     window.addEventListener('air-quotes:changed', load);
     setInterval(check, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v7 loaded');
+    console.log('[air-quotes] module v8 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
