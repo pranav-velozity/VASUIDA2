@@ -382,6 +382,19 @@ function iconContainer() {
 //   POST /flow/week/:weekStart?facility=LKWF   { ...patch }
 //
 // Guardrail: when we "prime" from backend we suppress write-through to avoid loops.
+  // Resolved once from tenancy and reused. getFacility() is synchronous and was called
+  // during the first render, before the plan fetch had resolved — so it returned '' and the
+  // whole week loaded with no facility, which is why the graphs were empty until you
+  // navigated away and back. This gives it an answer that does not depend on load order.
+  let _facFallback = '';
+  (async function primeFacilityFallback() {
+    try {
+      const who = await api('/tenancy/whoami');
+      const codes = (who && who.resolved && who.resolved.facility_codes) || [];
+      if (codes.length) _facFallback = String(codes[0]);
+    } catch (e) { /* leave empty; the plan path still works */ }
+  })();
+
   function getFacility() {
     try {
       // 1. Plan data is always authoritative — facility_name from uploaded plan
@@ -392,10 +405,10 @@ function iconContainer() {
       // 2. Cached in state.facility (set from plan on setWeek)
       const f = (window.state && window.state.facility) ? String(window.state.facility).trim() : '';
       if (f) return f;
-      // 3. No plan loaded yet — return empty (patchFlowWeek will skip until plan is loaded)
-      return '';
+      // 3. Tenancy fallback — covers both a cold render and a plan with no facility column.
+      return _facFallback || '';
     } catch {
-      return '';
+      return _facFallback || '';
     }
   }
 
@@ -6521,6 +6534,19 @@ async function refresh() {
     ws = normalizeWeekStartToMonday(ws);
     if (!window.state) window.state = {};
     window.state.weekStart = ws;
+    // The first render used to run before the plan arrived, leaving every facility-scoped
+    // call unfiltered and the graphs blank until the user changed week and came back. If we
+    // still have no facility at this point, fetch the plan and derive one before continuing.
+    if (!getFacility()) {
+      try {
+        const plan = await loadPlan(ws);
+        if (Array.isArray(plan) && plan.length) {
+          window.state.plan = plan;
+          const pf = plan.map(p => String(p.facility_name || p.facility || '').trim()).find(Boolean);
+          if (pf) window.state.facility = pf;
+        }
+      } catch (e) { /* fall through to the tenancy fallback */ }
+    }
     // Prime week-scoped local stores from backend so data is shared across browsers.
     await primeFlowWeekFromBackend(ws);
     // Backend sync pulse (cross-browser): periodically re-prime this week if backend changed.
