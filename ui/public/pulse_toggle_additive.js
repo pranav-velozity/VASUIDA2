@@ -52,11 +52,21 @@
         JSON.stringify({ error: 'pulse_off', message: 'Pulse is switched off.' }),
         { status: 409, headers: { 'Content-Type': 'application/json' } }));
     }
-    const o = init ? { ...init } : {};
-    const h = new Headers(o.headers || (typeof input === 'object' && input && input.headers) || {});
-    h.set('x-pulse-enabled', '1');
-    o.headers = h;
-    return _origFetch(typeof input === 'string' ? input : input.url, o);
+    // Merge onto whatever the caller passed. A Request object carries its own method and
+    // body, so it is rebuilt rather than reduced to a URL — passing input.url alone would
+    // quietly turn a POST into a GET.
+    if (typeof input === 'string') {
+      const o = init ? { ...init } : {};
+      const h = new Headers(o.headers || {});
+      h.set('x-pulse-enabled', '1');
+      o.headers = h;
+      return _origFetch(input, o);
+    }
+    try {
+      const r = new Request(input, init || undefined);
+      r.headers.set('x-pulse-enabled', '1');
+      return _origFetch(r);
+    } catch (e) { return _origFetch(input, init); }
   };
 
   // ── toggle UI ──
@@ -126,7 +136,7 @@
     // The bar is rendered by the host page and may not exist yet on a cold load.
     let tries = 0;
     const t = setInterval(() => { mount(); if (document.getElementById('ptg-wrap') || ++tries > 40) clearInterval(t); }, 300);
-    console.log('[pulse-toggle] v1 loaded — Pulse OFF by default');
+    console.log('[pulse-toggle] v2 loaded — Pulse OFF by default');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
