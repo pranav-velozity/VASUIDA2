@@ -146,10 +146,11 @@
       const anchor = el('wh-btn-upload'); if (!anchor || !anchor.parentNode) return null;
       b = document.createElement('button');
       b.id = 'aq-btn-open';
-      b.style.cssText = 'font-size:11px;font-weight:500;color:#1C1C1E;background:#fff;'
-        + 'border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:7px 20px;cursor:pointer;'
-        + 'display:flex;align-items:center;justify-content:center;gap:6px;min-width:132px;'
-        + 'white-space:nowrap;transition:all .15s;';
+      b.style.cssText = 'font-size:11px;font-weight:500;color:#fff;background:' + BRAND + ';'
+        + 'border:0.5px solid ' + BRAND + ';border-radius:8px;padding:7px 18px;cursor:pointer;'
+        + 'display:inline-flex;align-items:center;justify-content:center;gap:6px;'
+        + 'min-width:140px;flex:0 0 auto;flex-wrap:nowrap;white-space:nowrap;line-height:1;'
+        + 'transition:all .15s;';
       b.title = 'Request an air freight quote';
       b.addEventListener('click', openModal);
       anchor.parentNode.insertBefore(b, anchor);
@@ -160,12 +161,12 @@
   function paintButton() {
     const b = ensureButton(); if (!b) return;
     const n = (_data && _data.awaiting_approval) || 0;
-    b.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M3 12h5l2-3 3 6 2-3h6"/><path d="M12 3v3M12 18v3"/></svg>Air Quotes`
-      + (n ? `<span style="background:${BRAND};color:#fff;font-size:9px;font-weight:700;
-           border-radius:20px;padding:1px 6px;margin-left:2px;">${n}</span>` : '');
-    b.style.borderColor = n ? 'rgba(153,0,51,.45)' : 'rgba(0,0,0,0.15)';
+    b.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;">
+        <path d="M21 15.5 3 10V7l2 .5 1.5 2 4 1L9 4.5 11 5l3 4.5 6 1.6a1.6 1.6 0 0 1 0 3.1z"/></svg>`
+      + `<span style="white-space:nowrap;">Air Quotes</span>`
+      + (n ? `<span style="background:#fff;color:${BRAND};font-size:9px;font-weight:700;
+           border-radius:20px;padding:1px 6px;margin-left:1px;">${n}</span>` : '');
   }
 
   // ── modal body: two views behind one button ──
@@ -413,7 +414,7 @@
     window.addEventListener('air-quotes:changed', load);
     setInterval(check, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v3 loaded');
+    console.log('[air-quotes] module v4 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

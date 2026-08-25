@@ -88,8 +88,8 @@
   }
 
   const ST = {
-    submitted:      { t: 'Needs RFQ',    c: AMBER, b: 'rgba(183,121,31,.12)' },
-    rfq_sent:       { t: 'With partner', c: MID,   b: 'rgba(0,0,0,.05)' },
+    submitted:      { t: 'Sending',            c: AMBER, b: 'rgba(183,121,31,.12)' },
+    rfq_sent:       { t: 'Submitted to partner', c: MID, b: 'rgba(0,0,0,.05)' },
     costed:         { t: 'Costed',       c: BRAND, b: 'rgba(153,0,51,.10)' },
     pending_review: { t: 'Review',       c: BRAND, b: 'rgba(153,0,51,.10)' },
     quoted:         { t: 'With client',  c: MID,   b: 'rgba(0,0,0,.05)' },
@@ -137,11 +137,12 @@
       <div class="aqi-card">
         <div class="aqi-sec">Queue &middot; ${list.length} quote(s)</div>
         ${list.length ? `<table class="aqi"><thead><tr>
-            <th>Ref</th><th>Week</th><th>Vendor</th><th class="n">Chargeable kg</th>
+            <th>Ref</th><th>Week</th><th>Sent to partner</th><th>Vendor</th><th class="n">Chargeable kg</th>
             <th class="n">Cost</th><th class="n">Sell</th><th class="n">$/kg</th><th>Status</th>
           </tr></thead><tbody>${list.map(x => `<tr data-q="${esc(x.id)}" class="${x.id === _sel ? 'sel' : ''}">
             <td><b>${esc(x.ref || '')}</b></td>
             <td style="color:${MID}">${esc(x.week_label || x.week_start)}</td>
+            <td style="color:${LIGHT};font-size:10px;">${x.rfq_sent_at ? esc(String(x.rfq_sent_at).slice(0, 10)) : '—'}</td>
             <td>${esc(x.vendor_raw)}</td>
             <td class="n">${nf(x.chargeable_kg)}</td>
             <td class="n">${x.cost == null ? '—' : money(x.cost, x.cost_currency)}</td>
@@ -184,14 +185,20 @@
         <dt><b>Chargeable</b></dt><dd><b>${nf(q.chargeable_kg)} kg</b></dd>
         ${q.partner_name ? `<dt>Priced by</dt><dd>${esc(q.partner_name)}</dd>` : ''}
         ${q.cost_valid_until ? `<dt>Cost valid to</dt><dd>${esc(q.cost_valid_until)}</dd>` : ''}
+        ${q.rfq_sent_at ? `<dt>Sent to partner</dt><dd>${esc(String(q.rfq_sent_at).slice(0, 10))}</dd>` : ''}
       </dl>
       ${q.client_note ? `<div style="font-size:11px;color:${MID};margin-top:8px;"><b>Client note:</b> ${esc(q.client_note)}</div>` : ''}
       ${q.partner_note ? `<div style="font-size:11px;color:${MID};margin-top:4px;"><b>Partner note:</b> ${esc(q.partner_note)}</div>` : ''}
 
       ${q.cost == null ? `
-        <div class="aqi-calc"><div class="aqi-s">No partner cost yet.</div></div>
-        ${canRfq ? `<button class="aqi-btn" id="aqi-rfq" style="margin-top:14px;width:100%;">
-          ${q.state === 'submitted' ? 'Send RFQ to partner' : 'Reissue partner link'}</button>` : ''}
+        <div class="aqi-calc">
+          <div class="aqi-s">${q.rfq_sent_at
+            ? `Submitted to the partner on <b>${esc(String(q.rfq_sent_at).slice(0, 10))}</b>. Awaiting their cost.`
+            : 'Not yet submitted to the partner.'}</div>
+        </div>
+        ${canRfq ? `<button class="aqi-btn g" id="aqi-rfq" style="margin-top:14px;width:100%;">
+          Reissue partner link</button>
+          <div class="aqi-s" style="margin-top:5px;">Use if the link expired, bounced, or a second contact needs it.</div>` : ''}
         <div id="aqi-msg"></div>`
       : `
         <div class="aqi-calc">
@@ -222,7 +229,7 @@
           <label class="aqi-lbl" for="aqi-valid">Quote valid for (days)</label>
           <input class="aqi-in" id="aqi-valid" type="number" min="1" step="1" value="7">
           <div style="display:flex;gap:10px;margin-top:16px;">
-            ${canRfq ? `<button class="aqi-btn g" id="aqi-rfq" style="flex:1;">Back to partner</button>` : ''}
+            ${canRfq ? `<button class="aqi-btn g" id="aqi-rfq" style="flex:1;">Reissue link</button>` : ''}
             <button class="aqi-btn" id="aqi-release" style="flex:2;">
               ${q.state === 'quoted' ? 'Re-release to client' : 'Release to client'}</button>
           </div>
@@ -319,7 +326,7 @@
     window.addEventListener('state:ready', load);
     setInterval(load, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v1 loaded');
+    console.log('[air-quote-review] module v2 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
