@@ -1,16 +1,20 @@
 /* ── VelOzity Pinpoint — Air Freight Quotes (client surface) v1 ──
    Panel on the Week Hub plus the request modal.
 
-   Two deliberate choices:
+   Three deliberate choices:
 
-   1. The modal carries its OWN week selector rather than inheriting the page's week.
-      Quotes run several weeks ahead of the plan upload — a request raised in week 35 is
-      usually for week 40 — so making the client navigate to the target week first would
-      be backwards. Nothing here pre-fills from the plan, because there is no plan yet.
+   1. Everything lives behind one toolbar button beside Upload Plan. No permanent panel —
+      the Week Hub is busy enough, and quotes are an occasional action, not a daily read.
 
-   2. The panel lists ALL open quotes regardless of week, not just the displayed one. A
-      quote raised for week 40 while sitting on week 35 would otherwise be invisible the
-      moment it was submitted.
+   2. The button carries a count badge when quotes are awaiting approval. Without the
+      panel there is nothing else to signal it, and a released quote sitting unseen is the
+      one failure this workflow cannot afford.
+
+   3. The modal carries its OWN week selector rather than inheriting the page's week, and
+      lists ALL quotes regardless of week. Quotes run several weeks ahead of the plan
+      upload — a request raised in week 35 is usually for week 40 — so inheriting the
+      displayed week would be backwards, and a week filter would hide what was just
+      raised. Nothing pre-fills from the plan, because there is no plan yet.
 
    Nothing in this file references cost or margin. The server never sends them to a client;
    this module must never start asking. */
@@ -72,12 +76,7 @@
     if (el('aq-styles')) return;
     const s = document.createElement('style'); s.id = 'aq-styles';
     s.textContent = `
-      #aq-panel{margin:14px 0;}
-      .aq-card{background:#fff;border:.5px solid rgba(0,0,0,.09);border-radius:12px;
-               padding:15px 17px;box-shadow:${LIFT};}
-      .aq-h{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:2px;}
-      .aq-t{font-size:13px;font-weight:700;color:${DARK};}
-      .aq-s{font-size:10px;color:${LIGHT};}
+      .aq-s{font-size:10px;color:${LIGHT};margin-top:2px;}
       .aq-btn{border:0;border-radius:9px;background:${BRAND};color:#fff;
               font:600 12px inherit;padding:8px 14px;cursor:pointer;}
       .aq-btn.g{background:#fff;color:${DARK};border:.5px solid rgba(0,0,0,.16);}
@@ -97,8 +96,19 @@
       .aq-ov{position:fixed;inset:0;background:rgba(0,0,0,.34);z-index:9600;display:flex;
              align-items:flex-start;justify-content:center;padding:28px 18px;overflow:auto;
              -webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);}
-      .aq-modal{background:#fff;border-radius:16px;width:min(520px,100%);padding:22px 24px;
+      /* Wide enough for the quote table without horizontal scroll; the form stays
+         comfortable inside it. */
+      .aq-modal{background:#fff;border-radius:16px;width:min(920px,100%);padding:22px 24px 26px;
                 box-shadow:0 18px 60px rgba(0,0,0,.22);}
+      .aq-x{background:none;border:0;font-size:22px;line-height:1;color:${LIGHT};cursor:pointer;padding:0 2px;}
+      .aq-x:hover{color:${DARK};}
+      .aq-tabs{display:inline-flex;border:.5px solid rgba(0,0,0,.14);border-radius:9px;
+               overflow:hidden;margin:14px 0 4px;}
+      .aq-tab{border:0;background:#fff;color:${MID};font:600 11px inherit;padding:7px 15px;cursor:pointer;
+              display:inline-flex;align-items:center;}
+      .aq-sec{font-size:9px;font-weight:700;color:${LIGHT};text-transform:uppercase;
+              letter-spacing:.06em;margin:16px 0 2px;}
+      #aq-body{max-height:min(66vh,720px);overflow:auto;padding-right:2px;}
       .aq-lbl{display:block;font-size:11px;font-weight:600;color:${MID};margin:12px 0 4px;}
       .aq-in{width:100%;padding:9px 11px;border:.5px solid rgba(0,0,0,.14);border-radius:9px;
              font:inherit;font-size:13px;color:${DARK};background:#fff;}
@@ -122,35 +132,71 @@
   const pill = st => { const s = STATE_STYLE[st] || STATE_STYLE.submitted;
     return `<span class="aq-pill" style="color:${s.c};background:${s.b}">${s.t}</span>`; };
 
-  // ── mount ──
+  // ── mount: a button in the Week Hub action bar, next to Upload Plan ──
   function onWeekHub() {
     const h = (location.hash || '').toLowerCase();
     return h === '' || h === '#' || h.includes('week-hub') || h.includes('flow') || h.includes('dashboard');
   }
-  function ensureHost() {
-    let host = el('aq-panel');
-    if (!host) {
-      const dash = el('page-dashboard'); if (!dash) return null;
-      host = document.createElement('div'); host.id = 'aq-panel';
-      dash.appendChild(host);                     // below the existing week content
+
+  // Matches wh-btn-upload's inline styling rather than importing a new visual language
+  // into a toolbar that already has one.
+  function ensureButton() {
+    let b = el('aq-btn-open');
+    if (!b) {
+      const anchor = el('wh-btn-upload'); if (!anchor || !anchor.parentNode) return null;
+      b = document.createElement('button');
+      b.id = 'aq-btn-open';
+      b.style.cssText = 'font-size:11px;font-weight:500;color:#1C1C1E;background:#fff;'
+        + 'border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:7px 14px;cursor:pointer;'
+        + 'display:flex;align-items:center;gap:5px;transition:all .15s;';
+      b.title = 'Request an air freight quote';
+      b.addEventListener('click', openModal);
+      anchor.parentNode.insertBefore(b, anchor);
     }
-    return host;
+    return b;
   }
 
-  // ── panel ──
-  function render() {
-    const host = ensureHost(); if (!host || !_data) return;
-    const t = _data.tiles || {}, cur = t.currency || 'AUD';
-    const open = _data.open || [], hist = (_data.history || []).slice(0, 12);
+  function paintButton() {
+    const b = ensureButton(); if (!b) return;
+    const n = (_data && _data.awaiting_approval) || 0;
+    b.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 12h5l2-3 3 6 2-3h6"/><path d="M12 3v3M12 18v3"/></svg>Air Quotes`
+      + (n ? `<span style="background:${BRAND};color:#fff;font-size:9px;font-weight:700;
+           border-radius:20px;padding:1px 6px;margin-left:2px;">${n}</span>` : '');
+    b.style.borderColor = n ? 'rgba(153,0,51,.45)' : 'rgba(0,0,0,0.15)';
+  }
 
+  // ── modal body: two views behind one button ──
+  // Defaults to Quotes when something is awaiting approval, otherwise to the request form.
+  // The alternative — always opening on the form — buries the one thing needing action.
+  let _view = null;
+
+  function tilesHtml() {
+    const t = (_data && _data.tiles) || {}, cur = t.currency || 'AUD';
+    if (!t.approved_count) return '';
     const tile = (label, value, sub) => `<div class="aq-tile">
       <div class="aq-tl">${esc(label)}</div><div class="aq-tv">${value}</div>
       <div class="aq-ts">${esc(sub || '')}</div></div>`;
+    return `<div class="aq-tiles">
+        ${tile('Approved', nf(t.approved_count), 'last ' + t.window_weeks + ' weeks')}
+        ${tile('Total spend', money(t.total_spend, cur), '')}
+        ${tile('Per chargeable kg', t.per_chargeable_kg == null ? '—' : money(t.per_chargeable_kg, cur), 'not per gross kg')}
+        ${tile('Per carton', t.per_carton == null ? '—' : money(t.per_carton, cur), '')}
+        ${tile('Per unit', t.per_unit == null ? '—' : money(t.per_unit, cur),
+               t.per_unit == null ? 'no unit counts entered' : t.per_unit_basis + ' of ' + t.approved_count + ' quotes')}
+        ${tile('Approval rate', t.approval_rate_pct == null ? '—' : t.approval_rate_pct + '%', '')}
+        ${tile('Avg turnaround', t.avg_turnaround_hours == null ? '—' : Math.round(t.avg_turnaround_hours) + 'h', 'request to quote')}
+      </div>
+      <div class="aq-s" style="margin:2px 0 10px;">Averages cover approved quotes only, over a rolling ${t.window_weeks} weeks. Air rates move seasonally &mdash; read them against the trend, not as a fixed benchmark.</div>`;
+  }
 
-    const rows = (list, showAction) => list.map(q => `<tr>
+  function rowsHtml(list, showAction) {
+    return list.map(q => `<tr>
       <td><b>${esc(q.ref || '')}</b><div style="color:${LIGHT};font-size:10px;">${esc(q.week_label || q.week_start)}</div></td>
       <td>${esc(q.vendor)}</td>
       <td class="n">${nf(q.cartons)}</td>
+      <td class="n">${q.units ? nf(q.units) : '—'}</td>
       <td class="n">${nf(q.chargeable_kg)}</td>
       <td class="n">${q.quoted_amount == null ? '—' : money(q.quoted_amount, q.currency)}</td>
       <td>${pill(q.state)}${q.state === 'quoted' && q.valid_until ? `<div style="color:${LIGHT};font-size:9px;margin-top:2px;">until ${esc(q.valid_until)}</div>` : ''}</td>
@@ -158,81 +204,54 @@
         ${showAction && q.state === 'quoted'
           ? `<button class="aq-btn" data-ok="${esc(q.id)}" style="padding:5px 10px;">Approve</button>
              <button class="aq-btn g" data-no="${esc(q.id)}" style="padding:5px 10px;margin-left:4px;">Decline</button>`
-          : (q.decided_at ? `<span style="color:${LIGHT};font-size:10px;">${esc(String(q.decided_at).slice(0,10))}</span>` : '')}
+          : (q.decided_at ? `<span style="color:${LIGHT};font-size:10px;">${esc(String(q.decided_at).slice(0, 10))}</span>` : '')}
       </td></tr>`).join('');
-
-    host.innerHTML = `
-      <div class="aq-card">
-        <div class="aq-h">
-          <div><div class="aq-t">Air freight quotes</div>
-            <div class="aq-s">${open.length ? nf(open.length) + ' open' : 'No open requests'}${
-              _data.awaiting_approval ? ` · <b style="color:${BRAND}">${_data.awaiting_approval} awaiting your approval</b>` : ''}</div></div>
-          <button class="aq-btn" id="aq-new">Request a quote</button>
-        </div>
-
-        ${t.approved_count ? `<div class="aq-tiles">
-          ${tile('Approved', nf(t.approved_count), 'last ' + t.window_weeks + ' weeks')}
-          ${tile('Total spend', money(t.total_spend, cur), '')}
-          ${tile('Per chargeable kg', t.per_chargeable_kg == null ? '—' : money(t.per_chargeable_kg, cur), 'not per gross kg')}
-          ${tile('Per carton', t.per_carton == null ? '—' : money(t.per_carton, cur), '')}
-          ${tile('Per unit', t.per_unit == null ? '—' : money(t.per_unit, cur),
-                 t.per_unit == null ? 'no unit counts entered' : t.per_unit_basis + ' of ' + t.approved_count + ' quotes')}
-          ${tile('Approval rate', t.approval_rate_pct == null ? '—' : t.approval_rate_pct + '%', '')}
-          ${tile('Avg turnaround', t.avg_turnaround_hours == null ? '—' : Math.round(t.avg_turnaround_hours) + 'h', 'request to quote')}
-        </div>
-        <div class="aq-s" style="margin-bottom:4px;">Averages cover approved quotes only, over a rolling ${t.window_weeks} weeks. Air rates move seasonally &mdash; read them against the trend, not as a fixed benchmark.</div>` : ''}
-
-        ${open.length ? `<table class="aq"><thead><tr>
-            <th>Reference</th><th>Vendor</th><th class="n">Cartons</th><th class="n">Chargeable kg</th>
-            <th class="n">Quoted</th><th>Status</th><th></th></tr></thead>
-          <tbody>${rows(open, true)}</tbody></table>`
-          : `<div class="aq-none">No open quote requests. Raise one for any upcoming week &mdash; you don't need the plan uploaded first.</div>`}
-
-        ${hist.length ? `<div style="font-size:10px;font-weight:700;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;margin:16px 0 2px;">History</div>
-          <table class="aq"><thead><tr>
-            <th>Reference</th><th>Vendor</th><th class="n">Cartons</th><th class="n">Chargeable kg</th>
-            <th class="n">Quoted</th><th>Status</th><th></th></tr></thead>
-          <tbody>${rows(hist, false)}</tbody></table>` : ''}
-        <div id="aq-msg"></div>
-      </div>`;
-
-    el('aq-new').addEventListener('click', openModal);
-    host.querySelectorAll('[data-ok]').forEach(b => b.addEventListener('click', () => decide(b.getAttribute('data-ok'), 'approve')));
-    host.querySelectorAll('[data-no]').forEach(b => b.addEventListener('click', () => decide(b.getAttribute('data-no'), 'decline')));
   }
 
+  const TH = `<thead><tr><th>Reference</th><th>Vendor</th><th class="n">Cartons</th>
+      <th class="n">Units</th><th class="n">Chargeable kg</th><th class="n">Quoted</th>
+      <th>Status</th><th></th></tr></thead>`;
+
+  function quotesHtml() {
+    const open = (_data && _data.open) || [], hist = (_data && _data.history) || [];
+    if (!open.length && !hist.length)
+      return `<div class="aq-none">No quotes yet. Use <b>New request</b> above &mdash; you can raise one for any upcoming week without waiting for the plan.</div>`;
+    return `
+      ${tilesHtml()}
+      ${open.length ? `<div class="aq-sec">Open</div>
+        <table class="aq">${TH}<tbody>${rowsHtml(open, true)}</tbody></table>` : ''}
+      ${hist.length ? `<div class="aq-sec">History</div>
+        <table class="aq">${TH}<tbody>${rowsHtml(hist, false)}</tbody></table>` : ''}`;
+  }
+
+  // Approve / decline. Confirmed with the amount, and recorded against the Clerk identity
+  // rather than "whoever opened the email" — this commits spend.
   async function decide(id, decision) {
-    const q = (_data.open || []).find(x => x.id === id) || {};
+    const all = ((_data && _data.open) || []).concat((_data && _data.history) || []);
+    const q = all.find(x => x.id === id) || {};
     const label = decision === 'approve' ? 'Approve' : 'Decline';
     if (!confirm(`${label} ${q.ref || 'this quote'}?\n\n${q.vendor || ''} · ${money(q.quoted_amount, q.currency)}\n\nThis is recorded against your Pinpoint login.`)) return;
     let note = null;
-    if (decision === 'decline') { note = prompt('Reason for declining (optional):', '') || null; }
+    if (decision === 'decline') note = prompt('Reason for declining (optional):', '') || null;
     try {
       await req('/air-quotes/' + encodeURIComponent(id) + '/decision',
         { method: 'POST', body: JSON.stringify({ decision, note }) });
       await load();
-    } catch (e) {
-      const m = el('aq-msg');
-      if (m) m.innerHTML = `<div class="aq-msg" style="background:rgba(179,63,64,.10);color:${RED};">${esc(e.message || e)}</div>`;
-    }
+      if (document.querySelector('.aq-ov')) paintModal();
+    } catch (e) { alert('Could not record the decision: ' + (e.message || e)); }
   }
 
   // ── modal ──
   function closeModal() { const o = document.querySelector('.aq-ov'); if (o) o.remove(); }
 
-  function openModal() {
-    styles(); closeModal();
+  function formHtml() {
     const weeks = weekOptions();
-    const o = document.createElement('div'); o.className = 'aq-ov';
-    o.addEventListener('click', e => { if (e.target === o) closeModal(); });
-    o.innerHTML = `<div class="aq-modal">
-      <div style="font-size:15px;font-weight:700;color:${DARK};">Request an air freight quote</div>
-      <div style="font-size:11px;color:${LIGHT};margin-top:2px;">Choose any upcoming week — the plan doesn't need to be uploaded yet.</div>
+    return `
+      <div class="aq-s" style="margin-bottom:2px;">Choose any upcoming week &mdash; the plan doesn't need to be uploaded yet.</div>
 
       <label class="aq-lbl" for="aq-week">Shipping week</label>
       <select class="aq-in" id="aq-week">
-        ${weeks.map(w => `<option value="${w.value}" data-wk="Week ${w.week}" ${w.next ? 'selected' : ''}>
-          Week ${w.week} · ${esc(w.date)}${w.past ? '  (past)' : ''}</option>`).join('')}
+        ${weeks.map(w => `<option value="${w.value}" data-wk="Week ${w.week}" ${w.next ? 'selected' : ''}>Week ${w.week} · ${esc(w.date)}${w.past ? '  (past)' : ''}</option>`).join('')}
       </select>
 
       <label class="aq-lbl" for="aq-vendor">Vendor</label>
@@ -253,7 +272,7 @@
           <input class="aq-in" id="aq-cbm" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00"></div>
       </div>
 
-      <div class="aq-chg" id="aq-chg">
+      <div class="aq-chg">
         <div style="font-size:9px;color:${MID};text-transform:uppercase;letter-spacing:.06em;font-weight:600;">Chargeable weight</div>
         <b id="aq-chgv">—</b>
         <div style="font-size:10px;color:${MID};margin-top:3px;" id="aq-chgn">Air freight bills on the greater of gross and volumetric weight.</div>
@@ -266,46 +285,93 @@
         <button class="aq-btn g" id="aq-cancel" style="flex:1;padding:11px;">Cancel</button>
         <button class="aq-btn" id="aq-submit" style="flex:2;padding:11px;">Send request</button>
       </div>
-      <div id="aq-mmsg"></div>
+      <div id="aq-mmsg"></div>`;
+  }
+
+  function paintModal() {
+    const b = el('aq-body'); if (!b) return;
+    const awaiting = (_data && _data.awaiting_approval) || 0;
+    b.innerHTML = _view === 'form' ? formHtml() : quotesHtml();
+
+    document.querySelectorAll('[data-tab]').forEach(t => {
+      const on = t.getAttribute('data-tab') === _view;
+      t.style.color = on ? '#fff' : MID;
+      t.style.background = on ? DARK : '#fff';
+    });
+    const badge = el('aq-tabbadge');
+    if (badge) badge.innerHTML = awaiting ? `<span style="background:${BRAND};color:#fff;font-size:9px;font-weight:700;border-radius:20px;padding:1px 6px;margin-left:5px;">${awaiting}</span>` : '';
+
+    if (_view === 'form') {
+      // Live chargeable weight. Seeing it before submitting removes an entire category of
+      // "why is this so expensive" once the quote comes back.
+      const recalc = () => {
+        const g = Number(el('aq-gross').value) || 0, c = Number(el('aq-cbm').value) || 0;
+        const vol = Math.round(c * 166.67 * 100) / 100;
+        const chg = Math.max(g, vol);
+        el('aq-chgv').textContent = chg ? nf(Math.round(chg * 100) / 100) + ' kg' : '—';
+        el('aq-chgn').innerHTML = chg
+          ? `Greater of gross (${nf(g)} kg) and volumetric (${nf(vol)} kg at 166.67 kg/CBM) &mdash; <b>${vol > g ? 'volumetric' : 'gross'}</b> applies.`
+          : 'Air freight bills on the greater of gross and volumetric weight.';
+      };
+      ['aq-gross', 'aq-cbm'].forEach(id => el(id).addEventListener('input', recalc));
+      el('aq-cancel').addEventListener('click', closeModal);
+      el('aq-submit').addEventListener('click', submitRequest);
+    } else {
+      b.querySelectorAll('[data-ok]').forEach(x => x.addEventListener('click', () => decide(x.getAttribute('data-ok'), 'approve')));
+      b.querySelectorAll('[data-no]').forEach(x => x.addEventListener('click', () => decide(x.getAttribute('data-no'), 'decline')));
+    }
+  }
+
+  async function submitRequest() {
+    const sel = el('aq-week');
+    const payload = {
+      week_start: sel.value,
+      week_label: sel.selectedOptions[0].getAttribute('data-wk'),
+      vendor: el('aq-vendor').value.trim(),
+      cartons: parseInt(el('aq-cartons').value, 10) || 0,
+      units: el('aq-units').value === '' ? null : (parseInt(el('aq-units').value, 10) || 0),
+      gross_weight_kg: Number(el('aq-gross').value) || 0,
+      cbm: Number(el('aq-cbm').value) || 0,
+      client_note: el('aq-note').value.trim() || null,
+    };
+    const fail = m => { const t = el('aq-mmsg'); if (t) t.innerHTML = `<div class="aq-msg" style="background:rgba(179,63,64,.10);color:${RED};">${esc(m)}</div>`; };
+    if (!payload.vendor) return fail('Vendor is required.');
+    if (!payload.gross_weight_kg && !payload.cbm) return fail('Enter a gross weight or a CBM figure.');
+    const btn = el('aq-submit'); btn.disabled = true; btn.textContent = 'Sending…';
+    try {
+      await req('/air-quotes', { method: 'POST', body: JSON.stringify(payload) });
+      await load();
+      _view = 'quotes';          // land on the list so the new request is visible
+      paintModal();
+    } catch (e) { fail(e.message || String(e)); btn.disabled = false; btn.textContent = 'Send request'; }
+  }
+
+  function openModal() {
+    styles(); closeModal();
+    _view = ((_data && _data.awaiting_approval) || 0) ? 'quotes' : (((_data && _data.open) || []).length || ((_data && _data.history) || []).length ? 'quotes' : 'form');
+    const o = document.createElement('div'); o.className = 'aq-ov';
+    o.addEventListener('click', e => { if (e.target === o) closeModal(); });
+    o.innerHTML = `<div class="aq-modal">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;">
+        <div><div style="font-size:15px;font-weight:700;color:${DARK};">Air freight quotes</div>
+          <div class="aq-s">Request, track and approve &mdash; all weeks</div></div>
+        <button class="aq-x" id="aq-close">&times;</button>
+      </div>
+      <div class="aq-tabs">
+        <button class="aq-tab" data-tab="quotes">Quotes<span id="aq-tabbadge"></span></button>
+        <button class="aq-tab" data-tab="form">New request</button>
+      </div>
+      <div id="aq-body"></div>
     </div>`;
     document.body.appendChild(o);
-
-    // Live chargeable weight. Showing it before submission removes an entire category of
-    // "why is this so expensive" once the quote comes back.
-    const recalc = () => {
-      const g = Number(el('aq-gross').value) || 0, c = Number(el('aq-cbm').value) || 0;
-      const vol = Math.round(c * 166.67 * 100) / 100;
-      const chg = Math.max(g, vol);
-      el('aq-chgv').textContent = chg ? nf(Math.round(chg * 100) / 100) + ' kg' : '—';
-      el('aq-chgn').innerHTML = chg
-        ? `Greater of gross (${nf(g)} kg) and volumetric (${nf(vol)} kg at 166.67 kg/CBM) &mdash; <b>${vol > g ? 'volumetric' : 'gross'}</b> applies.`
-        : 'Air freight bills on the greater of gross and volumetric weight.';
-    };
-    ['aq-gross', 'aq-cbm'].forEach(id => el(id).addEventListener('input', recalc));
-
-    el('aq-cancel').addEventListener('click', closeModal);
-    el('aq-submit').addEventListener('click', async () => {
-      const sel = el('aq-week');
-      const payload = {
-        week_start: sel.value,
-        week_label: sel.selectedOptions[0].getAttribute('data-wk'),
-        vendor: el('aq-vendor').value.trim(),
-        cartons: parseInt(el('aq-cartons').value, 10) || 0,
-        units: el('aq-units').value === '' ? null : (parseInt(el('aq-units').value, 10) || 0),
-        gross_weight_kg: Number(el('aq-gross').value) || 0,
-        cbm: Number(el('aq-cbm').value) || 0,
-        client_note: el('aq-note').value.trim() || null,
-      };
-      const fail = m => { el('aq-mmsg').innerHTML = `<div class="aq-msg" style="background:rgba(179,63,64,.10);color:${RED};">${esc(m)}</div>`; };
-      if (!payload.vendor) return fail('Vendor is required.');
-      if (!payload.gross_weight_kg && !payload.cbm) return fail('Enter a gross weight or a CBM figure.');
-      const btn = el('aq-submit'); btn.disabled = true; btn.textContent = 'Sending…';
-      try {
-        await req('/air-quotes', { method: 'POST', body: JSON.stringify(payload) });
-        closeModal();
-        await load();
-      } catch (e) { fail(e.message || String(e)); btn.disabled = false; btn.textContent = 'Send request'; }
+    el('aq-close').addEventListener('click', closeModal);
+    document.querySelectorAll('[data-tab]').forEach(t =>
+      t.addEventListener('click', () => { _view = t.getAttribute('data-tab'); paintModal(); }));
+    document.addEventListener('keydown', function esc2(ev) {
+      if (ev.key === 'Escape') { closeModal(); document.removeEventListener('keydown', esc2); }
     });
+    paintModal();
+    load().then(() => { if (document.querySelector('.aq-ov')) paintModal(); });
   }
 
   // ── load / gate ──
@@ -313,24 +379,30 @@
     try {
       _data = await req('/air-quotes');
       try { _vendors = (await req('/air-quotes/vendors')).vendors || []; } catch (e) {}
-      render();
-    } catch (e) { /* leave the panel as it was */ }
+      paintButton();
+    } catch (e) { /* leave the button as it was */ }
   }
 
   async function check() {
     styles();
     const active = window.pinpointClient || 'unknown';
-    if (!onWeekHub()) { const h = el('aq-panel'); if (h) h.style.display = 'none'; return; }
-    const h = el('aq-panel'); if (h) h.style.display = '';
+    const existing = el('aq-btn-open');
+    if (!onWeekHub()) { if (existing) existing.style.display = 'none'; return; }
+    if (existing) existing.style.display = '';
     if (_capClient === active) { if (_on) load(); return; }
     // Fail closed on a definite refusal; ignore transient errors so a cold load (401 before
-    // the Clerk token is ready) never permanently hides the panel.
+    // the Clerk token is ready) never permanently removes the button.
     try { _data = await req('/air-quotes'); _on = true; }
-    catch (e) { if (e.status === 403 || e.status === 409) { _on = false; _capClient = active;
-                  const p = el('aq-panel'); if (p) p.remove(); } return; }
+    catch (e) {
+      if (e.status === 403 || e.status === 409) {
+        _on = false; _capClient = active;
+        const b = el('aq-btn-open'); if (b) b.remove();
+      }
+      return;
+    }
     _capClient = active;
     try { _vendors = (await req('/air-quotes/vendors')).vendors || []; } catch (e) {}
-    render();
+    paintButton();
   }
 
   function init() {
@@ -340,7 +412,7 @@
     window.addEventListener('air-quotes:changed', load);
     setInterval(check, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v1 loaded');
+    console.log('[air-quotes] module v2 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
