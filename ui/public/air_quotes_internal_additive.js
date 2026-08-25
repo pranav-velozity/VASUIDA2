@@ -20,7 +20,7 @@
   const el = id => document.getElementById(id);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
   const nf = n => Number(n || 0).toLocaleString();
-  const money = (n, c) => n == null ? '—' : (c || 'AUD') + ' ' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const money = (n, c) => n == null ? '—' : (c || 'USD') + ' ' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const apiBase = () => (document.querySelector('meta[name="api-base"]')?.content || window.apiBase || '').replace(/\/+$/, '');
 
   async function tok() { if (window.Clerk?.session) { try { return await window.Clerk.session.getToken(); } catch (e) {} } return null; }
@@ -161,8 +161,8 @@
             <td style="color:${LIGHT};font-size:10px;">${x.rfq_sent_at ? esc(String(x.rfq_sent_at).slice(0, 10)) : '—'}</td>
             <td>${esc(x.vendor_raw)}</td>
             <td class="n">${nf(x.chargeable_kg)}</td>
-            <td class="n">${x.cost == null ? '—' : money(x.cost, x.cost_currency)}</td>
-            <td class="n">${x.sell_preview == null ? '—' : money(x.sell_preview, x.currency)}</td>
+            <td class="n">${x.cost == null ? '—' : money(x.cost, 'USD')}</td>
+            <td class="n">${x.sell_preview == null ? '—' : money(x.sell_preview, 'USD')}</td>
             <td class="n">${x.sell_per_kg == null ? '—' : x.sell_per_kg.toFixed(2)}</td>
             <td class="n">${x.sell_per_unit == null
               ? `<span style="color:${LIGHT}">NA</span>` : x.sell_per_unit.toFixed(2)}</td>
@@ -201,6 +201,8 @@
         <dt>Gross weight</dt><dd>${nf(q.gross_weight_kg)} kg</dd>
         <dt>Volume</dt><dd>${nf(q.cbm)} CBM</dd>
         <dt><b>Chargeable</b></dt><dd><b>${nf(q.chargeable_kg)} kg</b></dd>
+        ${q.zendesk_ticket ? `<dt>Zendesk</dt><dd>${esc(q.zendesk_ticket)}</dd>` : ''}
+        ${q.po_numbers ? `<dt>PO number(s)</dt><dd>${esc(q.po_numbers)}</dd>` : ''}
         ${q.transit_label ? `<dt>Transit</dt><dd>${esc(q.transit_label)}</dd>` : ''}
         ${q.partner_name ? `<dt>Priced by</dt><dd>${esc(q.partner_name)}</dd>` : ''}
         ${q.cost_valid_until ? `<dt>Cost valid to</dt><dd>${esc(q.cost_valid_until)}</dd>` : ''}
@@ -222,11 +224,11 @@
       : `
         <div class="aqi-calc">
           <dl class="aqi-kv">
-            <dt>Partner cost</dt><dd>${money(q.cost, q.cost_currency)}</dd>
+            <dt>Partner cost</dt><dd>${money(q.cost, 'USD')}</dd>
             <dt>Markup</dt><dd>${q.markup_pct}%${q.markup_source === 'override' ? ` <span style="color:${AMBER}">(override)</span>` : ''}</dd>
           </dl>
           <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:8px;">
-            <div><div class="aqi-s">Sell price</div><div class="aqi-big">${money(q.sell_preview, q.currency)}</div></div>
+            <div><div class="aqi-s">Sell price</div><div class="aqi-big">${money(q.sell_preview, 'USD')}</div></div>
             <div style="text-align:right;">
               <div class="aqi-s">Gross margin</div>
               <div style="font-size:15px;font-weight:700;color:${DARK};">${q.gross_margin_pct == null ? '—' : q.gross_margin_pct + '%'}</div>
@@ -327,14 +329,14 @@
         return err('A reason is required when the markup differs from the rate card.');
       const q = (_data.quotes || []).find(x => x.id === _sel) || {};
       const sell = Math.round(q.cost * (1 + markup / 100) * 100) / 100;
-      if (!confirm(`Release ${q.ref} to the client at ${money(sell, q.currency)}?\n\n`
-        + `Cost ${money(q.cost, q.cost_currency)} · markup ${markup}%\n`
+      if (!confirm(`Release ${q.ref} to the client at ${money(sell, 'USD')}?\n\n`
+        + `Cost ${money(q.cost, 'USD')} · markup ${markup}%\n`
         + `The client sees the sell price only.`)) return;
       _busy = true; rel.disabled = true;
       try {
         const r = await req('/air-quotes/' + encodeURIComponent(_sel) + '/release',
           { method: 'POST', body: JSON.stringify({ markup_pct: markup, markup_reason: reason || null, valid_days: days }) });
-        ok(`Released at ${esc(money(r.sell_amount, q.currency))} — valid until ${esc(r.valid_until)}, gross margin ${r.gross_margin_pct}%.`);
+        ok(`Released at ${esc(money(r.sell_amount, 'USD'))} — valid until ${esc(r.valid_until)}, gross margin ${r.gross_margin_pct}%.`);
         await load();
       } catch (e) { err(e.message || String(e)); rel.disabled = false; }
       _busy = false;
@@ -382,7 +384,7 @@
     window.addEventListener('state:ready', load);
     setInterval(load, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v6 loaded');
+    console.log('[air-quote-review] module v7 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

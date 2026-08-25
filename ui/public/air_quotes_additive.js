@@ -30,7 +30,7 @@
   const el = id => document.getElementById(id);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
   const nf = n => Number(n || 0).toLocaleString();
-  const money = (n, c) => n == null ? '—' : (c || 'AUD') + ' ' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const money = (n, c) => n == null ? '—' : (c || 'USD') + ' ' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const apiBase = () => (document.querySelector('meta[name="api-base"]')?.content || window.apiBase || '').replace(/\/+$/, '');
 
   async function tok() { if (window.Clerk?.session) { try { return await window.Clerk.session.getToken(); } catch (e) {} } return null; }
@@ -193,7 +193,7 @@
   let _view = null;
 
   function tilesHtml() {
-    const t = (_data && _data.tiles) || {}, cur = t.currency || 'AUD';
+    const t = (_data && _data.tiles) || {}, cur = t.currency || 'USD';
     if (!t.approved_count) return '';
     const tile = (label, value, sub) => `<div class="aq-tile">
       <div class="aq-tl">${esc(label)}</div><div class="aq-tv">${value}</div>
@@ -213,6 +213,8 @@
   function rowsHtml(list, showAction) {
     return list.map(q => `<tr>
       <td><b>${esc(q.ref || '')}</b><div style="color:${LIGHT};font-size:10px;">${esc(q.week_label || q.week_start)}</div></td>
+      <td style="color:${MID};max-width:150px;overflow:hidden;text-overflow:ellipsis;"
+          title="${esc(q.po_numbers || '')}">${esc(q.po_numbers || '—')}</td>
       <td>${esc(q.vendor)}</td>
       <td class="n">${nf(q.cartons)}</td>
       <td class="n">${q.units ? nf(q.units) : '—'}</td>
@@ -220,7 +222,7 @@
       <td>${q.transit_mode
         ? `<span class="aq-pill" style="color:${q.transit_mode === 'VOZAIR' ? BRAND : MID};background:${q.transit_mode === 'VOZAIR' ? 'rgba(153,0,51,.10)' : 'rgba(0,0,0,.05)'}">${esc(q.transit_mode)}</span>`
         : `<span style="color:${LIGHT}">—</span>`}</td>
-      <td class="n">${q.quoted_amount == null ? '—' : money(q.quoted_amount, q.currency)}</td>
+      <td class="n">${q.quoted_amount == null ? '—' : money(q.quoted_amount, 'USD')}</td>
       <td>${pill(q.state)}${q.state === 'quoted' && q.valid_until ? `<div style="color:${LIGHT};font-size:9px;margin-top:2px;">until ${esc(q.valid_until)}</div>` : ''}</td>
       <td style="text-align:right;white-space:nowrap;">
         ${q.state === 'quoted'
@@ -232,7 +234,7 @@
       </td></tr>`).join('');
   }
 
-  const TH = `<thead><tr><th>Reference</th><th>Vendor</th><th class="n">Cartons</th>
+  const TH = `<thead><tr><th>Reference</th><th>PO number(s)</th><th>Vendor</th><th class="n">Cartons</th>
       <th class="n">Units</th><th class="n">Chargeable kg</th><th>Transit</th>
       <th class="n">Quoted</th><th>Status</th><th></th></tr></thead>`;
 
@@ -242,7 +244,7 @@
       return `<div class="aq-none">No quotes yet. Use <b>New request</b> above &mdash; you can raise one for any upcoming week without waiting for the plan.</div>`;
     return `
       ${tilesHtml()}
-      <div class="aq-s" style="margin:0 0 8px;">All quoted prices are all-inclusive air freight and <b>exclude GST and customs clearance charges</b>.</div>
+      <div class="aq-s" style="margin:0 0 8px;">All quoted prices are <b>door-to-door all-inclusive air freight</b> and exclude GST and customs clearance charges.</div>
       ${open.length ? `<div class="aq-sec">Open</div>
         <table class="aq">${TH}<tbody>${rowsHtml(open, true)}</tbody></table>` : ''}
       ${hist.length ? `<div class="aq-sec">History</div>
@@ -255,7 +257,7 @@
     const all = ((_data && _data.open) || []).concat((_data && _data.history) || []);
     const q = all.find(x => x.id === id) || {};
     const label = decision === 'approve' ? 'Approve' : 'Decline';
-    if (!confirm(`${label} ${q.ref || 'this quote'}?\n\n${q.vendor || ''} · ${money(q.quoted_amount, q.currency)}\n\nThis is recorded against your Pinpoint login.`)) return;
+    if (!confirm(`${label} ${q.ref || 'this quote'}?\n\n${q.vendor || ''} · ${money(q.quoted_amount, 'USD')}\n\nThis is recorded against your Pinpoint login.`)) return;
     let note = null;
     if (decision === 'decline') note = prompt('Reason for declining (optional):', '') || null;
     try {
@@ -288,12 +290,16 @@
   function formHtml() {
     const weeks = weekOptions();
     return `
-      <div class="aq-s" style="margin-bottom:2px;">Choose any upcoming week &mdash; the plan doesn't need to be uploaded yet. Quotes are all-inclusive air freight and exclude GST and customs clearance charges.</div>
+      <div class="aq-s" style="margin-bottom:2px;">Choose any upcoming week &mdash; the plan doesn't need to be uploaded yet. Quotes are door-to-door all-inclusive air freight and exclude GST and customs clearance charges.</div>
 
       <label class="aq-lbl" for="aq-week">Shipping week</label>
       <select class="aq-in" id="aq-week">
         ${weeks.map(w => `<option value="${w.value}" data-wk="Week ${w.week}" ${w.next ? 'selected' : ''}>Week ${w.week} · ${esc(w.date)}${w.past ? '  (past)' : ''}</option>`).join('')}
       </select>
+
+      <label class="aq-lbl" for="aq-zendesk">Zendesk ticket <span style="color:${BRAND}">*</span></label>
+      <input class="aq-in" id="aq-zendesk" placeholder="e.g. 38214" autocomplete="off">
+      <div class="aq-s">Used as the quote reference and to tie this shipment to its transit lane.</div>
 
       <label class="aq-lbl" for="aq-vendor">Vendor</label>
       <input class="aq-in" id="aq-vendor" list="aq-vendorlist" placeholder="Start typing…" autocomplete="off">
@@ -319,8 +325,8 @@
         <div style="font-size:10px;color:${MID};margin-top:3px;" id="aq-chgn">Air freight bills on the greater of gross and volumetric weight.</div>
       </div>
 
-      <label class="aq-lbl" for="aq-note">Note <span style="font-weight:400;color:${LIGHT}">(optional)</span></label>
-      <input class="aq-in" id="aq-note" placeholder="Anything the carrier should know">
+      <label class="aq-lbl" for="aq-note">PO number(s)</label>
+      <input class="aq-in" id="aq-note" placeholder="One or several, comma separated">
 
       <div style="display:flex;gap:10px;margin-top:18px;">
         <button class="aq-btn g" id="aq-cancel" style="flex:1;padding:11px;">Cancel</button>
@@ -369,14 +375,16 @@
     const payload = {
       week_start: sel.value,
       week_label: sel.selectedOptions[0].getAttribute('data-wk'),
+      zendesk_ticket: el('aq-zendesk').value.trim(),
+      po_numbers: el('aq-note').value.trim() || null,
       vendor: el('aq-vendor').value.trim(),
       cartons: parseInt(el('aq-cartons').value, 10) || 0,
       units: el('aq-units').value === '' ? null : (parseInt(el('aq-units').value, 10) || 0),
       gross_weight_kg: Number(el('aq-gross').value) || 0,
       cbm: Number(el('aq-cbm').value) || 0,
-      client_note: el('aq-note').value.trim() || null,
     };
     const fail = m => { const t = el('aq-mmsg'); if (t) t.innerHTML = `<div class="aq-msg" style="background:rgba(179,63,64,.10);color:${RED};">${esc(m)}</div>`; };
+    if (!payload.zendesk_ticket) return fail('Zendesk ticket is required — it becomes the quote reference.');
     if (!payload.vendor) return fail('Vendor is required.');
     if (!payload.gross_weight_kg && !payload.cbm) return fail('Enter a gross weight or a CBM figure.');
     const btn = el('aq-submit'); btn.disabled = true; btn.textContent = 'Sending…';
@@ -454,7 +462,7 @@
     window.addEventListener('air-quotes:changed', load);
     setInterval(check, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v9 loaded');
+    console.log('[air-quotes] module v10 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
