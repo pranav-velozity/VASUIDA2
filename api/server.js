@@ -11367,7 +11367,10 @@ app.post('/air-quotes/:id/rfq', authenticateRequest, requireRole(['admin']), wri
       aqEvent(q.id, 'submitted', 'rfq_sent', (req.auth && req.auth.userId) || null, 'internal', null);
     }
 
-    const base = String(process.env.PUBLIC_APP_URL || '').replace(/\/+$/, '');
+    // The partner page is served by THIS app, so the link must use the API origin — not the
+    // SPA host. Falls back to the request's own origin when the env var is unset.
+    const base = String(process.env.PUBLIC_API_URL || process.env.PUBLIC_APP_URL || '').replace(/\/+$/, '')
+              || `${req.protocol}://${req.get('host')}`;
     const link = `${base}/air-quote/cost?token=${token}`;
     const to = parseEmailList((req.body || {}).to || process.env.AIR_QUOTE_PARTNER_EMAIL_TO);
     const from = process.env.EXCEPTION_EMAIL_FROM;
@@ -11406,23 +11409,181 @@ app.post('/air-quotes/:id/rfq', authenticateRequest, requireRole(['admin']), wri
 });
 
 // ── Partner: magic-link cost form (no login) ──
-// Token-scoped to one quote. Returns shipment facts only — never the client's name, never
-// any pricing that has been quoted.
+// Deliberately server-rendered rather than a route in the SPA. The partner is external,
+// should not need an account, and should not depend on the frontend deploy. Self-contained
+// page, works on a phone, no build step.
+//
+// Token-scoped to one quote. Shows shipment facts only — never the client's name, never any
+// price that has been quoted to them.
+
+// JSON.stringify alone does not escape "</script>", so a value reflected into an inline
+// script can break out of the block. Tokens are hex in practice, but the value arrives from
+// the query string — escape it rather than rely on that.
+function aqJsEmbed(v) {
+  return JSON.stringify(String(v == null ? '' : v))
+    .replace(/</g, '\\u003c').replace(/>/g, '\\u003e')
+    .replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+}
+
+function aqPartnerPage(body, title) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escHtml(title || 'Air freight RFQ')}</title>
+<style>
+  :root{--brand:#990033;--dark:#1C1C1E;--mid:#6E6E73;--light:#AEAEB2;--line:rgba(0,0,0,.1);}
+  *{box-sizing:border-box;}
+  body{margin:0;background:#F5F5F7;color:var(--dark);
+       font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;}
+  .wrap{max-width:560px;margin:0 auto;padding:24px 18px 48px;}
+  .card{background:#fff;border:.5px solid var(--line);border-radius:14px;padding:20px 22px;
+        box-shadow:0 1px 2px rgba(0,0,0,.04),0 4px 12px rgba(0,0,0,.06);margin-bottom:14px;}
+  h1{font-size:17px;margin:0 0 2px;letter-spacing:-.01em;}
+  .sub{font-size:11px;color:var(--light);margin-bottom:0;}
+  .ref{display:inline-block;font:600 11px ui-monospace,SFMono-Regular,Menlo,monospace;
+       background:#F5F5F7;border-radius:6px;padding:3px 7px;color:var(--mid);margin-top:8px;}
+  dl{display:grid;grid-template-columns:auto 1fr;gap:7px 16px;margin:0;font-size:13px;}
+  dt{color:var(--mid);}
+  dd{margin:0;text-align:right;font-variant-numeric:tabular-nums;}
+  .chg{margin-top:14px;padding:11px 13px;background:#F5F5F7;border-radius:10px;}
+  .chg b{font-size:17px;}
+  .chg .n{font-size:10px;color:var(--mid);margin-top:3px;}
+  label{display:block;font-size:11px;font-weight:600;color:var(--mid);margin:12px 0 4px;}
+  input,textarea,select{width:100%;padding:10px 11px;border:.5px solid var(--line);
+        border-radius:9px;font:inherit;color:var(--dark);background:#fff;}
+  input:focus,textarea:focus{outline:2px solid rgba(153,0,51,.25);outline-offset:1px;}
+  textarea{min-height:64px;resize:vertical;}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  button{width:100%;margin-top:18px;padding:13px;border:0;border-radius:10px;background:var(--brand);
+         color:#fff;font:600 14px inherit;cursor:pointer;}
+  button:disabled{opacity:.55;cursor:default;}
+  .msg{margin-top:12px;padding:11px 13px;border-radius:9px;font-size:12px;display:none;}
+  .msg.ok{background:#E8F6EC;color:#1B7F3B;display:block;}
+  .msg.err{background:#FBEAEA;color:#B33F40;display:block;}
+  .foot{text-align:center;font-size:10px;color:var(--light);margin-top:18px;}
+  .done{text-align:center;padding:26px 10px;}
+  .done .tick{font-size:34px;color:#34C759;}
+</style></head><body><div class="wrap">${body}
+<div class="foot">VelOzity Pinpoint &middot; this link is unique to this request</div>
+</div></body></html>`;
+}
+
 app.get('/air-quote/cost', (req, res) => {
+  const fail = (msg) => res.status(403).type('html').send(aqPartnerPage(
+    `<div class="card done"><div class="tick" style="color:#B33F40">&#9888;</div>
+     <h1 style="margin-top:10px">${escHtml(msg)}</h1>
+     <div class="sub" style="margin-top:6px">Please ask your VelOzity contact to reissue the link.</div></div>`,
+    'Link unavailable'));
   try {
     const t = db.prepare(`SELECT * FROM air_quote_token WHERE token=? AND purpose='partner_cost'`)
                 .get(String(req.query.token || ''));
-    if (!t) return res.status(403).json({ error: 'invalid_token' });
+    if (!t) return fail('This link is not valid.');
     if (t.expires_at < new Date().toISOString().slice(0, 19).replace('T', ' '))
-      return res.status(403).json({ error: 'expired_token' });
+      return fail('This link has expired.');
     const q = db.prepare('SELECT * FROM air_quote WHERE id=?').get(t.quote_id);
-    if (!q) return res.status(404).json({ error: 'not_found' });
-    const existing = db.prepare('SELECT cost_amount, cost_currency, cost_valid_until, partner_note, partner_name FROM air_quote_cost WHERE quote_id=?').get(q.id);
-    res.json({ ref: q.ref, week: q.week_label || q.week_start, vendor: q.vendor_raw,
-      cartons: q.cartons, gross_weight_kg: q.gross_weight_kg, cbm: q.cbm,
-      chargeable_kg: q.chargeable_kg, origin: q.origin, destination: q.destination,
-      note: q.client_note, currency: q.currency, submitted: existing || null });
-  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+    if (!q) return fail('This request no longer exists.');
+    const ex = db.prepare('SELECT * FROM air_quote_cost WHERE quote_id=?').get(q.id) || {};
+
+    // A programmatic caller can still ask for the raw facts.
+    if (String(req.query.format || '') === 'json') {
+      return res.json({ ref: q.ref, week: q.week_label || q.week_start, vendor: q.vendor_raw,
+        cartons: q.cartons, gross_weight_kg: q.gross_weight_kg, cbm: q.cbm,
+        chargeable_kg: q.chargeable_kg, origin: q.origin, destination: q.destination,
+        note: q.client_note, currency: q.currency,
+        submitted: ex.cost_amount != null ? {
+          cost_amount: ex.cost_amount, cost_currency: ex.cost_currency,
+          cost_valid_until: ex.cost_valid_until, partner_note: ex.partner_note,
+          partner_name: ex.partner_name } : null });
+    }
+
+    if (['approved', 'declined'].includes(q.state)) {
+      return res.type('html').send(aqPartnerPage(
+        `<div class="card done"><div class="tick">&#10003;</div>
+         <h1 style="margin-top:10px">This request is closed</h1>
+         <div class="sub" style="margin-top:6px">No further pricing is needed for ${escHtml(q.ref)}.</div></div>`,
+        `RFQ ${q.ref}`));
+    }
+
+    const row = (k, v) => v == null || v === '' ? '' : `<dt>${escHtml(k)}</dt><dd>${escHtml(String(v))}</dd>`;
+    const volumetric = Math.round((q.cbm || 0) * AQ_VOLUMETRIC_KG_PER_CBM * 100) / 100;
+    const basis = volumetric > (q.gross_weight_kg || 0) ? 'volumetric' : 'gross';
+    const resubmit = ex.cost_amount != null;
+
+    const body = `
+  <div class="card">
+    <h1>Air freight quotation request</h1>
+    <div class="sub">Please provide your all-inclusive cost.</div>
+    <div class="ref">${escHtml(q.ref)}</div>
+    <dl style="margin-top:16px;">
+      ${row('Shipping week', q.week_label || q.week_start)}
+      ${row('Vendor', q.vendor_raw)}
+      ${row('Cartons', q.cartons)}
+      ${row('Gross weight', (q.gross_weight_kg || 0) + ' kg')}
+      ${row('Volume', (q.cbm || 0) + ' CBM')}
+      ${row('Origin', q.origin)}
+      ${row('Destination', q.destination)}
+    </dl>
+    <div class="chg">
+      <div style="font-size:10px;color:var(--mid);text-transform:uppercase;letter-spacing:.06em;font-weight:600;">Chargeable weight</div>
+      <b>${escHtml(String(q.chargeable_kg))} kg</b>
+      <div class="n">Greater of gross (${escHtml(String(q.gross_weight_kg || 0))} kg) and volumetric
+        (${escHtml(String(volumetric))} kg at ${AQ_VOLUMETRIC_KG_PER_CBM} kg/CBM) &mdash; ${basis} applies.</div>
+    </div>
+    ${q.client_note ? `<div style="margin-top:12px;font-size:12px;color:var(--mid);"><b>Note:</b> ${escHtml(q.client_note)}</div>` : ''}
+  </div>
+
+  <div class="card">
+    ${resubmit ? `<div class="msg ok" style="margin:0 0 6px;">A cost of ${escHtml(String(ex.cost_amount))} ${escHtml(ex.cost_currency || q.currency)} is already on file. Submitting again replaces it.</div>` : ''}
+    <label for="cost">All-inclusive cost</label>
+    <div class="row">
+      <input id="cost" type="number" min="0" step="0.01" inputmode="decimal"
+             placeholder="0.00" value="${ex.cost_amount != null ? escHtml(String(ex.cost_amount)) : ''}">
+      <select id="cur">
+        ${['AUD','USD','CNY','HKD','EUR','GBP'].map(x =>
+          `<option value="${x}" ${(ex.cost_currency || q.currency) === x ? 'selected' : ''}>${x}</option>`).join('')}
+      </select>
+    </div>
+    <label for="valid">Rate valid until</label>
+    <input id="valid" type="date" value="${escHtml(ex.cost_valid_until || '')}">
+    <label for="who">Your name</label>
+    <input id="who" type="text" placeholder="Name" value="${escHtml(ex.partner_name || '')}">
+    <label for="note">Notes (optional)</label>
+    <textarea id="note" placeholder="Routing, transit time, exclusions&hellip;">${escHtml(ex.partner_note || '')}</textarea>
+    <button id="go">${resubmit ? 'Update cost' : 'Submit cost'}</button>
+    <div class="msg" id="msg"></div>
+  </div>
+
+  <script>
+  (function(){
+    var b=document.getElementById('go'), m=document.getElementById('msg');
+    function show(k,t){ m.className='msg '+k; m.textContent=t; }
+    b.addEventListener('click', async function(){
+      var v=parseFloat(document.getElementById('cost').value);
+      if(!(v>0)){ show('err','Enter a cost greater than zero.'); return; }
+      b.disabled=true; b.textContent='Submitting\u2026';
+      try{
+        var r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({token:${aqJsEmbed(String(req.query.token || ''))},
+            cost_amount:v, cost_currency:document.getElementById('cur').value,
+            cost_valid_until:document.getElementById('valid').value||null,
+            partner_name:document.getElementById('who').value||null,
+            partner_note:document.getElementById('note').value||null})});
+        var j=await r.json();
+        if(!r.ok){ show('err', j.error||('Error '+r.status)); b.disabled=false; b.textContent='Submit cost'; return; }
+        document.querySelector('.wrap').innerHTML =
+          '<div class="card done"><div class="tick">\u2713</div>'+
+          '<h1 style="margin-top:10px">Cost received</h1>'+
+          '<div class="sub" style="margin-top:6px">Thank you. VelOzity will take it from here.</div></div>';
+      }catch(e){ show('err','Could not submit: '+e.message); b.disabled=false; b.textContent='Submit cost'; }
+    });
+  })();
+  </script>`;
+    res.type('html').send(aqPartnerPage(body, `RFQ ${q.ref}`));
+  } catch (e) {
+    console.error('[GET /air-quote/cost]', e);
+    res.status(500).type('html').send(aqPartnerPage(
+      `<div class="card done"><h1>Something went wrong</h1>
+       <div class="sub" style="margin-top:6px">Please contact your VelOzity representative.</div></div>`, 'Error'));
+  }
 });
 
 app.post('/air-quote/cost', writeOpLimiter, (req, res) => {
