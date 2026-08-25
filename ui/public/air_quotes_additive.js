@@ -77,6 +77,16 @@
     const s = document.createElement('style'); s.id = 'aq-styles';
     s.textContent = `
       .aq-s{font-size:10px;color:${LIGHT};margin-top:2px;}
+      #aq-btn-open{display:inline-flex !important;flex-direction:row !important;
+        align-items:center !important;justify-content:center !important;flex-wrap:nowrap !important;
+        gap:6px !important;white-space:nowrap !important;line-height:1 !important;
+        min-width:140px !important;padding:7px 18px !important;font-size:11px !important;
+        font-weight:500 !important;color:#fff !important;background:${BRAND} !important;
+        border:0.5px solid ${BRAND} !important;border-radius:8px !important;cursor:pointer;
+        flex:0 0 auto !important;text-align:center;}
+      #aq-btn-open svg{width:13px !important;height:13px !important;flex:0 0 auto !important;
+        display:inline-block !important;vertical-align:middle;}
+      #aq-btn-open span{display:inline-block !important;white-space:nowrap !important;}
       .aq-btn{border:0;border-radius:9px;background:${BRAND};color:#fff;
               font:600 12px inherit;padding:8px 14px;cursor:pointer;}
       .aq-btn.g{background:#fff;color:${DARK};border:.5px solid rgba(0,0,0,.16);}
@@ -93,6 +103,10 @@
       table.aq td.n{text-align:right;font-variant-numeric:tabular-nums;}
       .aq-pill{display:inline-block;font-size:9px;font-weight:600;padding:2px 7px;border-radius:20px;}
       .aq-none{font-size:11px;color:${LIGHT};padding:14px 2px;}
+      /* Deliberately quiet — withdrawing is rare, and it should not compete with Approve. */
+      .aq-del{border:0;background:none;color:${LIGHT};font-size:15px;line-height:1;
+              cursor:pointer;padding:2px 6px;margin-left:6px;border-radius:6px;}
+      .aq-del:hover{color:${RED};background:rgba(179,63,64,.08);}
       .aq-ov{position:fixed;inset:0;background:rgba(0,0,0,.34);z-index:9600;display:flex;
              align-items:flex-start;justify-content:center;padding:28px 18px;overflow:auto;
              -webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);}
@@ -146,11 +160,7 @@
       const anchor = el('wh-btn-upload'); if (!anchor || !anchor.parentNode) return null;
       b = document.createElement('button');
       b.id = 'aq-btn-open';
-      b.style.cssText = 'font-size:11px;font-weight:500;color:#fff;background:' + BRAND + ';'
-        + 'border:0.5px solid ' + BRAND + ';border-radius:8px;padding:7px 18px;cursor:pointer;'
-        + 'display:inline-flex;align-items:center;justify-content:center;gap:6px;'
-        + 'min-width:140px;flex:0 0 auto;flex-wrap:nowrap;white-space:nowrap;line-height:1;'
-        + 'transition:all .15s;';
+      b.style.transition = 'all .15s';   // everything else lives in the #aq-btn-open rule
       b.title = 'Request an air freight quote';
       b.addEventListener('click', openModal);
       anchor.parentNode.insertBefore(b, anchor);
@@ -203,10 +213,12 @@
       <td class="n">${q.quoted_amount == null ? '—' : money(q.quoted_amount, q.currency)}</td>
       <td>${pill(q.state)}${q.state === 'quoted' && q.valid_until ? `<div style="color:${LIGHT};font-size:9px;margin-top:2px;">until ${esc(q.valid_until)}</div>` : ''}</td>
       <td style="text-align:right;white-space:nowrap;">
-        ${showAction && q.state === 'quoted'
+        ${q.state === 'quoted'
           ? `<button class="aq-btn" data-ok="${esc(q.id)}" style="padding:5px 10px;">Approve</button>
              <button class="aq-btn g" data-no="${esc(q.id)}" style="padding:5px 10px;margin-left:4px;">Decline</button>`
           : (q.decided_at ? `<span style="color:${LIGHT};font-size:10px;">${esc(String(q.decided_at).slice(0, 10))}</span>` : '')}
+        ${!['approved', 'declined'].includes(q.state)
+          ? `<button class="aq-del" data-del="${esc(q.id)}" title="Withdraw this request">&times;</button>` : ''}
       </td></tr>`).join('');
   }
 
@@ -241,6 +253,22 @@
       await load();
       if (document.querySelector('.aq-ov')) paintModal();
     } catch (e) { alert('Could not record the decision: ' + (e.message || e)); }
+  }
+
+  // Withdraw. Warns when the partner has already priced it — that is wasted work on their
+  // side, and the client should know before discarding it.
+  async function withdraw(id) {
+    const all = ((_data && _data.open) || []).concat((_data && _data.history) || []);
+    const q = all.find(x => x.id === id) || {};
+    const priced = q.state === 'quoted' || q.quoted_amount != null;
+    if (!confirm(`Withdraw ${q.ref || 'this request'}?\n\n${q.vendor || ''} · ${q.week_label || q.week_start || ''}`
+      + (priced ? '\n\nThis has already been priced. Withdrawing discards that quote.' : '')
+      + '\n\nThis cannot be undone.')) return;
+    try {
+      await req('/air-quotes/' + encodeURIComponent(id), { method: 'DELETE' });
+      await load();
+      if (document.querySelector('.aq-ov')) paintModal();
+    } catch (e) { alert('Could not withdraw: ' + (e.message || e)); }
   }
 
   // ── modal ──
@@ -321,6 +349,7 @@
     } else {
       b.querySelectorAll('[data-ok]').forEach(x => x.addEventListener('click', () => decide(x.getAttribute('data-ok'), 'approve')));
       b.querySelectorAll('[data-no]').forEach(x => x.addEventListener('click', () => decide(x.getAttribute('data-no'), 'decline')));
+      b.querySelectorAll('[data-del]').forEach(x => x.addEventListener('click', () => withdraw(x.getAttribute('data-del'))));
     }
   }
 
@@ -414,7 +443,7 @@
     window.addEventListener('air-quotes:changed', load);
     setInterval(check, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v4 loaded');
+    console.log('[air-quotes] module v5 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
