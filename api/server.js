@@ -11440,7 +11440,9 @@ app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), (re
       if (r.k > 0) bench[r.vendor_key] = { per_kg: Math.round(r.s / r.k * 100) / 100, n: r.n };
     }
 
+    const insight = aqInternalInsights(c, null);
     res.json({ client_id: c, markup_default_pct: dflt,
+      insights: insight.lines, win_bands: insight.bands,
       quotes: rows.map(q => {
         const k = costs[q.id] || {};
         const markup = k.markup_pct != null ? k.markup_pct : dflt;
@@ -11470,19 +11472,131 @@ app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), (re
 });
 
 // ── Internal: issue the partner's RFQ link ──
+// ── Insights ──
+//
+// SEPARATION IS STRUCTURAL, NOT INSTRUCTIONAL.
+// aqClientInsights() never reads air_quote_cost. Not "is told not to" — it has no access
+// to the table. Cost and margin live in a separate table precisely so a client-facing
+// builder can be written without them in reach. Every line here is templated from computed
+// figures rather than generated, so there is no model output to police.
+// If Pulse is ever used to phrase these, it must receive THIS function's output and
+// nothing else.
+
+// Client-safe. Sell price, weights and their own history only.
+function aqClientInsights(q) {
+  const out = [];
+  const cur = q.currency || 'USD';
+  const m = (n) => `${cur} ${Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const perKg = q.chargeable_kg > 0 ? q.sell_amount / q.chargeable_kg : null;
+
+  // 1. Against their own approved history. Their data, so it cannot be disputed — and a
+  //    rolling window keeps a peak-season quote from being judged against a quiet one.
+  const hist = db.prepare(`SELECT SUM(sell_amount) s, SUM(chargeable_kg) k, COUNT(*) n
+                           FROM air_quote WHERE client_id=? AND state='approved'
+                             AND chargeable_kg > 0 AND id <> ?
+                             AND decided_at >= date('now','-180 days')`).get(q.client_id, q.id);
+  if (perKg && hist && hist.n >= 3 && hist.k > 0) {
+    const avg = hist.s / hist.k;
+    const diff = Math.round((perKg - avg) / avg * 100);
+    out.push(Math.abs(diff) < 3
+      ? `At ${m(perKg)} per chargeable kg, this is in line with the ${m(avg)} average across your last ${hist.n} approved air shipments.`
+      : `At ${m(perKg)} per chargeable kg, this is ${Math.abs(diff)}% ${diff < 0 ? 'below' : 'above'} the ${m(avg)} average across your last ${hist.n} approved air shipments.`);
+  }
+
+  // 2. Density. This is the line that tells them how to spend less with us — which is why
+  //    it carries more weight than any favourable comparison we could make.
+  const density = q.cbm > 0 ? q.gross_weight_kg / q.cbm : null;
+  if (density && perKg && density < AQ_VOLUMETRIC_KG_PER_CBM - 5) {
+    const paidAir = Math.round((q.chargeable_kg - q.gross_weight_kg) * 100) / 100;
+    const save = Math.round(paidAir * 0.15 * perKg);
+    out.push(`This shipment is ${Math.round(density)} kg per CBM against the ${Math.round(AQ_VOLUMETRIC_KG_PER_CBM)} kg air breakpoint, so it bills on volume rather than weight — ${paidAir.toLocaleString()} kg of the chargeable weight is space, not goods. Cutting carton void by 15% would take roughly ${m(save)} off a shipment this size.`);
+  } else if (density && density >= AQ_VOLUMETRIC_KG_PER_CBM) {
+    out.push(`At ${Math.round(density)} kg per CBM this shipment bills on actual weight rather than volume, which is the more efficient of the two for air.`);
+  }
+
+  // 3. Same vendor, so like-for-like on packing and origin.
+  const v = db.prepare(`SELECT SUM(sell_amount) s, SUM(chargeable_kg) k, COUNT(*) n
+                        FROM air_quote WHERE client_id=? AND vendor_key=? AND state='approved'
+                          AND chargeable_kg > 0 AND id <> ?`).get(q.client_id, q.vendor_key, q.id);
+  if (perKg && v && v.n >= 2 && v.k > 0) {
+    const avg = v.s / v.k;
+    const diff = Math.round((perKg - avg) / avg * 100);
+    if (Math.abs(diff) >= 5)
+      out.push(`On ${q.vendor_raw} specifically, your ${v.n} previous approved shipments averaged ${m(avg)} per chargeable kg — this quote is ${Math.abs(diff)}% ${diff < 0 ? 'lower' : 'higher'}.`);
+  }
+  return out;
+}
+
+// Internal only. Reads cost and margin freely — and is never called from a client or
+// partner code path.
+function aqInternalInsights(clientId, q) {
+  const out = [];
+  const r2 = (n) => Math.round(n * 100) / 100;
+
+  // Win rate by price band. The most commercially useful number this system produces:
+  // it says where the client's resistance actually starts, rather than where we assume it does.
+  const decided = db.prepare(`SELECT state, sell_amount, chargeable_kg FROM air_quote
+                              WHERE client_id=? AND state IN ('approved','declined') AND chargeable_kg > 0`).all(clientId);
+  const withRate = decided.map(x => ({ ok: x.state === 'approved', kg: x.sell_amount / x.chargeable_kg }));
+  const bands = [];
+  if (withRate.length >= 8) {
+    const sorted = withRate.map(x => x.kg).sort((a, b) => a - b);
+    const t1 = sorted[Math.floor(sorted.length / 3)], t2 = sorted[Math.floor(sorted.length * 2 / 3)];
+    const mk = (label, f) => { const g = withRate.filter(f);
+      return g.length ? { band: label, n: g.length, win_pct: Math.round(g.filter(x => x.ok).length / g.length * 100) } : null; };
+    bands.push(mk(`under ${r2(t1)}`, x => x.kg < t1),
+               mk(`${r2(t1)}–${r2(t2)}`, x => x.kg >= t1 && x.kg <= t2),
+               mk(`over ${r2(t2)}`, x => x.kg > t2));
+    const b = bands.filter(Boolean);
+    if (b.length === 3 && b[0].win_pct - b[2].win_pct >= 20)
+      out.push(`Win rate falls from ${b[0].win_pct}% under ${r2(t1)}/kg to ${b[2].win_pct}% over ${r2(t2)}/kg. Resistance starts around ${r2(t2)}.`);
+  }
+
+  if (q) {
+    const k = db.prepare('SELECT * FROM air_quote_cost WHERE quote_id=?').get(q.id);
+    if (k && k.cost_amount != null && q.chargeable_kg > 0) {
+      // Is the partner's own rate drifting on this vendor?
+      const prev = db.prepare(`SELECT AVG(k.cost_amount / q.chargeable_kg) avg_kg, COUNT(*) n
+                               FROM air_quote q JOIN air_quote_cost k ON k.quote_id=q.id
+                               WHERE q.client_id=? AND q.vendor_key=? AND q.id <> ? AND q.chargeable_kg > 0`)
+                      .get(clientId, q.vendor_key, q.id);
+      if (prev && prev.n >= 2 && prev.avg_kg > 0) {
+        const now = k.cost_amount / q.chargeable_kg;
+        const d = Math.round((now - prev.avg_kg) / prev.avg_kg * 100);
+        if (Math.abs(d) >= 10)
+          out.push(`Partner cost is ${Math.abs(d)}% ${d > 0 ? 'above' : 'below'} their ${r2(prev.avg_kg)}/kg average on ${q.vendor_raw} across ${prev.n} prior quotes.`);
+      }
+    }
+  }
+
+  const marg = db.prepare(`SELECT AVG((q.sell_amount - k.cost_amount) / q.sell_amount * 100) gm, COUNT(*) n
+                           FROM air_quote q JOIN air_quote_cost k ON k.quote_id=q.id
+                           WHERE q.client_id=? AND q.state='approved' AND q.sell_amount > 0`).get(clientId);
+  if (marg && marg.n >= 3) out.push(`Realised gross margin across ${marg.n} approved quotes is ${r2(marg.gm)}%.`);
+  return { lines: out, bands: bands.filter(Boolean) };
+}
+
 // ── Notifications ──
 // Every send is best-effort: a mail failure is logged but never rolls back the state change
 // that triggered it. A quote that moved but whose email bounced is recoverable; a quote
 // that failed to move because of a mail outage is not.
 
-function aqMailShell(title, rows, cta, footer) {
+function aqMailShell(title, rows, cta, footer, insights) {
   const line = (k, v) => v == null || v === '' ? '' :
     `<tr><td style="padding:4px 0;color:#6E6E73;font-size:13px;">${escHtml(k)}</td>
          <td style="padding:4px 0;text-align:right;font-size:13px;color:#1C1C1E;">${escHtml(String(v))}</td></tr>`;
+  // Insights sit ABOVE the numbers: the reader should meet the interpretation before the
+  // table, not have to scroll past the figures to find out what they mean.
+  const ins = (insights && insights.length) ? `
+    <div style="margin:0 0 16px;padding:13px 15px;background:#F5F5F7;border-radius:10px;">
+      ${insights.map(t => `<div style="font-size:12px;color:#1C1C1E;line-height:1.55;margin-bottom:7px;">
+        <span style="color:#990033;font-weight:700;">&bull;</span> ${escHtml(t)}</div>`).join('')}
+    </div>` : '';
   return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
       background:#F5F5F7;padding:24px;">
     <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:14px;padding:24px 26px;">
       <div style="font-size:17px;font-weight:700;color:#1C1C1E;margin-bottom:14px;">${escHtml(title)}</div>
+      ${ins}
       <table style="width:100%;border-collapse:collapse;">${rows.map(r => line(r[0], r[1])).join('')}</table>
       ${cta || ''}
       ${footer ? `<div style="margin-top:18px;font-size:11px;color:#AEAEB2;line-height:1.5;">${footer}</div>` : ''}
@@ -11529,8 +11643,10 @@ async function aqNotifyCosted(quoteId, origin) {
       <a href="${base}/air-quote/release?token=${token}" style="display:inline-block;padding:12px 26px;
         border-radius:9px;background:#990033;color:#fff;text-decoration:none;font-size:14px;font-weight:600;">
         Release to client at ${q.markup_pct}%</a></div>`;
+  const ins = aqInternalInsights(q.client_id, q).lines;
   const html = aqMailShell(`Ready to review — ${q.ref}`, rows, cta,
-    'The button opens a confirmation page. To change the markup, or to send it back to the partner, use Quote Review in Pinpoint.');
+    'The button opens a confirmation page. To change the markup, or to send it back to the partner, use Quote Review in Pinpoint.',
+    ins);
   await aqMail(process.env.AIR_QUOTE_INTERNAL_EMAIL_TO,
     `Air quote ready to review — ${q.ref}, ${q.vendor_raw}`, html,
     rows.filter(r => r[1] != null).map(r => `${r[0]}: ${r[1]}`).join('\n')
@@ -11572,11 +11688,15 @@ async function aqNotifyQuoted(quoteId, origin) {
   // Both buttons open a confirmation page rather than acting on the click. Mail security
   // scanners prefetch links; a one-click GET that approved would be triggered by a scanner
   // before anyone read the message.
+  // aqClientInsights has no access to the cost table by construction.
+  const insights = aqClientInsights(q);
   const html = aqMailShell(`Air freight quote — ${q.ref}`, rows, cta,
-    'Approving opens a confirmation page. Chargeable weight is the greater of gross and volumetric weight, which is what air freight is billed on.');
+    'Approving opens a confirmation page. Chargeable weight is the greater of gross and volumetric weight, which is what air freight is billed on.',
+    insights);
   await aqMail(process.env.AIR_QUOTE_CLIENT_EMAIL_TO,
     `Air freight quote ${q.ref} — ${q.vendor_raw}, ${q.week_label || q.week_start}`, html,
-    rows.filter(r => r[1] != null).map(r => `${r[0]}: ${r[1]}`).join('\n')
+    (insights.length ? insights.map(t => '• ' + t).join('\n') + '\n\n' : '')
+      + rows.filter(r => r[1] != null).map(r => `${r[0]}: ${r[1]}`).join('\n')
       + `\n\nApprove: ${link('approve')}\nDecline: ${link('decline')}`);
 }
 
