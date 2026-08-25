@@ -3937,9 +3937,11 @@ window._supplierDiscrepancySubmit = async function() {
     });
     if (!r.ok) { const err = await r.json().catch(()=>({})); errEl.textContent = err.error || 'Could not authorise.'; errEl.style.display = 'block'; btn.textContent = 'Generate Report →'; btn.disabled = false; return; }
     const { token } = await r.json();
+    // Read the format BEFORE removing the modal — the radios live inside it, so once it is
+    // gone querySelector finds nothing and every choice silently falls back to PDF.
+    const fmt = (document.querySelector('input[name="sd-fmt"]:checked')||{}).value || 'pdf';
     document.getElementById('sd-report-modal').remove();
     // One token covers both formats, so the cost password is asked for once.
-    const fmt = (document.querySelector('input[name="sd-fmt"]:checked')||{}).value || 'pdf';
     const qs = `token=${token}&week=${encodeURIComponent(week)}&supplier=${encodeURIComponent(supplier)}`;
     if (fmt === 'pdf' || fmt === 'both') window.open(`${_base}/report/supplier-discrepancy?${qs}`, '_blank');
     if (fmt === 'xlsx' || fmt === 'both') {
