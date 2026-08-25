@@ -88,7 +88,10 @@ const corsOptions = {
     return cb(new Error('Not allowed by CORS: ' + origin));
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-pinpoint-client']
+  // x-pulse-enabled must be listed or the browser's preflight rejects every AI call from
+  // the SPA — the request never reaches the handler, so the failure looks like a server
+  // error rather than a CORS one.
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-pinpoint-client', 'x-pulse-enabled']
 };
 // Same-origin requests still carry an Origin header on POST/PUT/DELETE. The allow list
 // holds the SPA hosts, not the API's own, so a page served BY this app posting back to it
