@@ -10999,6 +10999,517 @@ app.post('/report/supplier-discrepancy/auth', authenticateRequest, (req, res) =>
   res.json({ token, cost });
 });
 
+// ═══════════════════ AIR FREIGHT QUOTATION ═══════════════════
+// Three-party workflow: the client raises a request, our partner returns a cost against a
+// magic link, a VelOzity reviewer applies the rate-card markup and releases it, and the
+// client approves or declines inside Pinpoint.
+//
+// CONFIDENTIALITY — the single hard rule of this module.
+// The partner's cost and the applied markup must NEVER reach the client. Cost lives in its
+// own table (air_quote_cost), never on the quote row, and every client-facing response is
+// built by aqPublic() below, which selects explicit fields. Never return a raw quote row
+// to a client, and never add a cost-derived field to aqPublic().
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS air_quote (
+  id              TEXT PRIMARY KEY,
+  client_id       TEXT NOT NULL,
+  ref             TEXT,                      -- human reference, e.g. AQ-2609-014
+  week_start      TEXT NOT NULL,             -- Monday of the shipping week being quoted
+  week_label      TEXT,                      -- 'Week 40' as the client thinks of it
+  vendor_raw      TEXT NOT NULL,             -- exactly as typed
+  vendor_key      TEXT NOT NULL,             -- normalised, for grouping only
+  cartons         INTEGER NOT NULL DEFAULT 0,
+  units           INTEGER,                   -- optional; drives the per-unit tile
+  gross_weight_kg REAL NOT NULL DEFAULT 0,
+  cbm             REAL NOT NULL DEFAULT 0,
+  chargeable_kg   REAL NOT NULL DEFAULT 0,   -- computed, never accepted from a client
+  origin          TEXT,
+  destination     TEXT,
+  client_note     TEXT,
+  state           TEXT NOT NULL DEFAULT 'submitted',
+  sell_amount     REAL,                      -- the only price a client ever sees
+  currency        TEXT NOT NULL DEFAULT 'AUD',
+  valid_until     TEXT,
+  released_at     TEXT, released_by TEXT,
+  decided_at      TEXT, decided_by TEXT, decision_note TEXT,
+  created_by      TEXT, created_by_name TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_air_quote_client ON air_quote(client_id, state, week_start);
+CREATE INDEX IF NOT EXISTS idx_air_quote_vendor ON air_quote(client_id, vendor_key);
+
+-- Partner cost and margin. Internal only. Deliberately a separate table so that a careless
+-- SELECT * on air_quote can never expose it.
+CREATE TABLE IF NOT EXISTS air_quote_cost (
+  quote_id        TEXT PRIMARY KEY REFERENCES air_quote(id) ON DELETE CASCADE,
+  partner_name    TEXT,
+  cost_amount     REAL,
+  cost_currency   TEXT DEFAULT 'AUD',
+  cost_valid_until TEXT,
+  partner_note    TEXT,
+  costed_at       TEXT, costed_by TEXT,
+  markup_pct      REAL,                      -- applied
+  markup_default  REAL,                      -- what the rate card said at the time
+  markup_source   TEXT,                      -- 'rate_card' | 'override'
+  markup_reason   TEXT,
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Magic-link tokens for the partner. Persisted rather than in-memory so a restart does not
+-- invalidate a link already sitting in someone's inbox.
+CREATE TABLE IF NOT EXISTS air_quote_token (
+  token       TEXT PRIMARY KEY,
+  quote_id    TEXT NOT NULL REFERENCES air_quote(id) ON DELETE CASCADE,
+  purpose     TEXT NOT NULL DEFAULT 'partner_cost',
+  expires_at  TEXT NOT NULL,
+  used_at     TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_air_quote_token_q ON air_quote_token(quote_id);
+
+-- Every transition, for audit. Never shown to the client.
+CREATE TABLE IF NOT EXISTS air_quote_event (
+  id         TEXT PRIMARY KEY,
+  quote_id   TEXT NOT NULL REFERENCES air_quote(id) ON DELETE CASCADE,
+  from_state TEXT, to_state TEXT,
+  actor      TEXT, actor_role TEXT,
+  detail     TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_air_quote_event_q ON air_quote_event(quote_id, created_at);
+`);
+
+function aqNewId(p) { return (p || 'aq') + '_' + crypto.randomBytes(10).toString('hex'); }
+
+// Air freight bills on the greater of actual and volumetric weight. 1 CBM = 166.67 kg at
+// the standard 6000 cm3/kg divisor. Quoting off gross alone understates a light, bulky
+// shipment badly — 11.46 CBM against 1341 kg gross is chargeable at 1910 kg, 42% higher.
+const AQ_VOLUMETRIC_KG_PER_CBM = Number(process.env.AIR_VOLUMETRIC_KG_PER_CBM || 166.67);
+function aqChargeableKg(grossKg, cbm) {
+  const g = Math.max(0, Number(grossKg) || 0);
+  const v = Math.max(0, Number(cbm) || 0) * AQ_VOLUMETRIC_KG_PER_CBM;
+  return Math.round(Math.max(g, v) * 100) / 100;
+}
+
+// Group analytics on a normalised name without maintaining a vendor master. Case,
+// punctuation and legal suffixes are stripped; genuinely different spellings stay
+// separate, which the type-ahead and the reviewer's edit are there to limit.
+function aqVendorKey(name) {
+  return String(name || '')
+    .toUpperCase()
+    .replace(/[.,'"()\-\/&]/g, ' ')
+    .replace(/\b(CO|LTD|LIMITED|COMPANY|INC|CORP|CORPORATION|PTY|PTE|LLC|GMBH|SA|SRL|BV|AG)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Stored as a MARKUP on cost: 40 means cost x 1.40. The review screen also shows the
+// implied gross margin so the two readings can never be confused.
+function aqMarkupDefault(clientId) { return rateFor(clientId, 'air_quote_markup', 40); }
+function aqSell(cost, markupPct) {
+  const c = Number(cost) || 0, m = Number(markupPct) || 0;
+  return Math.round(c * (1 + m / 100) * 100) / 100;
+}
+
+function aqEvent(quoteId, from, to, actor, role, detail) {
+  try {
+    db.prepare(`INSERT INTO air_quote_event (id, quote_id, from_state, to_state, actor, actor_role, detail)
+                VALUES (?,?,?,?,?,?,?)`)
+      .run(aqNewId('aqe'), quoteId, from || null, to || null, actor || null, role || null, detail || null);
+  } catch (e) { console.error('[air-quote:event]', e.message); }
+}
+
+// THE client-facing projection. Explicit field list, no spread, nothing cost-derived.
+// If a new client-visible field is needed, add it here deliberately.
+function aqPublic(q) {
+  if (!q) return null;
+  return {
+    id: q.id, ref: q.ref, week_start: q.week_start, week_label: q.week_label,
+    vendor: q.vendor_raw, cartons: q.cartons, units: q.units,
+    gross_weight_kg: q.gross_weight_kg, cbm: q.cbm, chargeable_kg: q.chargeable_kg,
+    origin: q.origin, destination: q.destination, client_note: q.client_note,
+    // 'pending_review' and 'costed' are internal steps; the client sees one waiting state.
+    state: (q.state === 'costed' || q.state === 'pending_review' || q.state === 'rfq_sent')
+             ? 'in_progress' : q.state,
+    quoted_amount: (q.state === 'quoted' || q.state === 'approved' || q.state === 'declined' || q.state === 'expired')
+             ? q.sell_amount : null,
+    currency: q.currency, valid_until: q.valid_until,
+    released_at: q.released_at, decided_at: q.decided_at, decision_note: q.decision_note,
+    created_at: q.created_at,
+  };
+}
+
+// A quote past its validity date is no longer live. Computed on read rather than by a cron
+// so the state is always correct without another scheduled job to babysit.
+function aqExpireStale(clientId) {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = db.prepare(`SELECT id FROM air_quote WHERE client_id=? AND state='quoted'
+                             AND valid_until IS NOT NULL AND valid_until < ?`).all(clientId, today);
+    for (const r of rows) {
+      db.prepare(`UPDATE air_quote SET state='expired', updated_at=datetime('now') WHERE id=?`).run(r.id);
+      aqEvent(r.id, 'quoted', 'expired', 'system', 'system', 'validity lapsed');
+    }
+  } catch (e) { /* non-fatal */ }
+}
+
+// ── Client: raise a request ──
+// Week is chosen in the modal, not inherited from the page — quotes run weeks ahead of the
+// plan upload, so there is nothing to pre-fill from and every value is typed.
+app.post('/air-quotes', authenticateRequest, writeOpLimiter, auditLog('create_air_quote'), (req, res) => {
+  try {
+    const c = curClient();
+    const b = req.body || {};
+    const ws = String(b.week_start || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) return res.status(400).json({ error: 'week_start required as YYYY-MM-DD (Monday)' });
+    const vendor = String(b.vendor || '').trim();
+    if (!vendor) return res.status(400).json({ error: 'vendor required' });
+    const cartons = Math.max(0, parseInt(b.cartons, 10) || 0);
+    const gross = Math.max(0, Number(b.gross_weight_kg) || 0);
+    const cbm = Math.max(0, Number(b.cbm) || 0);
+    if (!gross && !cbm) return res.status(400).json({ error: 'gross weight or CBM required' });
+    const units = b.units == null || b.units === '' ? null : Math.max(0, parseInt(b.units, 10) || 0);
+
+    const id = aqNewId('aq');
+    // Reference: AQ-YYWW-NN, sequenced within the shipping week so it sorts naturally.
+    const wk = String(b.week_label || '').replace(/\D/g, '') || ws.slice(5, 7) + ws.slice(8, 10);
+    const like = `AQ-${ws.slice(2, 4)}${wk}-%`;
+    const last = db.prepare(`SELECT ref FROM air_quote WHERE client_id=? AND ref LIKE ? ORDER BY ref DESC LIMIT 1`).get(c, like);
+    let seq = 1; if (last && last.ref) { const m = last.ref.match(/-(\d+)$/); if (m) seq = parseInt(m[1], 10) + 1; }
+    const ref = `AQ-${ws.slice(2, 4)}${wk}-${String(seq).padStart(2, '0')}`;
+
+    db.prepare(`INSERT INTO air_quote
+      (id, client_id, ref, week_start, week_label, vendor_raw, vendor_key, cartons, units,
+       gross_weight_kg, cbm, chargeable_kg, origin, destination, client_note, state,
+       created_by, created_by_name)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'submitted', ?, ?)`)
+      .run(id, c, ref, ws, String(b.week_label || '').trim() || null, vendor, aqVendorKey(vendor),
+           cartons, units, gross, cbm, aqChargeableKg(gross, cbm),
+           String(b.origin || '').trim() || null, String(b.destination || '').trim() || null,
+           String(b.client_note || '').trim() || null,
+           (req.auth && req.auth.userId) || null, String(b.created_by_name || '').trim() || null);
+
+    aqEvent(id, null, 'submitted', (req.auth && req.auth.userId) || null, 'client', `${vendor} · ${cartons} ctn`);
+    const q = db.prepare('SELECT * FROM air_quote WHERE id=?').get(id);
+    res.json(aqPublic(q));
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Client: list own quotes + the tiles ──
+// Everything below is built from sell price only. Cost is not joined at all.
+app.get('/air-quotes', authenticateRequest, (req, res) => {
+  try {
+    const c = curClient();
+    aqExpireStale(c);
+    const rows = db.prepare(`SELECT * FROM air_quote WHERE client_id=? ORDER BY week_start DESC, created_at DESC`).all(c);
+    const open = rows.filter(q => ['submitted','rfq_sent','costed','pending_review','quoted'].includes(q.state));
+    const history = rows.filter(q => ['approved','declined','expired'].includes(q.state));
+
+    // Rolling window, approved only — a declined quote is not a price anyone paid. Air
+    // rates move seasonally, so a long average would flatter or punish unfairly.
+    const weeks = Math.max(1, parseInt(req.query.weeks, 10) || 12);
+    const since = new Date(Date.now() - weeks * 7 * 86400000).toISOString().slice(0, 10);
+    const appr = rows.filter(q => q.state === 'approved' && (q.decided_at || '').slice(0, 10) >= since);
+    const sum = (f) => appr.reduce((a, q) => a + (Number(f(q)) || 0), 0);
+    const spend = sum(q => q.sell_amount);
+    const kg = sum(q => q.chargeable_kg), ctn = sum(q => q.cartons);
+    const withUnits = appr.filter(q => q.units > 0);
+    const unitSpend = withUnits.reduce((a, q) => a + (q.sell_amount || 0), 0);
+    const unitQty = withUnits.reduce((a, q) => a + (q.units || 0), 0);
+    const decided = rows.filter(q => q.state === 'approved' || q.state === 'declined');
+    const turn = rows.filter(q => q.released_at && q.created_at)
+      .map(q => (Date.parse(q.released_at + 'Z') - Date.parse(q.created_at + 'Z')) / 3600000)
+      .filter(h => isFinite(h) && h >= 0);
+
+    const r2 = (n) => Math.round(n * 100) / 100;
+    res.json({
+      client_id: c,
+      open: open.map(aqPublic),
+      history: history.map(aqPublic),
+      awaiting_approval: open.filter(q => q.state === 'quoted').length,
+      tiles: {
+        window_weeks: weeks,
+        approved_count: appr.length,
+        total_spend: r2(spend),
+        per_chargeable_kg: kg ? r2(spend / kg) : null,
+        per_carton: ctn ? r2(spend / ctn) : null,
+        per_unit: unitQty ? r2(unitSpend / unitQty) : null,
+        per_unit_basis: withUnits.length,          // how many quotes carried a unit count
+        approval_rate_pct: decided.length ? Math.round(appr.length / decided.length * 100) : null,
+        avg_turnaround_hours: turn.length ? r2(turn.reduce((a, h) => a + h, 0) / turn.length) : null,
+        currency: rows.length ? rows[0].currency : 'AUD',
+      },
+      // Trend beside the average, so "above average" can be read against the season.
+      trend: (() => {
+        const byWeek = {};
+        for (const q of appr) {
+          const k = q.week_start;
+          const e = byWeek[k] || (byWeek[k] = { week_start: k, spend: 0, kg: 0 });
+          e.spend += q.sell_amount || 0; e.kg += q.chargeable_kg || 0;
+        }
+        return Object.values(byWeek).sort((a, b) => a.week_start.localeCompare(b.week_start))
+          .map(e => ({ week_start: e.week_start, per_kg: e.kg ? r2(e.spend / e.kg) : null }));
+      })(),
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Vendor type-ahead. Distinct names already used — no master table to maintain.
+app.get('/air-quotes/vendors', authenticateRequest, (req, res) => {
+  try {
+    const c = curClient();
+    const rows = db.prepare(`SELECT vendor_raw, vendor_key, COUNT(*) n, MAX(created_at) last_used
+                             FROM air_quote WHERE client_id=? GROUP BY vendor_key
+                             ORDER BY last_used DESC LIMIT 200`).all(c);
+    res.json({ vendors: rows.map(r => ({ name: r.vendor_raw, key: r.vendor_key, used: r.n })) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Chargeable-weight preview for the modal — no write, no auth beyond being signed in.
+app.get('/air-quotes/chargeable', authenticateRequest, (req, res) => {
+  const gross = Number(req.query.gross_weight_kg) || 0, cbm = Number(req.query.cbm) || 0;
+  res.json({ gross_weight_kg: gross, cbm,
+    volumetric_kg: Math.round(cbm * AQ_VOLUMETRIC_KG_PER_CBM * 100) / 100,
+    chargeable_kg: aqChargeableKg(gross, cbm),
+    basis: (cbm * AQ_VOLUMETRIC_KG_PER_CBM) > gross ? 'volumetric' : 'gross',
+    divisor_kg_per_cbm: AQ_VOLUMETRIC_KG_PER_CBM });
+});
+
+// ── Client: approve or decline ──
+// In Pinpoint, not by emailed link: the decision commits spend, so it should carry an
+// authenticated identity rather than "whoever opened the forwarded message".
+app.post('/air-quotes/:id/decision', authenticateRequest, writeOpLimiter, auditLog('decide_air_quote'), (req, res) => {
+  try {
+    const c = curClient();
+    const q = db.prepare('SELECT * FROM air_quote WHERE id=? AND client_id=?').get(req.params.id, c);
+    if (!q) return res.status(404).json({ error: 'not_found' });
+    if (q.state !== 'quoted') return res.status(409).json({ error: 'not_awaiting_decision', state: q.state });
+    const d = String((req.body || {}).decision || '').toLowerCase();
+    if (d !== 'approve' && d !== 'decline') return res.status(400).json({ error: "decision must be 'approve' or 'decline'" });
+    const today = new Date().toISOString().slice(0, 10);
+    if (d === 'approve' && q.valid_until && q.valid_until < today)
+      return res.status(409).json({ error: 'quote_expired', valid_until: q.valid_until });
+
+    const to = d === 'approve' ? 'approved' : 'declined';
+    db.prepare(`UPDATE air_quote SET state=?, decided_at=datetime('now'), decided_by=?, decision_note=?,
+                updated_at=datetime('now') WHERE id=?`)
+      .run(to, (req.auth && req.auth.userId) || null, String((req.body || {}).note || '').trim() || null, q.id);
+    aqEvent(q.id, 'quoted', to, (req.auth && req.auth.userId) || null, 'client', null);
+    res.json(aqPublic(db.prepare('SELECT * FROM air_quote WHERE id=?').get(q.id)));
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Internal: the review queue ──
+// Admin only. This is the one surface where cost and margin are visible.
+app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const c = String(req.query.client_id || curClient());
+    aqExpireStale(c);
+    const rows = db.prepare(`SELECT * FROM air_quote WHERE client_id=? ORDER BY
+                             CASE state WHEN 'costed' THEN 0 WHEN 'pending_review' THEN 0
+                                        WHEN 'submitted' THEN 1 WHEN 'rfq_sent' THEN 2 ELSE 3 END,
+                             created_at DESC`).all(c);
+    const costs = {};
+    for (const r of db.prepare(`SELECT * FROM air_quote_cost`).all()) costs[r.quote_id] = r;
+    const dflt = aqMarkupDefault(c);
+
+    // Benchmark: what recently approved quotes cost per chargeable kg on the same vendor.
+    // Two quotes at 6,400 and 9,100 say nothing until you see 3.35/kg against 4.80/kg.
+    const bench = {};
+    for (const r of db.prepare(`SELECT vendor_key, SUM(sell_amount) s, SUM(chargeable_kg) k, COUNT(*) n
+                                FROM air_quote WHERE client_id=? AND state='approved' AND chargeable_kg>0
+                                GROUP BY vendor_key`).all(c)) {
+      if (r.k > 0) bench[r.vendor_key] = { per_kg: Math.round(r.s / r.k * 100) / 100, n: r.n };
+    }
+
+    res.json({ client_id: c, markup_default_pct: dflt,
+      quotes: rows.map(q => {
+        const k = costs[q.id] || {};
+        const markup = k.markup_pct != null ? k.markup_pct : dflt;
+        const sell = q.sell_amount != null ? q.sell_amount
+                   : (k.cost_amount != null ? aqSell(k.cost_amount, markup) : null);
+        return {
+          ...q,
+          cost: k.cost_amount ?? null, cost_currency: k.cost_currency || q.currency,
+          partner_name: k.partner_name || null, partner_note: k.partner_note || null,
+          cost_valid_until: k.cost_valid_until || null,
+          markup_pct: markup, markup_default_pct: dflt,
+          markup_source: k.markup_source || 'rate_card', markup_reason: k.markup_reason || null,
+          sell_preview: sell,
+          // Both readings of the same number, so markup and margin can never be confused.
+          gross_margin_pct: (sell && k.cost_amount != null && sell > 0)
+            ? Math.round((sell - k.cost_amount) / sell * 1000) / 10 : null,
+          sell_per_kg: (sell && q.chargeable_kg > 0) ? Math.round(sell / q.chargeable_kg * 100) / 100 : null,
+          vendor_benchmark_per_kg: (bench[q.vendor_key] || {}).per_kg ?? null,
+        };
+      }) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Internal: issue the partner's RFQ link ──
+app.post('/air-quotes/:id/rfq', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+  auditLog('send_air_quote_rfq'), async (req, res) => {
+  try {
+    const c = curClient();
+    const q = db.prepare('SELECT * FROM air_quote WHERE id=? AND client_id=?').get(req.params.id, c);
+    if (!q) return res.status(404).json({ error: 'not_found' });
+    if (!['submitted', 'rfq_sent', 'costed'].includes(q.state))
+      return res.status(409).json({ error: 'not_rfq_able', state: q.state });
+
+    const days = Math.max(1, parseInt((req.body || {}).expires_days, 10) || 14);
+    const token = crypto.randomBytes(24).toString('hex');
+    db.prepare(`INSERT INTO air_quote_token (token, quote_id, purpose, expires_at)
+                VALUES (?,?, 'partner_cost', datetime('now', ?))`).run(token, q.id, `+${days} days`);
+    if (q.state === 'submitted') {
+      db.prepare(`UPDATE air_quote SET state='rfq_sent', updated_at=datetime('now') WHERE id=?`).run(q.id);
+      aqEvent(q.id, 'submitted', 'rfq_sent', (req.auth && req.auth.userId) || null, 'internal', null);
+    }
+
+    const base = String(process.env.PUBLIC_APP_URL || '').replace(/\/+$/, '');
+    const link = `${base}/air-quote/cost?token=${token}`;
+    const to = parseEmailList((req.body || {}).to || process.env.AIR_QUOTE_PARTNER_EMAIL_TO);
+    const from = process.env.EXCEPTION_EMAIL_FROM;
+    let sent = null, sendError = null;
+    if (to.length && from) {
+      const subj = `RFQ ${q.ref} — air freight, ${q.week_label || q.week_start}, ${q.vendor_raw}`;
+      const lines = [
+        `Air freight RFQ ${q.ref}`, '',
+        `Shipping week: ${q.week_label || q.week_start}`,
+        `Vendor: ${q.vendor_raw}`,
+        `Cartons: ${q.cartons}`,
+        `Gross weight: ${q.gross_weight_kg} kg`,
+        `CBM: ${q.cbm}`,
+        `Chargeable weight: ${q.chargeable_kg} kg`,
+        q.origin ? `Origin: ${q.origin}` : null,
+        q.destination ? `Destination: ${q.destination}` : null,
+        q.client_note ? `Note: ${q.client_note}` : null,
+        '', 'Please enter your all-inclusive cost here:', link,
+        '', `This link expires in ${days} days.`,
+      ].filter(Boolean);
+      const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:14px;color:#1C1C1E;">`
+        + lines.map(l => l === '' ? '<div style="height:10px"></div>'
+            : (l === link ? `<div><a href="${link}">${link}</a></div>` : `<div>${escHtml(l)}</div>`)).join('')
+        + `</div>`;
+      try {
+        const r = await sendViaResend({ from, replyTo: process.env.EXCEPTION_EMAIL_REPLY_TO || undefined,
+                                        to, subject: subj, html, text: lines.join('\n') });
+        sent = r.id;
+      } catch (e) { sendError = String(e.message || e); }
+    }
+    aqEvent(q.id, q.state, 'rfq_sent', (req.auth && req.auth.userId) || null, 'internal',
+            sent ? `RFQ emailed to ${to.join(', ')}` : (sendError || 'link issued, no email sent'));
+    res.json({ quote_id: q.id, ref: q.ref, link, expires_days: days,
+               emailed_to: to, resend_id: sent, email_error: sendError });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Partner: magic-link cost form (no login) ──
+// Token-scoped to one quote. Returns shipment facts only — never the client's name, never
+// any pricing that has been quoted.
+app.get('/air-quote/cost', (req, res) => {
+  try {
+    const t = db.prepare(`SELECT * FROM air_quote_token WHERE token=? AND purpose='partner_cost'`)
+                .get(String(req.query.token || ''));
+    if (!t) return res.status(403).json({ error: 'invalid_token' });
+    if (t.expires_at < new Date().toISOString().slice(0, 19).replace('T', ' '))
+      return res.status(403).json({ error: 'expired_token' });
+    const q = db.prepare('SELECT * FROM air_quote WHERE id=?').get(t.quote_id);
+    if (!q) return res.status(404).json({ error: 'not_found' });
+    const existing = db.prepare('SELECT cost_amount, cost_currency, cost_valid_until, partner_note, partner_name FROM air_quote_cost WHERE quote_id=?').get(q.id);
+    res.json({ ref: q.ref, week: q.week_label || q.week_start, vendor: q.vendor_raw,
+      cartons: q.cartons, gross_weight_kg: q.gross_weight_kg, cbm: q.cbm,
+      chargeable_kg: q.chargeable_kg, origin: q.origin, destination: q.destination,
+      note: q.client_note, currency: q.currency, submitted: existing || null });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/air-quote/cost', writeOpLimiter, (req, res) => {
+  try {
+    const b = req.body || {};
+    const t = db.prepare(`SELECT * FROM air_quote_token WHERE token=? AND purpose='partner_cost'`)
+                .get(String(b.token || ''));
+    if (!t) return res.status(403).json({ error: 'invalid_token' });
+    if (t.expires_at < new Date().toISOString().slice(0, 19).replace('T', ' '))
+      return res.status(403).json({ error: 'expired_token' });
+    const q = db.prepare('SELECT * FROM air_quote WHERE id=?').get(t.quote_id);
+    if (!q) return res.status(404).json({ error: 'not_found' });
+    if (['approved', 'declined'].includes(q.state))
+      return res.status(409).json({ error: 'already_decided', state: q.state });
+
+    const cost = Number(b.cost_amount);
+    if (!isFinite(cost) || cost <= 0) return res.status(400).json({ error: 'cost_amount must be a positive number' });
+    const dflt = aqMarkupDefault(q.client_id);
+    db.prepare(`INSERT INTO air_quote_cost
+      (quote_id, partner_name, cost_amount, cost_currency, cost_valid_until, partner_note,
+       costed_at, costed_by, markup_pct, markup_default, markup_source, updated_at)
+      VALUES (?,?,?,?,?,?, datetime('now'), ?, ?, ?, 'rate_card', datetime('now'))
+      ON CONFLICT(quote_id) DO UPDATE SET
+        partner_name=excluded.partner_name, cost_amount=excluded.cost_amount,
+        cost_currency=excluded.cost_currency, cost_valid_until=excluded.cost_valid_until,
+        partner_note=excluded.partner_note, costed_at=excluded.costed_at,
+        costed_by=excluded.costed_by, updated_at=datetime('now')`)
+      .run(q.id, String(b.partner_name || '').trim() || null, Math.round(cost * 100) / 100,
+           String(b.cost_currency || q.currency).trim(), String(b.cost_valid_until || '').trim() || null,
+           String(b.partner_note || '').trim() || null, String(b.partner_name || '').trim() || null,
+           dflt, dflt);
+
+    // Straight to review — a costed quote is never released to the client automatically.
+    db.prepare(`UPDATE air_quote SET state='pending_review', updated_at=datetime('now') WHERE id=?`).run(q.id);
+    db.prepare(`UPDATE air_quote_token SET used_at=datetime('now') WHERE token=?`).run(t.token);
+    aqEvent(q.id, q.state, 'pending_review', String(b.partner_name || 'partner'), 'partner', 'cost submitted');
+    res.json({ ok: true, ref: q.ref, message: 'Cost received. Thank you.' });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Internal: review and release ──
+app.post('/air-quotes/:id/release', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+  auditLog('release_air_quote'), (req, res) => {
+  try {
+    const c = curClient();
+    const q = db.prepare('SELECT * FROM air_quote WHERE id=? AND client_id=?').get(req.params.id, c);
+    if (!q) return res.status(404).json({ error: 'not_found' });
+    if (!['pending_review', 'costed', 'quoted'].includes(q.state))
+      return res.status(409).json({ error: 'not_reviewable', state: q.state });
+    const k = db.prepare('SELECT * FROM air_quote_cost WHERE quote_id=?').get(q.id);
+    if (!k || k.cost_amount == null) return res.status(409).json({ error: 'no_partner_cost' });
+
+    const b = req.body || {};
+    const dflt = aqMarkupDefault(c);
+    let markup = b.markup_pct == null || b.markup_pct === '' ? (k.markup_pct != null ? k.markup_pct : dflt) : Number(b.markup_pct);
+    if (!isFinite(markup) || markup < 0) return res.status(400).json({ error: 'markup_pct invalid' });
+    const overridden = Math.abs(markup - dflt) > 0.0001;
+    if (overridden && !String(b.markup_reason || '').trim())
+      return res.status(400).json({ error: 'markup_reason required when overriding the rate card' });
+
+    const sell = aqSell(k.cost_amount, markup);
+    const days = Math.max(1, parseInt(b.valid_days, 10) || 7);
+    const validUntil = new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+
+    db.prepare(`UPDATE air_quote_cost SET markup_pct=?, markup_default=?, markup_source=?, markup_reason=?,
+                updated_at=datetime('now') WHERE quote_id=?`)
+      .run(markup, dflt, overridden ? 'override' : 'rate_card',
+           String(b.markup_reason || '').trim() || null, q.id);
+    db.prepare(`UPDATE air_quote SET state='quoted', sell_amount=?, valid_until=?,
+                released_at=datetime('now'), released_by=?, updated_at=datetime('now') WHERE id=?`)
+      .run(sell, validUntil, (req.auth && req.auth.userId) || null, q.id);
+    aqEvent(q.id, q.state, 'quoted', (req.auth && req.auth.userId) || null, 'internal',
+            `markup ${markup}% (${overridden ? 'override' : 'rate card'}) · sell ${sell}`);
+
+    res.json({ quote_id: q.id, ref: q.ref, sell_amount: sell, markup_pct: markup,
+               markup_source: overridden ? 'override' : 'rate_card', valid_until: validUntil,
+               gross_margin_pct: sell > 0 ? Math.round((sell - k.cost_amount) / sell * 1000) / 10 : null });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Full internal history for one quote, including every transition.
+app.get('/air-quotes/:id/events', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    res.json({ events: db.prepare('SELECT * FROM air_quote_event WHERE quote_id=? ORDER BY created_at').all(req.params.id) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ═══════════════════ AIR PO REPORT ═══════════════════
 // One row per air PO for a week, baseline against actual across the whole journey:
 // receiving, VAS completion, the six transit/clearing stages, and last-mile delivery.
@@ -13026,6 +13537,9 @@ CREATE TABLE IF NOT EXISTS client_rate (
 (function seedRateCards(){
   try {
     const ins = db.prepare(`INSERT OR IGNORE INTO client_rate (client_id, service_code, label, unit, rate, currency) VALUES (?,?,?,?,?,?)`);
+    // Air quote markup, expressed as a MARKUP on partner cost: 40 => cost x 1.40.
+    // Lives on the rate card so it is edited in the same place as every other rate.
+    try { ins.run('ICONIC', 'air_quote_markup', 'Air quote markup', 'percent', 40, 'AUD'); } catch (e) {}
 
     // Fulfilment clients (envelope model)
     for (const c of db.prepare(`SELECT client_id FROM client_capability WHERE capability='envelope_fulfilment' AND enabled=1`).all()) {
