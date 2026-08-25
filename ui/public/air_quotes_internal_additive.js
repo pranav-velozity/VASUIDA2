@@ -60,6 +60,7 @@
       table.aqi{width:100%;border-collapse:collapse;font-size:11px;}
       table.aqi th{text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.05em;
                    color:${LIGHT};font-weight:600;padding:6px;border-bottom:.5px solid rgba(0,0,0,.08);}
+      table.aqi th.n{text-align:right;}
       table.aqi td{padding:8px 6px;border-bottom:.5px solid rgba(0,0,0,.05);color:${DARK};}
       table.aqi td.n{text-align:right;font-variant-numeric:tabular-nums;}
       table.aqi tr.sel td{background:rgba(153,0,51,.05);}
@@ -183,6 +184,7 @@
         <dt>Gross weight</dt><dd>${nf(q.gross_weight_kg)} kg</dd>
         <dt>Volume</dt><dd>${nf(q.cbm)} CBM</dd>
         <dt><b>Chargeable</b></dt><dd><b>${nf(q.chargeable_kg)} kg</b></dd>
+        ${q.transit_label ? `<dt>Transit</dt><dd>${esc(q.transit_label)}</dd>` : ''}
         ${q.partner_name ? `<dt>Priced by</dt><dd>${esc(q.partner_name)}</dd>` : ''}
         ${q.cost_valid_until ? `<dt>Cost valid to</dt><dd>${esc(q.cost_valid_until)}</dd>` : ''}
         ${q.rfq_sent_at ? `<dt>Sent to partner</dt><dd>${esc(String(q.rfq_sent_at).slice(0, 10))}</dd>` : ''}
@@ -326,7 +328,7 @@
     window.addEventListener('state:ready', load);
     setInterval(load, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v2 loaded');
+    console.log('[air-quote-review] module v3 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

@@ -99,6 +99,8 @@
       table.aq{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px;}
       table.aq th{text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.05em;
                   color:${LIGHT};font-weight:600;padding:6px;border-bottom:.5px solid rgba(0,0,0,.08);}
+      /* Numeric headers must follow their column, or they float left over right-aligned figures. */
+      table.aq th.n{text-align:right;}
       table.aq td{padding:7px 6px;border-bottom:.5px solid rgba(0,0,0,.05);color:${DARK};vertical-align:middle;}
       table.aq td.n{text-align:right;font-variant-numeric:tabular-nums;}
       .aq-pill{display:inline-block;font-size:9px;font-weight:600;padding:2px 7px;border-radius:20px;}
@@ -210,6 +212,9 @@
       <td class="n">${nf(q.cartons)}</td>
       <td class="n">${q.units ? nf(q.units) : '—'}</td>
       <td class="n">${nf(q.chargeable_kg)}</td>
+      <td>${q.transit_mode
+        ? `<span class="aq-pill" style="color:${q.transit_mode === 'VOZAIR' ? BRAND : MID};background:${q.transit_mode === 'VOZAIR' ? 'rgba(153,0,51,.10)' : 'rgba(0,0,0,.05)'}">${esc(q.transit_mode)}</span>`
+        : `<span style="color:${LIGHT}">—</span>`}</td>
       <td class="n">${q.quoted_amount == null ? '—' : money(q.quoted_amount, q.currency)}</td>
       <td>${pill(q.state)}${q.state === 'quoted' && q.valid_until ? `<div style="color:${LIGHT};font-size:9px;margin-top:2px;">until ${esc(q.valid_until)}</div>` : ''}</td>
       <td style="text-align:right;white-space:nowrap;">
@@ -223,8 +228,8 @@
   }
 
   const TH = `<thead><tr><th>Reference</th><th>Vendor</th><th class="n">Cartons</th>
-      <th class="n">Units</th><th class="n">Chargeable kg</th><th class="n">Quoted</th>
-      <th>Status</th><th></th></tr></thead>`;
+      <th class="n">Units</th><th class="n">Chargeable kg</th><th>Transit</th>
+      <th class="n">Quoted</th><th>Status</th><th></th></tr></thead>`;
 
   function quotesHtml() {
     const open = (_data && _data.open) || [], hist = (_data && _data.history) || [];
@@ -443,7 +448,7 @@
     window.addEventListener('air-quotes:changed', load);
     setInterval(check, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v5 loaded');
+    console.log('[air-quotes] module v6 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
