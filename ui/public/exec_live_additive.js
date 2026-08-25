@@ -18,6 +18,26 @@
   })();
 
   async function _getToken() { try { return await window.Clerk?.session?.getToken(); } catch { return null; } }
+  // Facility resolution used to depend entirely on the plan sheet carrying a facility
+  // column. Plans without one — which is a normal shape — left the whole page dead with a
+  // message telling the user to go and load a plan they had already loaded. Ask the server
+  // as a last resort instead: tenancy already knows which facilities the client has.
+  let _facilityCache = null;
+  async function _resolveFacility() {
+    const fromPlan = ((window.state?.plan) || [])
+      .map(p => String(p.facility_name || p.facility || '').trim()).find(Boolean);
+    if (fromPlan) return fromPlan;
+    const fromState = String(window.state?.facility || '').trim();
+    if (fromState) return fromState;
+    if (_facilityCache !== null) return _facilityCache;
+    try {
+      const who = await _api('/tenancy/whoami');
+      const codes = (who && who.resolved && who.resolved.facility_codes) || [];
+      _facilityCache = codes.length ? String(codes[0]) : '';
+    } catch (e) { _facilityCache = ''; }
+    return _facilityCache;
+  }
+
   async function _api(path) {
     const token = await _getToken();
     const res = await fetch(`${_apiBase}${path}`, { headers: Object.assign({'content-type':'application/json'}, token?{'authorization':'Bearer '+token}:{}) });
@@ -189,9 +209,11 @@
       const toDate = new Date(), fromDate = new Date(toDate);
       fromDate.setUTCDate(fromDate.getUTCDate() - (_range * 7));
       const from = fromDate.toISOString().slice(0,10), to = toDate.toISOString().slice(0,10);
-      const facility = ((window.state?.plan)||[]).map(p=>String(p.facility_name||p.facility||'').trim()).find(Boolean)
-        || String(window.state?.facility||'').trim() || '';
-      if (!facility) { _renderError('No facility found. Please navigate to Week Hub and load a plan first.'); return; }
+      const facility = await _resolveFacility();
+      if (!facility) {
+        _renderError('Could not determine a facility for this client. The uploaded plan does not carry a facility column and none is configured.');
+        return;
+      }
       _facility = facility; _from = from; _to = to;
       const data = await _api(`/exec/summary?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&facility=${encodeURIComponent(facility)}`);
       _weeks = Array.isArray(data.weeks) ? data.weeks : [];
