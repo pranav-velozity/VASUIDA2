@@ -147,8 +147,9 @@
       b = document.createElement('button');
       b.id = 'aq-btn-open';
       b.style.cssText = 'font-size:11px;font-weight:500;color:#1C1C1E;background:#fff;'
-        + 'border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:7px 14px;cursor:pointer;'
-        + 'display:flex;align-items:center;gap:5px;transition:all .15s;';
+        + 'border:0.5px solid rgba(0,0,0,0.15);border-radius:8px;padding:7px 20px;cursor:pointer;'
+        + 'display:flex;align-items:center;justify-content:center;gap:6px;min-width:132px;'
+        + 'white-space:nowrap;transition:all .15s;';
       b.title = 'Request an air freight quote';
       b.addEventListener('click', openModal);
       anchor.parentNode.insertBefore(b, anchor);
@@ -348,7 +349,7 @@
 
   function openModal() {
     styles(); closeModal();
-    _view = ((_data && _data.awaiting_approval) || 0) ? 'quotes' : (((_data && _data.open) || []).length || ((_data && _data.history) || []).length ? 'quotes' : 'form');
+    _view = ((_data && _data.awaiting_approval) || 0) ? 'quotes' : 'form';
     const o = document.createElement('div'); o.className = 'aq-ov';
     o.addEventListener('click', e => { if (e.target === o) closeModal(); });
     o.innerHTML = `<div class="aq-modal">
@@ -358,8 +359,8 @@
         <button class="aq-x" id="aq-close">&times;</button>
       </div>
       <div class="aq-tabs">
-        <button class="aq-tab" data-tab="quotes">Quotes<span id="aq-tabbadge"></span></button>
         <button class="aq-tab" data-tab="form">New request</button>
+        <button class="aq-tab" data-tab="quotes">Quotes<span id="aq-tabbadge"></span></button>
       </div>
       <div id="aq-body"></div>
     </div>`;
@@ -412,7 +413,7 @@
     window.addEventListener('air-quotes:changed', load);
     setInterval(check, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v2 loaded');
+    console.log('[air-quotes] module v3 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
