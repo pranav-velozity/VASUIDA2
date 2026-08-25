@@ -11042,7 +11042,7 @@ CREATE TABLE IF NOT EXISTS air_quote (
   client_note     TEXT,
   state           TEXT NOT NULL DEFAULT 'submitted',
   sell_amount     REAL,                      -- the only price a client ever sees
-  currency        TEXT NOT NULL DEFAULT 'AUD',
+  currency        TEXT NOT NULL DEFAULT 'USD',
   valid_until     TEXT,
   rfq_sent_at     TEXT,                      -- when the partner was asked to price it
   released_at     TEXT, released_by TEXT,
@@ -11062,7 +11062,7 @@ CREATE TABLE IF NOT EXISTS air_quote_cost (
   quote_id        TEXT PRIMARY KEY REFERENCES air_quote(id) ON DELETE CASCADE,
   partner_name    TEXT,
   cost_amount     REAL,
-  cost_currency   TEXT DEFAULT 'AUD',
+  cost_currency   TEXT DEFAULT 'USD',
   cost_valid_until TEXT,
   partner_note    TEXT,
   costed_at       TEXT, costed_by TEXT,
@@ -11107,6 +11107,15 @@ try {
   // rather than reconstructed from the event log.
   for (const col of ['created_by_email', 'decided_by_email', 'decided_by_name', 'decided_via']) {
     if (!_aqc.includes(col)) db.exec(`ALTER TABLE air_quote ADD COLUMN ${col} TEXT`);
+  }
+  // One-time: quotes raised under the old AUD default that have not been decided yet.
+  // Decided quotes are left alone — they are a record of what was agreed, right or wrong.
+  const _curFix = db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability='aq_usd_v1'`).get();
+  if (!_curFix) {
+    const n = db.prepare(`UPDATE air_quote SET currency='USD'
+                          WHERE currency='AUD' AND state NOT IN ('approved','declined')`).run().changes;
+    db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled) VALUES ('__meta','aq_usd_v1',1)`).run();
+    if (n) console.log(`[air-quote:migration] re-stamped ${n} undecided quote(s) from AUD to USD`);
   }
 } catch (e) { console.error('[air-quote:migration]', e.message); }
 
@@ -11451,6 +11460,9 @@ app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), (re
           gross_margin_pct: (sell && k.cost_amount != null && sell > 0)
             ? Math.round((sell - k.cost_amount) / sell * 1000) / 10 : null,
           sell_per_kg: (sell && q.chargeable_kg > 0) ? Math.round(sell / q.chargeable_kg * 100) / 100 : null,
+          // NA rather than null when the client left units blank — an empty cell reads as a
+          // bug, "NA" reads as a choice they made.
+          sell_per_unit: (sell && q.units > 0) ? Math.round(sell / q.units * 10000) / 10000 : null,
           vendor_benchmark_per_kg: (bench[q.vendor_key] || {}).per_kg ?? null,
         };
       }) });
@@ -11493,7 +11505,7 @@ const aqFullRow = (id) => db.prepare(`SELECT q.*, k.cost_amount, k.cost_currency
     LEFT JOIN air_quote_cost k ON k.quote_id=q.id WHERE q.id=?`).get(id);
 
 // Partner has priced it — internal needs to review. Cost and margin are fine here.
-async function aqNotifyCosted(quoteId) {
+async function aqNotifyCosted(quoteId, origin) {
   const q = aqFullRow(quoteId); if (!q) return;
   const sell = aqSell(q.cost_amount, q.markup_pct);
   const gm = sell > 0 ? Math.round((sell - q.cost_amount) / sell * 1000) / 10 : null;
@@ -11507,11 +11519,22 @@ async function aqNotifyCosted(quoteId) {
     ['Gross margin', gm == null ? null : gm + '%'],
     ['Priced by', q.partner_name],
   ];
-  const html = aqMailShell(`Ready to review — ${q.ref}`, rows, '',
-    'Open Quote Review in Pinpoint to set the markup and release it to the client. Nothing is sent until you do.');
+  // Releasing at the rate-card markup is the common case and needs no judgement, so it can
+  // be done from the email. Anything requiring an override still goes through Pinpoint.
+  const token = crypto.randomBytes(24).toString('hex');
+  db.prepare(`INSERT INTO air_quote_token (token, quote_id, purpose, expires_at)
+              VALUES (?,?, 'internal_release', datetime('now', '+14 days'))`).run(token, q.id);
+  const base = String(process.env.PUBLIC_API_URL || origin || '').replace(/\/+$/, '');
+  const cta = `<div style="margin-top:20px;text-align:center;">
+      <a href="${base}/air-quote/release?token=${token}" style="display:inline-block;padding:12px 26px;
+        border-radius:9px;background:#990033;color:#fff;text-decoration:none;font-size:14px;font-weight:600;">
+        Release to client at ${q.markup_pct}%</a></div>`;
+  const html = aqMailShell(`Ready to review — ${q.ref}`, rows, cta,
+    'The button opens a confirmation page. To change the markup, or to send it back to the partner, use Quote Review in Pinpoint.');
   await aqMail(process.env.AIR_QUOTE_INTERNAL_EMAIL_TO,
     `Air quote ready to review — ${q.ref}, ${q.vendor_raw}`, html,
-    rows.filter(r => r[1] != null).map(r => `${r[0]}: ${r[1]}`).join('\n'));
+    rows.filter(r => r[1] != null).map(r => `${r[0]}: ${r[1]}`).join('\n')
+      + `\n\nRelease at ${q.markup_pct}%: ${base}/air-quote/release?token=${token}`);
 }
 
 // Released to the client. Sell price only — no cost, no markup, no margin.
@@ -11790,8 +11813,8 @@ app.get('/air-quote/cost', (req, res) => {
       <input id="cost" type="number" min="0" step="0.01" inputmode="decimal"
              placeholder="0.00" value="${ex.cost_amount != null ? escHtml(String(ex.cost_amount)) : ''}">
       <select id="cur">
-        ${['AUD','USD','CNY','HKD','EUR','GBP'].map(x =>
-          `<option value="${x}" ${(ex.cost_currency || q.currency) === x ? 'selected' : ''}>${x}</option>`).join('')}
+        ${['USD','AUD','CNY','HKD','EUR','GBP'].map(x =>
+          `<option value="${x}" ${(ex.cost_currency || q.currency || 'USD') === x ? 'selected' : ''}>${x}</option>`).join('')}
       </select>
     </div>
     <label for="transit">Transit</label>
@@ -11883,8 +11906,130 @@ app.post('/air-quote/cost', writeOpLimiter, (req, res) => {
     db.prepare(`UPDATE air_quote SET state='pending_review', updated_at=datetime('now') WHERE id=?`).run(q.id);
     db.prepare(`UPDATE air_quote_token SET used_at=datetime('now') WHERE token=?`).run(t.token);
     aqEvent(q.id, q.state, 'pending_review', String(b.partner_name || 'partner'), 'partner', 'cost submitted');
-    aqNotifyCosted(q.id).catch(e => console.error('[air-quote:notify-costed]', e.message));
+    aqNotifyCosted(q.id, `${req.protocol}://${req.get('host')}`)
+      .catch(e => console.error('[air-quote:notify-costed]', e.message));
     res.json({ ok: true, ref: q.ref, message: 'Cost received. Thank you.' });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Internal: release from the email link ──
+// Confirmation page, not a one-click GET — a mail scanner prefetching this would otherwise
+// push a price to the client unreviewed. Releases at the rate-card markup only; an override
+// still requires Quote Review, because that is the case a human should look at.
+app.get('/air-quote/release', (req, res) => {
+  const fail = (msg) => res.status(403).type('html').send(aqPartnerPage(
+    `<div class="card done"><div class="tick" style="color:#B33F40">&#9888;</div>
+     <h1 style="margin-top:10px">${escHtml(msg)}</h1>
+     <div class="sub" style="margin-top:6px">Use Quote Review in Pinpoint instead.</div></div>`, 'Link unavailable'));
+  try {
+    const t = db.prepare(`SELECT * FROM air_quote_token WHERE token=? AND purpose='internal_release'`)
+                .get(String(req.query.token || ''));
+    if (!t) return fail('This link is not valid.');
+    if (t.used_at) return fail('This quote has already been released.');
+    if (t.expires_at < new Date().toISOString().slice(0, 19).replace('T', ' ')) return fail('This link has expired.');
+    const q = aqFullRow(t.quote_id);
+    if (!q) return fail('This quote no longer exists.');
+    if (!['pending_review', 'costed'].includes(q.state))
+      return fail(`This quote is ${q.state} and can no longer be released here.`);
+    if (q.cost_amount == null) return fail('No partner cost has been received yet.');
+
+    const cur = q.cost_currency || q.currency || 'USD';
+    const sell = aqSell(q.cost_amount, q.markup_pct);
+    const gm = sell > 0 ? Math.round((sell - q.cost_amount) / sell * 1000) / 10 : null;
+    const perKg = q.chargeable_kg > 0 ? (sell / q.chargeable_kg).toFixed(2) : null;
+    const perUnit = q.units > 0 ? (sell / q.units).toFixed(2) : null;
+    const row = (k, v) => v == null || v === '' ? '' : `<dt>${escHtml(k)}</dt><dd>${escHtml(String(v))}</dd>`;
+
+    const body = `
+  <div class="card">
+    <h1>Release quote to client</h1>
+    <div class="sub">Internal &mdash; confirm before the client sees this price.</div>
+    <div class="ref">${escHtml(q.ref)}</div>
+    <dl style="margin-top:16px;">
+      ${row('Shipping week', q.week_label || q.week_start)}
+      ${row('Vendor', q.vendor_raw)}
+      ${row('Cartons', q.cartons)}
+      ${row('Units', q.units)}
+      ${row('Chargeable weight', q.chargeable_kg + ' kg')}
+      ${row('Transit', AQ_TRANSIT[q.transit_mode] || q.transit_mode)}
+      ${row('Partner cost', cur + ' ' + Number(q.cost_amount).toFixed(2))}
+      ${row('Markup', q.markup_pct + '%')}
+      ${row('Gross margin', gm == null ? null : gm + '%')}
+      ${row('Per chargeable kg', perKg == null ? null : cur + ' ' + perKg)}
+      ${row('Per unit', perUnit == null ? 'NA' : cur + ' ' + perUnit)}
+    </dl>
+    <div class="chg">
+      <div style="font-size:10px;color:var(--mid);text-transform:uppercase;letter-spacing:.06em;font-weight:600;">Sell price to client</div>
+      <b>${escHtml(cur)} ${sell.toFixed(2)}</b>
+    </div>
+  </div>
+  <div class="card">
+    <label for="days">Quote valid for (days)</label>
+    <input id="days" type="number" min="1" step="1" value="7">
+    <button id="go">Release to client</button>
+    <div class="msg" id="msg"></div>
+  </div>
+  <script>
+  (function(){
+    var b=document.getElementById('go'), m=document.getElementById('msg');
+    b.addEventListener('click', async function(){
+      b.disabled=true; b.textContent='Releasing\u2026';
+      try{
+        var r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({token:${aqJsEmbed(String(req.query.token || ''))},
+            valid_days:parseInt(document.getElementById('days').value,10)||7})});
+        var j=await r.json();
+        if(!r.ok){ m.className='msg err'; m.textContent=j.error||('Error '+r.status);
+                   b.disabled=false; b.textContent='Release to client'; return; }
+        document.querySelector('.wrap').innerHTML =
+          '<div class="card done"><div class="tick">\u2713</div>'+
+          '<h1 style="margin-top:10px">Released</h1>'+
+          '<div class="sub" style="margin-top:6px">The client has been emailed the quote.</div></div>';
+      }catch(e){ m.className='msg err'; m.textContent='Could not release: '+e.message;
+                 b.disabled=false; b.textContent='Release to client'; }
+    });
+  })();
+  </script>`;
+    res.type('html').send(aqPartnerPage(body, `Release ${q.ref}`));
+  } catch (e) {
+    console.error('[GET /air-quote/release]', e);
+    res.status(500).type('html').send(aqPartnerPage(`<div class="card done"><h1>Something went wrong</h1></div>`, 'Error'));
+  }
+});
+
+app.post('/air-quote/release', writeOpLimiter, (req, res) => {
+  try {
+    const b = req.body || {};
+    const t = db.prepare(`SELECT * FROM air_quote_token WHERE token=? AND purpose='internal_release'`)
+                .get(String(b.token || ''));
+    if (!t) return res.status(403).json({ error: 'invalid_token' });
+    if (t.used_at) return res.status(409).json({ error: 'already_released' });
+    if (t.expires_at < new Date().toISOString().slice(0, 19).replace('T', ' '))
+      return res.status(403).json({ error: 'expired_token' });
+    const q = db.prepare('SELECT * FROM air_quote WHERE id=?').get(t.quote_id);
+    if (!q) return res.status(404).json({ error: 'not_found' });
+    if (!['pending_review', 'costed'].includes(q.state))
+      return res.status(409).json({ error: 'not_reviewable', state: q.state });
+    const k = db.prepare('SELECT * FROM air_quote_cost WHERE quote_id=?').get(q.id);
+    if (!k || k.cost_amount == null) return res.status(409).json({ error: 'no_partner_cost' });
+
+    const markup = k.markup_pct != null ? k.markup_pct : aqMarkupDefault(q.client_id);
+    const sell = aqSell(k.cost_amount, markup);
+    const days = Math.max(1, parseInt(b.valid_days, 10) || 7);
+    const validUntil = new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+    const cur = k.cost_currency || q.currency || 'USD';
+
+    db.transaction(() => {
+      db.prepare(`UPDATE air_quote SET state='quoted', sell_amount=?, currency=?, valid_until=?,
+                  released_at=datetime('now'), released_by='email-link', updated_at=datetime('now')
+                  WHERE id=?`).run(sell, cur, validUntil, q.id);
+      db.prepare(`UPDATE air_quote_token SET used_at=datetime('now')
+                  WHERE quote_id=? AND purpose='internal_release'`).run(q.id);
+    })();
+    aqEvent(q.id, q.state, 'quoted', 'email-link', 'internal', `released at ${markup}% · sell ${cur} ${sell}`);
+    aqNotifyQuoted(q.id, `${req.protocol}://${req.get('host')}`)
+      .catch(e => console.error('[air-quote:notify-quoted]', e.message));
+    res.json({ ok: true, ref: q.ref, sell_amount: sell, currency: cur, valid_until: validUntil });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -12015,6 +12160,36 @@ app.post('/air-quote/decide', writeOpLimiter, (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Internal: remove a decided quote ──
+// Approved and declined quotes are commercial records, so the client-facing withdraw
+// endpoint refuses them. This is the deliberate override: admin only, and a shared password
+// on top, so removing an agreed price is never a single misplaced click.
+const AQ_DELETE_PASSWORD = process.env.AIR_QUOTE_DELETE_PASSWORD || 'Velozity2026!';
+
+app.post('/air-quotes/:id/purge', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+  auditLog('purge_air_quote'), (req, res) => {
+  try {
+    const c = curClient();
+    const q = db.prepare('SELECT * FROM air_quote WHERE id=? AND client_id=?').get(req.params.id, c);
+    if (!q) return res.status(404).json({ error: 'not_found' });
+    // Timing-safe compare: this is a shared secret, so do not leak its length by returning
+    // early on the first mismatched character.
+    const given = Buffer.from(String((req.body || {}).password || ''));
+    const want = Buffer.from(AQ_DELETE_PASSWORD);
+    const okPw = given.length === want.length && crypto.timingSafeEqual(given, want);
+    if (!okPw) return res.status(403).json({ error: 'bad_password' });
+
+    db.transaction(() => {
+      db.prepare('DELETE FROM air_quote_token WHERE quote_id=?').run(q.id);
+      db.prepare('DELETE FROM air_quote_cost  WHERE quote_id=?').run(q.id);
+      db.prepare('DELETE FROM air_quote_event WHERE quote_id=?').run(q.id);
+      db.prepare('DELETE FROM air_quote       WHERE id=?').run(q.id);
+    })();
+    console.log(`[air-quote] ${q.ref} PURGED from state ${q.state} by ${(req.auth && req.auth.userId) || 'unknown'}`);
+    res.json({ id: q.id, ref: q.ref, deleted: true, was_state: q.state });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Internal: review and release ──
 app.post('/air-quotes/:id/release', authenticateRequest, requireRole(['admin']), writeOpLimiter,
   auditLog('release_air_quote'), (req, res) => {
@@ -12043,15 +12218,17 @@ app.post('/air-quotes/:id/release', authenticateRequest, requireRole(['admin']),
                 updated_at=datetime('now') WHERE quote_id=?`)
       .run(markup, dflt, overridden ? 'override' : 'rate_card',
            String(b.markup_reason || '').trim() || null, q.id);
-    db.prepare(`UPDATE air_quote SET state='quoted', sell_amount=?, valid_until=?,
+    db.prepare(`UPDATE air_quote SET state='quoted', sell_amount=?, currency=?, valid_until=?,
                 released_at=datetime('now'), released_by=?, updated_at=datetime('now') WHERE id=?`)
-      .run(sell, validUntil, (req.auth && req.auth.userId) || null, q.id);
+      .run(sell, k.cost_currency || q.currency || 'USD', validUntil,
+           (req.auth && req.auth.userId) || null, q.id);
     aqEvent(q.id, q.state, 'quoted', (req.auth && req.auth.userId) || null, 'internal',
             `markup ${markup}% (${overridden ? 'override' : 'rate card'}) · sell ${sell}`);
     aqNotifyQuoted(q.id, `${req.protocol}://${req.get('host')}`)
       .catch(e => console.error('[air-quote:notify-quoted]', e.message));
 
-    res.json({ quote_id: q.id, ref: q.ref, sell_amount: sell, markup_pct: markup,
+    res.json({ quote_id: q.id, ref: q.ref, sell_amount: sell,
+               currency: k.cost_currency || q.currency || 'USD', markup_pct: markup,
                markup_source: overridden ? 'override' : 'rate_card', valid_until: validUntil,
                gross_margin_pct: sell > 0 ? Math.round((sell - k.cost_amount) / sell * 1000) / 10 : null });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
