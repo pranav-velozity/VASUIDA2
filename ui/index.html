@@ -1,6 +1,27 @@
 <!doctype html>
 <html lang="en">
 <head>
+<style id="pp-boot-gate">
+  /* Client-specific chrome starts hidden and is revealed once tenancy resolves. Without
+     this the ICONIC-shaped markup paints first and is hidden a beat later, which reads as
+     the page flashing another customer's layout before settling on yours. */
+  html.pp-booting #nav-exec, html.pp-booting #nav-map, html.pp-booting #nav-reports,
+  html.pp-booting #nav-vas-labelling, html.pp-booting #nav-receiving,
+  html.pp-booting #nav-finance, html.pp-booting #nav-aqi,
+  html.pp-booting #wh-btn-upload, html.pp-booting #btn-upload-plan,
+  html.pp-booting #wh-btn-zero, html.pp-booting #btn-zero-plan,
+  html.pp-booting #wh-btn-zero-uids,
+  html.pp-booting #aq-btn-open { visibility: hidden !important; }
+</style>
+<script>
+  (function () {
+    document.documentElement.classList.add('pp-booting');
+    // Never let a failed or slow capability lookup leave the toolbar empty. Whatever
+    // happens, the gate lifts — capability filtering then applies as normal.
+    setTimeout(function () { document.documentElement.classList.remove('pp-booting'); }, 4000);
+  })();
+</script>
+
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <!-- ⬇️ Set to your Render API base (no trailing slash) -->
@@ -6447,13 +6468,13 @@ window.__openPrebookModal = function(){
     if(window.show) window.show('#intake');
   };
   </script>
-  <script src="/public/tenancy_additive.js?v=6" defer></script>
-  <script src="/public/ehp_ops_additive.js?v=19" defer></script>
-  <script src="/public/ehp_geo_additive.js?v=7" defer></script>
-  <script src="/public/air_quotes_additive.js?v=11" defer></script>
+  <script src="/public/tenancy_additive.js?v=7" defer></script>
+  <script src="/public/ehp_ops_additive.js?v=20" defer></script>
+  <script src="/public/ehp_geo_additive.js?v=8" defer></script>
+  <script src="/public/air_quotes_additive.js?v=12" defer></script>
   <script src="/public/pulse_toggle_additive.js?v=2" defer></script>
-  <script src="/public/air_quotes_internal_additive.js?v=9" defer></script>
-  <script src="/public/fulfilment_weekhub_additive.js?v=12" defer></script>
+  <script src="/public/air_quotes_internal_additive.js?v=10" defer></script>
+  <script src="/public/fulfilment_weekhub_additive.js?v=13" defer></script>
 
 
 <!-- ── Week Hub Split-Flap Insight Flipper ── -->
