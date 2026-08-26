@@ -116,11 +116,11 @@
               cursor:pointer;padding:2px 6px;margin-left:6px;border-radius:6px;}
       .aq-del:hover{color:${RED};background:rgba(179,63,64,.08);}
       .aq-ov{position:fixed;inset:0;background:rgba(0,0,0,.34);z-index:9600;display:flex;
-             align-items:flex-start;justify-content:center;padding:28px 18px;overflow:auto;
+             align-items:flex-start;justify-content:center;padding:18px;overflow:auto;
              -webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);}
       /* Wide enough for the quote table without horizontal scroll; the form stays
          comfortable inside it. */
-      .aq-modal{background:#fff;border-radius:16px;width:min(920px,100%);padding:22px 24px 26px;
+      .aq-modal{background:#fff;border-radius:16px;width:min(1200px,100%);padding:24px 28px 28px;
                 box-shadow:0 18px 60px rgba(0,0,0,.22);}
       .aq-x{background:none;border:0;font-size:22px;line-height:1;color:${LIGHT};cursor:pointer;padding:0 2px;}
       .aq-x:hover{color:${DARK};}
@@ -130,7 +130,7 @@
               display:inline-flex;align-items:center;}
       .aq-sec{font-size:9px;font-weight:700;color:${LIGHT};text-transform:uppercase;
               letter-spacing:.06em;margin:16px 0 2px;}
-      #aq-body{max-height:min(66vh,720px);overflow:auto;padding-right:2px;}
+      #aq-body{max-height:min(80vh,940px);overflow:auto;padding-right:4px;}
       .aq-lbl{display:block;font-size:11px;font-weight:600;color:${MID};margin:12px 0 4px;}
       .aq-in{width:100%;padding:9px 11px;border:.5px solid rgba(0,0,0,.14);border-radius:9px;
              font:inherit;font-size:13px;color:${DARK};background:#fff;}
@@ -519,7 +519,7 @@
     window.addEventListener('air-quotes:changed', load);
     setInterval(() => { if (document.visibilityState === 'visible') check(); }, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v12 loaded');
+    console.log('[air-quotes] module v13 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
