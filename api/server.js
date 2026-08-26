@@ -11188,7 +11188,7 @@ try {
   // Who asked and who agreed. A dispute turns on these, so they are stored on the quote
   // rather than reconstructed from the event log.
   for (const col of ['created_by_email', 'decided_by_email', 'decided_by_name', 'decided_via',
-                     'zendesk_ticket', 'po_numbers', 'revision_of']) {
+                     'zendesk_ticket', 'po_numbers', 'revision_of', 'review_saved_at']) {
     if (!_aqc.includes(col)) db.exec(`ALTER TABLE air_quote ADD COLUMN ${col} TEXT`);
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_air_quote_zendesk ON air_quote(client_id, zendesk_ticket)");
@@ -11235,6 +11235,52 @@ const AQ_TRANSIT = {
   DHL:    'Courier — DHL',
   VOZAIR: 'VOZAIR — VelOzity managed air',
 };
+
+// ── Cost lines ──
+// The partner prices three components. Each carries its own markup so a reviewer can price
+// freight and services differently, and the header totals are always the sum of the lines —
+// never stored independently, so they cannot drift apart.
+db.exec(`
+CREATE TABLE IF NOT EXISTS air_quote_cost_line (
+  quote_id    TEXT NOT NULL REFERENCES air_quote(id) ON DELETE CASCADE,
+  code        TEXT NOT NULL,          -- air_freight | vip_service | palletization
+  cost_amount REAL NOT NULL DEFAULT 0,
+  markup_pct  REAL,
+  sell_amount REAL,
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (quote_id, code)
+);
+`);
+
+const AQ_LINES = [
+  { code: 'air_freight',   label: 'Air freight' },
+  { code: 'vip_service',   label: 'VIP service fee' },
+  { code: 'palletization', label: 'Palletization' },
+];
+const AQ_LINE_LABEL = Object.fromEntries(AQ_LINES.map(l => [l.code, l.label]));
+
+function aqLines(quoteId) {
+  const rows = db.prepare('SELECT * FROM air_quote_cost_line WHERE quote_id=?').all(quoteId);
+  const byCode = Object.fromEntries(rows.map(r => [r.code, r]));
+  return AQ_LINES.map(l => {
+    const r = byCode[l.code] || {};
+    return { code: l.code, label: l.label,
+             cost_amount: r.cost_amount == null ? 0 : r.cost_amount,
+             markup_pct: r.markup_pct, sell_amount: r.sell_amount };
+  });
+}
+
+// Recompute the header from the lines and persist it. Called after every line write so a
+// stored total is never a stale copy of something that has since changed.
+function aqRollup(quoteId) {
+  const lines = aqLines(quoteId);
+  const cost = Math.round(lines.reduce((a, l) => a + (l.cost_amount || 0), 0) * 100) / 100;
+  const sell = Math.round(lines.reduce((a, l) => a + (l.sell_amount || 0), 0) * 100) / 100;
+  const pct = cost > 0 ? Math.round((sell - cost) / cost * 1000) / 10 : null;
+  db.prepare(`UPDATE air_quote_cost SET cost_amount=?, markup_pct=?, updated_at=datetime('now')
+              WHERE quote_id=?`).run(cost, pct, quoteId);
+  return { lines, cost, sell, markup_pct: pct };
+}
 
 function aqNewId(p) { return (p || 'aq') + '_' + crypto.randomBytes(10).toString('hex'); }
 
@@ -11556,11 +11602,25 @@ app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), (re
       quotes: rows.map(q => {
         const k = costs[q.id] || {};
         const markup = k.markup_pct != null ? k.markup_pct : dflt;
-        const sell = q.sell_amount != null ? q.sell_amount
-                   : (k.cost_amount != null ? aqSell(k.cost_amount, markup) : null);
+        // Sell always comes from the lines when they exist — the header is a rollup, never
+        // an independent figure that could disagree with its own components.
+        const sell = lineSell > 0 ? Math.round(lineSell * 100) / 100
+                   : (q.sell_amount != null ? q.sell_amount
+                   : (k.cost_amount != null ? aqSell(k.cost_amount, markup) : null));
+        const lines = aqLines(q.id);
+        const lineSell = lines.reduce((a, l) => a + (l.sell_amount || 0), 0);
+        const per = (n, d) => (n != null && d > 0) ? Math.round(n / d * 10000) / 10000 : null;
         return {
           ...q,
-          cost: k.cost_amount ?? null, cost_currency: k.cost_currency || q.currency,
+          lines: lines.map(l => ({
+            ...l,
+            cost_per_kg: per(l.cost_amount, q.chargeable_kg),
+            cost_per_unit: per(l.cost_amount, q.units),
+            sell_per_kg: per(l.sell_amount, q.chargeable_kg),
+            sell_per_unit: per(l.sell_amount, q.units),
+          })),
+          review_state: q.state === 'quoted' ? 'sent' : (q.review_saved_at ? 'draft' : 'new'),
+          cost: k.cost_amount ?? null, cost_currency: 'USD',
           partner_name: k.partner_name || null, partner_note: k.partner_note || null,
           transit_mode: k.transit_mode || null,
           transit_label: k.transit_mode ? (AQ_TRANSIT[k.transit_mode] || k.transit_mode) : null,
@@ -11575,6 +11635,8 @@ app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), (re
           // NA rather than null when the client left units blank — an empty cell reads as a
           // bug, "NA" reads as a choice they made.
           sell_per_unit: (sell && q.units > 0) ? Math.round(sell / q.units * 10000) / 10000 : null,
+          cost_per_kg: (k.cost_amount != null && q.chargeable_kg > 0) ? Math.round(k.cost_amount / q.chargeable_kg * 100) / 100 : null,
+          cost_per_unit: (k.cost_amount != null && q.units > 0) ? Math.round(k.cost_amount / q.units * 10000) / 10000 : null,
           vendor_benchmark_per_kg: (bench[q.vendor_key] || {}).per_kg ?? null,
         };
       }) });
@@ -12005,6 +12067,7 @@ app.get('/air-quote/cost', (req, res) => {
     const q = db.prepare('SELECT * FROM air_quote WHERE id=?').get(t.quote_id);
     if (!q) return fail('This request no longer exists.');
     const ex = db.prepare('SELECT * FROM air_quote_cost WHERE quote_id=?').get(q.id) || {};
+    const exLines = aqLines(q.id);
 
     // A programmatic caller can still ask for the raw facts.
     if (String(req.query.format || '') === 'json') {
@@ -12050,9 +12113,17 @@ app.get('/air-quote/cost', (req, res) => {
 
   <div class="card">
     ${resubmit ? `<div class="msg ok" style="margin:0 0 6px;">A cost of ${escHtml(String(ex.cost_amount))} ${escHtml(ex.cost_currency || q.currency)} is already on file. Submitting again replaces it.</div>` : ''}
-    <label for="cost">All-inclusive cost (USD)</label>
-    <input id="cost" type="number" min="0" step="0.01" inputmode="decimal"
-           placeholder="0.00" value="${ex.cost_amount != null ? escHtml(String(ex.cost_amount)) : ''}">
+    ${AQ_LINES.map(l => {
+      const cur = (exLines.find(x => x.code === l.code) || {}).cost_amount;
+      return `<label for="c-${l.code}">${escHtml(l.label)} (USD)</label>
+      <input class="cline" id="c-${l.code}" type="number" min="0" step="0.01" inputmode="decimal"
+             placeholder="0.00" value="${cur ? escHtml(String(cur)) : ''}">`;
+    }).join('')}
+    <div class="chg" style="margin-top:14px;">
+      <div style="font-size:10px;color:var(--mid);text-transform:uppercase;letter-spacing:.06em;font-weight:600;">Total (USD)</div>
+      <b id="ctotal">0.00</b>
+      <div class="n">Sum of the three lines above.</div>
+    </div>
     <label for="transit">Transit</label>
     <select id="transit">
       <option value="">— select —</option>
@@ -12073,16 +12144,25 @@ app.get('/air-quote/cost', (req, res) => {
   (function(){
     var b=document.getElementById('go'), m=document.getElementById('msg');
     function show(k,t){ m.className='msg '+k; m.textContent=t; }
+    function retotal(){
+      var t=0; Array.prototype.forEach.call(document.querySelectorAll('.cline'), function(el){ t+=parseFloat(el.value)||0; });
+      document.getElementById('ctotal').textContent=t.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('.cline'), function(el){ el.addEventListener('input', retotal); });
+    retotal();
     b.addEventListener('click', async function(){
-      var v=parseFloat(document.getElementById('cost').value);
-      if(!(v>0)){ show('err','Enter a cost greater than zero.'); return; }
+      var lines={}; var v=0;
+      Array.prototype.forEach.call(document.querySelectorAll('.cline'), function(el){
+        var n=parseFloat(el.value)||0; lines[el.id.slice(2)]=Math.round(n*100)/100; v+=n; });
+      v=Math.round(v*100)/100;
+      if(!(v>0)){ show('err','Enter a cost on at least one line.'); return; }
       var tm=document.getElementById('transit').value;
       if(!tm){ show('err','Choose how the freight will move.'); return; }
       b.disabled=true; b.textContent='Submitting\u2026';
       try{
         var r=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({token:${aqJsEmbed(String(req.query.token || ''))},
-            cost_amount:v, transit_mode:tm, cost_currency:'USD',
+            cost_amount:v, cost_lines:lines, transit_mode:tm, cost_currency:'USD',
             cost_valid_until:document.getElementById('valid').value||null,
             partner_name:document.getElementById('who').value||null,
             partner_note:document.getElementById('note').value||null})});
@@ -12138,8 +12218,24 @@ app.post('/air-quote/cost', writeOpLimiter, (req, res) => {
            String(b.partner_note || '').trim() || null, String(b.partner_name || '').trim() || null,
            dflt, dflt, transit);
 
+    // Store the three lines and seed each with the rate-card markup. The reviewer can move
+    // any of them; until they do, every line prices at the standard rate.
+    const cl = (b.cost_lines && typeof b.cost_lines === 'object') ? b.cost_lines : {};
+    const ins = db.prepare(`INSERT INTO air_quote_cost_line (quote_id, code, cost_amount, markup_pct, sell_amount)
+                            VALUES (?,?,?,?,?)
+                            ON CONFLICT(quote_id, code) DO UPDATE SET
+                              cost_amount=excluded.cost_amount, sell_amount=excluded.sell_amount,
+                              updated_at=datetime('now')`);
+    db.transaction(() => {
+      for (const l of AQ_LINES) {
+        const amt = Math.max(0, Number(cl[l.code]) || 0);
+        ins.run(q.id, l.code, amt, dflt, aqSell(amt, dflt));
+      }
+    })();
+    aqRollup(q.id);
+
     // Straight to review — a costed quote is never released to the client automatically.
-    db.prepare(`UPDATE air_quote SET state='pending_review', updated_at=datetime('now') WHERE id=?`).run(q.id);
+    db.prepare(`UPDATE air_quote SET state='pending_review', review_saved_at=NULL, updated_at=datetime('now') WHERE id=?`).run(q.id);
     db.prepare(`UPDATE air_quote_token SET used_at=datetime('now') WHERE token=?`).run(t.token);
     aqEvent(q.id, q.state, 'pending_review', String(b.partner_name || 'partner'), 'partner', 'cost submitted');
     aqNotifyCosted(q.id, `${req.protocol}://${req.get('host')}`)
@@ -12400,6 +12496,81 @@ app.post('/air-quote/decide', writeOpLimiter, (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Internal: save pricing without releasing ──
+// A reviewer can price a quote and come back to it. Saving marks it a draft; only Release
+// sends anything to the client.
+//
+// Two ways to price, and they are reconciled here rather than in the browser so the stored
+// numbers cannot depend on which field someone happened to type in:
+//   * per line — a markup percentage or an explicit sell amount
+//   * on the total — a sell figure distributed across the lines in proportion to their cost
+app.post('/air-quotes/:id/pricing', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+  auditLog('save_air_quote_pricing'), (req, res) => {
+  try {
+    const c = curClient();
+    const q = db.prepare('SELECT * FROM air_quote WHERE id=? AND client_id=?').get(req.params.id, c);
+    if (!q) return res.status(404).json({ error: 'not_found' });
+    if (['approved', 'declined'].includes(q.state))
+      return res.status(409).json({ error: 'already_decided', state: q.state });
+
+    const b = req.body || {};
+    const current = aqLines(q.id);
+    const costTotal = current.reduce((a, l) => a + (l.cost_amount || 0), 0);
+    const upd = db.prepare(`UPDATE air_quote_cost_line SET markup_pct=?, sell_amount=?,
+                            updated_at=datetime('now') WHERE quote_id=? AND code=?`);
+
+    if (b.total_sell != null && b.total_sell !== '') {
+      // Distribute proportionally to cost. A line with no cost cannot take a share, so any
+      // rounding remainder lands on the largest line rather than creating a phantom charge.
+      const target = Math.round(Number(b.total_sell) * 100) / 100;
+      if (!isFinite(target) || target < 0) return res.status(400).json({ error: 'total_sell invalid' });
+      if (!(costTotal > 0)) return res.status(409).json({ error: 'no_cost_to_distribute' });
+      let allocated = 0;
+      const shares = current.map(l => {
+        const v = Math.round(target * ((l.cost_amount || 0) / costTotal) * 100) / 100;
+        allocated += v; return { code: l.code, cost: l.cost_amount || 0, sell: v };
+      });
+      const drift = Math.round((target - allocated) * 100) / 100;
+      if (drift !== 0) {
+        const biggest = shares.reduce((m, x) => (x.cost > m.cost ? x : m), shares[0]);
+        biggest.sell = Math.round((biggest.sell + drift) * 100) / 100;
+      }
+      db.transaction(() => {
+        for (const sh of shares) {
+          const pct = sh.cost > 0 ? Math.round((sh.sell - sh.cost) / sh.cost * 1000) / 10 : null;
+          upd.run(pct, sh.sell, q.id, sh.code);
+        }
+      })();
+    } else if (Array.isArray(b.lines)) {
+      db.transaction(() => {
+        for (const l of b.lines) {
+          const row = current.find(x => x.code === l.code);
+          if (!row) continue;
+          const cost = row.cost_amount || 0;
+          let pct, sell;
+          if (l.sell_amount != null && l.sell_amount !== '') {
+            sell = Math.round(Number(l.sell_amount) * 100) / 100;
+            pct = cost > 0 ? Math.round((sell - cost) / cost * 1000) / 10 : null;
+          } else {
+            pct = Number(l.markup_pct);
+            if (!isFinite(pct)) pct = aqMarkupDefault(c);
+            sell = aqSell(cost, pct);
+          }
+          upd.run(pct, sell, q.id, l.code);
+        }
+      })();
+    } else {
+      return res.status(400).json({ error: 'nothing_to_save' });
+    }
+
+    const roll = aqRollup(q.id);
+    db.prepare(`UPDATE air_quote SET review_saved_at=datetime('now'), updated_at=datetime('now') WHERE id=?`).run(q.id);
+    aqEvent(q.id, q.state, q.state, (req.auth && req.auth.userId) || null, 'internal',
+            `pricing saved as draft · sell ${roll.sell}`);
+    res.json({ quote_id: q.id, ref: q.ref, ...roll, review_state: 'draft' });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Internal: remove a decided quote ──
 // Approved and declined quotes are commercial records, so the client-facing withdraw
 // endpoint refuses them. This is the deliberate override: admin only, and a shared password
@@ -12450,7 +12621,10 @@ app.post('/air-quotes/:id/release', authenticateRequest, requireRole(['admin']),
     if (overridden && !String(b.markup_reason || '').trim())
       return res.status(400).json({ error: 'markup_reason required when overriding the rate card' });
 
-    const sell = aqSell(k.cost_amount, markup);
+    // If the lines have been priced, they are the truth — releasing must send exactly what
+    // the reviewer saw and saved, not a figure recomputed from a header markup.
+    const lineSell = aqLines(q.id).reduce((a, l) => a + (l.sell_amount || 0), 0);
+    const sell = lineSell > 0 ? Math.round(lineSell * 100) / 100 : aqSell(k.cost_amount, markup);
     const days = Math.max(1, parseInt(b.valid_days, 10) || 7);
     const validUntil = new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
 
