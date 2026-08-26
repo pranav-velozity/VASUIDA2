@@ -507,7 +507,18 @@
   async function load() {
     try { _data = await req('/air-quotes/internal'); _on = true; paintNav(); render(); }
     catch (e) {
-      if (e.status === 403 || e.status === 401) { _on = false; const a = el('nav-aqi'); if (a) a.style.display = 'none'; }
+      if (e.status === 403 || e.status === 401) {
+        _on = false; const a = el('nav-aqi'); if (a) a.style.display = 'none';
+        return;
+      }
+      // Anything else is a real failure. Say so rather than leaving a spinner running.
+      const body = el('aqi-body');
+      if (body) body.innerHTML = `<div class="aqi-card"><div class="aqi-sec">Could not load</div>
+        <div style="font-size:12px;color:${RED};">${esc(e.message || String(e))}</div>
+        <div class="aqi-s" style="margin-top:6px;">Status ${esc(String(e.status || 'unknown'))}. Try again, or send this message on if it persists.</div>
+        <button class="aqi-btn g" id="aqi-retry" style="margin-top:12px;">Retry</button></div>`;
+      const r = el('aqi-retry');
+      if (r) r.addEventListener('click', () => { const b = el('aqi-body'); if (b) b.textContent = 'Loading…'; load(); });
     }
   }
 
@@ -544,7 +555,7 @@
     window.addEventListener('state:ready', load);
     setInterval(load, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v8 loaded');
+    console.log('[air-quote-review] module v9 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
