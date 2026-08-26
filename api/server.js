@@ -11300,6 +11300,61 @@ function aqRollup(quoteId) {
   return { lines, cost, sell, markup_pct: pct };
 }
 
+// ── Repricing conversation ──
+// A quote can go back and forth with the partner more than once, so this is a thread rather
+// than a comment field. Both sides read the same messages: the partner sees them on their
+// magic-link page, the reviewer sees them in the panel.
+db.exec(`
+CREATE TABLE IF NOT EXISTS air_quote_message (
+  id          TEXT PRIMARY KEY,
+  quote_id    TEXT NOT NULL REFERENCES air_quote(id) ON DELETE CASCADE,
+  author_role TEXT NOT NULL,          -- internal | partner
+  author      TEXT,
+  body        TEXT NOT NULL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_aq_msg ON air_quote_message(quote_id, created_at);
+
+-- Each partner submission is kept. Overwriting meant nobody could see whether they moved
+-- on the second round, which is the single most useful thing about asking them to.
+CREATE TABLE IF NOT EXISTS air_quote_cost_round (
+  id          TEXT PRIMARY KEY,
+  quote_id    TEXT NOT NULL REFERENCES air_quote(id) ON DELETE CASCADE,
+  round_no    INTEGER NOT NULL,
+  total_cost  REAL,
+  lines_json  TEXT,
+  partner_name TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_aq_round ON air_quote_cost_round(quote_id, round_no);
+`);
+
+function aqMessages(quoteId) {
+  return db.prepare('SELECT * FROM air_quote_message WHERE quote_id=? ORDER BY created_at').all(quoteId);
+}
+function aqSay(quoteId, role, author, body) {
+  const t = String(body || '').trim(); if (!t) return;
+  db.prepare(`INSERT INTO air_quote_message (id, quote_id, author_role, author, body)
+              VALUES (?,?,?,?,?)`).run(aqNewId('aqm'), quoteId, role, author || null, t);
+}
+function aqRounds(quoteId) {
+  return db.prepare('SELECT * FROM air_quote_cost_round WHERE quote_id=? ORDER BY round_no').all(quoteId)
+    .map(r => ({ ...r, lines: safeJsonParse(r.lines_json, []) || [] }));
+}
+// Snapshot whatever the partner last submitted, before it is asked for again.
+function aqSnapshotRound(quoteId, partnerName) {
+  const lines = aqLines(quoteId);
+  const total = Math.round(lines.reduce((a, l) => a + (l.cost_amount || 0), 0) * 100) / 100;
+  if (!(total > 0)) return null;
+  const next = (db.prepare('SELECT MAX(round_no) n FROM air_quote_cost_round WHERE quote_id=?').get(quoteId).n || 0) + 1;
+  db.prepare(`INSERT INTO air_quote_cost_round (id, quote_id, round_no, total_cost, lines_json, partner_name)
+              VALUES (?,?,?,?,?,?)`)
+    .run(aqNewId('aqr'), quoteId, next, total,
+         JSON.stringify(lines.map(l => ({ code: l.code, label: l.label, cost_amount: l.cost_amount }))),
+         partnerName || null);
+  return next;
+}
+
 function aqNewId(p) { return (p || 'aq') + '_' + crypto.randomBytes(10).toString('hex'); }
 
 // Air freight bills on the greater of actual and volumetric weight. 1 CBM = 166.67 kg at
@@ -11352,7 +11407,7 @@ function aqPublic(q) {
     gross_weight_kg: q.gross_weight_kg, cbm: q.cbm, chargeable_kg: q.chargeable_kg,
     origin: q.origin, destination: q.destination, client_note: q.client_note,
     // 'pending_review' and 'costed' are internal steps; the client sees one waiting state.
-    state: (q.state === 'costed' || q.state === 'pending_review' || q.state === 'rfq_sent')
+    state: ['costed', 'pending_review', 'rfq_sent', 'repricing'].includes(q.state)
              ? 'in_progress' : q.state,
     quoted_amount: (q.state === 'quoted' || q.state === 'approved' || q.state === 'declined' || q.state === 'expired')
              ? q.sell_amount : null,
@@ -11639,6 +11694,8 @@ app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), (re
             sell_per_unit: per(l.sell_amount, q.units),
           })),
           review_state: q.state === 'quoted' ? 'sent' : (q.review_saved_at ? 'draft' : 'new'),
+          messages: aqMessages(q.id),
+          rounds: aqRounds(q.id).map(r => ({ round_no: r.round_no, total_cost: r.total_cost, created_at: r.created_at })),
           cost: k.cost_amount ?? null, cost_currency: 'USD',
           partner_name: k.partner_name || null, partner_note: k.partner_note || null,
           transit_mode: k.transit_mode || null,
@@ -11956,7 +12013,7 @@ async function aqSendRfq(quote, opts) {
   let sent = null, sendError = null;
 
   if (to.length && from) {
-    const subj = `RFQ ${quote.ref} — air freight, ${quote.week_label || quote.week_start}, ${quote.vendor_raw}`;
+    const subj = `${o.subjectPrefix || 'RFQ'} ${quote.ref} — air freight, ${quote.week_label || quote.week_start}, ${quote.vendor_raw}`;
     const lines = [
       `Air freight RFQ ${quote.ref}`, '',
       quote.zendesk_ticket ? `Zendesk: ${quote.zendesk_ticket}` : null,
@@ -11969,6 +12026,8 @@ async function aqSendRfq(quote, opts) {
       quote.origin ? `Origin: ${quote.origin}` : null,
       quote.destination ? `Destination: ${quote.destination}` : null,
       quote.client_note ? `Note: ${quote.client_note}` : null,
+      o.note ? '' : null,
+      o.note ? `From VelOzity: ${o.note}` : null,
       '', 'Please enter your all-inclusive cost here:', link,
       '', `This link expires in ${days} days.`,
     ].filter(Boolean);
@@ -12000,7 +12059,7 @@ app.post('/air-quotes/:id/rfq', authenticateRequest, requireRole(['admin']), wri
     const c = curClient();
     const q = db.prepare('SELECT * FROM air_quote WHERE id=? AND client_id=?').get(req.params.id, c);
     if (!q) return res.status(404).json({ error: 'not_found' });
-    if (!['submitted', 'rfq_sent', 'costed'].includes(q.state))
+    if (!['submitted', 'rfq_sent', 'costed', 'repricing', 'pending_review'].includes(q.state))
       return res.status(409).json({ error: 'not_rfq_able', state: q.state });
     const r = await aqSendRfq(q, {
       expires_days: (req.body || {}).expires_days,
@@ -12087,6 +12146,8 @@ app.get('/air-quote/cost', (req, res) => {
     if (!q) return fail('This request no longer exists.');
     const ex = db.prepare('SELECT * FROM air_quote_cost WHERE quote_id=?').get(q.id) || {};
     const exLines = aqLines(q.id);
+    const msgs = aqMessages(q.id);
+    const rounds = aqRounds(q.id);
 
     // A programmatic caller can still ask for the raw facts.
     if (String(req.query.format || '') === 'json') {
@@ -12130,6 +12191,25 @@ app.get('/air-quote/cost', (req, res) => {
     ${q.client_note ? `<div style="margin-top:14px;font-size:12px;color:var(--mid);"><b>Note:</b> ${escHtml(q.client_note)}</div>` : ''}
   </div>
 
+  ${msgs.length ? `<div class="card">
+    <div style="font-size:12px;font-weight:700;color:var(--dark);margin-bottom:8px;">Correspondence</div>
+    ${msgs.map(m => `<div style="padding:9px 11px;border-radius:9px;margin-bottom:7px;
+        background:${m.author_role === 'internal' ? '#F5F5F7' : '#FBF6F8'};">
+      <div style="font-size:10px;color:var(--light);margin-bottom:3px;">
+        ${m.author_role === 'internal' ? 'VelOzity' : escHtml(m.author || 'You')} &middot; ${escHtml(String(m.created_at).slice(0, 16))}</div>
+      <div style="font-size:12px;color:var(--dark);line-height:1.5;">${escHtml(m.body)}</div>
+    </div>`).join('')}
+  </div>` : ''}
+
+  ${rounds.length ? `<div class="card">
+    <div style="font-size:12px;font-weight:700;color:var(--dark);margin-bottom:6px;">Your previous submission${rounds.length > 1 ? 's' : ''}</div>
+    ${rounds.slice(-2).map(r => `<div style="font-size:12px;color:var(--mid);margin-bottom:6px;">
+      <b>Round ${r.round_no}</b> &middot; ${escHtml(String(r.created_at).slice(0, 10))} &middot; total USD ${Number(r.total_cost).toFixed(2)}
+      <div style="font-size:11px;margin-top:3px;">${r.lines.map(l =>
+        `${escHtml(l.label)} ${Number(l.cost_amount).toFixed(2)}`).join(' &middot; ')}</div>
+    </div>`).join('')}
+  </div>` : ''}
+
   <div class="card">
     ${resubmit ? `<div class="msg ok" style="margin:0 0 6px;">A cost of ${escHtml(String(ex.cost_amount))} ${escHtml(ex.cost_currency || q.currency)} is already on file. Submitting again replaces it.</div>` : ''}
     ${AQ_LINES.map(l => {
@@ -12153,7 +12233,7 @@ app.get('/air-quote/cost', (req, res) => {
     <input id="valid" type="date" value="${escHtml(ex.cost_valid_until || '')}">
     <label for="who">Your name</label>
     <input id="who" type="text" placeholder="Name" value="${escHtml(ex.partner_name || '')}">
-    <label for="note">Notes (optional)</label>
+    <label for="note">Notes${msgs.length ? ' / reply to VelOzity' : ' (optional)'}</label>
     <textarea id="note" placeholder="Routing, transit time, exclusions&hellip;">${escHtml(ex.partner_note || '')}</textarea>
     <button id="go">${resubmit ? 'Update cost' : 'Submit cost'}</button>
     <div class="msg" id="msg"></div>
@@ -12256,7 +12336,10 @@ app.post('/air-quote/cost', writeOpLimiter, (req, res) => {
     // Straight to review — a costed quote is never released to the client automatically.
     db.prepare(`UPDATE air_quote SET state='pending_review', review_saved_at=NULL, updated_at=datetime('now') WHERE id=?`).run(q.id);
     db.prepare(`UPDATE air_quote_token SET used_at=datetime('now') WHERE token=?`).run(t.token);
-    aqEvent(q.id, q.state, 'pending_review', String(b.partner_name || 'partner'), 'partner', 'cost submitted');
+    if (String(b.partner_note || '').trim())
+      aqSay(q.id, 'partner', String(b.partner_name || 'partner'), b.partner_note);
+    aqEvent(q.id, q.state, 'pending_review', String(b.partner_name || 'partner'), 'partner',
+            q.state === 'repricing' ? 'revised cost submitted' : 'cost submitted');
     aqNotifyCosted(q.id, `${req.protocol}://${req.get('host')}`)
       .catch(e => console.error('[air-quote:notify-costed]', e.message));
     res.json({ ok: true, ref: q.ref, message: 'Cost received. Thank you.' });
@@ -12512,6 +12595,42 @@ app.post('/air-quote/decide', writeOpLimiter, (req, res) => {
     aqEvent(q.id, 'quoted', to, email, 'client', 'via email link');
     aqNotifyDecision(q.id).catch(e => console.error('[air-quote:notify-decision]', e.message));
     res.json({ ok: true, ref: q.ref, state: to });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Internal: send it back to the partner for repricing ──
+// Snapshots their current figures, records the comment, reopens the link and emails them.
+// Nothing about this reaches the client — the quote stays "Pricing" from their side.
+app.post('/air-quotes/:id/reprice', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+  auditLog('reprice_air_quote'), async (req, res) => {
+  try {
+    const c = curClient();
+    const q = db.prepare('SELECT * FROM air_quote WHERE id=? AND client_id=?').get(req.params.id, c);
+    if (!q) return res.status(404).json({ error: 'not_found' });
+    if (['approved', 'declined'].includes(q.state))
+      return res.status(409).json({ error: 'already_decided', state: q.state });
+    const comment = String((req.body || {}).comment || '').trim();
+    if (!comment) return res.status(400).json({ error: 'comment_required',
+      message: 'Tell the partner what needs revisiting — a bare request to reprice wastes a round.' });
+
+    const k = db.prepare('SELECT * FROM air_quote_cost WHERE quote_id=?').get(q.id) || {};
+    const round = aqSnapshotRound(q.id, k.partner_name);
+    aqSay(q.id, 'internal', aqUserEmail(req) || aqUserName(req), comment);
+
+    db.prepare(`UPDATE air_quote SET state='repricing', review_saved_at=NULL,
+                updated_at=datetime('now') WHERE id=?`).run(q.id);
+    aqEvent(q.id, q.state, 'repricing', aqUserEmail(req) || null, 'internal',
+            `sent back for repricing (round ${round || 1})`);
+
+    const r = await aqSendRfq(q, {
+      origin: `${req.protocol}://${req.get('host')}`,
+      actor: aqUserEmail(req) || null, actorRole: 'internal',
+      subjectPrefix: 'Revised pricing requested',
+      note: comment,
+    });
+    // aqSendRfq moves it to rfq_sent; repricing is the more precise state, so restore it.
+    db.prepare(`UPDATE air_quote SET state='repricing' WHERE id=?`).run(q.id);
+    res.json({ quote_id: q.id, ref: q.ref, round: round || 1, ...r });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
