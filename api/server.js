@@ -6762,7 +6762,8 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
 
       // ── Lines come from the client's rate card, not from code ──
       const tpl = db.prepare(`SELECT * FROM client_rate
-        WHERE client_id=? AND active=1 AND invoice_type='VAS' ORDER BY sort_order, service_code`).all(_c);
+        WHERE client_id=? AND active=1 AND invoice_type='VAS'
+          AND service_code NOT LIKE '%_markup' ORDER BY sort_order, service_code`).all(_c);
 
       const lines = tpl.map((t, i) => {
         const base = QTY[t.qty_source] !== undefined ? QTY[t.qty_source] : 0;
@@ -14684,8 +14685,15 @@ CREATE TABLE IF NOT EXISTS client_rate (
   try {
     const ins = db.prepare(`INSERT OR IGNORE INTO client_rate (client_id, service_code, label, unit, rate, currency) VALUES (?,?,?,?,?,?)`);
     // Air quote markup, expressed as a MARKUP on partner cost: 40 => cost x 1.40.
-    // Lives on the rate card so it is edited in the same place as every other rate.
-    try { ins.run('ICONIC', 'air_quote_markup', 'Air quote markup', 'percent', 40, 'AUD'); } catch (e) {}
+    // Lives on the rate card so it is edited in the same place as every other rate, but it
+    // is a setting rather than a billable service. client_rate.invoice_type defaults to
+    // 'VAS', and the VAS prefill bills every active VAS rate — so it must be filed under
+    // its own type or it lands on the client's invoice as a phantom line.
+    try {
+      ins.run('ICONIC', 'air_quote_markup', 'Air quote markup', 'percent', 40, 'USD');
+      db.prepare(`UPDATE client_rate SET invoice_type='CONFIG', gst_free=1
+                  WHERE service_code='air_quote_markup'`).run();
+    } catch (e) {}
 
     // Fulfilment clients (envelope model)
     for (const c of db.prepare(`SELECT client_id FROM client_capability WHERE capability='envelope_fulfilment' AND enabled=1`).all()) {
@@ -14802,6 +14810,7 @@ function clientInvoiceTypes(clientId) {
   const has = (cap) => !!db.prepare(`SELECT 1 x FROM client_capability
     WHERE client_id=? AND capability=? AND enabled=1`).get(clientId, cap);
   const types = ['VAS'];                       // every client bills service work
+  // 'CONFIG' is deliberately absent: those rows are settings, not something to invoice.
   if (has('freight_lanes') || has('transit_clearing')) { types.push('SEA', 'AIR'); }
   return types;
 }
