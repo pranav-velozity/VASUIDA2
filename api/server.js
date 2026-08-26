@@ -11109,6 +11109,7 @@ CREATE TABLE IF NOT EXISTS air_quote (
   ref             TEXT,                      -- human reference, e.g. AQ-2609-014
   week_start      TEXT NOT NULL,             -- Monday of the shipping week being quoted
   week_label      TEXT,                      -- 'Week 40' as the client thinks of it
+  revision_of     TEXT,                      -- id of the quote this one replaces
   zendesk_ticket  TEXT,                      -- raw, as typed; also a lane-key component
   po_numbers      TEXT,                      -- free text: one PO or several
   vendor_raw      TEXT NOT NULL,             -- exactly as typed
@@ -11187,7 +11188,7 @@ try {
   // Who asked and who agreed. A dispute turns on these, so they are stored on the quote
   // rather than reconstructed from the event log.
   for (const col of ['created_by_email', 'decided_by_email', 'decided_by_name', 'decided_via',
-                     'zendesk_ticket', 'po_numbers']) {
+                     'zendesk_ticket', 'po_numbers', 'revision_of']) {
     if (!_aqc.includes(col)) db.exec(`ALTER TABLE air_quote ADD COLUMN ${col} TEXT`);
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_air_quote_zendesk ON air_quote(client_id, zendesk_ticket)");
@@ -11281,6 +11282,7 @@ function aqPublic(q) {
   if (!q) return null;
   return {
     id: q.id, ref: q.ref, zendesk_ticket: q.zendesk_ticket, po_numbers: q.po_numbers,
+    revision_of: q.revision_of || null,
     week_start: q.week_start, week_label: q.week_label,
     vendor: q.vendor_raw, cartons: q.cartons, units: q.units,
     gross_weight_kg: q.gross_weight_kg, cbm: q.cbm, chargeable_kg: q.chargeable_kg,
@@ -11331,7 +11333,11 @@ app.post('/air-quotes', authenticateRequest, writeOpLimiter, auditLog('create_ai
     const gross = Math.max(0, Number(b.gross_weight_kg) || 0);
     const cbm = Math.max(0, Number(b.cbm) || 0);
     if (!gross && !cbm) return res.status(400).json({ error: 'gross weight or CBM required' });
-    const units = b.units == null || b.units === '' ? null : Math.max(0, parseInt(b.units, 10) || 0);
+    // Units are required: they are the denominator for cost per unit, which is how the
+    // client compares air against sea. Optional meant half the quotes could not be compared.
+    const units = Math.max(0, parseInt(b.units, 10) || 0);
+    if (!units) return res.status(400).json({ error: 'units required' });
+    const revisionOf = String(b.revision_of || '').trim() || null;
 
     const id = aqNewId('aq');
     // Reference is the Zendesk ticket, so the quote, the lane and the PO milestones all
@@ -11345,11 +11351,11 @@ app.post('/air-quotes', authenticateRequest, writeOpLimiter, auditLog('create_ai
     const ref = priorN === 0 ? `AQ-${zdKey}` : `AQ-${zdKey}-${String(priorN + 1).padStart(2, '0')}`;
 
     db.prepare(`INSERT INTO air_quote
-      (id, client_id, ref, zendesk_ticket, po_numbers, week_start, week_label, vendor_raw, vendor_key,
-       cartons, units, gross_weight_kg, cbm, chargeable_kg, origin, destination, client_note, state,
-       created_by, created_by_name, created_by_email)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'submitted', ?, ?, ?)`)
-      .run(id, c, ref, zd, String(b.po_numbers || b.client_note || '').trim() || null,
+      (id, client_id, ref, zendesk_ticket, po_numbers, revision_of, week_start, week_label,
+       vendor_raw, vendor_key, cartons, units, gross_weight_kg, cbm, chargeable_kg,
+       origin, destination, client_note, state, created_by, created_by_name, created_by_email)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'submitted', ?, ?, ?)`)
+      .run(id, c, ref, zd, String(b.po_numbers || b.client_note || '').trim() || null, revisionOf,
            ws, String(b.week_label || '').trim() || null, vendor, aqVendorKey(vendor),
            cartons, units, gross, cbm, aqChargeableKg(gross, cbm),
            String(b.origin || '').trim() || null, String(b.destination || '').trim() || null,
@@ -11357,7 +11363,13 @@ app.post('/air-quotes', authenticateRequest, writeOpLimiter, auditLog('create_ai
            (req.auth && req.auth.userId) || null,
            String(b.created_by_name || '').trim() || aqUserName(req), aqUserEmail(req));
 
-    aqEvent(id, null, 'submitted', (req.auth && req.auth.userId) || null, 'client', `${vendor} · ${cartons} ctn`);
+    aqEvent(id, null, 'submitted', (req.auth && req.auth.userId) || null, 'client',
+            `${vendor} · ${cartons} ctn` + (revisionOf ? ' · revision' : ''));
+    if (revisionOf) {
+      const src = db.prepare('SELECT ref FROM air_quote WHERE id=? AND client_id=?').get(revisionOf, c);
+      if (src) aqEvent(revisionOf, null, null, (req.auth && req.auth.userId) || null, 'client',
+                       `revised as ${ref}`);
+    }
 
     // Straight out to the partner — no human step. Nothing is decided at this point, so a
     // manual "send RFQ" only delayed the one thing on the critical path. A send failure is
