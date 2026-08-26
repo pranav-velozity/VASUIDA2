@@ -187,6 +187,10 @@
            border-radius:20px;padding:1px 6px;margin-left:1px;">${n}</span>` : '');
   }
 
+  // Quote being revised, if any. Cleared once the revision is submitted or the modal is
+  // closed, so a stale source can never attach itself to an unrelated request.
+  let _reviseFrom = null;
+
   // ── modal body: two views behind one button ──
   // Defaults to Quotes when something is awaiting approval, otherwise to the request form.
   // The alternative — always opening on the form — buries the one thing needing action.
@@ -229,6 +233,8 @@
           ? `<button class="aq-btn" data-ok="${esc(q.id)}" style="padding:5px 10px;">Approve</button>
              <button class="aq-btn g" data-no="${esc(q.id)}" style="padding:5px 10px;margin-left:4px;">Decline</button>`
           : (q.decided_at ? `<span style="color:${LIGHT};font-size:10px;" title="${esc(q.decided_by || '')}">${esc(String(q.decided_at).slice(0, 10))}${q.decided_by ? `<br>${esc(String(q.decided_by).split('@')[0])}` : ''}</span>` : '')}
+        <button class="aq-btn g" data-rev="${esc(q.id)}" style="padding:4px 9px;margin-left:6px;"
+                title="Start a new quote from this one">Revise</button>
         ${!['approved', 'declined'].includes(q.state)
           ? `<button class="aq-del" data-del="${esc(q.id)}" title="Withdraw this request">&times;</button>` : ''}
       </td></tr>`).join('');
@@ -284,12 +290,48 @@
     } catch (e) { alert('Could not withdraw: ' + (e.message || e)); }
   }
 
+  // Start a new quote from an existing one. Deliberately not an edit: a quote that has
+  // been sent to the partner, or priced, or seen by the client, is a record. Revising
+  // creates the next quote on the same Zendesk ticket, which the server numbers -02.
+  function revise(id) {
+    const all = ((_data && _data.open) || []).concat((_data && _data.history) || []);
+    const q = all.find(x => x.id === id);
+    if (!q) return;
+    _reviseFrom = q;
+    _view = 'form';
+    paintModal();
+    // Fill after paint, since the form is rebuilt each time the view changes.
+    const set = (elId, v) => { const n = el(elId); if (n && v != null && v !== '') n.value = v; };
+    set('aq-zendesk', q.zendesk_ticket);
+    set('aq-vendor', q.vendor);
+    set('aq-cartons', q.cartons);
+    set('aq-units', q.units);
+    set('aq-gross', q.gross_weight_kg);
+    set('aq-cbm', q.cbm);
+    set('aq-note', q.po_numbers);
+    const wk = el('aq-week');
+    if (wk && q.week_start && [...wk.options].some(o => o.value === q.week_start)) wk.value = q.week_start;
+    const g = el('aq-gross'); if (g) g.dispatchEvent(new Event('input'));   // refresh chargeable weight
+    const body = el('aq-body'); if (body) body.scrollTop = 0;
+  }
+
   // ── modal ──
-  function closeModal() { const o = document.querySelector('.aq-ov'); if (o) o.remove(); }
+  function closeModal() {
+    const o = document.querySelector('.aq-ov'); if (o) o.remove();
+    _reviseFrom = null;
+  }
 
   function formHtml() {
     const weeks = weekOptions();
     return `
+      ${_reviseFrom ? `<div class="aq-msg" style="background:rgba(153,0,51,.07);color:${DARK};margin:0 0 10px;">
+        Revising <b>${esc(_reviseFrom.ref)}</b> &mdash; this creates a new quote on the same Zendesk ticket.
+        ${!['approved','declined'].includes(_reviseFrom.state)
+          ? `<label style="display:flex;align-items:center;gap:6px;margin-top:7px;font-size:11px;cursor:pointer;">
+               <input type="checkbox" id="aq-wd-src" checked style="accent-color:${BRAND};">
+               Withdraw ${esc(_reviseFrom.ref)} once this is sent</label>`
+          : `<div style="font-size:10px;color:${LIGHT};margin-top:4px;">${esc(_reviseFrom.ref)} has been ${esc(_reviseFrom.state)} and will be kept as a record.</div>`}
+      </div>` : ''}
       <div class="aq-s" style="margin-bottom:2px;">Choose any upcoming week &mdash; the plan doesn't need to be uploaded yet. Quotes are door-to-door all-inclusive air freight and exclude GST and customs clearance charges.</div>
 
       <label class="aq-lbl" for="aq-week">Shipping week</label>
@@ -308,8 +350,8 @@
       <div class="aq-row">
         <div><label class="aq-lbl" for="aq-cartons">Carton count</label>
           <input class="aq-in" id="aq-cartons" type="number" min="0" step="1" inputmode="numeric" placeholder="0"></div>
-        <div><label class="aq-lbl" for="aq-units">Units <span style="font-weight:400;color:${LIGHT}">(optional)</span></label>
-          <input class="aq-in" id="aq-units" type="number" min="0" step="1" inputmode="numeric" placeholder="0"></div>
+        <div><label class="aq-lbl" for="aq-units">Units <span style="color:${BRAND}">*</span></label>
+          <input class="aq-in" id="aq-units" type="number" min="1" step="1" inputmode="numeric" placeholder="0"></div>
       </div>
 
       <div class="aq-row">
@@ -367,6 +409,7 @@
       b.querySelectorAll('[data-ok]').forEach(x => x.addEventListener('click', () => decide(x.getAttribute('data-ok'), 'approve')));
       b.querySelectorAll('[data-no]').forEach(x => x.addEventListener('click', () => decide(x.getAttribute('data-no'), 'decline')));
       b.querySelectorAll('[data-del]').forEach(x => x.addEventListener('click', () => withdraw(x.getAttribute('data-del'))));
+      b.querySelectorAll('[data-rev]').forEach(x => x.addEventListener('click', () => revise(x.getAttribute('data-rev'))));
     }
   }
 
@@ -377,19 +420,29 @@
       week_label: sel.selectedOptions[0].getAttribute('data-wk'),
       zendesk_ticket: el('aq-zendesk').value.trim(),
       po_numbers: el('aq-note').value.trim() || null,
+      revision_of: _reviseFrom ? _reviseFrom.id : null,
       vendor: el('aq-vendor').value.trim(),
       cartons: parseInt(el('aq-cartons').value, 10) || 0,
-      units: el('aq-units').value === '' ? null : (parseInt(el('aq-units').value, 10) || 0),
+      units: parseInt(el('aq-units').value, 10) || 0,
       gross_weight_kg: Number(el('aq-gross').value) || 0,
       cbm: Number(el('aq-cbm').value) || 0,
     };
     const fail = m => { const t = el('aq-mmsg'); if (t) t.innerHTML = `<div class="aq-msg" style="background:rgba(179,63,64,.10);color:${RED};">${esc(m)}</div>`; };
     if (!payload.zendesk_ticket) return fail('Zendesk ticket is required — it becomes the quote reference.');
+    if (!payload.units) return fail('Units are required — they drive the cost-per-unit comparison.');
     if (!payload.vendor) return fail('Vendor is required.');
     if (!payload.gross_weight_kg && !payload.cbm) return fail('Enter a gross weight or a CBM figure.');
     const btn = el('aq-submit'); btn.disabled = true; btn.textContent = 'Sending…';
     try {
       await req('/air-quotes', { method: 'POST', body: JSON.stringify(payload) });
+      // Retire the source only after the replacement exists — otherwise a failure here
+      // would leave them with neither.
+      const wd = el('aq-wd-src');
+      if (_reviseFrom && wd && wd.checked) {
+        try { await req('/air-quotes/' + encodeURIComponent(_reviseFrom.id), { method: 'DELETE' }); }
+        catch (e) { console.warn('[air-quotes] could not withdraw source', e.message); }
+      }
+      _reviseFrom = null;
       await load();
       _view = 'quotes';          // land on the list so the new request is visible
       paintModal();
@@ -416,7 +469,11 @@
     document.body.appendChild(o);
     el('aq-close').addEventListener('click', closeModal);
     document.querySelectorAll('[data-tab]').forEach(t =>
-      t.addEventListener('click', () => { _view = t.getAttribute('data-tab'); paintModal(); }));
+      t.addEventListener('click', () => {
+        const next = t.getAttribute('data-tab');
+        if (next === 'form') _reviseFrom = null;   // tabbing in starts a fresh request
+        _view = next; paintModal();
+      }));
     document.addEventListener('keydown', function esc2(ev) {
       if (ev.key === 'Escape') { closeModal(); document.removeEventListener('keydown', esc2); }
     });
@@ -462,7 +519,7 @@
     window.addEventListener('air-quotes:changed', load);
     setInterval(check, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v10 loaded');
+    console.log('[air-quotes] module v11 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
