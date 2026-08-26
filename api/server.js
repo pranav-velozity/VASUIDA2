@@ -636,7 +636,7 @@ CREATE TABLE IF NOT EXISTS role_alias (
   ]);
 
   const capRows = [];
-  const ICONIC_CAPS = ['week_hub','receiving_ops','vas_ops','apo_generator','iconic_sftp','transit_clearing','freight_lanes','non_compliance','executive','reports','finance'];
+  const ICONIC_CAPS = ['week_hub','receiving_ops','vas_ops','apo_generator','iconic_sftp','transit_clearing','freight_lanes','non_compliance','executive','reports','finance','plan_upload','air_quotes'];
   // NB: no 'reports' — that page is the ICONIC report set. EHP gets 'fulfilment_geo'.
   const EHP_CAPS    = ['week_hub','receiving_ops','vas_ops','inbound_pallets','envelope_fulfilment','shopify_orders','executive','fulfilment_geo','finance'];
   for (const c of ICONIC_CAPS) capRows.push(['ICONIC', c]);
@@ -704,6 +704,23 @@ CREATE TABLE IF NOT EXISTS role_alias (
     setCap.run('ICONIC', 'fulfilment_geo', 0);    // present but off — ICONIC has the Live Map
     setCap.run('VOZ', 'fulfilment_geo', 1);       // internal sees both clients' surfaces
     db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled) VALUES ('__meta','caps_v4',1)`).run();
+  }
+
+  // v5 — the Week Hub action bar (Upload Plan, Zero, Zero UIDs) and the Air Quotes button
+  // had no capability behind them, so an EHP session rendered ICONIC controls that do
+  // nothing for them. Two explicit capabilities rather than piggy-backing on freight_lanes,
+  // so the intent is readable when someone reads the row.
+  const capsV5 = db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability='caps_v5'`).get();
+  if (!capsV5) {
+    const setCap = db.prepare(`INSERT INTO client_capability (client_id, capability, enabled) VALUES (?,?,?)
+                               ON CONFLICT(client_id, capability) DO UPDATE SET enabled=excluded.enabled`);
+    for (const cap of ['plan_upload', 'air_quotes']) {
+      setCap.run('ICONIC', cap, 1);
+      setCap.run('VOZ', cap, 1);
+      setCap.run('EHP', cap, 0);
+    }
+    db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled) VALUES ('__meta','caps_v5',1)`).run();
+    console.log('[caps] v5 — plan_upload and air_quotes granted to ICONIC and VOZ only');
   }
 
   ins(`INSERT OR IGNORE INTO role_alias (clerk_role,role) VALUES (?,?)`, [
@@ -14684,6 +14701,25 @@ CREATE TABLE IF NOT EXISTS client_rate (
 (function seedRateCards(){
   try {
     const ins = db.prepare(`INSERT OR IGNORE INTO client_rate (client_id, service_code, label, unit, rate, currency) VALUES (?,?,?,?,?,?)`);
+    // One-time: the markup was briefly seeded as a VAS rate, so the prefill wrote it onto
+    // any invoice created in that window. Those lines are stored, so moving the rate does
+    // not retract them. Remove them here — strictly the zero-value ones, so no invoice
+    // total can change as a side effect of a cleanup.
+    try {
+      const done = db.prepare(`SELECT 1 x FROM client_capability
+        WHERE client_id='__meta' AND capability='aq_markup_line_cleanup_v1'`).get();
+      if (!done) {
+        const n = db.prepare(`DELETE FROM fin_invoice_lines
+          WHERE description LIKE '%air_quote_markup%' AND COALESCE(total,0) = 0`).run().changes;
+        const kept = db.prepare(`SELECT COUNT(*) n FROM fin_invoice_lines
+          WHERE description LIKE '%air_quote_markup%'`).get().n;
+        db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled)
+                    VALUES ('__meta','aq_markup_line_cleanup_v1',1)`).run();
+        if (n) console.log(`[fin:cleanup] removed ${n} zero-value air_quote_markup invoice line(s)`);
+        if (kept) console.warn(`[fin:cleanup] ${kept} air_quote_markup line(s) have a non-zero value and were LEFT IN PLACE — review them manually`);
+      }
+    } catch (e) { console.error('[fin:cleanup]', e.message); }
+
     // Air quote markup, expressed as a MARKUP on partner cost: 40 => cost x 1.40.
     // Lives on the rate card so it is edited in the same place as every other rate, but it
     // is a setting rather than a billable service. client_rate.invoice_type defaults to
