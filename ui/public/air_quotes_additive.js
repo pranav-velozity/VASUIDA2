@@ -88,7 +88,8 @@
         display:inline-block !important;vertical-align:middle;}
       #aq-btn-open span{display:inline-block !important;white-space:nowrap !important;}
       .aq-btn{border:0;border-radius:9px;background:${BRAND};color:#fff;
-              font:600 12px inherit;padding:8px 14px;cursor:pointer;}
+              font:600 12px inherit;padding:8px 14px;cursor:pointer;white-space:nowrap;}
+      .aq-btn.ok{background:${GREEN};}
       .aq-btn.g{background:#fff;color:${DARK};border:.5px solid rgba(0,0,0,.16);}
       .aq-btn:disabled{opacity:.55;cursor:default;}
       /* Three across, two even rows. Six tiles in an auto-fit grid reflowed to an odd
@@ -108,7 +109,14 @@
       /* Numeric headers must follow their column, or they float left over right-aligned figures. */
       table.aq th.n{text-align:right;}
       table.aq td{padding:7px 6px;border-bottom:.5px solid rgba(0,0,0,.05);color:${DARK};vertical-align:middle;}
-      table.aq td.n{text-align:right;font-variant-numeric:tabular-nums;}
+      /* Money and figures must never wrap — "USD" landing on its own line above the amount
+         reads as two separate values. */
+      table.aq td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
+      table.aq td.act{white-space:nowrap;text-align:right;}
+      /* The PO list is the only free-growing column, so it is the one that gives up width. */
+      table.aq td.po{max-width:190px;font-size:10px;color:${MID};line-height:1.35;
+                     word-break:break-word;}
+      .aq-st{display:flex;flex-direction:column;align-items:flex-start;gap:2px;white-space:nowrap;}
       .aq-pill{display:inline-block;font-size:9px;font-weight:600;padding:2px 7px;border-radius:20px;}
       .aq-none{font-size:11px;color:${LIGHT};padding:14px 2px;}
       /* Deliberately quiet — withdrawing is rare, and it should not compete with Approve. */
@@ -217,8 +225,7 @@
   function rowsHtml(list, showAction) {
     return list.map(q => `<tr>
       <td><b>${esc(q.ref || '')}</b><div style="color:${LIGHT};font-size:10px;">${esc(q.week_label || q.week_start)}</div></td>
-      <td style="color:${MID};max-width:150px;overflow:hidden;text-overflow:ellipsis;"
-          title="${esc(q.po_numbers || '')}">${esc(q.po_numbers || '—')}</td>
+      <td class="po" title="${esc(q.po_numbers || '')}">${esc(q.po_numbers || '—')}</td>
       <td>${esc(q.vendor)}</td>
       <td class="n">${nf(q.cartons)}</td>
       <td class="n">${q.units ? nf(q.units) : '—'}</td>
@@ -227,10 +234,10 @@
         ? `<span class="aq-pill" style="color:${q.transit_mode === 'VOZAIR' ? BRAND : MID};background:${q.transit_mode === 'VOZAIR' ? 'rgba(153,0,51,.10)' : 'rgba(0,0,0,.05)'}">${esc(q.transit_mode)}</span>`
         : `<span style="color:${LIGHT}">—</span>`}</td>
       <td class="n">${q.quoted_amount == null ? '—' : money(q.quoted_amount, 'USD')}</td>
-      <td>${pill(q.state)}${q.state === 'quoted' && q.valid_until ? `<div style="color:${LIGHT};font-size:9px;margin-top:2px;">until ${esc(q.valid_until)}</div>` : ''}</td>
-      <td style="text-align:right;white-space:nowrap;">
+      <td><div class="aq-st">${pill(q.state)}${q.state === 'quoted' && q.valid_until ? `<span style="color:${LIGHT};font-size:9px;">until ${esc(q.valid_until)}</span>` : ''}</div></td>
+      <td class="act">
         ${q.state === 'quoted'
-          ? `<button class="aq-btn" data-ok="${esc(q.id)}" style="padding:5px 10px;">Approve</button>
+          ? `<button class="aq-btn ok" data-ok="${esc(q.id)}" style="padding:5px 10px;">Approve</button>
              <button class="aq-btn g" data-no="${esc(q.id)}" style="padding:5px 10px;margin-left:4px;">Decline</button>`
           : (q.decided_at ? `<span style="color:${LIGHT};font-size:10px;" title="${esc(q.decided_by || '')}">${esc(String(q.decided_at).slice(0, 10))}${q.decided_by ? `<br>${esc(String(q.decided_by).split('@')[0])}` : ''}</span>` : '')}
         <button class="aq-btn g" data-rev="${esc(q.id)}" style="padding:4px 9px;margin-left:6px;"
@@ -519,7 +526,7 @@
     window.addEventListener('air-quotes:changed', load);
     setInterval(() => { if (document.visibilityState === 'visible') check(); }, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v13 loaded');
+    console.log('[air-quotes] module v14 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
