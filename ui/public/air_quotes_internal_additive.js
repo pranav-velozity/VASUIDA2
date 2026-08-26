@@ -92,6 +92,7 @@
   const ST = {
     submitted:      { t: 'Sending',            c: AMBER, b: 'rgba(183,121,31,.12)' },
     rfq_sent:       { t: 'Submitted to partner', c: MID, b: 'rgba(0,0,0,.05)' },
+    repricing:      { t: 'Repricing',          c: AMBER, b: 'rgba(183,121,31,.12)' },
     costed:         { t: 'Costed',       c: BRAND, b: 'rgba(153,0,51,.10)' },
     pending_review: { t: 'Review',       c: BRAND, b: 'rgba(153,0,51,.10)' },
     quoted:         { t: 'With client',  c: MID,   b: 'rgba(0,0,0,.05)' },
@@ -232,8 +233,8 @@
   function detailHtml(q) {
     if (!q) return `<div class="aqi-card"><div class="aqi-none">Select a quote.</div></div>`;
     const dflt = _data.markup_default_pct;
-    const canReview = ['pending_review', 'costed', 'quoted'].includes(q.state) && q.cost != null;
-    const canRfq = ['submitted', 'rfq_sent', 'costed'].includes(q.state);
+    const canReview = ['pending_review', 'costed', 'quoted', 'repricing'].includes(q.state) && q.cost != null;
+    const canRfq = ['submitted', 'rfq_sent', 'costed', 'repricing'].includes(q.state);
     const bench = q.vendor_benchmark_per_kg;
     // Flag an outlier rather than expecting the reviewer to notice it. 25% is loose enough
     // not to cry wolf on ordinary rate movement.
@@ -319,6 +320,33 @@
           <input class="aqi-in" id="aqi-reason" placeholder="Why this differs from the rate card" value="${esc(q.markup_reason || '')}">
           <label class="aqi-lbl" for="aqi-valid">Quote valid for (days)</label>
           <input class="aqi-in" id="aqi-valid" type="number" min="1" step="1" value="7">
+          ${(q.rounds || []).length ? `<div class="aqi-s" style="margin-top:8px;">
+            Partner rounds: ${q.rounds.map(r => `<b>${r.round_no}</b> USD ${Number(r.total_cost).toFixed(2)}`).join(' &rarr; ')}
+            ${q.rounds.length > 1 && q.cost != null ? (() => {
+              const first = q.rounds[0].total_cost;
+              const move = first > 0 ? Math.round((q.cost - first) / first * 1000) / 10 : null;
+              return move == null ? '' : ` &rarr; now <b>${Number(q.cost).toFixed(2)}</b>
+                <span style="color:${move < 0 ? GREEN : RED}">(${move > 0 ? '+' : ''}${move}%)</span>`;
+            })() : ''}
+          </div>` : ''}
+
+          ${(q.messages || []).length ? `<div style="margin-top:12px;">
+            <div class="aqi-sec" style="margin:0 0 6px;">Correspondence</div>
+            ${q.messages.map(m => `<div style="padding:8px 10px;border-radius:8px;margin-bottom:6px;
+                background:${m.author_role === 'internal' ? 'rgba(153,0,51,.05)' : '#F5F5F7'};">
+              <div style="font-size:9px;color:${LIGHT};margin-bottom:2px;">
+                ${m.author_role === 'internal' ? 'VelOzity' : esc(m.author || 'Partner')} &middot; ${esc(String(m.created_at).slice(0, 16))}</div>
+              <div style="font-size:11px;color:${DARK};line-height:1.45;">${esc(m.body)}</div>
+            </div>`).join('')}
+          </div>` : ''}
+
+          <label class="aqi-lbl" for="aqi-repcomment">Send back to partner <span style="font-weight:400;color:${LIGHT}">(what needs revisiting)</span></label>
+          <textarea class="aqi-in" id="aqi-repcomment" rows="2"
+            placeholder="e.g. Air freight looks high against the last two quotes on this lane"
+            style="resize:vertical;font-family:inherit;"></textarea>
+          <button class="aqi-btn g" id="aqi-reprice" style="width:100%;margin-top:8px;color:${AMBER};border-color:rgba(183,121,31,.35);">
+            Request revised pricing</button>
+
           <div style="display:flex;gap:10px;margin-top:16px;">
             <button class="aqi-btn g" id="aqi-save" style="flex:1;">Save draft</button>
             <button class="aqi-btn" id="aqi-release" style="flex:2;">
@@ -474,6 +502,26 @@
       _busy = false;
     });
 
+    const rep = el('aqi-reprice');
+    if (rep) rep.addEventListener('click', async () => {
+      if (_busy) return;
+      const comment = (el('aqi-repcomment') || {}).value?.trim();
+      if (!comment) return err('Say what needs revisiting — a bare request to reprice wastes a round.');
+      const q = (_data.quotes || []).find(x => x.id === _sel) || {};
+      if (!confirm(`Send ${q.ref} back to the partner?\n\nTheir current figures are kept for comparison, `
+        + `and they will receive your comment with a fresh link.\nThe client sees no change.`)) return;
+      _busy = true; rep.disabled = true;
+      try {
+        const r = await req('/air-quotes/' + encodeURIComponent(_sel) + '/reprice',
+          { method: 'POST', body: JSON.stringify({ comment }) });
+        ok(`Sent back to the partner (round ${r.round}).`
+          + (r.resend_id ? ` Emailed to ${esc((r.emailed_to || []).join(', '))}.` : ' Email not configured — link below.')
+          + `<div style="margin-top:6px;word-break:break-all;font-family:ui-monospace,Menlo,monospace;font-size:10px;">${esc(r.link)}</div>`);
+        await load();
+      } catch (e) { err(e.message || String(e)); rep.disabled = false; }
+      _busy = false;
+    });
+
     const rel = el('aqi-release');
     if (rel) rel.addEventListener('click', async () => {
       if (_busy) return;
@@ -564,7 +612,7 @@
       load();
     }, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v10 loaded');
+    console.log('[air-quote-review] module v11 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

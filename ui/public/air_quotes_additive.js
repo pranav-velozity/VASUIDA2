@@ -103,7 +103,16 @@
       .aq-tv{font-size:15px;font-weight:700;color:${DARK};margin-top:2px;font-variant-numeric:tabular-nums;
              letter-spacing:-.02em;line-height:1.15;}
       .aq-ts{font-size:9px;color:${LIGHT};margin-top:1px;line-height:1.25;}
-      table.aq{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px;}
+      /* Fixed layout with declared widths. Auto layout let Vendor claim whatever a long
+         company name needed and squeezed Quoted and the actions into wrapping. */
+      table.aq{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px;table-layout:fixed;}
+      table.aq col.c-ref{width:8%;}  table.aq col.c-po{width:12%;}
+      table.aq col.c-ven{width:15%;} table.aq col.c-ctn{width:6%;}
+      table.aq col.c-unt{width:6%;}  table.aq col.c-kg{width:8%;}
+      table.aq col.c-tr{width:7%;}   table.aq col.c-amt{width:10%;}
+      table.aq col.c-st{width:9%;}   table.aq col.c-act{width:16%;}
+      table.aq col.c-del{width:3%;}
+      table.aq td.ven{word-break:break-word;line-height:1.35;}
       table.aq th{text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.05em;
                   color:${LIGHT};font-weight:600;padding:6px;border-bottom:.5px solid rgba(0,0,0,.08);}
       /* Numeric headers must follow their column, or they float left over right-aligned figures. */
@@ -121,7 +130,7 @@
       .aq-none{font-size:11px;color:${LIGHT};padding:14px 2px;}
       /* Deliberately quiet — withdrawing is rare, and it should not compete with Approve. */
       .aq-del{border:0;background:none;color:${LIGHT};font-size:15px;line-height:1;
-              cursor:pointer;padding:2px 6px;margin-left:6px;border-radius:6px;}
+              cursor:pointer;padding:2px 5px;border-radius:6px;}
       .aq-del:hover{color:${RED};background:rgba(179,63,64,.08);}
       .aq-ov{position:fixed;inset:0;background:rgba(0,0,0,.34);z-index:9600;display:flex;
              align-items:flex-start;justify-content:center;padding:18px;overflow:auto;
@@ -226,7 +235,7 @@
     return list.map(q => `<tr>
       <td><b>${esc(q.ref || '')}</b><div style="color:${LIGHT};font-size:10px;">${esc(q.week_label || q.week_start)}</div></td>
       <td class="po" title="${esc(q.po_numbers || '')}">${esc(q.po_numbers || '—')}</td>
-      <td>${esc(q.vendor)}</td>
+      <td class="ven">${esc(q.vendor)}</td>
       <td class="n">${nf(q.cartons)}</td>
       <td class="n">${q.units ? nf(q.units) : '—'}</td>
       <td class="n">${nf(q.chargeable_kg)}</td>
@@ -237,19 +246,24 @@
       <td><div class="aq-st">${pill(q.state)}${q.state === 'quoted' && q.valid_until ? `<span style="color:${LIGHT};font-size:9px;">until ${esc(q.valid_until)}</span>` : ''}</div></td>
       <td class="act">
         ${q.state === 'quoted'
-          ? `<button class="aq-btn ok" data-ok="${esc(q.id)}" style="padding:5px 10px;">Approve</button>
-             <button class="aq-btn g" data-no="${esc(q.id)}" style="padding:5px 10px;margin-left:4px;">Decline</button>`
+          ? `<button class="aq-btn ok" data-ok="${esc(q.id)}" style="padding:5px 9px;">Approve</button>
+             <button class="aq-btn g" data-no="${esc(q.id)}" style="padding:5px 9px;margin-left:4px;">Decline</button>`
           : (q.decided_at ? `<span style="color:${LIGHT};font-size:10px;" title="${esc(q.decided_by || '')}">${esc(String(q.decided_at).slice(0, 10))}${q.decided_by ? `<br>${esc(String(q.decided_by).split('@')[0])}` : ''}</span>` : '')}
-        <button class="aq-btn g" data-rev="${esc(q.id)}" style="padding:4px 9px;margin-left:6px;"
+        <button class="aq-btn g" data-rev="${esc(q.id)}" style="padding:5px 9px;margin-left:5px;"
                 title="Start a new quote from this one">Revise</button>
-        ${!['approved', 'declined'].includes(q.state)
+      </td>
+      <td class="act">${!['approved', 'declined'].includes(q.state)
           ? `<button class="aq-del" data-del="${esc(q.id)}" title="Withdraw this request">&times;</button>` : ''}
       </td></tr>`).join('');
   }
 
-  const TH = `<thead><tr><th>Reference</th><th>PO number(s)</th><th>Vendor</th><th class="n">Cartons</th>
+  const TH = `<colgroup>
+      <col class="c-ref"><col class="c-po"><col class="c-ven"><col class="c-ctn"><col class="c-unt">
+      <col class="c-kg"><col class="c-tr"><col class="c-amt"><col class="c-st"><col class="c-act"><col class="c-del">
+    </colgroup>
+    <thead><tr><th>Reference</th><th>PO number(s)</th><th>Vendor</th><th class="n">Cartons</th>
       <th class="n">Units</th><th class="n">Chargeable kg</th><th>Transit</th>
-      <th class="n">Quoted</th><th>Status</th><th></th></tr></thead>`;
+      <th class="n">Quoted</th><th>Status</th><th></th><th></th></tr></thead>`;
 
   function quotesHtml() {
     const open = (_data && _data.open) || [], hist = (_data && _data.history) || [];
