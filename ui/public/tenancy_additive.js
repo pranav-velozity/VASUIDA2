@@ -58,6 +58,19 @@
     'nav-reports':        'reports',
     'nav-finance':        'finance',
   };
+  // Controls outside the nav that are equally client-specific. These live in the static
+  // markup, so without this they paint for every client and only stop being wrong once
+  // someone notices. Same treatment as the nav.
+  const CTRL_CAPS = {
+    'wh-btn-upload':   'plan_upload',
+    'btn-upload-plan': 'plan_upload',
+    'wh-btn-zero':     'plan_upload',
+    'btn-zero-plan':   'plan_upload',
+    'wh-btn-zero-uids': 'plan_upload',
+    'aq-btn-open':     'air_quotes',
+    'nav-aqi':         'air_quotes',
+  };
+
   function applyCapabilityNav() {
     if (!_who) return;
     const r = _who.resolved || {};
@@ -68,6 +81,18 @@
       const n = document.getElementById(id);
       if (n && !caps.includes(cap)) n.style.display = 'none';
     }
+    // Show as well as hide: these buttons are injected by other modules, so a client that
+    // IS entitled to them needs them un-hidden once the boot gate lifts.
+    for (const [id, cap] of Object.entries(CTRL_CAPS)) {
+      const n = document.getElementById(id);
+      if (!n) continue;
+      if (!caps.includes(cap)) n.style.display = 'none';
+      else if (n.style.display === 'none') n.style.display = '';
+    }
+    // Expose the resolved set so late-mounting modules can gate themselves without
+    // re-fetching whoami, and re-apply when one of them appears.
+    window.pinpointCaps = caps;
+    document.documentElement.classList.remove('pp-booting');
     // If Labelling is hidden, only show the VAS Ops parent when Fulfilment is available.
     const lab = document.getElementById('nav-vas-labelling');
     const ful = document.getElementById('nav-vas-fulfilment');

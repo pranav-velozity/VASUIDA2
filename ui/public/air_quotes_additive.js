@@ -517,9 +517,9 @@
     window.addEventListener('hashchange', check);
     window.addEventListener('state:ready', check);
     window.addEventListener('air-quotes:changed', load);
-    setInterval(check, 20000);
+    setInterval(() => { if (document.visibilityState === 'visible') check(); }, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v11 loaded');
+    console.log('[air-quotes] module v12 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

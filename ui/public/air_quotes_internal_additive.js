@@ -553,9 +553,18 @@
     window.openAirQuoteReview = open;
     load();
     window.addEventListener('state:ready', load);
-    setInterval(load, 30000);
+    // Only poll while the panel is actually open and the tab is visible. A background
+    // reload every 30 seconds redrew the whole queue whether or not anything had changed,
+    // which is what made the app look like it was refreshing itself.
+    setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      if (!document.querySelector('.aqi-ov')) return;
+      if (_busy) return;                       // never redraw under someone's cursor mid-edit
+      if (document.activeElement && /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) return;
+      load();
+    }, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v9 loaded');
+    console.log('[air-quote-review] module v10 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

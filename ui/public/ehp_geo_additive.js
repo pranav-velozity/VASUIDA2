@@ -611,9 +611,10 @@
     window.openEhpGeo = open;
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
-    setInterval(refreshEnabled, 15000);      // the active client can change via the picker
+    // Capability re-check only; it early-returns unless the client actually changed.
+    setInterval(() => { if (document.visibilityState === 'visible') refreshEnabled(); }, 15000);
     if (location.hash === '#ehp-geo') setTimeout(open, 600);
-    console.log('[ehp-geo] module v7 loaded');
+    console.log('[ehp-geo] module v8 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

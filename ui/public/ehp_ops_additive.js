@@ -888,7 +888,7 @@
     window.openEhpOps = open;
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
-    setInterval(refreshEnabled, 15000);   // active client can change via the picker
+    setInterval(() => { if (document.visibilityState === 'visible') refreshEnabled(); }, 15000);
     console.log('[ehp-ops] module v12 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

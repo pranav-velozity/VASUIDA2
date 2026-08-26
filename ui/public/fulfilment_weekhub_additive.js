@@ -572,16 +572,18 @@
     // Live refresh — the panel previously only updated when you navigated away and back.
     setInterval(() => {
       if (!_on || !onWeekHub() || document.visibilityState !== 'visible') return;
-      render(true);
+      if (document.visibilityState === 'visible') render(true);
     }, 20000);
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && _on && onWeekHub()) render(true);
     });
     window.addEventListener('state:ready', () => { _lastWeek = ''; check(); });
     window.addEventListener('hashchange', () => { applyImmediately(); check(); });
-    setInterval(check, 4000);                 // client switch / week change
+    // Client and week changes both raise events, so this is only a backstop. Four seconds
+    // meant a needless pass fifteen times a minute.
+    setInterval(() => { if (document.visibilityState === 'visible') check(); }, 15000);
     window.refreshFulfilmentWeekHub = () => render(true);
-    console.log('[fulfilment-weekhub] module v9 loaded');
+    console.log('[fulfilment-weekhub] module v10 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
