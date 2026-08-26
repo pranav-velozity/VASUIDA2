@@ -16,6 +16,7 @@
   const AMBER = '#B7791F', GREEN = '#1B7F3B', RED = '#B33F40';
 
   let _on = false, _data = null, _sel = null, _busy = false;
+  const _expanded = new Set();
 
   const el = id => document.getElementById(id);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
@@ -101,6 +102,46 @@
   const pill = st => { const s = ST[st] || ST.submitted;
     return `<span class="aqi-pill" style="color:${s.c};background:${s.b}">${s.t}</span>`; };
 
+  // Distinguishes priced-but-not-sent from untouched. Without it a reviewer cannot tell
+  // whether a quote is waiting on them or already handled and simply not released.
+  const reviewPill = x => x.review_state === 'draft'
+    ? `<span class="aqi-pill" style="color:${AMBER};background:rgba(183,121,31,.12);margin-left:4px;">Draft</span>`
+    : (x.review_state === 'sent'
+      ? `<span class="aqi-pill" style="color:${GREEN};background:rgba(27,127,59,.12);margin-left:4px;">Sent</span>` : '');
+
+  const n2 = v => v == null ? '—' : Number(v).toFixed(2);
+
+  // Cost and sell side by side, per line, both per kg and per unit — so an odd price shows
+  // up as an odd rate rather than needing mental arithmetic.
+  function linesHtml(x) {
+    const ls = x.lines || [];
+    if (!ls.length) return `<div class="aqi-s" style="padding:8px 2px;">No cost lines yet.</div>`;
+    const tot = k => ls.reduce((a, l) => a + (l[k] || 0), 0);
+    return `<table class="aqi" style="margin:4px 0 8px;background:#FAFAFB;">
+      <thead><tr><th>Line</th>
+        <th class="n">Cost</th><th class="n">Cost /kg</th><th class="n">Cost /unit</th>
+        <th class="n">Markup</th>
+        <th class="n">Sell</th><th class="n">Sell /kg</th><th class="n">Sell /unit</th></tr></thead>
+      <tbody>${ls.map(l => `<tr>
+        <td>${esc(l.label)}</td>
+        <td class="n">${n2(l.cost_amount)}</td>
+        <td class="n" style="color:${MID}">${n2(l.cost_per_kg)}</td>
+        <td class="n" style="color:${MID}">${n2(l.cost_per_unit)}</td>
+        <td class="n">${l.markup_pct == null ? '—' : l.markup_pct + '%'}</td>
+        <td class="n"><b>${n2(l.sell_amount)}</b></td>
+        <td class="n" style="color:${MID}">${n2(l.sell_per_kg)}</td>
+        <td class="n" style="color:${MID}">${n2(l.sell_per_unit)}</td></tr>`).join('')}
+        <tr style="font-weight:700;"><td>Total</td>
+          <td class="n">${n2(tot('cost_amount'))}</td>
+          <td class="n" style="color:${MID}">${n2(tot('cost_per_kg'))}</td>
+          <td class="n" style="color:${MID}">${n2(tot('cost_per_unit'))}</td>
+          <td class="n"></td>
+          <td class="n">${n2(tot('sell_amount'))}</td>
+          <td class="n" style="color:${MID}">${n2(tot('sell_per_kg'))}</td>
+          <td class="n" style="color:${MID}">${n2(tot('sell_per_unit'))}</td></tr>
+      </tbody></table>`;
+  }
+
   // ── nav ──
   function injectNav() {
     if (el('nav-aqi')) return;
@@ -153,9 +194,12 @@
       <div class="aqi-card">
         <div class="aqi-sec">Queue &middot; ${list.length} quote(s)</div>
         ${list.length ? `<table class="aqi"><thead><tr>
+            <th style="width:22px;"></th>
             <th>Ref</th><th>Week</th><th>Sent to partner</th><th>Vendor</th><th class="n">Chargeable kg</th>
             <th class="n">Cost</th><th class="n">Sell</th><th class="n">/kg</th><th class="n">/unit</th><th>Status</th>
           </tr></thead><tbody>${list.map(x => `<tr data-q="${esc(x.id)}" class="${x.id === _sel ? 'sel' : ''}">
+            <td style="text-align:center;color:${LIGHT};" data-exp="${esc(x.id)}"
+                title="Show the cost lines">${_expanded.has(x.id) ? '&#9662;' : '&#9656;'}</td>
             <td><b>${esc(x.ref || '')}</b></td>
             <td style="color:${MID}">${esc(x.week_label || x.week_start)}</td>
             <td style="color:${LIGHT};font-size:10px;">${x.rfq_sent_at ? esc(String(x.rfq_sent_at).slice(0, 10)) : '—'}</td>
@@ -166,12 +210,19 @@
             <td class="n">${x.sell_per_kg == null ? '—' : x.sell_per_kg.toFixed(2)}</td>
             <td class="n">${x.sell_per_unit == null
               ? `<span style="color:${LIGHT}">NA</span>` : x.sell_per_unit.toFixed(2)}</td>
-            <td>${pill(x.state)}</td></tr>`).join('')}</tbody></table>`
+            <td>${pill(x.state)}${reviewPill(x)}</td></tr>
+            ${_expanded.has(x.id) ? `<tr class="aqi-exp"><td></td><td colspan="10">${linesHtml(x)}</td></tr>` : ''}`).join('')}</tbody></table>`
           : `<div class="aqi-none">No quote requests yet.</div>`}
       </div>
       <div id="aqi-detail">${detailHtml(q)}</div>
     </div>`;
 
+    body.querySelectorAll('[data-exp]').forEach(t => t.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const id = t.getAttribute('data-exp');
+      if (_expanded.has(id)) _expanded.delete(id); else _expanded.add(id);
+      render();
+    }));
     body.querySelectorAll('[data-q]').forEach(r => r.addEventListener('click', () => {
       _sel = r.getAttribute('data-q'); render();
     }));
@@ -245,17 +296,35 @@
         </div>
 
         ${canReview ? `
-          <label class="aqi-lbl" for="aqi-markup">Markup % <span style="font-weight:400;color:${LIGHT}">(rate card: ${dflt}%)</span></label>
-          <input class="aqi-in" id="aqi-markup" type="number" min="0" step="0.1" value="${q.markup_pct}">
-          <label class="aqi-lbl" for="aqi-reason">Reason <span style="font-weight:400;color:${LIGHT}">(required if you change it)</span></label>
+          <div class="aqi-sec" style="margin:16px 0 6px;">Pricing <span style="font-weight:400;text-transform:none;letter-spacing:0;">&mdash; rate card ${dflt}%</span></div>
+          <table class="aqi"><thead><tr><th>Line</th><th class="n">Cost</th>
+            <th class="n" style="width:78px;">Markup %</th><th class="n" style="width:96px;">Sell</th></tr></thead>
+          <tbody>${(q.lines || []).map(l => `<tr>
+            <td style="font-size:11px;">${esc(l.label)}</td>
+            <td class="n" style="color:${MID}">${n2(l.cost_amount)}</td>
+            <td class="n"><input class="aqi-in aqi-pct" data-code="${esc(l.code)}" type="number" step="0.1" min="0"
+                 value="${l.markup_pct == null ? dflt : l.markup_pct}" style="padding:5px 7px;font-size:12px;text-align:right;"></td>
+            <td class="n"><input class="aqi-in aqi-sell" data-code="${esc(l.code)}" type="number" step="0.01" min="0"
+                 value="${l.sell_amount == null ? '' : l.sell_amount}" style="padding:5px 7px;font-size:12px;text-align:right;"></td>
+          </tr>`).join('')}
+            <tr style="font-weight:700;"><td>Total</td>
+              <td class="n" style="color:${MID}" id="aqi-tcost">${n2(q.cost)}</td>
+              <td class="n" id="aqi-tpct" style="color:${MID};font-weight:400;font-size:10px;"></td>
+              <td class="n"><input class="aqi-in" id="aqi-tsell" type="number" step="0.01" min="0"
+                   style="padding:5px 7px;font-size:12px;text-align:right;font-weight:700;"></td></tr>
+          </tbody></table>
+          <div class="aqi-s" style="margin-top:4px;">Edit a markup or a sell figure on any line. Change the total and it distributes across the lines in proportion to their cost.</div>
+
+          <label class="aqi-lbl" for="aqi-reason">Reason <span style="font-weight:400;color:${LIGHT}">(required if you change the rate card markup)</span></label>
           <input class="aqi-in" id="aqi-reason" placeholder="Why this differs from the rate card" value="${esc(q.markup_reason || '')}">
           <label class="aqi-lbl" for="aqi-valid">Quote valid for (days)</label>
           <input class="aqi-in" id="aqi-valid" type="number" min="1" step="1" value="7">
           <div style="display:flex;gap:10px;margin-top:16px;">
-            ${canRfq ? `<button class="aqi-btn g" id="aqi-rfq" style="flex:1;">Reissue link</button>` : ''}
+            <button class="aqi-btn g" id="aqi-save" style="flex:1;">Save draft</button>
             <button class="aqi-btn" id="aqi-release" style="flex:2;">
               ${q.state === 'quoted' ? 'Re-release to client' : 'Release to client'}</button>
           </div>
+          ${canRfq ? `<button class="aqi-btn g" id="aqi-rfq" style="width:100%;margin-top:8px;">Reissue partner link</button>` : ''}
           ${q.state === 'quoted' ? `<div class="aqi-s" style="margin-top:6px;">Already with the client${q.valid_until ? ` until ${esc(q.valid_until)}` : ''}. Re-releasing replaces the price they see.</div>` : ''}
           <div id="aqi-msg"></div>` : ''}
       `}
@@ -318,24 +387,115 @@
       }
     });
 
+    // Two-way binding, resolved here so the reviewer always sees the same arithmetic the
+    // server will apply on save. _pricingMode records which field they last drove, because
+    // the server needs to know whether to treat this as line edits or a total to distribute.
+    let _pricingMode = 'lines';
+    const costOf = code => ((_data.quotes || []).find(x => x.id === _sel)?.lines || [])
+      .find(l => l.code === code)?.cost_amount || 0;
+
+    function syncTotals() {
+      const sells = [...document.querySelectorAll('.aqi-sell')];
+      const total = sells.reduce((a, i) => a + (parseFloat(i.value) || 0), 0);
+      const cost = parseFloat((el('aqi-tcost') || {}).textContent) || 0;
+      const t = el('aqi-tsell'); if (t && document.activeElement !== t) t.value = total ? total.toFixed(2) : '';
+      const p = el('aqi-tpct');
+      if (p) p.textContent = cost > 0 && total ? (Math.round((total - cost) / cost * 1000) / 10) + '%' : '';
+    }
+
+    document.querySelectorAll('.aqi-pct').forEach(inp => inp.addEventListener('input', () => {
+      _pricingMode = 'lines';
+      const code = inp.getAttribute('data-code');
+      const pct = parseFloat(inp.value);
+      const sell = document.querySelector(`.aqi-sell[data-code="${code}"]`);
+      if (sell && isFinite(pct)) sell.value = (costOf(code) * (1 + pct / 100)).toFixed(2);
+      syncTotals();
+    }));
+
+    document.querySelectorAll('.aqi-sell').forEach(inp => inp.addEventListener('input', () => {
+      _pricingMode = 'lines';
+      const code = inp.getAttribute('data-code');
+      const sell = parseFloat(inp.value);
+      const pct = document.querySelector(`.aqi-pct[data-code="${code}"]`);
+      const c = costOf(code);
+      if (pct && isFinite(sell) && c > 0) pct.value = (Math.round((sell - c) / c * 1000) / 10);
+      syncTotals();
+    }));
+
+    const tsell = el('aqi-tsell');
+    if (tsell) tsell.addEventListener('input', () => {
+      _pricingMode = 'total';
+      // Preview the distribution so the lines on screen match what will be saved.
+      const target = parseFloat(tsell.value);
+      const cost = parseFloat((el('aqi-tcost') || {}).textContent) || 0;
+      if (!isFinite(target) || !(cost > 0)) return;
+      let allocated = 0;
+      const rows = [...document.querySelectorAll('.aqi-sell')].map(i => {
+        const c = costOf(i.getAttribute('data-code'));
+        const v = Math.round(target * (c / cost) * 100) / 100;
+        allocated += v; return { i, c, v };
+      });
+      const drift = Math.round((target - allocated) * 100) / 100;
+      if (drift !== 0 && rows.length) {
+        const big = rows.reduce((m, x) => (x.c > m.c ? x : m), rows[0]);
+        big.v = Math.round((big.v + drift) * 100) / 100;
+      }
+      rows.forEach(r => {
+        r.i.value = r.v.toFixed(2);
+        const p = document.querySelector(`.aqi-pct[data-code="${r.i.getAttribute('data-code')}"]`);
+        if (p && r.c > 0) p.value = Math.round((r.v - r.c) / r.c * 1000) / 10;
+      });
+      const pEl = el('aqi-tpct');
+      if (pEl) pEl.textContent = (Math.round((target - cost) / cost * 1000) / 10) + '%';
+    });
+
+    syncTotals();
+
+    function pricingPayload() {
+      if (_pricingMode === 'total') {
+        const t = parseFloat((el('aqi-tsell') || {}).value);
+        if (isFinite(t)) return { total_sell: t };
+      }
+      return { lines: [...document.querySelectorAll('.aqi-sell')].map(i => ({
+        code: i.getAttribute('data-code'),
+        sell_amount: i.value === '' ? null : parseFloat(i.value),
+      })) };
+    }
+
+    const save = el('aqi-save');
+    if (save) save.addEventListener('click', async () => {
+      if (_busy) return; _busy = true; save.disabled = true;
+      try {
+        const r = await req('/air-quotes/' + encodeURIComponent(_sel) + '/pricing',
+          { method: 'POST', body: JSON.stringify(pricingPayload()) });
+        ok(`Saved as draft — total ${esc(money(r.sell, 'USD'))}. Nothing has been sent to the client.`);
+        await load();
+      } catch (e) { err(e.message || String(e)); save.disabled = false; }
+      _busy = false;
+    });
+
     const rel = el('aqi-release');
     if (rel) rel.addEventListener('click', async () => {
       if (_busy) return;
-      const markup = Number(el('aqi-markup').value);
       const reason = el('aqi-reason').value.trim();
       const days = parseInt(el('aqi-valid').value, 10) || 7;
-      if (!isFinite(markup) || markup < 0) return err('Enter a valid markup percentage.');
-      if (Math.abs(markup - _data.markup_default_pct) > 0.0001 && !reason)
-        return err('A reason is required when the markup differs from the rate card.');
       const q = (_data.quotes || []).find(x => x.id === _sel) || {};
-      const sell = Math.round(q.cost * (1 + markup / 100) * 100) / 100;
-      if (!confirm(`Release ${q.ref} to the client at ${money(sell, 'USD')}?\n\n`
-        + `Cost ${money(q.cost, 'USD')} · markup ${markup}%\n`
-        + `The client sees the sell price only.`)) return;
+      const total = parseFloat((el('aqi-tsell') || {}).value);
+      if (!isFinite(total) || total <= 0) return err('Price the lines before releasing.');
+      const dflt = _data.markup_default_pct;
+      const eff = q.cost > 0 ? Math.round((total - q.cost) / q.cost * 1000) / 10 : null;
+      if (eff != null && Math.abs(eff - dflt) > 0.05 && !reason)
+        return err('A reason is required when the effective markup differs from the rate card.');
+      if (!confirm(`Release ${q.ref} to the client at ${money(total, 'USD')}?\n\n`
+        + `Cost ${money(q.cost, 'USD')} · effective markup ${eff}%\n`
+        + `The client sees the total only — never the three lines.`)) return;
       _busy = true; rel.disabled = true;
       try {
+        // Persist what is on screen first, so the released price is exactly what was seen.
+        await req('/air-quotes/' + encodeURIComponent(_sel) + '/pricing',
+          { method: 'POST', body: JSON.stringify(pricingPayload()) });
         const r = await req('/air-quotes/' + encodeURIComponent(_sel) + '/release',
-          { method: 'POST', body: JSON.stringify({ markup_pct: markup, markup_reason: reason || null, valid_days: days }) });
+          { method: 'POST', body: JSON.stringify({ markup_pct: eff, markup_reason: reason || null, valid_days: days }) });
         ok(`Released at ${esc(money(r.sell_amount, 'USD'))} — valid until ${esc(r.valid_until)}, gross margin ${r.gross_margin_pct}%.`);
         await load();
       } catch (e) { err(e.message || String(e)); rel.disabled = false; }
@@ -384,7 +544,7 @@
     window.addEventListener('state:ready', load);
     setInterval(load, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v7 loaded');
+    console.log('[air-quote-review] module v8 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
