@@ -11601,15 +11601,16 @@ app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), (re
       insights: insight.lines, win_bands: insight.bands,
       quotes: rows.map(q => {
         const k = costs[q.id] || {};
+        // Lines first: sell is derived from them, so they must exist before it is computed.
+        const lines = aqLines(q.id);
+        const lineSell = lines.reduce((a, l) => a + (l.sell_amount || 0), 0);
+        const per = (n, d) => (n != null && d > 0) ? Math.round(n / d * 10000) / 10000 : null;
         const markup = k.markup_pct != null ? k.markup_pct : dflt;
         // Sell always comes from the lines when they exist — the header is a rollup, never
         // an independent figure that could disagree with its own components.
         const sell = lineSell > 0 ? Math.round(lineSell * 100) / 100
                    : (q.sell_amount != null ? q.sell_amount
                    : (k.cost_amount != null ? aqSell(k.cost_amount, markup) : null));
-        const lines = aqLines(q.id);
-        const lineSell = lines.reduce((a, l) => a + (l.sell_amount || 0), 0);
-        const per = (n, d) => (n != null && d > 0) ? Math.round(n / d * 10000) / 10000 : null;
         return {
           ...q,
           lines: lines.map(l => ({
