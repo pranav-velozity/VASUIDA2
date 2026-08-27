@@ -11672,6 +11672,7 @@ app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), (re
     const insight = aqInternalInsights(c, null);
     res.json({ client_id: c, markup_default_pct: dflt,
       insights: insight.lines, win_bands: insight.bands,
+      tiles: aqInternalTiles(c, req.query.weeks),
       quotes: rows.map(q => {
         const k = costs[q.id] || {};
         // Lines first: sell is derived from them, so they must exist before it is computed.
@@ -12603,6 +12604,64 @@ app.post('/air-quote/decide', writeOpLimiter, (req, res) => {
     res.json({ ok: true, ref: q.ref, state: to });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
+
+// Headline numbers for the review screen, with a per-week series behind each so a figure
+// can be read as a direction rather than a snapshot. Internal only — cost and margin are
+// in here, so this must never be reachable from a client route.
+function aqInternalTiles(clientId, weeks) {
+  const w = Math.max(4, parseInt(weeks, 10) || 12);
+  const since = new Date(Date.now() - w * 7 * 86400000).toISOString().slice(0, 10);
+
+  const rows = db.prepare(`SELECT q.week_start, q.state, q.sell_amount, q.chargeable_kg, q.cartons, q.units,
+                                  k.cost_amount
+                           FROM air_quote q LEFT JOIN air_quote_cost k ON k.quote_id=q.id
+                           WHERE q.client_id=? AND q.state IN ('approved','declined')
+                             AND COALESCE(q.decided_at, q.created_at) >= ?`).all(clientId, since);
+  const won = rows.filter(r => r.state === 'approved');
+
+  const sum = (a, f) => a.reduce((x, r) => x + (Number(f(r)) || 0), 0);
+  const div = (n, d) => d > 0 ? Math.round(n / d * 100) / 100 : null;
+
+  const sell = sum(won, r => r.sell_amount);
+  const cost = sum(won, r => r.cost_amount);
+  const kg = sum(won, r => r.chargeable_kg);
+  const ctn = sum(won, r => r.cartons);
+  const withUnits = won.filter(r => r.units > 0);
+  const unitSell = sum(withUnits, r => r.sell_amount), unitQty = sum(withUnits, r => r.units);
+  const margin = Math.round((sell - cost) * 100) / 100;
+
+  // Weekly buckets, oldest first. A single week with one quote is noisy, which is why the
+  // tile shows the window figure and the line shows the shape.
+  const byWeek = {};
+  for (const r of rows) {
+    const k = r.week_start || 'unknown';
+    const e = byWeek[k] || (byWeek[k] = { week: k, sell: 0, cost: 0, kg: 0, ctn: 0, unitSell: 0, units: 0, won: 0, n: 0 });
+    e.n++;
+    if (r.state === 'approved') {
+      e.won++; e.sell += r.sell_amount || 0; e.cost += r.cost_amount || 0;
+      e.kg += r.chargeable_kg || 0; e.ctn += r.cartons || 0;
+      if (r.units > 0) { e.unitSell += r.sell_amount || 0; e.units += r.units; }
+    }
+  }
+  const series = Object.values(byWeek).sort((a, b) => String(a.week).localeCompare(String(b.week)));
+  const trend = (f) => series.map(e => { const v = f(e); return v == null ? null : Math.round(v * 100) / 100; });
+
+  return {
+    window_weeks: w, approved_count: won.length, decided_count: rows.length,
+    per_kg:        { value: div(sell, kg),        trend: trend(e => e.kg > 0 ? e.sell / e.kg : null) },
+    per_carton:    { value: div(sell, ctn),       trend: trend(e => e.ctn > 0 ? e.sell / e.ctn : null) },
+    per_unit:      { value: div(unitSell, unitQty), trend: trend(e => e.units > 0 ? e.unitSell / e.units : null) },
+    approval_rate: { value: rows.length ? Math.round(won.length / rows.length * 100) : null,
+                     trend: trend(e => e.n > 0 ? e.won / e.n * 100 : null) },
+    total_cost:    { value: Math.round(cost * 100) / 100,
+                     trend: trend(e => e.cost || null) },
+    margin:        { value: sell > 0 ? Math.round(margin / sell * 1000) / 10 : null,   // avg margin %
+                     total: margin,
+                     avg_per_quote: won.length ? Math.round(margin / won.length * 100) / 100 : null,
+                     trend: trend(e => e.sell > 0 ? (e.sell - e.cost) / e.sell * 100 : null) },
+    weeks: series.map(e => e.week),
+  };
+}
 
 // ── Internal: send it back to the partner for repricing ──
 // Snapshots their current figures, records the comment, reopens the link and emails them.
