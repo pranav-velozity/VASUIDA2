@@ -215,10 +215,12 @@
   //   * server — /air-quotes/internal is requireRole(['admin'])
   //   * tenancy — nav gated on the quote_review capability
   //   * here    — never mount the nav for a client that lacks the capability
+  // Entitlement follows the PERSON, not the client they happen to be viewing. A VelOzity
+  // admin works as ICONIC or EHP through the picker, so a client-scoped capability would
+  // lock them out of their own review screen.
   function entitled() {
-    const caps = window.pinpointCaps;
-    if (!Array.isArray(caps)) return null;          // unknown yet — decide nothing
-    return caps.includes('quote_review');
+    if (typeof window.pinpointIsInternal !== 'boolean') return null;   // not resolved yet
+    return window.pinpointIsInternal;
   }
 
   function injectNav() {
@@ -700,7 +702,7 @@
       load();
     }, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v13 loaded');
+    console.log('[air-quote-review] module v14 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

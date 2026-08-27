@@ -68,10 +68,15 @@
     'btn-zero-plan':   'plan_upload',
     'wh-btn-zero-uids': 'plan_upload',
     'aq-btn-open':     'air_quotes',
-    // Quote Review exposes partner cost and margin — internal only, never the client's
-    // air_quotes capability.
-    'nav-aqi':         'quote_review',
+    // 'nav-aqi' is NOT here. Capabilities are resolved for the ACTIVE client, and a
+    // VelOzity admin works as ICONIC or EHP through the picker — so a client-scoped
+    // capability would hide Quote Review from the very people who need it. It is gated on
+    // org type below instead, which follows the person rather than the client they are
+    // currently viewing.
   };
+
+  // Elements only ever shown to VelOzity staff, whichever client they are viewing.
+  const INTERNAL_ONLY = ['nav-aqi'];
 
   function applyCapabilityNav() {
     if (!_who) return;
@@ -98,9 +103,19 @@
         n.style.display = '';
       }
     }
+    const internal = (r.org_type === 'internal');
+    for (const id of INTERNAL_ONLY) {
+      const n = document.getElementById(id);
+      if (!n) continue;
+      if (!internal) { n.dataset.ppHidden = '1'; n.style.display = 'none'; }
+      else if (n.dataset.ppHidden === '1') { delete n.dataset.ppHidden; n.style.display = ''; }
+    }
+
     // Expose the resolved set so late-mounting modules can gate themselves without
     // re-fetching whoami, and re-apply when one of them appears.
     window.pinpointCaps = caps;
+    window.pinpointOrgType = r.org_type || null;
+    window.pinpointIsInternal = internal;
     document.documentElement.classList.remove('pp-booting');
     // If Labelling is hidden, only show the VAS Ops parent when Fulfilment is available.
     const lab = document.getElementById('nav-vas-labelling');
