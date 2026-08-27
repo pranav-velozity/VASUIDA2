@@ -68,7 +68,9 @@
     'btn-zero-plan':   'plan_upload',
     'wh-btn-zero-uids': 'plan_upload',
     'aq-btn-open':     'air_quotes',
-    'nav-aqi':         'air_quotes',
+    // Quote Review exposes partner cost and margin — internal only, never the client's
+    // air_quotes capability.
+    'nav-aqi':         'quote_review',
   };
 
   function applyCapabilityNav() {
@@ -81,13 +83,20 @@
       const n = document.getElementById(id);
       if (n && !caps.includes(cap)) n.style.display = 'none';
     }
-    // Show as well as hide: these buttons are injected by other modules, so a client that
-    // IS entitled to them needs them un-hidden once the boot gate lifts.
+    // Hide what is not entitled. Only ever UN-hide something this function hid itself —
+    // marked below. A blanket un-hide previously reversed a module's own decision to hide
+    // an element after an authorisation failure, putting an internal-only nav item back in
+    // front of a client.
     for (const [id, cap] of Object.entries(CTRL_CAPS)) {
       const n = document.getElementById(id);
       if (!n) continue;
-      if (!caps.includes(cap)) n.style.display = 'none';
-      else if (n.style.display === 'none') n.style.display = '';
+      if (!caps.includes(cap)) {
+        n.dataset.ppHidden = '1';
+        n.style.display = 'none';
+      } else if (n.dataset.ppHidden === '1') {
+        delete n.dataset.ppHidden;
+        n.style.display = '';
+      }
     }
     // Expose the resolved set so late-mounting modules can gate themselves without
     // re-fetching whoami, and re-apply when one of them appears.
