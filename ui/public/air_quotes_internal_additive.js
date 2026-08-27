@@ -83,6 +83,16 @@
       .aqi-btn.g{background:#fff;color:${DARK};border:.5px solid rgba(0,0,0,.16);}
       .aqi-btn:disabled{opacity:.55;cursor:default;}
       .aqi-none{font-size:11px;color:${LIGHT};padding:16px 2px;}
+      .aqi-tiles{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;}
+      @media (max-width:1280px){ .aqi-tiles{grid-template-columns:repeat(3,minmax(0,1fr));} }
+      @media (max-width:760px){ .aqi-tiles{grid-template-columns:repeat(2,minmax(0,1fr));} }
+      .aqi-tile{border:.5px solid rgba(0,0,0,.09);border-radius:10px;padding:10px 12px;
+                box-shadow:0 1px 2px rgba(0,0,0,.04),0 4px 12px rgba(0,0,0,.06);}
+      .aqi-tl{font-size:8px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;
+              color:${LIGHT};line-height:1.25;}
+      .aqi-tv{font-size:17px;font-weight:700;color:${DARK};letter-spacing:-.02em;margin-top:3px;
+              font-variant-numeric:tabular-nums;line-height:1.15;}
+      .aqi-ts{font-size:9px;color:${LIGHT};margin-top:2px;line-height:1.3;}
       .aqi-msg{margin-top:10px;padding:9px 11px;border-radius:8px;font-size:11px;}
       .aqi-warn{font-size:10px;color:${AMBER};margin-top:4px;}
     `;
@@ -111,6 +121,62 @@
       ? `<span class="aqi-pill" style="color:${GREEN};background:rgba(27,127,59,.12);margin-left:4px;">Sent</span>` : '');
 
   const n2 = v => v == null ? '—' : Number(v).toFixed(2);
+
+  // Sparkline in the tile corner. Deliberately no axes or labels — at this size it conveys
+  // direction, and anything more detailed would be unreadable rather than informative.
+  function spark(vals, colour) {
+    const pts = (vals || []).filter(v => v != null && isFinite(v));
+    if (pts.length < 2) return '';
+    const W = 56, H = 18, min = Math.min(...pts), max = Math.max(...pts);
+    const span = (max - min) || 1;
+    const x = i => (i / (pts.length - 1)) * W;
+    const y = v => H - ((v - min) / span) * (H - 2) - 1;
+    const d = pts.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('');
+    const last = pts[pts.length - 1], first = pts[0];
+    const col = colour || (last >= first ? GREEN : RED);
+    return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="overflow:visible;">
+      <path d="${d}" fill="none" stroke="${col}" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>
+      <circle cx="${x(pts.length - 1).toFixed(1)}" cy="${y(last).toFixed(1)}" r="1.9" fill="${col}"/>
+    </svg>`;
+  }
+
+  function tilesHtml() {
+    const t = _data.tiles; if (!t) return '';
+    if (!t.decided_count) return `<div class="aqi-card" style="margin-bottom:16px;">
+      <div class="aqi-sec">Performance</div>
+      <div class="aqi-none">No decided quotes in the last ${t.window_weeks} weeks.</div></div>`;
+
+    // Rising cost per kg is bad news, rising margin is good — so the colour follows meaning
+    // rather than direction. A green line on a rising cost would read as a win.
+    const card = (label, value, sub, series, invert) => {
+      const pts = (series || []).filter(v => v != null);
+      const up = pts.length > 1 && pts[pts.length - 1] >= pts[0];
+      const col = pts.length > 1 ? ((up !== !!invert) ? GREEN : RED) : MID;
+      return `<div class="aqi-tile">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+          <div class="aqi-tl">${esc(label)}</div>
+          <div style="flex:0 0 auto;margin-top:-2px;">${spark(series, col)}</div>
+        </div>
+        <div class="aqi-tv">${value}</div>
+        <div class="aqi-ts">${sub || ''}</div>
+      </div>`;
+    };
+    const m = v => v == null ? '—' : 'USD ' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    return `<div class="aqi-card" style="margin-bottom:16px;">
+      <div class="aqi-sec">Performance &middot; last ${t.window_weeks} weeks &middot; ${t.approved_count} approved</div>
+      <div class="aqi-tiles">
+        ${card('Per chargeable kg', n2(t.per_kg.value), 'sell / chargeable kg', t.per_kg.trend, true)}
+        ${card('Per carton', n2(t.per_carton.value), 'sell / carton', t.per_carton.trend, true)}
+        ${card('Per unit', t.per_unit.value == null ? 'NA' : n2(t.per_unit.value), 'sell / unit', t.per_unit.trend, true)}
+        ${card('Approval rate', t.approval_rate.value == null ? '—' : t.approval_rate.value + '%',
+               `${t.approved_count} of ${t.decided_count} decided`, t.approval_rate.trend, false)}
+        ${card('Total cost', m(t.total_cost.value), 'partner cost, approved', t.total_cost.trend, true)}
+        ${card('Avg margin', t.margin.value == null ? '—' : t.margin.value + '%',
+               `${m(t.margin.total)} total &middot; ${m(t.margin.avg_per_quote)} per quote`, t.margin.trend, false)}
+      </div>
+    </div>`;
+  }
 
   // Cost and sell side by side, per line, both per kg and per unit — so an odd price shows
   // up as an odd rate rather than needing mental arithmetic.
@@ -178,6 +244,7 @@
 
     const ins = _data.insights || [], bands = _data.win_bands || [];
     body.innerHTML = `
+    ${tilesHtml()}
     ${(ins.length || bands.length) ? `<div class="aqi-card" style="margin-bottom:16px;">
       <div class="aqi-sec">Pricing intelligence</div>
       ${ins.map(t => `<div style="font-size:12px;color:${DARK};line-height:1.55;margin-bottom:6px;">
@@ -612,7 +679,7 @@
       load();
     }, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v11 loaded');
+    console.log('[air-quote-review] module v12 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
