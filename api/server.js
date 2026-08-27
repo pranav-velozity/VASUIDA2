@@ -11961,14 +11961,20 @@ async function aqNotifyDecision(quoteId) {
   const q = aqFullRow(quoteId); if (!q) return;
   const approved = q.state === 'approved';
   const who = q.decided_by_email || q.decided_by_name || 'the client';
+  // Shipment facts as the CLIENT gave them. The partner computes chargeable weight
+  // themselves as part of pricing — sending ours back invites an argument about our
+  // arithmetic instead of a booking, and it is our own cross-check, not theirs.
   const base = [
     ['Reference', q.ref], ['Zendesk', q.zendesk_ticket], ['PO number(s)', q.po_numbers],
     ['Shipping week', q.week_label || q.week_start], ['Vendor', q.vendor_raw],
-    ['Cartons', q.cartons], ['Chargeable weight', q.chargeable_kg + ' kg'],
+    ['Cartons', q.cartons],
+    ['Gross weight', q.gross_weight_kg + ' kg'], ['Volume', q.cbm + ' CBM'],
     ['Transit', AQ_TRANSIT[q.transit_mode] || q.transit_mode],
   ];
 
+  // Internal keeps the chargeable figure — it is the basis every margin number rests on.
   const internalRows = base.concat([
+    ['Chargeable weight', q.chargeable_kg + ' kg'],
     ['Quoted price', `${q.currency} ${Number(q.sell_amount || 0).toFixed(2)}`],
     ['Partner cost', q.cost_amount == null ? null : `USD ${Number(q.cost_amount).toFixed(2)}`],
     ['Markup', q.markup_pct == null ? null : q.markup_pct + '%'],
