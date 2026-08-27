@@ -163,7 +163,7 @@
   const STATE_STYLE = {
     submitted:   { t: 'Submitted',        c: MID,   b: 'rgba(0,0,0,.05)' },
     in_progress: { t: 'Pricing',          c: AMBER, b: 'rgba(183,121,31,.12)' },
-    quoted:      { t: 'Awaiting you',     c: BRAND, b: 'rgba(153,0,51,.10)' },
+    quoted:      { t: 'Pending approval', c: BRAND, b: 'rgba(153,0,51,.10)' },
     approved:    { t: 'Approved',         c: GREEN, b: 'rgba(27,127,59,.12)' },
     declined:    { t: 'Declined',         c: RED,   b: 'rgba(179,63,64,.12)' },
     expired:     { t: 'Expired',          c: LIGHT, b: 'rgba(0,0,0,.05)' },
@@ -540,7 +540,7 @@
     window.addEventListener('air-quotes:changed', load);
     setInterval(() => { if (document.visibilityState === 'visible') check(); }, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v14 loaded');
+    console.log('[air-quotes] module v15 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
