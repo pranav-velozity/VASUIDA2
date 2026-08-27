@@ -723,6 +723,20 @@ CREATE TABLE IF NOT EXISTS role_alias (
     console.log('[caps] v5 — plan_upload and air_quotes granted to ICONIC and VOZ only');
   }
 
+  // v6 — Quote Review shows partner cost and margin, so it is VelOzity-only. It was
+  // sharing the client-facing 'air_quotes' capability, which ICONIC holds, so their nav
+  // rendered it. Separate capability, granted to internal alone.
+  const capsV6 = db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability='caps_v6'`).get();
+  if (!capsV6) {
+    const setCap = db.prepare(`INSERT INTO client_capability (client_id, capability, enabled) VALUES (?,?,?)
+                               ON CONFLICT(client_id, capability) DO UPDATE SET enabled=excluded.enabled`);
+    setCap.run('VOZ', 'quote_review', 1);
+    setCap.run('ICONIC', 'quote_review', 0);
+    setCap.run('EHP', 'quote_review', 0);
+    db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled) VALUES ('__meta','caps_v6',1)`).run();
+    console.log('[caps] v6 — quote_review granted to VOZ only; revoked for ICONIC and EHP');
+  }
+
   ins(`INSERT OR IGNORE INTO role_alias (clerk_role,role) VALUES (?,?)`, [
     ['org:admin_auth','admin'],
     ['org:member','ops'],          // legacy 'member'
