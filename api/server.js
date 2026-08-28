@@ -6917,7 +6917,11 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
         const airLanes = lanes.filter(l => l.freight.toLowerCase() === 'air');
         const lines = airLanes.map((l, i) => ({
           sort_order: i,
-          description: `Air Freight - ${l.supplier||'—'}`,
+          // The ticket identifies the shipment on both sides; the supplier name did not.
+          // Falls back to the supplier where a lane has no ticket, so a line is never blank.
+          description: String(l.zendesk || '').trim() && String(l.zendesk).trim().toUpperCase() !== 'NO_TICKET'
+            ? String(l.zendesk).trim()
+            : `Air Freight - ${l.supplier || '—'}`,
           unit_label: 'Per KG',
           zendesk: l.zendesk,
           supplier: l.supplier,
@@ -6927,11 +6931,44 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
           gst_free: 0,
           is_misc: 0
         }));
+
+        // ── Additional PO labels, air only ──
+        // Units are attributed through the plan: a PO carries both its zendesk ticket and
+        // its freight mode, so units completed this week on an air PO are countable. Three
+        // labels per carton, billed at the rate-card additional-labelling rate. Quantity is
+        // shown pre-multiplied, matching how the VAS invoice presents the same charge.
+        const _airTickets = new Set(airLanes.map(l => String(l.zendesk || '').trim().toUpperCase()).filter(Boolean));
+        const _poIsAir = new Map();
+        for (const pw of db.prepare(`SELECT data FROM plans WHERE client_id=? AND week_start<=?
+                                     ORDER BY week_start DESC LIMIT 8`).all(_c, week_start)) {
+          for (const r of (safeJsonParse(pw.data, []) || [])) {
+            const po = String(r?.po_number || '').trim().toUpperCase();
+            if (!po || _poIsAir.has(po)) continue;
+            const mode = String(r?.freight_type ?? r?.freight ?? '').trim().toLowerCase();
+            const tkt = String(r?.zendesk_ticket ?? r?.zendesk ?? '').trim().toUpperCase();
+            // Air by the plan's own mode, or by belonging to a ticket on an air lane.
+            _poIsAir.set(po, mode.startsWith('air') || (tkt && _airTickets.has(tkt)));
+          }
+        }
+        let airUnits = 0;
+        for (const r of db.prepare(`SELECT po_number, COUNT(*) n FROM records
+                                    WHERE client_id=? AND status='complete'
+                                      AND date_local BETWEEN ? AND ? GROUP BY po_number`).all(_c, week_start, we)) {
+          if (_poIsAir.get(String(r.po_number || '').trim().toUpperCase())) airUnits += r.n;
+        }
+        const _rLabel = rateFor(_c, 'vas_additional_labelling', 0.01);
+        const _labelQty = airUnits * 3;
+        const _labelTotal = Math.round(_rLabel * _labelQty * 100) / 100;
+        lines.push({ sort_order: lines.length, description: '3 Additional PO Labels Per Carton',
+          unit_label: 'Per Unit', rate: _rLabel, quantity: _labelQty, total: _labelTotal,
+          gst_free: 0, is_misc: 0 });
+
         lines.push({ sort_order: lines.length, description:'Customs Processing', unit_label:'Flat Fee', rate:_rCustoms, quantity:airLanes.length||1, total:_rCustoms*(airLanes.length||1), gst_free:1, is_misc:0 });
         lines.push({ sort_order: lines.length+1, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
         lines.push({ sort_order: lines.length+2, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
         const customs = _rCustoms * (airLanes.length||1);
-        return res.json({ type:'AIR', week_start, lanes: airLanes, lines, customs, subtotal:0, gst:0, total:customs });
+        return res.json({ type:'AIR', week_start, lanes: airLanes, lines, customs,
+          air_units: airUnits, subtotal:_labelTotal, gst:0, total:customs + _labelTotal });
       }
     }
     res.status(400).json({ error: 'Unknown type' });
