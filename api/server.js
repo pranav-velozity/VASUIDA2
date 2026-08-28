@@ -12945,7 +12945,8 @@ app.get('/report/vas-supplier-allocation', authenticateRequest, requireRole(['ad
     const supplierOf = (po) => poSup.get(String(po || '').trim().toUpperCase()) || 'Unattributed';
 
     const bySup = new Map();
-    const bump = (sup) => { if (!bySup.has(sup)) bySup.set(sup, { supplier: sup, units: 0, pos: new Set(), nc_cartons: 0, nc_incidents: 0 });
+    const bump = (sup) => { if (!bySup.has(sup)) bySup.set(sup, { supplier: sup, units: 0, pos: new Set(),
+                              rep_cartons: 0, nc_cartons: 0, nc_incidents: 0 });
                             return bySup.get(sup); };
 
     // Units completed this week, per PO -> supplier.
@@ -12955,8 +12956,18 @@ app.get('/report/vas-supplier-allocation', authenticateRequest, requireRole(['ad
       const e = bump(supplierOf(r.po_number)); e.units += r.units; e.pos.add(r.po_number);
     }
 
-    // Carton replacements logged against a supplier. This is the causal basis — the supplier
-    // is recorded on the incident, not derived from a carton count.
+    // Cartons replaced, from receiving — the same source the invoice quantity comes from,
+    // and it carries the supplier on the row, so attribution is exact rather than inferred.
+    for (const r of db.prepare(`SELECT po_number, supplier_name, COALESCE(SUM(cartons_replaced),0) cartons
+                                FROM receiving WHERE client_id=? AND week_start=?
+                                  AND COALESCE(cartons_replaced,0) > 0
+                                GROUP BY po_number, supplier_name`).all(c, ws)) {
+      const sup = String(r.supplier_name || '').trim() || supplierOf(r.po_number);
+      const e = bump(sup); e.rep_cartons += r.cartons; e.pos.add(r.po_number);
+    }
+
+    // Non-compliance replacements, kept only as a cross-check on the Basis sheet. Where the
+    // two disagree, receiving is authoritative — it is what was billed.
     for (const r of db.prepare(`SELECT supplier, COALESCE(SUM(qty),0) cartons, COUNT(*) n
                                 FROM nc_incident
                                 WHERE week_start=? AND remedy_type='carton_replacement'
@@ -12967,6 +12978,7 @@ app.get('/report/vas-supplier-allocation', authenticateRequest, requireRole(['ad
 
     const sups = Array.from(bySup.values()).sort((a, b) => b.units - a.units);
     const totalUnits = sups.reduce((a, e) => a + e.units, 0);
+    const totalRep = sups.reduce((a, e) => a + e.rep_cartons, 0);
     const totalNc = sups.reduce((a, e) => a + e.nc_cartons, 0);
 
     // ── The amounts being split ──
@@ -12975,28 +12987,19 @@ app.get('/report/vas-supplier-allocation', authenticateRequest, requireRole(['ad
     const linesOf = (inv) => db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id=?').all(inv.id);
 
     const vasInv = invoicesFor('VAS')[0] || null;
-    let vasTotal = 0, cartonTotal = 0;
+    let vasTotal = 0, cartonTotal = 0, cartonQtyInvoiced = 0;
     if (vasInv) {
       for (const l of linesOf(vasInv)) {
         const amt = Number(l.total) || 0;
         if (amt <= 0) continue;
-        if (/carton replacement/i.test(l.description || '')) cartonTotal += amt;
-        else vasTotal += amt;                       // includes miscellaneous lines
+        if (/carton replacement/i.test(l.description || '')) {
+          cartonTotal += amt; cartonQtyInvoiced += Number(l.quantity) || 0;
+        } else vasTotal += amt;                     // includes miscellaneous lines
       }
     }
 
-    // Customs sits on the freight invoices, not the VAS one.
-    let customsTotal = 0; const customsRefs = [];
-    for (const t of ['SEA', 'AIR']) {
-      for (const inv of invoicesFor(t)) {
-        let sub = 0;
-        for (const l of linesOf(inv)) if (/customs/i.test(l.description || '')) sub += Number(l.total) || 0;
-        if (sub > 0) { customsTotal += sub; customsRefs.push(`${inv.ref_number} ${sub.toFixed(2)}`); }
-      }
-    }
     vasTotal = Math.round(vasTotal * 100) / 100;
     cartonTotal = Math.round(cartonTotal * 100) / 100;
-    customsTotal = Math.round(customsTotal * 100) / 100;
 
     // Largest remainder, so each column reconciles to the cent.
     function split(amount, weights) {
@@ -13009,10 +13012,9 @@ app.get('/report/vas-supplier-allocation', authenticateRequest, requireRole(['ad
       return out;
     }
     const unitW = sups.map(e => e.units);
-    const ncW = sups.map(e => e.nc_cartons);
+    const repW = sups.map(e => e.rep_cartons);
     const vasA = split(vasTotal, unitW);
-    const ctnA = split(cartonTotal, ncW);
-    const cusA = split(customsTotal, unitW);
+    const ctnA = split(cartonTotal, repW);
 
     const wb = new ExcelJS.Workbook();
     wb.creator = 'VelOzity Pinpoint';
@@ -13024,24 +13026,23 @@ app.get('/report/vas-supplier-allocation', authenticateRequest, requireRole(['ad
       { header: 'Units processed', key: 'un', width: 16 },
       { header: 'VAS', key: 'vas', width: 14 },
       { header: 'Carton replacement', key: 'ctn', width: 19 },
-      { header: 'Customs clearance', key: 'cus', width: 18 },
       { header: 'Total (ex GST)', key: 'tot', width: 16 },
       { header: 'Share', key: 'pct', width: 9 },
     ];
     sh.getRow(1).font = { bold: true };
     sh.views = [{ state: 'frozen', xSplit: 1, ySplit: 1 }];
 
-    const grand = Math.round((vasTotal + cartonTotal + customsTotal) * 100) / 100;
+    const grand = Math.round((vasTotal + cartonTotal) * 100) / 100;
     sups.forEach((e, i) => {
-      const t = Math.round((vasA[i] + ctnA[i] + cusA[i]) * 100) / 100;
+      const t = Math.round((vasA[i] + ctnA[i]) * 100) / 100;
       sh.addRow({ sup: e.supplier, pos: e.pos.size, un: e.units,
-                  vas: vasA[i], ctn: ctnA[i], cus: cusA[i], tot: t,
+                  vas: vasA[i], ctn: ctnA[i], tot: t,
                   pct: grand > 0 ? t / grand : 0 });
     });
     sh.addRow({});
     sh.addRow({ sup: 'TOTAL', un: totalUnits, vas: vasTotal, ctn: cartonTotal,
-                cus: customsTotal, tot: grand, pct: grand > 0 ? 1 : 0 }).font = { bold: true };
-    ['vas', 'ctn', 'cus', 'tot'].forEach(k => { sh.getColumn(k).numFmt = '#,##0.00'; });
+                tot: grand, pct: grand > 0 ? 1 : 0 }).font = { bold: true };
+    ['vas', 'ctn', 'tot'].forEach(k => { sh.getColumn(k).numFmt = '#,##0.00'; });
     sh.getColumn('pct').numFmt = '0.0%';
 
     // ── Basis ──
@@ -13050,43 +13051,63 @@ app.get('/report/vas-supplier-allocation', authenticateRequest, requireRole(['ad
       { header: 'Supplier', key: 'sup', width: 36 },
       { header: 'Units processed', key: 'un', width: 16 },
       { header: 'Unit share', key: 'us', width: 12 },
-      { header: 'Cartons replaced', key: 'nc', width: 17 },
-      { header: 'NC incidents', key: 'ni', width: 13 },
+      { header: 'Cartons replaced (receiving)', key: 'rp', width: 24 },
       { header: 'Carton share', key: 'cs', width: 13 },
+      { header: 'NC logged (cross-check)', key: 'nc', width: 22 },
+      { header: 'NC incidents', key: 'ni', width: 13 },
     ];
     s2.getRow(1).font = { bold: true };
     sups.forEach(e => s2.addRow({ sup: e.supplier, un: e.units,
       us: totalUnits > 0 ? e.units / totalUnits : 0,
-      nc: e.nc_cartons, ni: e.nc_incidents,
-      cs: totalNc > 0 ? e.nc_cartons / totalNc : 0 }));
+      rp: e.rep_cartons,
+      cs: totalRep > 0 ? e.rep_cartons / totalRep : 0,
+      nc: e.nc_cartons, ni: e.nc_incidents }));
     s2.getColumn('us').numFmt = '0.0%'; s2.getColumn('cs').numFmt = '0.0%';
 
     // ── Reconciliation ──
     const s3 = wb.addWorksheet('Reconciliation');
     s3.columns = [{ header: 'Item', key: 'k', width: 48 }, { header: 'Value', key: 'v', width: 34 }];
     s3.getRow(1).font = { bold: true };
+    // Tie-out block. Without it the report total looks wrong against the VAS invoice, when
+    // in fact it is larger by exactly the customs drawn from the freight invoice.
     [
       ['Week', ws + ' to ' + we],
+      ['', ''],
+      ['— TIE-OUT TO THE VAS INVOICE —', ''],
       ['VAS invoice', vasInv ? `${vasInv.ref_number} (${vasInv.status})` : '(none for this week)'],
-      ['VAS allocated (ex GST)', vasTotal],
+      ['VAS lines allocated', vasTotal],
       ['Carton replacement allocated', cartonTotal],
-      ['Customs clearance allocated', customsTotal],
-      ['Customs source invoices', customsRefs.join('; ') || '(no customs lines on sea or air invoices)'],
       ['Total allocated (ex GST)', grand],
+      ['Invoice subtotal (ex GST)', vasInv ? Number(vasInv.subtotal) || 0 : 0],
+      ['Matches the invoice?', vasInv
+        ? (Math.abs(grand - (Number(vasInv.subtotal) || 0)) < 0.01
+            ? 'Yes' : `No — difference of ${(grand - (Number(vasInv.subtotal) || 0)).toFixed(2)}`)
+        : 'n/a'],
       ['', ''],
       ['Suppliers', sups.length],
       ['Units processed', totalUnits],
-      ['Cartons replaced (non-compliance)', totalNc],
+      ['', ''],
+      ['— CARTON REPLACEMENT BASIS —', ''],
+      ['Cartons invoiced', cartonQtyInvoiced],
+      ['Cartons replaced per receiving', totalRep],
+      ['Difference', Math.round((cartonQtyInvoiced - totalRep) * 100) / 100],
+      ['Non-compliance logged (cross-check only)', totalNc],
+      ['Note', cartonQtyInvoiced === totalRep
+        ? 'Invoiced quantity matches receiving.'
+        : 'Receiving is authoritative for carton replacement. Where it differs from the invoiced quantity, the invoiced amount is still what gets split — but the difference is worth checking.'],
       ['', ''],
       ['VAS basis', 'Units completed per supplier — exact.'],
-      ['Carton replacement basis', 'Cartons replaced per supplier from logged non-compliance — exact.'],
-      ['Customs basis', 'Weighted average of units. Customs is charged per shipment, not per supplier, so this column is apportioned rather than measured.'],
+      ['Carton replacement basis', 'Cartons replaced per supplier from receiving — exact. Receiving carries the supplier on the row and is the source of the invoiced quantity.'],
       ['GST', 'Excluded throughout. Invoice line totals are stored ex-GST.'],
-      ['Unattributed', 'POs with no supplier on the plan for this week or the seven before it, and non-compliance rows with no supplier.'],
+      ['Customs', 'Not included. Customs clearance belongs to the sea and air freight invoices, not this one.'],
+      ['Unattributed', 'POs with no supplier on the plan for this week or the seven before it.'],
     ].forEach(r => s3.addRow({ k: r[0], v: r[1] }));
     if (!vasInv) s3.addRow({ k: 'WARNING', v: 'No VAS invoice for this week — the VAS and carton columns are zero.' }).font = { bold: true };
-    if (totalNc === 0 && cartonTotal > 0) s3.addRow({ k: 'WARNING',
-      v: 'Carton replacement was invoiced but no non-compliance replacements are logged for this week, so it could not be allocated.' }).font = { bold: true };
+    if (totalRep === 0 && cartonTotal > 0) s3.addRow({ k: 'WARNING',
+      v: 'Carton replacement was invoiced but receiving records no replaced cartons for this week, so it could not be allocated by supplier.' }).font = { bold: true };
+    if (totalRep > 0 && cartonQtyInvoiced !== totalRep) s3.addRow({ k: 'CHECK',
+      v: `${cartonQtyInvoiced} cartons invoiced against ${totalRep} recorded in receiving — a difference of ${Math.abs(cartonQtyInvoiced - totalRep)}.` })
+      .font = { bold: true };
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="VelOzity_Supplier_Allocation_${ws}.xlsx"`);
