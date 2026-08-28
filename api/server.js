@@ -12872,6 +12872,226 @@ app.get('/air-quotes/:id/events', authenticateRequest, requireRole(['admin']), (
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ═══════════════════ VAS SUPPLIER ALLOCATION ═══════════════════
+// Splits a week's charges back across suppliers, three columns each:
+//
+//   VAS                — every chargeable VAS line except carton replacement, allocated on
+//                        units actually completed per supplier. Exact: each record carries a
+//                        PO and the plan maps a PO to a supplier.
+//   Carton replacement — allocated on logged non-compliance replacements per supplier.
+//                        Exact for the same reason: nc_incident records the supplier itself,
+//                        so nothing is inferred from a net week-level carton delta.
+//   Customs clearance  — taken from the week's sea and air invoices and spread on a weighted
+//                        average of units, since a customs charge is not attributable to one
+//                        supplier. This is the only apportioned column, and it is labelled so.
+//
+// Every figure is ex-GST: invoice line totals are stored pre-GST, which is calculated on the
+// invoice subtotal rather than per line.
+
+// Password gate, mirroring the non-compliance report. This file attributes cost to named
+// suppliers, so it warrants a second factor beyond the admin role — its own token store
+// rather than sharing the NC one, so a token issued for one report cannot fetch the other.
+const _allocTokens = new Map();
+function _cleanAllocTokens() {
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  for (const [k, v] of _allocTokens) if (v.ts < cutoff) _allocTokens.delete(k);
+}
+
+app.post('/report/supplier-allocation/auth', authenticateRequest, requireRole(['admin']), (req, res) => {
+  const b = req.body || {};
+  const expected = process.env.COST_REPORT_PASSWORD || 'velozity2026';
+  const given = Buffer.from(String(b.password || ''));
+  const want = Buffer.from(expected);
+  const ok = given.length === want.length && crypto.timingSafeEqual(given, want);
+  if (!ok) return res.status(403).json({ error: 'Invalid password' });
+  _cleanAllocTokens();
+  const token = randomUUID();
+  _allocTokens.set(token, { ts: Date.now(), client: curClient() });
+  res.json({ token });
+});
+
+app.get('/report/vas-supplier-allocation', authenticateRequest, requireRole(['admin']),
+  auditLog('download_vas_allocation'), async (req, res) => {
+  try {
+    _cleanAllocTokens();
+    const t = _allocTokens.get(String(req.query.token || ''));
+    if (!t) return res.status(403).json({ error: 'invalid_or_expired_token',
+      message: 'Enter the report password to generate this file.' });
+    const c = curClient();
+    if (t.client && t.client !== c)
+      return res.status(403).json({ error: 'token_client_mismatch',
+        message: 'This token was issued for a different client.' });
+    const ws = String(req.query.week || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) return res.status(400).json({ error: 'week required as YYYY-MM-DD (Monday)' });
+    const we = new Date(Date.parse(ws + 'T00:00:00Z') + 6 * 86400000).toISOString().slice(0, 10);
+
+    // PO -> supplier, from this week's plan and the seven before it: work completed this
+    // week often belongs to a PO planned earlier.
+    const poSup = new Map();
+    for (const pw of db.prepare(`SELECT data FROM plans WHERE client_id=? AND week_start<=?
+                                 ORDER BY week_start DESC LIMIT 8`).all(c, ws)) {
+      for (const r of (safeJsonParse(pw.data, []) || [])) {
+        const po = String(r?.po_number || '').trim().toUpperCase();
+        const sup = String(r?.supplier_name ?? r?.supplier ?? '').trim();
+        if (po && sup && !poSup.has(po)) poSup.set(po, sup);
+      }
+    }
+    const supplierOf = (po) => poSup.get(String(po || '').trim().toUpperCase()) || 'Unattributed';
+
+    const bySup = new Map();
+    const bump = (sup) => { if (!bySup.has(sup)) bySup.set(sup, { supplier: sup, units: 0, pos: new Set(), nc_cartons: 0, nc_incidents: 0 });
+                            return bySup.get(sup); };
+
+    // Units completed this week, per PO -> supplier.
+    for (const r of db.prepare(`SELECT po_number, COUNT(*) units FROM records
+                                WHERE client_id=? AND status='complete'
+                                  AND date_local BETWEEN ? AND ? GROUP BY po_number`).all(c, ws, we)) {
+      const e = bump(supplierOf(r.po_number)); e.units += r.units; e.pos.add(r.po_number);
+    }
+
+    // Carton replacements logged against a supplier. This is the causal basis — the supplier
+    // is recorded on the incident, not derived from a carton count.
+    for (const r of db.prepare(`SELECT supplier, COALESCE(SUM(qty),0) cartons, COUNT(*) n
+                                FROM nc_incident
+                                WHERE week_start=? AND remedy_type='carton_replacement'
+                                  AND chargeable=1 GROUP BY supplier`).all(ws)) {
+      const e = bump(String(r.supplier || 'Unattributed').trim() || 'Unattributed');
+      e.nc_cartons += r.cartons; e.nc_incidents += r.n;
+    }
+
+    const sups = Array.from(bySup.values()).sort((a, b) => b.units - a.units);
+    const totalUnits = sups.reduce((a, e) => a + e.units, 0);
+    const totalNc = sups.reduce((a, e) => a + e.nc_cartons, 0);
+
+    // ── The amounts being split ──
+    const invoicesFor = (t) => db.prepare(`SELECT * FROM fin_invoices WHERE client_id=? AND type=? AND week_start=?
+                                           ORDER BY created_at DESC`).all(c, t, ws);
+    const linesOf = (inv) => db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id=?').all(inv.id);
+
+    const vasInv = invoicesFor('VAS')[0] || null;
+    let vasTotal = 0, cartonTotal = 0;
+    if (vasInv) {
+      for (const l of linesOf(vasInv)) {
+        const amt = Number(l.total) || 0;
+        if (amt <= 0) continue;
+        if (/carton replacement/i.test(l.description || '')) cartonTotal += amt;
+        else vasTotal += amt;                       // includes miscellaneous lines
+      }
+    }
+
+    // Customs sits on the freight invoices, not the VAS one.
+    let customsTotal = 0; const customsRefs = [];
+    for (const t of ['SEA', 'AIR']) {
+      for (const inv of invoicesFor(t)) {
+        let sub = 0;
+        for (const l of linesOf(inv)) if (/customs/i.test(l.description || '')) sub += Number(l.total) || 0;
+        if (sub > 0) { customsTotal += sub; customsRefs.push(`${inv.ref_number} ${sub.toFixed(2)}`); }
+      }
+    }
+    vasTotal = Math.round(vasTotal * 100) / 100;
+    cartonTotal = Math.round(cartonTotal * 100) / 100;
+    customsTotal = Math.round(customsTotal * 100) / 100;
+
+    // Largest remainder, so each column reconciles to the cent.
+    function split(amount, weights) {
+      const tot = weights.reduce((a, w) => a + w, 0);
+      if (!(tot > 0) || !(amount > 0)) return weights.map(() => 0);
+      let acc = 0;
+      const out = weights.map(w => { const v = Math.round(amount * (w / tot) * 100) / 100; acc += v; return v; });
+      const drift = Math.round((amount - acc) * 100) / 100;
+      if (drift !== 0) { let bi = 0; weights.forEach((w, i) => { if (w > weights[bi]) bi = i; }); out[bi] = Math.round((out[bi] + drift) * 100) / 100; }
+      return out;
+    }
+    const unitW = sups.map(e => e.units);
+    const ncW = sups.map(e => e.nc_cartons);
+    const vasA = split(vasTotal, unitW);
+    const ctnA = split(cartonTotal, ncW);
+    const cusA = split(customsTotal, unitW);
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'VelOzity Pinpoint';
+
+    const sh = wb.addWorksheet('Allocation');
+    sh.columns = [
+      { header: 'Supplier', key: 'sup', width: 36 },
+      { header: 'POs', key: 'pos', width: 7 },
+      { header: 'Units processed', key: 'un', width: 16 },
+      { header: 'VAS', key: 'vas', width: 14 },
+      { header: 'Carton replacement', key: 'ctn', width: 19 },
+      { header: 'Customs clearance', key: 'cus', width: 18 },
+      { header: 'Total (ex GST)', key: 'tot', width: 16 },
+      { header: 'Share', key: 'pct', width: 9 },
+    ];
+    sh.getRow(1).font = { bold: true };
+    sh.views = [{ state: 'frozen', xSplit: 1, ySplit: 1 }];
+
+    const grand = Math.round((vasTotal + cartonTotal + customsTotal) * 100) / 100;
+    sups.forEach((e, i) => {
+      const t = Math.round((vasA[i] + ctnA[i] + cusA[i]) * 100) / 100;
+      sh.addRow({ sup: e.supplier, pos: e.pos.size, un: e.units,
+                  vas: vasA[i], ctn: ctnA[i], cus: cusA[i], tot: t,
+                  pct: grand > 0 ? t / grand : 0 });
+    });
+    sh.addRow({});
+    sh.addRow({ sup: 'TOTAL', un: totalUnits, vas: vasTotal, ctn: cartonTotal,
+                cus: customsTotal, tot: grand, pct: grand > 0 ? 1 : 0 }).font = { bold: true };
+    ['vas', 'ctn', 'cus', 'tot'].forEach(k => { sh.getColumn(k).numFmt = '#,##0.00'; });
+    sh.getColumn('pct').numFmt = '0.0%';
+
+    // ── Basis ──
+    const s2 = wb.addWorksheet('Basis');
+    s2.columns = [
+      { header: 'Supplier', key: 'sup', width: 36 },
+      { header: 'Units processed', key: 'un', width: 16 },
+      { header: 'Unit share', key: 'us', width: 12 },
+      { header: 'Cartons replaced', key: 'nc', width: 17 },
+      { header: 'NC incidents', key: 'ni', width: 13 },
+      { header: 'Carton share', key: 'cs', width: 13 },
+    ];
+    s2.getRow(1).font = { bold: true };
+    sups.forEach(e => s2.addRow({ sup: e.supplier, un: e.units,
+      us: totalUnits > 0 ? e.units / totalUnits : 0,
+      nc: e.nc_cartons, ni: e.nc_incidents,
+      cs: totalNc > 0 ? e.nc_cartons / totalNc : 0 }));
+    s2.getColumn('us').numFmt = '0.0%'; s2.getColumn('cs').numFmt = '0.0%';
+
+    // ── Reconciliation ──
+    const s3 = wb.addWorksheet('Reconciliation');
+    s3.columns = [{ header: 'Item', key: 'k', width: 48 }, { header: 'Value', key: 'v', width: 34 }];
+    s3.getRow(1).font = { bold: true };
+    [
+      ['Week', ws + ' to ' + we],
+      ['VAS invoice', vasInv ? `${vasInv.ref_number} (${vasInv.status})` : '(none for this week)'],
+      ['VAS allocated (ex GST)', vasTotal],
+      ['Carton replacement allocated', cartonTotal],
+      ['Customs clearance allocated', customsTotal],
+      ['Customs source invoices', customsRefs.join('; ') || '(no customs lines on sea or air invoices)'],
+      ['Total allocated (ex GST)', grand],
+      ['', ''],
+      ['Suppliers', sups.length],
+      ['Units processed', totalUnits],
+      ['Cartons replaced (non-compliance)', totalNc],
+      ['', ''],
+      ['VAS basis', 'Units completed per supplier — exact.'],
+      ['Carton replacement basis', 'Cartons replaced per supplier from logged non-compliance — exact.'],
+      ['Customs basis', 'Weighted average of units. Customs is charged per shipment, not per supplier, so this column is apportioned rather than measured.'],
+      ['GST', 'Excluded throughout. Invoice line totals are stored ex-GST.'],
+      ['Unattributed', 'POs with no supplier on the plan for this week or the seven before it, and non-compliance rows with no supplier.'],
+    ].forEach(r => s3.addRow({ k: r[0], v: r[1] }));
+    if (!vasInv) s3.addRow({ k: 'WARNING', v: 'No VAS invoice for this week — the VAS and carton columns are zero.' }).font = { bold: true };
+    if (totalNc === 0 && cartonTotal > 0) s3.addRow({ k: 'WARNING',
+      v: 'Carton replacement was invoiced but no non-compliance replacements are logged for this week, so it could not be allocated.' }).font = { bold: true };
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="VelOzity_Supplier_Allocation_${ws}.xlsx"`);
+    await wb.xlsx.write(res);
+    return res.end();
+  } catch (e) {
+    console.error('[GET /report/vas-supplier-allocation]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 // ═══════════════════ AIR PO REPORT ═══════════════════
 // One row per air PO for a week, baseline against actual across the whole journey:
 // receiving, VAS completion, the six transit/clearing stages, and last-mile delivery.
