@@ -15232,15 +15232,18 @@ const QTY_SOURCES = ['applied_units', 'carton_delta', 'cartons_replaced', 'palle
 // it undercounts exactly the case that matters most: 20 replacements recorded in receiving
 // billed as 12. receiving.cartons_replaced is a direct count with a supplier on every row.
 // The x2 multiplier goes with it — the count is already cartons, not events.
-(function rateTemplatesV3(){
+// Named and marked distinctly: 'rateTemplatesV3' and the marker 'rates_v3' are already
+// taken by the labelling-cleanup migration below, which has run — reusing either would make
+// this a no-op that looks like a deployment problem.
+(function rateCartonBasisV1(){
   try {
-    if (db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability='rates_v3'`).get()) return;
+    if (db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability='rates_carton_basis_v1'`).get()) return;
     const n = db.prepare(`UPDATE client_rate SET qty_source='cartons_replaced', qty_multiplier=1
                           WHERE service_code='carton_replacement'`).run().changes;
     db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled)
-                VALUES ('__meta','rates_v3',1)`).run();
-    if (n) console.log(`[rates] v3 — carton_replacement now bills receiving.cartons_replaced (x1) on ${n} rate row(s)`);
-  } catch (e) { console.error('[rates:v3]', e.message); }
+                VALUES ('__meta','rates_carton_basis_v1',1)`).run();
+    console.log(`[rates] carton_replacement now bills receiving.cartons_replaced (x1) — ${n} rate row(s) updated`);
+  } catch (e) { console.error('[rates:carton-basis]', e.message); }
 })();
 
 // One-time metadata pass: gives the seeded rows their quantity behaviour and ordering,
