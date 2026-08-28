@@ -83,9 +83,9 @@
       .aqi-btn.g{background:#fff;color:${DARK};border:.5px solid rgba(0,0,0,.16);}
       .aqi-btn:disabled{opacity:.55;cursor:default;}
       .aqi-none{font-size:11px;color:${LIGHT};padding:16px 2px;}
-      .aqi-tiles{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;}
-      @media (max-width:1280px){ .aqi-tiles{grid-template-columns:repeat(3,minmax(0,1fr));} }
-      @media (max-width:760px){ .aqi-tiles{grid-template-columns:repeat(2,minmax(0,1fr));} }
+      .aqi-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;}
+      @media (max-width:1100px){ .aqi-tiles{grid-template-columns:repeat(2,minmax(0,1fr));} }
+      @media (max-width:620px){ .aqi-tiles{grid-template-columns:1fr;} }
       .aqi-tile{border:.5px solid rgba(0,0,0,.09);border-radius:10px;padding:10px 12px;
                 box-shadow:0 1px 2px rgba(0,0,0,.04),0 4px 12px rgba(0,0,0,.06);}
       .aqi-tl{font-size:8px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;
@@ -172,8 +172,11 @@
         ${card('Approval rate', t.approval_rate.value == null ? '—' : t.approval_rate.value + '%',
                `${t.approved_count} of ${t.decided_count} decided`, t.approval_rate.trend, false)}
         ${card('Total cost', m(t.total_cost.value), 'partner cost, approved', t.total_cost.trend, true)}
-        ${card('Avg margin', t.margin.value == null ? '—' : t.margin.value + '%',
-               `${m(t.margin.total)} total &middot; ${m(t.margin.avg_per_quote)} per quote`, t.margin.trend, false)}
+        ${card('Avg margin %', t.margin.value == null ? '—' : t.margin.value + '%', 'approved only', t.margin.trend, false)}
+        ${card('Total margin', m((t.margin_total || {}).value), `${t.approved_count} approved quotes`,
+               (t.margin_total || {}).trend, false)}
+        ${card('Margin per quote', m((t.margin_per_quote || {}).value), 'average, approved only',
+               (t.margin_per_quote || {}).trend, false)}
       </div>
     </div>`;
   }
@@ -702,7 +705,7 @@
       load();
     }, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v14 loaded');
+    console.log('[air-quote-review] module v15 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
