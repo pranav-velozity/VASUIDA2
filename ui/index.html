@@ -7781,6 +7781,7 @@ function renderReportsPage(container){
         ${reportCard('Stock Status','Planned vs actual received vs in-transit status per PO × SKU across a week or date range.','XLSX','Admin · Client','__stock-status-direct__')}
         ${reportCard('Cost Utilisation Report','Monthly cost analysis — VAS, sea and air freight unit economics, carton replacement. 4-month trend.','PDF','Admin only','__cost-util-direct__')}
         ${reportCard('Monthly Client Report','Monthly client-facing XLSX: Shipping Data and VAS Dashboard — one row per container, with transit dates, utilization, and costs.','XLSX','Admin only','__monthly-client-direct__')}
+        ${reportCard('Supplier Cost Allocation','Splits a week\'s charges across suppliers in three columns — VAS on units completed, carton replacement on logged non-compliance, and customs clearance on a weighted average. Ex GST.','XLSX','Admin · password','__vas-allocation-direct__')}
         ${reportCard('Air PO Milestone Report','Every air PO for the week with baseline against actual: receiving, VAS completion, the six transit and clearing stages, and last-mile delivery. Variance in days, late milestones highlighted.','XLSX','Admin · Ops','__air-po-report-direct__')}
         ${reportCard('Supplier Discrepancy Reporting','Weekly vendor non-compliance — rework and delivery-failure categories, affected qty, photo evidence and carton reconciliation. One page per supplier; Excel companion for reconciliation. Cost columns password-gated.','PDF · XLSX','Admin · Client','__supplier-discrepancy-direct__')}
       </div>
@@ -7894,6 +7895,33 @@ function renderReportsPage(container){
       }
       if(proxyId === '__monthly-client-direct__'){
         window._monthlyClientOpenModal();
+        return;
+      }
+      if(proxyId === '__vas-allocation-direct__'){
+        const wk = prompt('Invoice week — Monday date (YYYY-MM-DD):', (window.state && window.state.weekStart) || '');
+        if(!wk) return;
+        const pw = prompt('Report password:');
+        if(!pw) return;
+        (async () => {
+          const _b = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/, '');
+          let _t = null; if (window.Clerk?.session) { try { _t = await window.Clerk.session.getToken(); } catch(_){} }
+          const H = Object.assign({'Content-Type':'application/json'}, _t ? {'Authorization':'Bearer '+_t} : {},
+                      window.pinpointClient ? {'x-pinpoint-client': window.pinpointClient} : {});
+          try {
+            // Password is exchanged for a short-lived token, so it never travels on the
+            // download URL where it would land in browser history.
+            const ar = await fetch(`${_b}/report/supplier-allocation/auth`,
+              { method:'POST', headers:H, body: JSON.stringify({ password: pw }) });
+            if(!ar.ok){ alert('Incorrect password.'); return; }
+            const { token } = await ar.json();
+            const r = await fetch(`${_b}/report/vas-supplier-allocation?week=${encodeURIComponent(wk)}&token=${encodeURIComponent(token)}`, { headers:H });
+            if(!r.ok){ const e = await r.json().catch(()=>({})); alert('Could not generate: ' + (e.message || e.error || r.status)); return; }
+            const blob = await r.blob(); const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob); a.download = `VelOzity_Supplier_Allocation_${wk}.xlsx`;
+            document.body.appendChild(a); a.click();
+            setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+          } catch(e){ alert('Request failed: ' + e.message); }
+        })();
         return;
       }
       if(proxyId === '__air-po-report-direct__'){
