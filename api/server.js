@@ -12673,6 +12673,12 @@ function aqInternalTiles(clientId, weeks) {
                      total: margin,
                      avg_per_quote: won.length ? Math.round(margin / won.length * 100) / 100 : null,
                      trend: trend(e => e.sell > 0 ? (e.sell - e.cost) / e.sell * 100 : null) },
+    // Both approved-only, same as every other figure here — a declined quote never earned
+    // anything, so including it would understate what the desk actually makes.
+    margin_total:  { value: margin,
+                     trend: trend(e => e.won > 0 ? e.sell - e.cost : null) },
+    margin_per_quote: { value: won.length ? Math.round(margin / won.length * 100) / 100 : null,
+                     trend: trend(e => e.won > 0 ? (e.sell - e.cost) / e.won : null) },
     weeks: series.map(e => e.week),
   };
 }
