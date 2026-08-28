@@ -6915,13 +6915,25 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
       if (type === 'AIR') {
         // Group by zendesk
         const airLanes = lanes.filter(l => l.freight.toLowerCase() === 'air');
+
+        // Suppliers are long ("D&J INDUSTRIES (HONG KONG) COMPANY LIMITED") and the invoice
+        // column is narrow, so the first two words carry the identification without wrapping.
+        const shortSup = (name) => String(name || '').trim().split(/\s+/).slice(0, 2).join(' ').replace(/[,;]+$/, '');
+        const ticketOf = (l) => {
+          const z = String(l.zendesk || '').trim();
+          return (z && z.toUpperCase() !== 'NO_TICKET') ? z : '';
+        };
+        const lineLabel = (l) => {
+          const z = ticketOf(l), sup = shortSup(l.supplier);
+          if (z && sup) return `${z} - ${sup}`;
+          return z || sup || 'Air Freight';
+        };
+
         const lines = airLanes.map((l, i) => ({
           sort_order: i,
-          // The ticket identifies the shipment on both sides; the supplier name did not.
-          // Falls back to the supplier where a lane has no ticket, so a line is never blank.
-          description: String(l.zendesk || '').trim() && String(l.zendesk).trim().toUpperCase() !== 'NO_TICKET'
-            ? String(l.zendesk).trim()
-            : `Air Freight - ${l.supplier || '—'}`,
+          // Ticket first — it is what both sides quote — then the shortened supplier so a
+          // reader can tell two tickets apart without looking anything up.
+          description: lineLabel(l),
           unit_label: 'Per KG',
           zendesk: l.zendesk,
           supplier: l.supplier,
@@ -6967,7 +6979,12 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
         lines.push({ sort_order: lines.length+1, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
         lines.push({ sort_order: lines.length+2, description:'', unit_label:'', rate:0, quantity:0, total:0, gst_free:0, is_misc:1 });
         const customs = _rCustoms * (airLanes.length||1);
-        return res.json({ type:'AIR', week_start, lanes: airLanes, lines, customs,
+        // Pre-filled note listing every lane on the invoice, so the covering text does not
+        // have to be retyped each week and always matches the lines below it.
+        const notes = airLanes.length
+          ? 'Air freight — ' + airLanes.map(lineLabel).join('; ')
+          : '';
+        return res.json({ type:'AIR', week_start, lanes: airLanes, lines, customs, notes,
           air_units: airUnits, subtotal:_labelTotal, gst:0, total:customs + _labelTotal });
       }
     }
