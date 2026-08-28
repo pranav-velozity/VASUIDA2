@@ -6940,7 +6940,7 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
         const _airTickets = new Set(airLanes.map(l => String(l.zendesk || '').trim().toUpperCase()).filter(Boolean));
         const _poIsAir = new Map();
         for (const pw of db.prepare(`SELECT data FROM plans WHERE client_id=? AND week_start<=?
-                                     ORDER BY week_start DESC LIMIT 8`).all(_c, week_start)) {
+                                     ORDER BY week_start DESC LIMIT 8`).all(_c2, week_start)) {
           for (const r of (safeJsonParse(pw.data, []) || [])) {
             const po = String(r?.po_number || '').trim().toUpperCase();
             if (!po || _poIsAir.has(po)) continue;
@@ -6953,10 +6953,10 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
         let airUnits = 0;
         for (const r of db.prepare(`SELECT po_number, COUNT(*) n FROM records
                                     WHERE client_id=? AND status='complete'
-                                      AND date_local BETWEEN ? AND ? GROUP BY po_number`).all(_c, week_start, we)) {
+                                      AND date_local BETWEEN ? AND ? GROUP BY po_number`).all(_c2, week_start, we)) {
           if (_poIsAir.get(String(r.po_number || '').trim().toUpperCase())) airUnits += r.n;
         }
-        const _rLabel = rateFor(_c, 'vas_additional_labelling', 0.01);
+        const _rLabel = rateFor(_c2, 'vas_additional_labelling', 0.01);
         const _labelQty = airUnits * 3;
         const _labelTotal = Math.round(_rLabel * _labelQty * 100) / 100;
         lines.push({ sort_order: lines.length, description: '3 Additional PO Labels Per Carton',
