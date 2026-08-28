@@ -6774,6 +6774,11 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
       const cartonsIn = db.prepare(`SELECT SUM(cartons_received) as total FROM receiving
         WHERE client_id=? AND week_start = ?`).get(_c, week_start)?.total || 0;
       const cartonDelta = Math.max(0, cartonsOut - cartonsIn);
+      // Cartons actually recorded as replaced. carton_delta cannot see a carton replaced in
+      // place — the out count is unchanged — so it undercounts by exactly the cases that
+      // matter most. This is a direct count, and it carries a supplier on every row.
+      const cartonsReplaced = db.prepare(`SELECT COALESCE(SUM(cartons_replaced),0) n FROM receiving
+        WHERE client_id=? AND week_start = ?`).get(_c, week_start)?.n || 0;
 
       let palletsReceived = 0, envelopesDispatched = 0;
       try {
@@ -6786,6 +6791,7 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
       const QTY = {
         applied_units: units,
         carton_delta: cartonDelta,
+      cartons_replaced: cartonsReplaced,
         pallets_received: palletsReceived,
         envelopes_dispatched: envelopesDispatched,
         manual: 0,
@@ -15219,7 +15225,23 @@ try {
 
 // Quantity sources a template line can draw on. Each needs a query, so the set is
 // deliberately bounded — adding one is a small, contained change.
-const QTY_SOURCES = ['applied_units', 'carton_delta', 'pallets_received', 'envelopes_dispatched', 'manual'];
+const QTY_SOURCES = ['applied_units', 'carton_delta', 'cartons_replaced', 'pallets_received', 'envelopes_dispatched', 'manual'];
+
+// v3 — carton replacement was billed as max(0, bins out - cartons in) x 2. That net
+// difference cannot see a carton replaced IN PLACE, because the out count is unchanged, so
+// it undercounts exactly the case that matters most: 20 replacements recorded in receiving
+// billed as 12. receiving.cartons_replaced is a direct count with a supplier on every row.
+// The x2 multiplier goes with it — the count is already cartons, not events.
+(function rateTemplatesV3(){
+  try {
+    if (db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability='rates_v3'`).get()) return;
+    const n = db.prepare(`UPDATE client_rate SET qty_source='cartons_replaced', qty_multiplier=1
+                          WHERE service_code='carton_replacement'`).run().changes;
+    db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled)
+                VALUES ('__meta','rates_v3',1)`).run();
+    if (n) console.log(`[rates] v3 — carton_replacement now bills receiving.cartons_replaced (x1) on ${n} rate row(s)`);
+  } catch (e) { console.error('[rates:v3]', e.message); }
+})();
 
 // One-time metadata pass: gives the seeded rows their quantity behaviour and ordering,
 // and sets the invoice code used in reference numbers.
@@ -15235,7 +15257,7 @@ const QTY_SOURCES = ['applied_units', 'carton_delta', 'pallets_received', 'envel
       ['vas_additional_labelling', 'VAS', 'applied_units',        3, 2, 0],
       ['vas_polybagging',          'VAS', 'manual',               1, 3, 0],
       ['vas_storage',              'VAS', 'manual',               1, 4, 0],
-      ['carton_replacement',       'VAS', 'carton_delta',         2, 5, 0],
+      ['carton_replacement',       'VAS', 'cartons_replaced',     1, 5, 0],
       ['inbound_pallet',           'VAS', 'pallets_received',     1, 0, 0],
       ['envelope_dispatched',      'VAS', 'envelopes_dispatched', 1, 1, 0],
       ['customs_clearance',        'FREIGHT', 'manual',           1, 0, 1],
