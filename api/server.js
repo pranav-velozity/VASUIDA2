@@ -11429,6 +11429,37 @@ function aqSnapshotRound(quoteId, partnerName) {
   return next;
 }
 
+// requireRole('admin') checks the CLERK ROLE only — it says nothing about which
+// organisation the user belongs to. A partner who is an admin of their own org passes it.
+// Everything that exposes partner cost or margin must also require an internal org.
+function requireInternalOrg(req, res, next) {
+  try {
+    const t = tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole);
+    if (!t || t.org_type !== 'internal') {
+      console.warn(`[air-quote] internal route refused for org_type=${t && t.org_type} org=${req.auth && req.auth.orgId}`);
+      return res.status(403).json({ error: 'internal_only',
+        message: 'This view is restricted to VelOzity staff.' });
+    }
+    return next();
+  } catch (e) { return res.status(403).json({ error: 'internal_only' }); }
+}
+
+// Air quotes are between VelOzity and the client. A partner org resolves to whichever
+// client owns its facility — Kerry Shenzhen sits on VOZ_KY, which is ICONIC's — so without
+// this a partner would read that client's quoted sell prices through the ordinary
+// client-facing endpoints. Partners reach quotes only through their magic link.
+function requireClientOrInternal(req, res, next) {
+  try {
+    const t = tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole);
+    if (!t || (t.org_type !== 'internal' && t.org_type !== 'client')) {
+      console.warn(`[air-quote] client route refused for org_type=${t && t.org_type} org=${req.auth && req.auth.orgId}`);
+      return res.status(403).json({ error: 'not_available',
+        message: 'Air quotes are not available for this organisation.' });
+    }
+    return next();
+  } catch (e) { return res.status(403).json({ error: 'not_available' }); }
+}
+
 function aqNewId(p) { return (p || 'aq') + '_' + crypto.randomBytes(10).toString('hex'); }
 
 // Air freight bills on the greater of actual and volumetric weight. 1 CBM = 166.67 kg at
@@ -11514,7 +11545,7 @@ function aqExpireStale(clientId) {
 // ── Client: raise a request ──
 // Week is chosen in the modal, not inherited from the page — quotes run weeks ahead of the
 // plan upload, so there is nothing to pre-fill from and every value is typed.
-app.post('/air-quotes', authenticateRequest, writeOpLimiter, auditLog('create_air_quote'), async (req, res) => {
+app.post('/air-quotes', authenticateRequest, requireClientOrInternal, writeOpLimiter, auditLog('create_air_quote'), async (req, res) => {
   try {
     const c = curClient();
     const b = req.body || {};
@@ -11581,7 +11612,7 @@ app.post('/air-quotes', authenticateRequest, writeOpLimiter, auditLog('create_ai
 
 // ── Client: list own quotes + the tiles ──
 // Everything below is built from sell price only. Cost is not joined at all.
-app.get('/air-quotes', authenticateRequest, (req, res) => {
+app.get('/air-quotes', authenticateRequest, requireClientOrInternal, (req, res) => {
   try {
     const c = curClient();
     aqExpireStale(c);
@@ -11641,7 +11672,7 @@ app.get('/air-quotes', authenticateRequest, (req, res) => {
 });
 
 // Vendor type-ahead. Distinct names already used — no master table to maintain.
-app.get('/air-quotes/vendors', authenticateRequest, (req, res) => {
+app.get('/air-quotes/vendors', authenticateRequest, requireClientOrInternal, (req, res) => {
   try {
     const c = curClient();
     const rows = db.prepare(`SELECT vendor_raw, vendor_key, COUNT(*) n, MAX(created_at) last_used
@@ -11652,7 +11683,7 @@ app.get('/air-quotes/vendors', authenticateRequest, (req, res) => {
 });
 
 // Chargeable-weight preview for the modal — no write, no auth beyond being signed in.
-app.get('/air-quotes/chargeable', authenticateRequest, (req, res) => {
+app.get('/air-quotes/chargeable', authenticateRequest, requireClientOrInternal, (req, res) => {
   const gross = Number(req.query.gross_weight_kg) || 0, cbm = Number(req.query.cbm) || 0;
   res.json({ gross_weight_kg: gross, cbm,
     volumetric_kg: Math.round(cbm * AQ_VOLUMETRIC_KG_PER_CBM * 100) / 100,
@@ -11664,7 +11695,7 @@ app.get('/air-quotes/chargeable', authenticateRequest, (req, res) => {
 // ── Client: approve or decline ──
 // In Pinpoint, not by emailed link: the decision commits spend, so it should carry an
 // authenticated identity rather than "whoever opened the forwarded message".
-app.post('/air-quotes/:id/decision', authenticateRequest, writeOpLimiter, auditLog('decide_air_quote'), (req, res) => {
+app.post('/air-quotes/:id/decision', authenticateRequest, requireClientOrInternal, writeOpLimiter, auditLog('decide_air_quote'), (req, res) => {
   try {
     const c = curClient();
     const q = db.prepare('SELECT * FROM air_quote WHERE id=? AND client_id=?').get(req.params.id, c);
@@ -11697,7 +11728,7 @@ app.post('/air-quotes/:id/decision', authenticateRequest, writeOpLimiter, auditL
 //
 // Deletes are explicit rather than relying on FK cascade: PRAGMA foreign_keys is not
 // guaranteed on, and a silently orphaned cost row is worse than a verbose delete.
-app.delete('/air-quotes/:id', authenticateRequest, writeOpLimiter, auditLog('delete_air_quote'), (req, res) => {
+app.delete('/air-quotes/:id', authenticateRequest, requireClientOrInternal, writeOpLimiter, auditLog('delete_air_quote'), (req, res) => {
   try {
     const c = curClient();
     const q = db.prepare('SELECT * FROM air_quote WHERE id=? AND client_id=?').get(req.params.id, c);
@@ -11722,7 +11753,7 @@ app.delete('/air-quotes/:id', authenticateRequest, writeOpLimiter, auditLog('del
 
 // ── Internal: the review queue ──
 // Admin only. This is the one surface where cost and margin are visible.
-app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const c = String(req.query.client_id || curClient());
     aqExpireStale(c);
@@ -12134,7 +12165,7 @@ async function aqSendRfq(quote, opts) {
 }
 
 // Manual reissue — for an expired link, a bounced address, or a second partner contact.
-app.post('/air-quotes/:id/rfq', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+app.post('/air-quotes/:id/rfq', authenticateRequest, requireRole(['admin']), requireInternalOrg, writeOpLimiter,
   auditLog('send_air_quote_rfq'), async (req, res) => {
   try {
     const c = curClient();
@@ -12746,7 +12777,7 @@ function aqInternalTiles(clientId, weeks) {
 // ── Internal: send it back to the partner for repricing ──
 // Snapshots their current figures, records the comment, reopens the link and emails them.
 // Nothing about this reaches the client — the quote stays "Pricing" from their side.
-app.post('/air-quotes/:id/reprice', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+app.post('/air-quotes/:id/reprice', authenticateRequest, requireRole(['admin']), requireInternalOrg, writeOpLimiter,
   auditLog('reprice_air_quote'), async (req, res) => {
   try {
     const c = curClient();
@@ -12787,7 +12818,7 @@ app.post('/air-quotes/:id/reprice', authenticateRequest, requireRole(['admin']),
 // numbers cannot depend on which field someone happened to type in:
 //   * per line — a markup percentage or an explicit sell amount
 //   * on the total — a sell figure distributed across the lines in proportion to their cost
-app.post('/air-quotes/:id/pricing', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+app.post('/air-quotes/:id/pricing', authenticateRequest, requireRole(['admin']), requireInternalOrg, writeOpLimiter,
   auditLog('save_air_quote_pricing'), (req, res) => {
   try {
     const c = curClient();
@@ -12860,7 +12891,7 @@ app.post('/air-quotes/:id/pricing', authenticateRequest, requireRole(['admin']),
 // on top, so removing an agreed price is never a single misplaced click.
 const AQ_DELETE_PASSWORD = process.env.AIR_QUOTE_DELETE_PASSWORD || 'Velozity2026!';
 
-app.post('/air-quotes/:id/purge', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+app.post('/air-quotes/:id/purge', authenticateRequest, requireRole(['admin']), requireInternalOrg, writeOpLimiter,
   auditLog('purge_air_quote'), (req, res) => {
   try {
     const c = curClient();
@@ -12885,7 +12916,7 @@ app.post('/air-quotes/:id/purge', authenticateRequest, requireRole(['admin']), w
 });
 
 // ── Internal: review and release ──
-app.post('/air-quotes/:id/release', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+app.post('/air-quotes/:id/release', authenticateRequest, requireRole(['admin']), requireInternalOrg, writeOpLimiter,
   auditLog('release_air_quote'), (req, res) => {
   try {
     const c = curClient();
@@ -12932,7 +12963,7 @@ app.post('/air-quotes/:id/release', authenticateRequest, requireRole(['admin']),
 });
 
 // Full internal history for one quote, including every transition.
-app.get('/air-quotes/:id/events', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/air-quotes/:id/events', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     res.json({ events: db.prepare('SELECT * FROM air_quote_event WHERE quote_id=? ORDER BY created_at').all(req.params.id) });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
