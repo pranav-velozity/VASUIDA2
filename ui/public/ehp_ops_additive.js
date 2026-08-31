@@ -300,7 +300,10 @@
   // Labels are 76 x 36 mm, one per envelope: an order for three envelopes prints three
   // identical labels. Addresses are set in caps, which is the USPS convention for
   // machine-readable mail.
-  const LABEL_W = '76mm', LABEL_H = '36mm';
+  // 30% smaller than the original 76 x 36mm. Type and padding scale with it: the label is
+  // overflow:hidden, so text that no longer fits is silently cut off rather than shrinking —
+  // a truncated address looks like a data problem, not a layout one.
+  const LABEL_W = '53mm', LABEL_H = '25mm';
 
   function labelLines(o) {
     const cityLine = [o.recipient_city, o.recipient_state, o.recipient_postcode].filter(Boolean).join(' ');
@@ -357,11 +360,13 @@
       + '#labels{display:none;}'
       + '@media screen{#labels{margin-top:18px;} #labels.show{display:block;}'
       + '  .label{width:' + LABEL_W + ';height:' + LABEL_H + ';border:1px dashed #bbb;margin:0 0 6px;}}'
-      + '.label{box-sizing:border-box;padding:3.5mm 4mm;overflow:hidden;'
+      + '.label{box-sizing:border-box;padding:2.4mm 2.8mm;overflow:hidden;'
       + '  font-family:Helvetica,Arial,sans-serif;text-transform:uppercase;}'
-      + '.label .ref{font-size:5.5pt;color:#888;letter-spacing:.04em;margin-bottom:0.6mm;}'
-      + '.label .nm{font-size:9.5pt;font-weight:700;line-height:1.25;}'
-      + '.label .ln{font-size:9pt;line-height:1.28;}'
+      // The reference is held at 4.5pt rather than scaled the full 30% — below about 4pt it
+      // stops being readable on a thermal printer, and it is there to be read on the floor.
+      + '.label .ref{font-size:4.5pt;color:#888;letter-spacing:.03em;margin-bottom:0.4mm;}'
+      + '.label .nm{font-size:6.8pt;font-weight:700;line-height:1.22;}'
+      + '.label .ln{font-size:6.4pt;line-height:1.25;}'
       + '@media print{'
       + '  @page{size:' + LABEL_W + ' ' + LABEL_H + ';margin:0;}'
       + '  body{margin:0;} .noprint{display:none !important;}'
@@ -889,7 +894,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(() => { if (document.visibilityState === 'visible') refreshEnabled(); }, 15000);
-    console.log('[ehp-ops] module v12 loaded');
+    console.log('[ehp-ops] module v13 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
