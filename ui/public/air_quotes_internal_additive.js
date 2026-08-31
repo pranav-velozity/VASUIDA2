@@ -221,13 +221,13 @@
   // Entitlement follows the PERSON, not the client they happen to be viewing. A VelOzity
   // admin works as ICONIC or EHP through the picker, so a client-scoped capability would
   // lock them out of their own review screen.
-  function entitled() {
-    if (typeof window.pinpointIsInternal !== 'boolean') return null;   // not resolved yet
-    return window.pinpointIsInternal;
-  }
+  // Fails CLOSED. Returning null while unresolved meant an org whose identity never
+  // resolved kept the nav — which is how partner logins reached this screen. Unknown is
+  // treated as not entitled; the nav appears only once the server has confirmed internal.
+  function entitled() { return window.pinpointIsInternal === true; }
 
   function injectNav() {
-    if (entitled() === false) { const a = el('nav-aqi'); if (a) a.remove(); return; }
+    if (!entitled()) { const a = el('nav-aqi'); if (a) a.remove(); return; }
     if (el('nav-aqi')) return;
     const after = el('nav-finance') || el('nav-reports') || el('nav-exec');
     if (!after || !after.parentNode) return;
@@ -637,12 +637,12 @@
 
   // ── load / gate ──
   async function load() {
-    if (entitled() === false) {
+    if (!entitled()) {
       _on = false; const a = el('nav-aqi'); if (a) a.remove();
       const o = document.querySelector('.aqi-ov'); if (o) o.remove();
       return;
     }
-    try { _data = await req('/air-quotes/internal'); _on = true; paintNav(); render(); }
+    try { _data = await req('/air-quotes/internal'); _on = true; injectNav(); paintNav(); render(); }
     catch (e) {
       if (e.status === 403 || e.status === 401) {
         _on = false; const a = el('nav-aqi'); if (a) a.style.display = 'none';
@@ -665,7 +665,7 @@
   }
 
   function open() {
-    if (entitled() === false) return;
+    if (!entitled()) return;
     styles();
     if (document.querySelector('.aqi-ov')) return;
     const o = document.createElement('div'); o.className = 'aqi-ov';
@@ -688,12 +688,17 @@
 
   function init() {
     styles(); injectNav();
-    // Capabilities resolve asynchronously, so re-check once they land and drop the nav if
-    // this client is not entitled.
-    setInterval(() => { if (entitled() === false) { const a = el('nav-aqi'); if (a) a.remove(); } }, 1500);
+    // entitled() is false until tenancy resolves, so the nav cannot be created on the first
+    // pass. This must therefore ADD as well as remove — a gate that only ever removes would
+    // leave internal staff with no Quote Review at all once identity arrives late.
+    setInterval(() => {
+      if (entitled()) { injectNav(); paintNav(); }
+      else { const a = el('nav-aqi'); if (a) a.remove(); }
+    }, 1500);
     window.openAirQuoteReview = open;
     load();
     window.addEventListener('state:ready', load);
+    window.addEventListener('tenancy:ready', () => { if (entitled()) { injectNav(); load(); } });
     // Only poll while the panel is actually open and the tab is visible. A background
     // reload every 30 seconds redrew the whole queue whether or not anything had changed,
     // which is what made the app look like it was refreshing itself.
@@ -705,7 +710,7 @@
       load();
     }, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v15 loaded');
+    console.log('[air-quote-review] module v17 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

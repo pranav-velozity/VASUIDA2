@@ -179,7 +179,12 @@
 
   // Matches wh-btn-upload's inline styling rather than importing a new visual language
   // into a toolbar that already has one.
+  // A partner org inherits the capabilities of the client owning its facility, so the
+  // capability check alone is not enough here. Air quotes are a client conversation.
+  const isPartner = () => window.pinpointOrgType === 'partner';
+
   function ensureButton() {
+    if (isPartner()) { const x = el('aq-btn-open'); if (x) x.remove(); return null; }
     let b = el('aq-btn-open');
     if (!b) {
       const anchor = el('wh-btn-upload'); if (!anchor || !anchor.parentNode) return null;
@@ -471,6 +476,7 @@
   }
 
   function openModal() {
+    if (isPartner()) return;
     styles(); closeModal();
     _view = ((_data && _data.awaiting_approval) || 0) ? 'quotes' : 'form';
     const o = document.createElement('div'); o.className = 'aq-ov';
@@ -513,6 +519,7 @@
 
   async function check() {
     styles();
+    if (isPartner()) { const x = el('aq-btn-open'); if (x) x.remove(); _on = false; return; }
     const active = window.pinpointClient || 'unknown';
     const existing = el('aq-btn-open');
     if (!onWeekHub()) { if (existing) existing.style.display = 'none'; return; }
@@ -540,7 +547,7 @@
     window.addEventListener('air-quotes:changed', load);
     setInterval(() => { if (document.visibilityState === 'visible') check(); }, 20000);
     setTimeout(check, 800);
-    console.log('[air-quotes] module v15 loaded');
+    console.log('[air-quotes] module v16 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

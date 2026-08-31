@@ -78,12 +78,42 @@
   // Elements only ever shown to VelOzity staff, whichever client they are viewing.
   const INTERNAL_ONLY = ['nav-aqi'];
 
+  // Hidden from partner organisations regardless of capability. A partner resolves to the
+  // client that owns its facility, so it inherits that client's capabilities — Kerry
+  // Shenzhen sits on VOZ_KY and would otherwise pick up ICONIC's air_quotes.
+  const NOT_FOR_PARTNERS = ['aq-btn-open'];
+
   function applyCapabilityNav() {
     if (!_who) return;
     const r = _who.resolved || {};
     const active = window.pinpointClient || (r.client_ids || [])[0];
+    // Identity is published FIRST and unconditionally. It used to sit after the early
+    // return below, so an org with no resolvable capabilities — a partner, or an org not
+    // yet mapped — never had pinpointIsInternal set, and anything gated on it stayed
+    // visible. Internal-only surfaces must fail closed, not open.
+    const _wasInternal = window.pinpointIsInternal;
+    window.pinpointOrgType = r.org_type || null;
+    window.pinpointIsInternal = (r.org_type === 'internal');
+    // Tell late-mounting modules the moment identity is known, so they do not sit waiting
+    // on a polling interval to discover they are allowed to render.
+    if (_wasInternal !== window.pinpointIsInternal) {
+      try { window.dispatchEvent(new CustomEvent('tenancy:ready')); } catch (e) {}
+    }
+    for (const id of INTERNAL_ONLY) {
+      const n = document.getElementById(id);
+      if (!n) continue;
+      if (r.org_type !== 'internal') { n.dataset.ppHidden = '1'; n.style.display = 'none'; }
+      else if (n.dataset.ppHidden === '1') { delete n.dataset.ppHidden; n.style.display = ''; }
+    }
+    window.pinpointIsPartner = (r.org_type === 'partner');
+    for (const id of NOT_FOR_PARTNERS) {
+      const n = document.getElementById(id);
+      if (!n) continue;
+      if (r.org_type === 'partner') { n.dataset.ppHidden = '1'; n.style.display = 'none'; }
+    }
+
     const caps = (r.capabilities && r.capabilities[active]) || null;
-    if (!caps) return;                       // unknown -> change nothing
+    if (!caps) { document.documentElement.classList.remove('pp-booting'); return; }
     for (const [id, cap] of Object.entries(NAV_CAPS)) {
       const n = document.getElementById(id);
       if (n && !caps.includes(cap)) n.style.display = 'none';
@@ -103,19 +133,9 @@
         n.style.display = '';
       }
     }
-    const internal = (r.org_type === 'internal');
-    for (const id of INTERNAL_ONLY) {
-      const n = document.getElementById(id);
-      if (!n) continue;
-      if (!internal) { n.dataset.ppHidden = '1'; n.style.display = 'none'; }
-      else if (n.dataset.ppHidden === '1') { delete n.dataset.ppHidden; n.style.display = ''; }
-    }
-
     // Expose the resolved set so late-mounting modules can gate themselves without
     // re-fetching whoami, and re-apply when one of them appears.
     window.pinpointCaps = caps;
-    window.pinpointOrgType = r.org_type || null;
-    window.pinpointIsInternal = internal;
     document.documentElement.classList.remove('pp-booting');
     // If Labelling is hidden, only show the VAS Ops parent when Fulfilment is available.
     const lab = document.getElementById('nav-vas-labelling');
