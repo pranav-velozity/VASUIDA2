@@ -151,20 +151,48 @@
 
   function msg(kind, text){ return `<div class="ehp-msg ${kind}">${esc(text)}</div>`; }
 
-  async function render() {
+  // True while a render is in flight, so a background tick cannot start a second one on
+  // top of the first — overlapping renders were part of why this felt like it was
+  // constantly reloading.
+  let _rendering = false;
+
+  // opts.background: fetch first and leave the current content on screen until the new
+  // content is ready. Only a first open, or a tab change, shows "Loading…" — a background
+  // refresh that blanks the panel reads as the page hanging.
+  async function render(opts) {
+    const background = !!(opts && opts.background);
     const body = el('ehp-body'); if (!body) return;
-    body.innerHTML = 'Loading…';
+    if (_rendering) return;
+    _rendering = true;
+    // Never redraw under someone's cursor: the inventory tab has editable fields, and a
+    // refresh mid-entry would discard what they had typed.
+    if (background && document.activeElement &&
+        /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName) &&
+        body.contains(document.activeElement)) { _rendering = false; return; }
+
+    // Rendered into the real panel, never a detached node: the renderers wire their
+    // buttons with getElementById, which returns null outside the document, so a detached
+    // build would swap in dead controls. Each renderer awaits its data before writing, so
+    // the existing content already survives the fetch — the only thing that blanked the
+    // panel was the "Loading…" line, and a background pass simply skips it.
+    if (!background) body.innerHTML = 'Loading…';
     try {
-      if (_tab === 'queue')     return await renderQueue(body);
-      if (_tab === 'inbound')   return await renderInbound(body);
-      if (_tab === 'inventory') return await renderInventory(body);
-      if (_tab === 'recipe')    return await renderRecipe(body);
-      if (_tab === 'shopify')   return await renderShopify(body);
+      if (_tab === 'queue')     await renderQueue(body);
+      else if (_tab === 'inbound')   await renderInbound(body);
+      else if (_tab === 'inventory') await renderInventory(body);
+      else if (_tab === 'recipe')    await renderRecipe(body);
+      else if (_tab === 'shopify')   await renderShopify(body);
     } catch (e) {
-      body.innerHTML = msg('e', e.status === 409
-        ? 'Switch the Client selector to EHP to use this workspace.'
-        : ('Could not load: ' + (e.message || e)));
-    }
+      // A background failure leaves the last good content in place rather than replacing
+      // it with an error the user did not ask for.
+      if (!background) {
+        body.innerHTML = msg('e', e.status === 409
+          ? 'Switch the Client selector to EHP to use this workspace.'
+          : ('Could not load: ' + (e.message || e)));
+      } else {
+        console.warn('[ehp-ops] background refresh failed:', e.message || e);
+      }
+    } finally { _rendering = false; }
   }
 
   // ── Assembly: queue + batches ──
@@ -883,8 +911,9 @@
       // Only the read-mostly tabs; never re-render a form mid-entry.
       if (!document.querySelector('.ehp-ov')) return stopLive();
       if (document.visibilityState !== 'visible') return;
-      if (_tab === 'queue' || _tab === 'inventory') render();
-    }, 15000);
+      if (_rendering) return;
+      if (_tab === 'queue' || _tab === 'inventory') render({ background: true });
+    }, 60000);
   }
   function stopLive() { if (_liveTimer) { clearInterval(_liveTimer); _liveTimer = null; } }
 
@@ -894,7 +923,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(() => { if (document.visibilityState === 'visible') refreshEnabled(); }, 15000);
-    console.log('[ehp-ops] module v13 loaded');
+    console.log('[ehp-ops] module v14 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
