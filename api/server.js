@@ -10932,6 +10932,40 @@ function ehpSkuRefs(clientId, sku) {
   return refs;
 }
 
+// Batched equivalents of ehpSkuRefs and ehpOnHand for the whole client at once. The audit
+// endpoint previously called the per-SKU helpers inside a loop — and ehpSkuRefs twice per
+// SKU — which is nine queries per SKU. At ninety-odd SKUs that is around eight hundred
+// queries per request, on a fifteen-second refresh. These are five queries in total.
+// The per-SKU helpers stay for callers that genuinely need a single SKU.
+function ehpAllSkuRefs(clientId) {
+  const out = new Map();
+  const bump = (sku, key, n) => {
+    const k = String(sku || '');
+    if (!out.has(k)) out.set(k, { receipt_lines: 0, inventory_txns: 0, recipe_lines: 0, stock_counts: 0, total: 0 });
+    const e = out.get(k); e[key] += n; e.total += n;
+  };
+  const grab = (sql, key) => {
+    try { for (const r of db.prepare(sql).all(clientId)) bump(r.sku, key, r.n); }
+    catch (e) { /* a missing table must not take the whole page down */ }
+  };
+  grab('SELECT sku, COUNT(*) n FROM ehp_receipt_line    WHERE client_id=? GROUP BY sku', 'receipt_lines');
+  grab('SELECT sku, COUNT(*) n FROM ehp_inventory_txn   WHERE client_id=? GROUP BY sku', 'inventory_txns');
+  grab('SELECT sku, COUNT(*) n FROM ehp_kit_recipe_line WHERE client_id=? GROUP BY sku', 'recipe_lines');
+  grab('SELECT sku, COUNT(*) n FROM ehp_stock_count     WHERE client_id=? GROUP BY sku', 'stock_counts');
+  return out;
+}
+
+function ehpAllOnHand(clientId) {
+  const out = new Map();
+  try {
+    for (const r of db.prepare(`SELECT sku, COALESCE(SUM(qty_each),0) n FROM ehp_inventory_txn
+                                WHERE client_id=? GROUP BY sku`).all(clientId)) out.set(String(r.sku || ''), r.n);
+  } catch (e) { /* fall through to zero */ }
+  return out;
+}
+
+const EHP_ZERO_REFS = { receipt_lines: 0, inventory_txns: 0, recipe_lines: 0, stock_counts: 0, total: 0 };
+
 // Auto-create a SKU on first sighting; never overwrite existing conversions.
 function ehpEnsureSku(clientId, sku, extra) {
   if (!sku) return null;
@@ -13988,15 +14022,21 @@ app.get('/ehp/sku-audit', authenticateRequest, (req, res) => {
   try {
     const c = ehpGuard(req, res); if (!c) return;
     const rows = db.prepare('SELECT * FROM ehp_sku WHERE client_id=? ORDER BY sku').all(c);
+    const allRefs = ehpAllSkuRefs(c);
+    const allOnHand = ehpAllOnHand(c);
     res.json({
       client_id: c,
-      skus: rows.map(r => ({
-        sku: r.sku, name: r.name, flavour: r.flavour, format: r.format,
-        source: r.source, active: r.active, is_component: r.is_component,
-        ledger_on_hand: ehpOnHand(c, r.sku),
-        refs: ehpSkuRefs(c, r.sku),
-        safe_to_delete: ehpSkuRefs(c, r.sku).total === 0,
-      })),
+      skus: rows.map(r => {
+        const refs = allRefs.get(r.sku) || EHP_ZERO_REFS;
+        return {
+          sku: r.sku, name: r.name, flavour: r.flavour, format: r.format,
+          source: r.source, active: r.active, is_component: r.is_component,
+          product_line: r.product_line || null,
+          ledger_on_hand: allOnHand.get(r.sku) || 0,
+          refs,
+          safe_to_delete: refs.total === 0,
+        };
+      }),
       suppressed: db.prepare('SELECT * FROM ehp_sku_suppressed WHERE client_id=? ORDER BY sku').all(c),
     });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
