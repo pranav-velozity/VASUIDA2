@@ -435,7 +435,11 @@
       + '<script>(function(){'
       + 'var DATA=' + payload + ';'
       + 'var BATCH=' + JSON.stringify(batchId) + ';'
-      + 'function sel(){return Array.prototype.filter.call(document.querySelectorAll("tbody tr"),function(tr){return tr.querySelector(".sel").checked;});}'
+      // Scoped to rows carrying an order id. "tbody tr" also matched the Pull from stock
+      // table added later, whose rows have no checkbox — .checked on null threw, which
+      // killed refresh() and took the print handler with it. The null guard stops any
+      // future table doing the same.
+      + 'function sel(){return Array.prototype.filter.call(document.querySelectorAll("tr[data-id]"),function(tr){var c=tr.querySelector(".sel");return !!(c&&c.checked);});}'
       + 'function refresh(){var t=sel(),e=0;t.forEach(function(tr){e+=parseInt(tr.getAttribute("data-qty"),10)||1;});'
       + '  document.getElementById("count").textContent=t.length+" order(s) selected \\u00b7 "+e+" label(s) to print";'
       + '  document.getElementById("print").disabled=!t.length;'
@@ -444,7 +448,10 @@
       + 'document.getElementById("all").onclick=function(){document.querySelectorAll(".sel").forEach(function(c){c.checked=true;});refresh();};'
       + 'document.getElementById("none").onclick=function(){document.querySelectorAll(".sel").forEach(function(c){c.checked=false;});refresh();};'
       + 'document.getElementById("print").onclick=function(){'
+      + '  try{'
       + '  var ids=sel().map(function(tr){return tr.getAttribute("data-id");});'
+      + '  if(!ids.length){document.getElementById("count").textContent="Select at least one order.";return;}'
+      + '  if(!window.opener||typeof window.opener.__ehpLabelPdf!=="function"){document.getElementById("count").textContent="Lost the connection to Pinpoint - close this tab and open the pick list again.";return;}'
       + '  window.opener.__ehpLabelPdf(BATCH, ids);'
       + '  var box=document.getElementById("labels"),html="";'
       + '  ids.forEach(function(id){var o=DATA.filter(function(d){return String(d.id)===String(id);})[0];if(!o)return;'
@@ -455,8 +462,10 @@
       + '      html+="</div>";}});'
       + '  box.innerHTML=html;box.classList.add("show");'
       + '  document.getElementById("count").textContent="PDF generated \\u2014 check your downloads";'
+      + '  }catch(err){document.getElementById("count").textContent="Could not print: "+(err&&err.message?err.message:err);}'
       + '};'
-      + 'refresh();'
+      // Report a failure where the operator is looking, not in a console nobody has open.
+      + 'try{refresh();}catch(err){var c0=document.getElementById("count");if(c0)c0.textContent="Could not prepare the list: "+(err&&err.message?err.message:err);}'
       + '})();<\/script></body></html>';
 
     w.document.write(doc);
@@ -866,13 +875,17 @@
   }
 
   // Fetch the generated label PDF and hand it to the browser as a download. Server-side
-  // generation means the page size is exactly 76 x 36 mm regardless of print settings.
+  // generation means the page size is exact regardless of the browser's print settings.
   window.__ehpLabelPdf = async function (batchId, orderIds) {
     try {
       const t = await tok();
       const h = {}; if (t) h.Authorization = 'Bearer ' + t;
       if (window.pinpointClient) h['x-pinpoint-client'] = window.pinpointClient;
-      const qs = (orderIds && orderIds.length) ? '?order_ids=' + encodeURIComponent(orderIds.join(',')) : '';
+      // LABEL_W / LABEL_H only styled the on-screen preview — the printed label is generated
+      // server-side and defaulted to 76 x 36mm regardless. Pass the size explicitly so the
+      // PDF matches the stock the hint tells the operator to load.
+      const dim = 'w=' + parseFloat(LABEL_W) + '&h=' + parseFloat(LABEL_H);
+      const qs = '?' + dim + ((orderIds && orderIds.length) ? '&order_ids=' + encodeURIComponent(orderIds.join(',')) : '');
       const r = await fetch(apiBase() + '/ehp/batch/' + batchId + '/labels.pdf' + qs, { headers: h });
       if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (await r.text()).slice(0, 200));
       const blob = await r.blob();
@@ -923,7 +936,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(() => { if (document.visibilityState === 'visible') refreshEnabled(); }, 15000);
-    console.log('[ehp-ops] module v14 loaded');
+    console.log('[ehp-ops] module v15 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
