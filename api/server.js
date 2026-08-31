@@ -11217,6 +11217,975 @@ app.post('/report/supplier-discrepancy/auth', authenticateRequest, (req, res) =>
   res.json({ token, cost });
 });
 
+// ═══════════════════ SUPPLIER INVOICES ═══════════════════
+//
+// Monthly invoices from our service providers, submitted through a magic link and
+// reconciled line by line against what Pinpoint recorded.
+//
+// CONFIDENTIALITY — the hard rule of this module.
+// The supplier form is built solely by siSupplierView(). It emits operational quantities
+// only: weeks, units, cartons, pallets, container ids, sizes, AWBs, chargeable weight.
+// Never our rates, never what we billed the client, never margin, never a client invoice
+// reference, and never the client attribution. Client derivation happens after submission,
+// internally, for margin analysis alone. If a field is not in siSupplierView(), a supplier
+// cannot see it — that is the enforcement, not a rule someone has to remember.
+//
+// A WEEK BELONGS TO THE MONTH CONTAINING ITS MONDAY.
+// Every figure we hold — plan, receiving, records, flow — is keyed on week_start, so any
+// other rule would split a week by calendar date and guarantee our number never matches
+// theirs. It means months run 4 or 5 weeks: August 2026 has five (3, 10, 17, 24, 31 Aug)
+// and closes on 6 September, while September has four. Totals are therefore not comparable
+// month to month; per-unit figures are.
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS supplier_contact (
+  id           TEXT PRIMARY KEY,
+  supplier     TEXT NOT NULL,
+  invoice_type TEXT NOT NULL DEFAULT '*',      -- VAS_KY | VAS_TX | SEA | AIR | '*'
+  to_emails    TEXT NOT NULL,
+  cc_emails    TEXT,
+  active       INTEGER NOT NULL DEFAULT 1,
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (supplier, invoice_type)
+);
+
+CREATE TABLE IF NOT EXISTS supplier_invoice (
+  id             TEXT PRIMARY KEY,
+  supplier       TEXT NOT NULL,
+  invoice_type   TEXT NOT NULL,                -- VAS_KY | VAS_TX | SEA | AIR
+  facility_code  TEXT,
+  month_key      TEXT NOT NULL,                -- YYYY-MM, by Monday rule
+  week_starts    TEXT NOT NULL,                -- JSON array; removes all ambiguity later
+  status         TEXT NOT NULL DEFAULT 'requested',
+                 -- requested | received | queried | accepted | paid
+  invoice_number TEXT,
+  invoice_date   TEXT,
+  due_date       TEXT,
+  currency       TEXT NOT NULL DEFAULT 'USD',
+  total_amount   REAL,
+  submitted_by   TEXT,
+  submitted_at   TEXT,
+  accepted_by    TEXT, accepted_at TEXT,
+  paid_by        TEXT, paid_at TEXT, payment_ref TEXT,
+  expense_id     TEXT,                          -- set on payment; lets an un-pay reverse it
+  variance_json  TEXT,                          -- reconciliation snapshot at submission
+  created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (supplier, invoice_type, month_key)
+);
+CREATE INDEX IF NOT EXISTS idx_si_status ON supplier_invoice(status, due_date);
+CREATE INDEX IF NOT EXISTS idx_si_month  ON supplier_invoice(month_key);
+
+-- A supplier invoice number must be unique per supplier, or a resubmission after a query
+-- becomes a second payable.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_si_number ON supplier_invoice(supplier, invoice_number)
+  WHERE invoice_number IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS supplier_invoice_line (
+  id            TEXT PRIMARY KEY,
+  invoice_id    TEXT NOT NULL REFERENCES supplier_invoice(id) ON DELETE CASCADE,
+  week_start    TEXT NOT NULL,
+  shipment_ref  TEXT,                           -- Kerry's own grouping; presentation only
+  line_type     TEXT NOT NULL,                  -- vas | container | awb
+  ref           TEXT,                           -- container id or AWB
+  size          TEXT,                           -- 40 | 20 for containers
+  units         INTEGER, cartons INTEGER, pallets INTEGER, chargeable_kg REAL,
+  amount        REAL NOT NULL DEFAULT 0,
+  match_status  TEXT,                           -- matched | not_in_pinpoint | size_mismatch
+  client_id     TEXT,                           -- derived internally; never shown to supplier
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sil_inv ON supplier_invoice_line(invoice_id, week_start);
+
+CREATE TABLE IF NOT EXISTS supplier_invoice_token (
+  token      TEXT PRIMARY KEY,
+  invoice_id TEXT NOT NULL REFERENCES supplier_invoice(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  used_at    TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS supplier_invoice_message (
+  id          TEXT PRIMARY KEY,
+  invoice_id  TEXT NOT NULL REFERENCES supplier_invoice(id) ON DELETE CASCADE,
+  author_role TEXT NOT NULL,                    -- internal | supplier
+  author      TEXT,
+  body        TEXT NOT NULL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+
+// Cost belongs to a client, or margin by client is impossible. Nullable, so nothing that
+// writes an expense today needs to change.
+try {
+  const c = db.prepare("PRAGMA table_info(fin_expenses)").all().map(x => x.name);
+  if (!c.includes('client_id'))          db.exec("ALTER TABLE fin_expenses ADD COLUMN client_id TEXT");
+  if (!c.includes('supplier'))           db.exec("ALTER TABLE fin_expenses ADD COLUMN supplier TEXT");
+  if (!c.includes('supplier_invoice_id')) db.exec("ALTER TABLE fin_expenses ADD COLUMN supplier_invoice_id TEXT");
+} catch (e) { console.error('[fin_expenses:migration]', e.message); }
+
+const SI_TYPES = {
+  VAS_KY: { label: 'VAS — Shenzhen', facility: 'VOZ_KY', shape: 'vas' },
+  VAS_TX: { label: 'VAS — US',       facility: 'VOZ_TX', shape: 'vas' },
+  SEA:    { label: 'Sea freight',    facility: 'VOZ_KY', shape: 'container' },
+  AIR:    { label: 'Air freight',    facility: 'VOZ_KY', shape: 'awb' },
+};
+
+function siNewId(p) { return (p || 'si') + '_' + crypto.randomBytes(10).toString('hex'); }
+
+// Every Monday whose month is the given month. This single function defines the month for
+// the whole feature — the supplier form, the reconciliation and the expense all use it, so
+// they cannot disagree about which weeks a figure covers.
+function siWeeksOfMonth(monthKey) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(monthKey || '').trim());
+  if (!m) return [];
+  const y = +m[1], mo = +m[2];
+  const out = [];
+  const d = new Date(Date.UTC(y, mo - 1, 1));
+  while (d.getUTCMonth() === mo - 1) {
+    if (d.getUTCDay() === 1) out.push(d.toISOString().slice(0, 10));
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return out;
+}
+const siWeekEnd = (ws) => new Date(Date.parse(ws + 'T00:00:00Z') + 6 * 86400000).toISOString().slice(0, 10);
+
+// The month is only complete once its last week has ended.
+function siMonthCloses(monthKey) {
+  const w = siWeeksOfMonth(monthKey);
+  return w.length ? siWeekEnd(w[w.length - 1]) : null;
+}
+
+// ── What Pinpoint recorded, per week ──
+// The counter-figures the supplier is asked to confirm and price. Operational only.
+
+function siFlowData(facility, weekStart) {
+  const r = db.prepare('SELECT data FROM flow_week WHERE facility=? AND week_start=?').get(facility, weekStart);
+  return safeJsonParse(r && r.data, {}) || {};
+}
+
+function siContainersForWeek(facility, weekStart) {
+  const d = siFlowData(facility, weekStart);
+  const wc = d.intl_weekcontainers;
+  const arr = Array.isArray(wc) ? wc : (Array.isArray(wc && wc.containers) ? wc.containers : []);
+  return (arr || []).map(c => ({
+    ref: String(c.container_id || c.container || '').trim(),
+    size: String(c.size || '').replace(/\D/g, '') || null,
+    pos: Array.isArray(c.pos) ? c.pos : [],
+  })).filter(c => c.ref);
+}
+
+// Air lanes for the week. The lane key is supplier||zendesk||mode, so the ticket is the
+// reference both sides can quote — the same number that identifies an air quote.
+function siAirLanesForWeek(facility, weekStart) {
+  const d = siFlowData(facility, weekStart);
+  const out = [];
+  for (const key of Object.keys(d.intl_lanes || {})) {
+    const parts = String(key).split('||');
+    if (String(parts[2] || '').toLowerCase() !== 'air') continue;
+    out.push({ ref: parts[1] === 'NO_TICKET' ? '' : String(parts[1] || ''),
+               supplier: String(parts[0] || ''), lane_key: key });
+  }
+  return out.filter(l => l.ref);
+}
+
+function siVasForWeek(clientId, weekStart) {
+  const we = siWeekEnd(weekStart);
+  const units = db.prepare(`SELECT COUNT(*) n FROM records WHERE client_id=? AND status='complete'
+                            AND date_local BETWEEN ? AND ?`).get(clientId, weekStart, we).n || 0;
+  const rec = db.prepare(`SELECT COALESCE(SUM(cartons_received),0) c FROM receiving
+                          WHERE client_id=? AND week_start=?`).get(clientId, weekStart);
+  let pallets = 0;
+  try {
+    pallets = db.prepare(`SELECT COALESCE(SUM(pallets),0) n FROM ehp_pallet_receipt
+                          WHERE client_id=? AND received_date_local BETWEEN ? AND ?`)
+                .get(clientId, weekStart, we).n || 0;
+  } catch (e) { /* ICONIC has no pallet receipts table usage */ }
+  return { units, cartons: rec ? rec.c : 0, pallets };
+}
+
+// Client for a facility. VAS lines attribute wholesale; container and AWB lines attribute
+// through their own POs so a facility serving two clients still splits correctly.
+function siClientForFacility(facility) {
+  try {
+    const r = db.prepare('SELECT client_id FROM client_facility WHERE facility_code=?').all(facility);
+    return r.length === 1 ? r[0].client_id : null;
+  } catch (e) { return null; }
+}
+
+// THE SUPPLIER-FACING PROJECTION. Everything a supplier sees comes from here and nothing
+// else. Operational quantities only — no rates, no revenue, no margin, no client.
+function siSupplierView(inv) {
+  const t = SI_TYPES[inv.invoice_type] || {};
+  const weeks = safeJsonParse(inv.week_starts, []) || [];
+  const clientId = siClientForFacility(t.facility);
+  return {
+    supplier: inv.supplier,
+    type: inv.invoice_type,
+    type_label: t.label || inv.invoice_type,
+    shape: t.shape,
+    month_key: inv.month_key,
+    status: inv.status,
+    currency: inv.currency,
+    invoice_number: inv.invoice_number || '',
+    invoice_date: inv.invoice_date || '',
+    weeks: weeks.map(ws => {
+      const base = { week_start: ws, week_end: siWeekEnd(ws) };
+      if (t.shape === 'vas') {
+        const v = clientId ? siVasForWeek(clientId, ws) : { units: 0, cartons: 0, pallets: 0 };
+        return { ...base, recorded: v };
+      }
+      if (t.shape === 'container') {
+        return { ...base, recorded: { containers: siContainersForWeek(t.facility, ws)
+          .map(c => ({ ref: c.ref, size: c.size })) } };   // pos deliberately dropped: PO
+      }                                                     // numbers are the client's data
+      return { ...base, recorded: { awbs: siAirLanesForWeek(t.facility, ws)
+        .map(l => ({ ref: l.ref })) } };
+    }),
+  };
+}
+
+// ── Reconciliation ──
+// Line by line, not total against total. A total comparison can never surface a container
+// we shipped and they did not bill — the number simply looks low and nobody knows why.
+function siReconcile(inv, lines) {
+  const t = SI_TYPES[inv.invoice_type] || {};
+  const weeks = safeJsonParse(inv.week_starts, []) || [];
+  const clientId = siClientForFacility(t.facility);
+  const byWeek = {};
+  for (const l of lines) (byWeek[l.week_start] = byWeek[l.week_start] || []).push(l);
+
+  const out = [];
+  for (const ws of weeks) {
+    const ours = t.shape === 'container' ? siContainersForWeek(t.facility, ws)
+               : t.shape === 'awb'       ? siAirLanesForWeek(t.facility, ws)
+               : null;
+    const theirs = byWeek[ws] || [];
+    const amount = Math.round(theirs.reduce((a, l) => a + (l.amount || 0), 0) * 100) / 100;
+
+    if (t.shape === 'vas') {
+      const v = clientId ? siVasForWeek(clientId, ws) : { units: 0, cartons: 0, pallets: 0 };
+      const th = theirs[0] || {};
+      const varPct = (a, b) => (b > 0) ? Math.round((a - b) / b * 1000) / 10 : (a > 0 ? null : 0);
+      out.push({ week_start: ws, week_end: siWeekEnd(ws), amount,
+        recorded: v,
+        billed: { units: th.units || 0, cartons: th.cartons || 0, pallets: th.pallets || 0 },
+        variance: { units: varPct(th.units || 0, v.units),
+                    cartons: varPct(th.cartons || 0, v.cartons),
+                    pallets: varPct(th.pallets || 0, v.pallets) },
+        cost_per_unit: v.units > 0 ? Math.round(amount / v.units * 10000) / 10000 : null,
+        issues: [] });
+      continue;
+    }
+
+    // Container and AWB: match on reference, and report both directions.
+    const ourMap = new Map(ours.map(x => [String(x.ref).toUpperCase(), x]));
+    const theirMap = new Map(theirs.map(x => [String(x.ref || '').toUpperCase(), x]));
+    const matched = [], issues = [];
+    for (const l of theirs) {
+      const k = String(l.ref || '').toUpperCase();
+      const mine = ourMap.get(k);
+      if (!mine) { issues.push({ kind: 'not_in_pinpoint', ref: l.ref, amount: l.amount,
+        note: 'Billed but not recorded in Pinpoint for this week.' }); continue; }
+      if (t.shape === 'container' && l.size && mine.size && String(l.size) !== String(mine.size)) {
+        issues.push({ kind: 'size_mismatch', ref: l.ref, billed: l.size, recorded: mine.size,
+          note: 'Container size differs — 40ft against 20ft is a material difference.' });
+      }
+      matched.push(l.ref);
+    }
+    for (const x of ours) {
+      if (!theirMap.has(String(x.ref).toUpperCase()))
+        issues.push({ kind: 'not_billed', ref: x.ref,
+          note: 'Recorded in Pinpoint but not on this invoice — expect it later, or query it.' });
+    }
+    out.push({ week_start: ws, week_end: siWeekEnd(ws), amount,
+      recorded_count: ours.length, billed_count: theirs.length,
+      matched: matched.length, issues });
+  }
+  return out;
+}
+
+const siIssueCount = (rec) => (rec || []).reduce((a, w) => a + ((w.issues || []).length), 0);
+
+// ── Contacts, submissions and mail ──
+
+function siContactFor(supplier, invoiceType) {
+  const pick = (t) => {
+    try { return db.prepare(`SELECT * FROM supplier_contact WHERE supplier=? AND invoice_type=? AND active=1`)
+                   .get(supplier, t); } catch (e) { return null; }
+  };
+  // Exact type first, then the supplier default, then the legacy env var so nothing breaks
+  // before contacts are configured. Never a silent send to nowhere.
+  const row = pick(invoiceType) || pick('*');
+  const to = parseEmailList(row ? row.to_emails : process.env.AIR_QUOTE_PARTNER_EMAIL_TO);
+  const cc = parseEmailList((row && row.cc_emails) || process.env.SUPPLIER_INVOICE_CC || 'accounts@velozity.au');
+  return { to, cc, source: row ? (row.invoice_type === '*' ? 'supplier default' : 'type specific') : 'env fallback' };
+}
+
+// Creates the four submissions for a month if they do not already exist. Idempotent: the
+// unique index on supplier+type+month means a re-run cannot duplicate them.
+function siEnsureMonth(monthKey) {
+  const weeks = siWeeksOfMonth(monthKey);
+  if (!weeks.length) return { error: 'bad_month', month_key: monthKey };
+  const plan = [
+    { supplier: 'Kerry Logistics Shenzhen', type: 'VAS_KY' },
+    { supplier: 'Kerry Logistics Shenzhen', type: 'SEA' },
+    { supplier: 'Kerry Logistics Shenzhen', type: 'AIR' },
+    { supplier: 'Kerry Logistics US',       type: 'VAS_TX' },
+  ];
+  const made = [];
+  for (const p of plan) {
+    const exists = db.prepare(`SELECT id FROM supplier_invoice WHERE supplier=? AND invoice_type=? AND month_key=?`)
+                     .get(p.supplier, p.type, monthKey);
+    if (exists) { made.push({ ...p, id: exists.id, created: false }); continue; }
+    const id = siNewId('sinv');
+    db.prepare(`INSERT INTO supplier_invoice (id, supplier, invoice_type, facility_code, month_key, week_starts, status)
+                VALUES (?,?,?,?,?,?, 'requested')`)
+      .run(id, p.supplier, p.type, (SI_TYPES[p.type] || {}).facility || null, monthKey, JSON.stringify(weeks));
+    made.push({ ...p, id, created: true });
+  }
+  return { month_key: monthKey, weeks: weeks.length, closes: siMonthCloses(monthKey), invoices: made };
+}
+
+async function siSendRequest(inv, origin) {
+  const t = SI_TYPES[inv.invoice_type] || {};
+  const weeks = safeJsonParse(inv.week_starts, []) || [];
+  const token = crypto.randomBytes(24).toString('hex');
+  db.prepare(`INSERT INTO supplier_invoice_token (token, invoice_id, expires_at)
+              VALUES (?,?, datetime('now','+45 days'))`).run(token, inv.id);
+  const base = String(process.env.PUBLIC_API_URL || origin || '').replace(/\/+$/, '');
+  const link = `${base}/supplier-invoice?token=${token}`;
+  const { to, cc } = siContactFor(inv.supplier, inv.invoice_type);
+  const from = process.env.SUPPLIER_INVOICE_FROM || process.env.EXCEPTION_EMAIL_FROM;
+  if (!to.length || !from) return { skipped: true, reason: !from ? 'no from address' : 'no contact configured' };
+
+  const mLabel = new Date(inv.month_key + '-01T00:00:00Z')
+    .toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  const rows = [
+    ['Period', mLabel], ['Service', t.label || inv.invoice_type],
+    ['Weeks covered', `${weeks.length} (${weeks[0]} to ${siWeekEnd(weeks[weeks.length - 1])})`],
+    ['Payment terms', '30 days from invoice date'],
+  ];
+  const cta = `<div style="margin-top:20px;text-align:center;">
+      <a href="${link}" style="display:inline-block;padding:12px 26px;border-radius:9px;background:#990033;
+        color:#fff;text-decoration:none;font-size:14px;font-weight:600;">Submit your invoice</a></div>`;
+  // The week rule has to be stated, or a week straddling two months gets billed twice or
+  // not at all. August's final week runs 31 Aug to 6 Sep and belongs to August.
+  const foot = `A week belongs to the month containing its Monday, so this period runs
+    ${weeks[0]} to ${siWeekEnd(weeks[weeks.length - 1])} &mdash; the final week may run into the
+    following calendar month. The form lists the exact weeks.<br><br>
+    Please email your PDF invoice to accounts@velozity.au for our records.`;
+  const html = aqMailShell(`Invoice request — ${t.label || inv.invoice_type}, ${mLabel}`, rows, cta, foot);
+  const text = rows.map(r => `${r[0]}: ${r[1]}`).join('\n')
+    + `\n\nSubmit here: ${link}\n\nPlease email your PDF invoice to accounts@velozity.au.`;
+
+  const list = cc.length ? to.concat(cc) : to;
+  try {
+    const r = await sendViaResend({ from, replyTo: 'accounts@velozity.au', to: list,
+                                    subject: `Invoice request — ${t.label} — ${mLabel}`, html, text });
+    db.prepare(`UPDATE supplier_invoice SET updated_at=datetime('now') WHERE id=?`).run(inv.id);
+    return { link, emailed_to: list, resend_id: r.id };
+  } catch (e) {
+    console.error('[supplier-invoice:mail]', e.message);
+    return { link, emailed_to: list, error: String(e.message || e) };
+  }
+}
+
+// ── Supplier: magic-link submission ──
+// Token-scoped to one invoice, no login. Everything rendered comes from siSupplierView().
+
+function siTokenInvoice(token) {
+  const t = db.prepare('SELECT * FROM supplier_invoice_token WHERE token=?').get(String(token || ''));
+  if (!t) return { error: 'invalid_token' };
+  if (t.expires_at < new Date().toISOString().slice(0, 19).replace('T', ' ')) return { error: 'expired_token' };
+  const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(t.invoice_id);
+  if (!inv) return { error: 'not_found' };
+  return { inv, tok: t };
+}
+
+app.get('/supplier-invoice/data', (req, res) => {
+  const r = siTokenInvoice(req.query.token);
+  if (r.error) return res.status(403).json({ error: r.error });
+  const existing = db.prepare('SELECT * FROM supplier_invoice_line WHERE invoice_id=? ORDER BY week_start, id')
+                     .all(r.inv.id);
+  res.json({
+    ...siSupplierView(r.inv),
+    // Their own previous entry, so a query round is a correction rather than a re-key.
+    submitted: existing.map(l => ({ week_start: l.week_start, shipment_ref: l.shipment_ref,
+      ref: l.ref, size: l.size, units: l.units, cartons: l.cartons, pallets: l.pallets,
+      chargeable_kg: l.chargeable_kg, amount: l.amount })),
+    messages: db.prepare(`SELECT author_role, author, body, created_at FROM supplier_invoice_message
+                          WHERE invoice_id=? ORDER BY created_at`).all(r.inv.id),
+  });
+});
+
+app.post('/supplier-invoice/submit', writeOpLimiter, (req, res) => {
+  try {
+    const b = req.body || {};
+    const r = siTokenInvoice(b.token);
+    if (r.error) return res.status(403).json({ error: r.error });
+    const inv = r.inv;
+    if (['accepted', 'paid'].includes(inv.status))
+      return res.status(409).json({ error: 'already_processed', status: inv.status,
+        message: 'This invoice has already been processed. Contact accounts@velozity.au.' });
+
+    const number = String(b.invoice_number || '').trim();
+    if (!number) return res.status(400).json({ error: 'invoice_number required' });
+    const date = String(b.invoice_date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'invoice_date required (YYYY-MM-DD)' });
+    const lines = Array.isArray(b.lines) ? b.lines : [];
+    if (!lines.length) return res.status(400).json({ error: 'at least one line is required' });
+
+    const weeks = new Set(safeJsonParse(inv.week_starts, []) || []);
+    const clean = [];
+    for (const l of lines) {
+      const ws = String(l.week_start || '').trim();
+      // A line outside the invoice period would silently move cost into the wrong month.
+      if (!weeks.has(ws)) return res.status(400).json({ error: 'week_out_of_period', week_start: ws });
+      const amt = Math.round((Number(l.amount) || 0) * 100) / 100;
+      clean.push({ week_start: ws, shipment_ref: String(l.shipment_ref || '').trim() || null,
+        ref: String(l.ref || '').trim() || null, size: String(l.size || '').trim() || null,
+        units: l.units == null ? null : Math.max(0, parseInt(l.units, 10) || 0),
+        cartons: l.cartons == null ? null : Math.max(0, parseInt(l.cartons, 10) || 0),
+        pallets: l.pallets == null ? null : Math.max(0, parseInt(l.pallets, 10) || 0),
+        chargeable_kg: l.chargeable_kg == null ? null : Math.max(0, Number(l.chargeable_kg) || 0),
+        amount: amt });
+    }
+    const lineTotal = Math.round(clean.reduce((a, l) => a + l.amount, 0) * 100) / 100;
+    const stated = Math.round((Number(b.total_amount) || 0) * 100) / 100;
+    // The stated total and the lines must agree, or the reviewer has two figures and no
+    // way to know which one to pay.
+    if (Math.abs(lineTotal - stated) > 0.01)
+      return res.status(400).json({ error: 'total_mismatch', line_total: lineTotal, stated_total: stated,
+        message: `Your lines total ${lineTotal.toFixed(2)} but the invoice total says ${stated.toFixed(2)}.` });
+
+    const dup = db.prepare(`SELECT id FROM supplier_invoice WHERE supplier=? AND invoice_number=? AND id<>?`)
+                  .get(inv.supplier, number, inv.id);
+    if (dup) return res.status(409).json({ error: 'duplicate_invoice_number',
+      message: 'That invoice number has already been submitted.' });
+
+    const shape = (SI_TYPES[inv.invoice_type] || {}).shape;
+    const due = new Date(Date.parse(date + 'T00:00:00Z') + 30 * 86400000).toISOString().slice(0, 10);
+
+    db.transaction(() => {
+      db.prepare('DELETE FROM supplier_invoice_line WHERE invoice_id=?').run(inv.id);
+      const ins = db.prepare(`INSERT INTO supplier_invoice_line
+        (id, invoice_id, week_start, shipment_ref, line_type, ref, size, units, cartons, pallets, chargeable_kg, amount)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+      for (const l of clean) ins.run(siNewId('sil'), inv.id, l.week_start, l.shipment_ref,
+        shape === 'vas' ? 'vas' : (shape === 'container' ? 'container' : 'awb'),
+        l.ref, l.size, l.units, l.cartons, l.pallets, l.chargeable_kg, l.amount);
+
+      const stored = db.prepare('SELECT * FROM supplier_invoice_line WHERE invoice_id=?').all(inv.id);
+      const recon = siReconcile(inv, stored);
+      db.prepare(`UPDATE supplier_invoice SET status='received', invoice_number=?, invoice_date=?,
+                  due_date=?, total_amount=?, submitted_by=?, submitted_at=datetime('now'),
+                  variance_json=?, updated_at=datetime('now') WHERE id=?`)
+        .run(number, date, due, lineTotal, String(b.submitted_by || '').trim() || null,
+             JSON.stringify(recon), inv.id);
+      // Match status per line, for the review screen.
+      for (const w of recon) for (const iss of (w.issues || [])) {
+        if (!iss.ref) continue;
+        db.prepare(`UPDATE supplier_invoice_line SET match_status=? WHERE invoice_id=? AND week_start=? AND ref=?`)
+          .run(iss.kind, inv.id, w.week_start, iss.ref);
+      }
+      db.prepare(`UPDATE supplier_invoice_line SET match_status='matched'
+                  WHERE invoice_id=? AND match_status IS NULL AND ref IS NOT NULL`).run(inv.id);
+      if (String(b.note || '').trim())
+        db.prepare(`INSERT INTO supplier_invoice_message (id, invoice_id, author_role, author, body)
+                    VALUES (?,?, 'supplier', ?, ?)`)
+          .run(siNewId('sim'), inv.id, String(b.submitted_by || 'supplier'), String(b.note).trim());
+    })();
+
+    db.prepare(`UPDATE supplier_invoice_token SET used_at=datetime('now') WHERE token=?`).run(r.tok.token);
+    res.json({ ok: true, invoice_number: number, due_date: due, total: lineTotal,
+      message: 'Received. We will be in touch if anything needs clarifying.' });
+  } catch (e) {
+    console.error('[POST /supplier-invoice/submit]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// ── Supplier: the submission page ──
+// Server-rendered, same reasoning as the partner cost page: the supplier is external, has
+// no account, and should not depend on the SPA loading. Reuses aqPartnerPage for styling.
+app.get('/supplier-invoice', (req, res) => {
+  const fail = (m) => res.status(403).type('html').send(aqPartnerPage(
+    `<div class="card done"><div class="tick" style="color:#B33F40">&#9888;</div>
+     <h1 style="margin-top:10px">${escHtml(m)}</h1>
+     <div class="sub" style="margin-top:6px">Please contact accounts@velozity.au.</div></div>`, 'Link unavailable'));
+  try {
+    const r = siTokenInvoice(req.query.token);
+    if (r.error) return fail(r.error === 'expired_token' ? 'This link has expired.' : 'This link is not valid.');
+    const inv = r.inv;
+    if (['accepted', 'paid'].includes(inv.status)) return res.type('html').send(aqPartnerPage(
+      `<div class="card done"><div class="tick">&#10003;</div>
+       <h1 style="margin-top:10px">Already processed</h1>
+       <div class="sub" style="margin-top:6px">Invoice ${escHtml(inv.invoice_number || '')} is ${escHtml(inv.status)}.</div></div>`,
+      'Invoice received'));
+
+    const view = siSupplierView(inv);
+    const prior = db.prepare('SELECT * FROM supplier_invoice_line WHERE invoice_id=? ORDER BY week_start, id').all(inv.id);
+    const msgs = db.prepare(`SELECT author_role, author, body, created_at FROM supplier_invoice_message
+                             WHERE invoice_id=? ORDER BY created_at`).all(inv.id);
+    const mLabel = new Date(inv.month_key + '-01T00:00:00Z')
+      .toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+    const weekBlock = (w) => {
+      const rec = w.recorded || {};
+      const mine = prior.filter(l => l.week_start === w.week_start);
+      const val = (ref, field) => { const m = mine.find(x => (x.ref || '') === ref); return m && m[field] != null ? m[field] : ''; };
+      if (view.shape === 'vas') {
+        const m0 = mine[0] || {};
+        return `<div class="wk"><div class="wkh">${escHtml(w.week_start)} &rarr; ${escHtml(w.week_end)}</div>
+          <div class="rec">Pinpoint recorded: <b>${Number(rec.units || 0).toLocaleString()}</b> units &middot;
+            <b>${Number(rec.cartons || 0).toLocaleString()}</b> cartons &middot;
+            <b>${Number(rec.pallets || 0).toLocaleString()}</b> pallets</div>
+          <div class="g4">
+            <div><label>Units</label><input class="f" data-w="${escHtml(w.week_start)}" data-f="units" type="number" min="0" value="${m0.units != null ? m0.units : ''}"></div>
+            <div><label>Cartons</label><input class="f" data-w="${escHtml(w.week_start)}" data-f="cartons" type="number" min="0" value="${m0.cartons != null ? m0.cartons : ''}"></div>
+            <div><label>Pallets</label><input class="f" data-w="${escHtml(w.week_start)}" data-f="pallets" type="number" min="0" value="${m0.pallets != null ? m0.pallets : ''}"></div>
+            <div><label>Amount (USD)</label><input class="f amt" data-w="${escHtml(w.week_start)}" data-f="amount" type="number" min="0" step="0.01" value="${m0.amount != null ? m0.amount : ''}"></div>
+          </div></div>`;
+      }
+      const isCtn = view.shape === 'container';
+      const items = isCtn ? (rec.containers || []) : (rec.awbs || []);
+      const extra = mine.filter(l => !items.some(i => String(i.ref).toUpperCase() === String(l.ref || '').toUpperCase()));
+      const row = (ref, size, known) => `<tr>
+        <td>${known ? `<b>${escHtml(ref)}</b>` : `<input class="f rf" data-w="${escHtml(w.week_start)}" value="${escHtml(ref)}" placeholder="${isCtn ? 'Container' : 'AWB'}">`}
+          ${known ? `<input type="hidden" class="rf" data-w="${escHtml(w.week_start)}" value="${escHtml(ref)}">` : ''}</td>
+        <td>${isCtn ? `<input class="f sz" data-w="${escHtml(w.week_start)}" value="${escHtml(size || val(ref, 'size') || '')}" placeholder="40" style="width:70px">`
+                    : `<input class="f kg" data-w="${escHtml(w.week_start)}" type="number" min="0" step="0.01" value="${escHtml(String(val(ref, 'chargeable_kg') || ''))}" placeholder="kg" style="width:90px">`}</td>
+        <td><input class="f sh" data-w="${escHtml(w.week_start)}" value="${escHtml(val(ref, 'shipment_ref') || '')}" placeholder="Shipment ref"></td>
+        <td><input class="f am" data-w="${escHtml(w.week_start)}" type="number" min="0" step="0.01" value="${escHtml(String(val(ref, 'amount') || ''))}" placeholder="0.00" style="width:110px"></td>
+      </tr>`;
+      return `<div class="wk" data-week="${escHtml(w.week_start)}">
+        <div class="wkh">${escHtml(w.week_start)} &rarr; ${escHtml(w.week_end)}</div>
+        <div class="rec">Pinpoint recorded <b>${items.length}</b> ${isCtn ? 'container' : 'shipment'}${items.length === 1 ? '' : 's'} this week. Please price each one; add a row if we have missed any.</div>
+        <table class="lt"><thead><tr><th>${isCtn ? 'Container' : 'AWB'}</th><th>${isCtn ? 'Size' : 'Chargeable kg'}</th><th>Shipment ref</th><th>Amount (USD)</th></tr></thead>
+        <tbody>${items.map(i => row(i.ref, i.size, true)).join('')}
+               ${extra.map(l => row(l.ref || '', l.size, false)).join('')}</tbody></table>
+        <button type="button" class="addrow" data-w="${escHtml(w.week_start)}">+ Add a line</button>
+      </div>`;
+    };
+
+    const body = `
+  <div class="card">
+    <h1>Invoice submission</h1>
+    <div class="sub">${escHtml(view.type_label)} &middot; ${escHtml(mLabel)}</div>
+    <div class="ref">${escHtml(view.supplier)}</div>
+    <div class="note">This period covers <b>${view.weeks.length} weeks</b>, from
+      ${escHtml(view.weeks[0].week_start)} to ${escHtml(view.weeks[view.weeks.length - 1].week_end)}.
+      A week belongs to the month containing its Monday, so the final week may run into the next
+      calendar month. Please invoice these weeks only.</div>
+  </div>
+
+  ${msgs.length ? `<div class="card"><div style="font-size:12px;font-weight:700;margin-bottom:8px;">Correspondence</div>
+    ${msgs.map(m => `<div style="padding:9px 11px;border-radius:9px;margin-bottom:7px;
+      background:${m.author_role === 'internal' ? '#F5F5F7' : '#FBF6F8'};">
+      <div style="font-size:10px;color:var(--light);margin-bottom:3px;">${m.author_role === 'internal' ? 'VelOzity' : escHtml(m.author || 'You')} &middot; ${escHtml(String(m.created_at).slice(0, 16))}</div>
+      <div style="font-size:12px;line-height:1.5;">${escHtml(m.body)}</div></div>`).join('')}
+  </div>` : ''}
+
+  <div class="card">
+    <div class="row2">
+      <div><label for="num">Your invoice number</label><input id="num" value="${escHtml(inv.invoice_number || '')}"></div>
+      <div><label for="dt">Invoice date</label><input id="dt" type="date" value="${escHtml(inv.invoice_date || '')}"></div>
+    </div>
+    <div class="note" style="margin-top:8px;">Payment terms are 30 days from your invoice date. All amounts in USD.</div>
+  </div>
+
+  ${view.weeks.map(weekBlock).join('')}
+
+  <div class="card">
+    <div class="tot"><span>Invoice total (USD)</span><b id="tot">0.00</b></div>
+    <label for="who">Your name</label><input id="who" placeholder="Name">
+    <label for="note">Notes (optional)</label><textarea id="note" placeholder="Anything we should know"></textarea>
+    <button id="go">Submit invoice</button>
+    <div class="msg" id="msg"></div>
+    <div class="note" style="margin-top:12px;">Please also email your PDF invoice to <b>accounts@velozity.au</b> for our records.</div>
+  </div>
+
+  <style>
+    .wk{background:#fff;border:.5px solid rgba(0,0,0,.1);border-radius:12px;padding:14px 16px;margin-bottom:12px;
+        box-shadow:0 1px 2px rgba(0,0,0,.04),0 4px 12px rgba(0,0,0,.06);}
+    .wkh{font-size:12px;font-weight:700;color:#1C1C1E;}
+    .rec{font-size:11px;color:#6E6E73;margin:3px 0 10px;}
+    .note{font-size:11px;color:#6E6E73;line-height:1.5;}
+    .g4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}
+    .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+    .lt{width:100%;border-collapse:collapse;font-size:12px;}
+    .lt th{text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:#AEAEB2;padding:4px 4px;}
+    .lt td{padding:3px 4px;}
+    .lt input{padding:7px 8px;font-size:12px;}
+    .addrow{margin-top:8px;background:#fff;color:#6E6E73;border:.5px solid rgba(0,0,0,.16);
+            border-radius:8px;padding:6px 12px;font-size:11px;cursor:pointer;width:auto;}
+    .tot{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;
+         padding:10px 12px;background:#F5F5F7;border-radius:9px;margin-bottom:6px;}
+    .tot b{font-size:19px;}
+    label{display:block;font-size:11px;font-weight:600;color:#6E6E73;margin:10px 0 4px;}
+  </style>
+
+  <script>
+  (function(){
+    var TOKEN=${aqJsEmbed(String(req.query.token || ''))}, SHAPE=${aqJsEmbed(view.shape)};
+    var m=document.getElementById('msg');
+    function show(k,t){ m.className='msg '+k; m.textContent=t; }
+    function num(v){ var n=parseFloat(v); return isFinite(n)?n:0; }
+    function retotal(){
+      var t=0;
+      Array.prototype.forEach.call(document.querySelectorAll('.amt,.am'),function(i){ t+=num(i.value); });
+      document.getElementById('tot').textContent=t.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+      return Math.round(t*100)/100;
+    }
+    document.addEventListener('input',function(e){ if(e.target.classList.contains('f')) retotal(); });
+    Array.prototype.forEach.call(document.querySelectorAll('.addrow'),function(b){
+      b.addEventListener('click',function(){
+        var wk=b.getAttribute('data-w');
+        var tb=b.parentNode.querySelector('tbody'), tr=document.createElement('tr');
+        tr.innerHTML='<td><input class="f rf" data-w="'+wk+'" placeholder="'+(SHAPE==='container'?'Container':'AWB')+'"></td>'
+          +'<td>'+(SHAPE==='container'
+              ?'<input class="f sz" data-w="'+wk+'" placeholder="40" style="width:70px">'
+              :'<input class="f kg" data-w="'+wk+'" type="number" min="0" step="0.01" placeholder="kg" style="width:90px">')+'</td>'
+          +'<td><input class="f sh" data-w="'+wk+'" placeholder="Shipment ref"></td>'
+          +'<td><input class="f am" data-w="'+wk+'" type="number" min="0" step="0.01" placeholder="0.00" style="width:110px"></td>';
+        tb.appendChild(tr);
+      });
+    });
+    function collect(){
+      var out=[];
+      if(SHAPE==='vas'){
+        Array.prototype.forEach.call(document.querySelectorAll('.wk'),function(w){
+          var g=w.querySelectorAll('.f'); if(!g.length) return;
+          var wk=g[0].getAttribute('data-w'), o={week_start:wk};
+          Array.prototype.forEach.call(g,function(i){ o[i.getAttribute('data-f')]=num(i.value); });
+          if(o.amount>0||o.units>0) out.push(o);
+        });
+        return out;
+      }
+      Array.prototype.forEach.call(document.querySelectorAll('.lt tbody tr'),function(tr){
+        var rf=tr.querySelector('.rf'), am=tr.querySelector('.am');
+        if(!rf||!am) return;
+        var amt=num(am.value); var ref=(rf.value||'').trim();
+        if(!amt&&!ref) return;
+        var o={week_start:rf.getAttribute('data-w'), ref:ref, amount:amt};
+        var sz=tr.querySelector('.sz'), kg=tr.querySelector('.kg'), sh=tr.querySelector('.sh');
+        if(sz) o.size=(sz.value||'').trim();
+        if(kg) o.chargeable_kg=num(kg.value);
+        if(sh) o.shipment_ref=(sh.value||'').trim();
+        out.push(o);
+      });
+      return out;
+    }
+    document.getElementById('go').addEventListener('click',async function(){
+      var b=this;
+      var lines=collect(), total=retotal();
+      if(!document.getElementById('num').value.trim()){ show('err','Enter your invoice number.'); return; }
+      if(!document.getElementById('dt').value){ show('err','Enter your invoice date.'); return; }
+      if(!lines.length){ show('err','Enter at least one line.'); return; }
+      if(!(total>0)){ show('err','The invoice total must be greater than zero.'); return; }
+      b.disabled=true; b.textContent='Submitting\u2026';
+      try{
+        var r=await fetch(location.pathname+'/submit',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({token:TOKEN,invoice_number:document.getElementById('num').value.trim(),
+            invoice_date:document.getElementById('dt').value,total_amount:total,lines:lines,
+            submitted_by:document.getElementById('who').value||null,
+            note:document.getElementById('note').value||null})});
+        var j=await r.json();
+        if(!r.ok){ show('err', j.message||j.error||('Error '+r.status)); b.disabled=false; b.textContent='Submit invoice'; return; }
+        document.querySelector('.wrap').innerHTML='<div class="card done"><div class="tick">\u2713</div>'
+          +'<h1 style="margin-top:10px">Invoice received</h1>'
+          +'<div class="sub" style="margin-top:6px">Thank you. Due '+j.due_date+'. Please email the PDF to accounts@velozity.au.</div></div>';
+      }catch(e){ show('err','Could not submit: '+e.message); b.disabled=false; b.textContent='Submit invoice'; }
+    });
+    retotal();
+  })();
+  </script>`;
+    res.type('html').send(aqPartnerPage(body, `Invoice — ${view.type_label} — ${mLabel}`));
+  } catch (e) {
+    console.error('[GET /supplier-invoice]', e);
+    res.status(500).type('html').send(aqPartnerPage(`<div class="card done"><h1>Something went wrong</h1></div>`, 'Error'));
+  }
+});
+
+// ── Internal: review, accept, pay ──
+// requireInternalOrg as well as admin: a supplier who is an admin of their own Clerk org
+// must not reach cost across all clients.
+
+function siAgeBucket(due, status) {
+  if (status === 'paid' || !due) return null;
+  const days = Math.floor((Date.now() - Date.parse(due + 'T00:00:00Z')) / 86400000);
+  if (days <= 0) return 'current';
+  if (days <= 30) return '1-30';
+  if (days <= 60) return '31-60';
+  return '60+';
+}
+
+function siDetail(inv) {
+  const lines = db.prepare('SELECT * FROM supplier_invoice_line WHERE invoice_id=? ORDER BY week_start, id').all(inv.id);
+  // Recomputed on read rather than trusting the snapshot: our own recorded figures can
+  // change after submission, and the reviewer must see the current position.
+  const recon = siReconcile(inv, lines);
+  const weeks = safeJsonParse(inv.week_starts, []) || [];
+  return {
+    ...inv,
+    type_label: (SI_TYPES[inv.invoice_type] || {}).label || inv.invoice_type,
+    shape: (SI_TYPES[inv.invoice_type] || {}).shape,
+    week_count: weeks.length,
+    weeks,
+    lines,
+    reconciliation: recon,
+    issue_count: siIssueCount(recon),
+    age_bucket: siAgeBucket(inv.due_date, inv.status),
+    overdue: !!(inv.due_date && inv.status !== 'paid' && inv.due_date < new Date().toISOString().slice(0, 10)),
+    messages: db.prepare(`SELECT * FROM supplier_invoice_message WHERE invoice_id=? ORDER BY created_at`).all(inv.id),
+  };
+}
+
+app.get('/finance/supplier-invoices', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+  try {
+    const p = []; let sql = 'SELECT * FROM supplier_invoice WHERE 1=1';
+    if (req.query.month)  { sql += ' AND month_key=?'; p.push(String(req.query.month)); }
+    if (req.query.status) { sql += ' AND status=?';    p.push(String(req.query.status)); }
+    sql += ' ORDER BY month_key DESC, supplier, invoice_type';
+    const rows = db.prepare(sql).all(...p);
+    const today = new Date().toISOString().slice(0, 10);
+    const list = rows.map(r => ({
+      ...r,
+      type_label: (SI_TYPES[r.invoice_type] || {}).label || r.invoice_type,
+      week_count: (safeJsonParse(r.week_starts, []) || []).length,
+      issue_count: siIssueCount(safeJsonParse(r.variance_json, []) || []),
+      age_bucket: siAgeBucket(r.due_date, r.status),
+      overdue: !!(r.due_date && r.status !== 'paid' && r.due_date < today),
+    }));
+    // Accepted but not yet paid is exactly what is owed — a paid invoice has become an
+    // expense and must not be counted twice.
+    const payable = list.filter(x => x.status === 'accepted');
+    const ageing = { current: 0, '1-30': 0, '31-60': 0, '60+': 0 };
+    for (const x of payable) if (x.age_bucket) ageing[x.age_bucket] += (x.total_amount || 0);
+    res.json({
+      invoices: list,
+      summary: {
+        payable_total: Math.round(payable.reduce((a, x) => a + (x.total_amount || 0), 0) * 100) / 100,
+        overdue_total: Math.round(payable.filter(x => x.overdue).reduce((a, x) => a + (x.total_amount || 0), 0) * 100) / 100,
+        awaiting_review: list.filter(x => x.status === 'received').length,
+        outstanding_requests: list.filter(x => x.status === 'requested').length,
+        with_issues: list.filter(x => x.status === 'received' && x.issue_count > 0).length,
+        ageing: Object.fromEntries(Object.entries(ageing).map(([k, v]) => [k, Math.round(v * 100) / 100])),
+      },
+      months: db.prepare('SELECT DISTINCT month_key FROM supplier_invoice ORDER BY month_key DESC').all().map(x => x.month_key),
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.get('/finance/supplier-invoices/:id', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+  try {
+    const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(req.params.id);
+    if (!inv) return res.status(404).json({ error: 'not_found' });
+    res.json(siDetail(inv));
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Generate the month's four submissions. Idempotent, and usable by hand for testing well
+// before the cron is due to run.
+app.post('/finance/supplier-invoices/generate', authenticateRequest, requireRole(['admin']),
+  requireInternalOrg, writeOpLimiter, auditLog('generate_supplier_invoices'), async (req, res) => {
+  try {
+    const month = String((req.body || {}).month || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month required as YYYY-MM' });
+    const closes = siMonthCloses(month);
+    const today = new Date().toISOString().slice(0, 10);
+    const r = siEnsureMonth(month);
+    if (r.error) return res.status(400).json(r);
+    const send = String((req.body || {}).send || '') === '1';
+    const results = [];
+    for (const m of r.invoices) {
+      const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(m.id);
+      if (send && inv.status === 'requested') {
+        results.push({ ...m, ...(await siSendRequest(inv, `${req.protocol}://${req.get('host')}`)) });
+      } else results.push(m);
+    }
+    res.json({ ...r, sent: send, closes,
+      warning: closes && closes > today
+        ? `This month does not close until ${closes}. Figures for its final week are incomplete.` : undefined,
+      invoices: results });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/finance/supplier-invoices/:id/send', authenticateRequest, requireRole(['admin']),
+  requireInternalOrg, writeOpLimiter, auditLog('send_supplier_invoice_request'), async (req, res) => {
+  try {
+    const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(req.params.id);
+    if (!inv) return res.status(404).json({ error: 'not_found' });
+    if (['accepted', 'paid'].includes(inv.status)) return res.status(409).json({ error: 'already_processed' });
+    const r = await siSendRequest(inv, `${req.protocol}://${req.get('host')}`);
+    res.json({ id: inv.id, ...r });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/finance/supplier-invoices/:id/query', authenticateRequest, requireRole(['admin']),
+  requireInternalOrg, writeOpLimiter, auditLog('query_supplier_invoice'), async (req, res) => {
+  try {
+    const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(req.params.id);
+    if (!inv) return res.status(404).json({ error: 'not_found' });
+    if (inv.status === 'paid') return res.status(409).json({ error: 'already_paid' });
+    const comment = String((req.body || {}).comment || '').trim();
+    if (!comment) return res.status(400).json({ error: 'comment_required',
+      message: 'Say what needs correcting — a bare query wastes a round.' });
+    db.prepare(`INSERT INTO supplier_invoice_message (id, invoice_id, author_role, author, body)
+                VALUES (?,?, 'internal', ?, ?)`).run(siNewId('sim'), inv.id, aqUserEmail(req) || null, comment);
+    db.prepare(`UPDATE supplier_invoice SET status='queried', updated_at=datetime('now') WHERE id=?`).run(inv.id);
+    const r = await siSendRequest(inv, `${req.protocol}://${req.get('host')}`);
+    res.json({ id: inv.id, status: 'queried', ...r });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/finance/supplier-invoices/:id/accept', authenticateRequest, requireRole(['admin']),
+  requireInternalOrg, writeOpLimiter, auditLog('accept_supplier_invoice'), (req, res) => {
+  try {
+    const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(req.params.id);
+    if (!inv) return res.status(404).json({ error: 'not_found' });
+    if (!['received', 'queried'].includes(inv.status))
+      return res.status(409).json({ error: 'not_reviewable', status: inv.status });
+    if (!inv.total_amount) return res.status(409).json({ error: 'nothing_submitted' });
+
+    // Variance never blocks acceptance — sometimes their figure is right and ours is not —
+    // but it is recorded against the accepted invoice so the decision stays auditable.
+    const lines = db.prepare('SELECT * FROM supplier_invoice_line WHERE invoice_id=?').all(inv.id);
+    const recon = siReconcile(inv, lines);
+    const client = siClientForFacility((SI_TYPES[inv.invoice_type] || {}).facility);
+    db.transaction(() => {
+      if (client) db.prepare('UPDATE supplier_invoice_line SET client_id=? WHERE invoice_id=?').run(client, inv.id);
+      db.prepare(`UPDATE supplier_invoice SET status='accepted', accepted_by=?, accepted_at=datetime('now'),
+                  variance_json=?, updated_at=datetime('now') WHERE id=?`)
+        .run(aqUserEmail(req) || null, JSON.stringify(recon), inv.id);
+    })();
+    res.json({ id: inv.id, status: 'accepted', due_date: inv.due_date, issues: siIssueCount(recon) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Payment is what posts the expense. Accepted-but-unpaid sits in payables and stays out of
+// the P&L, so the payable total and expenses can never double-count the same invoice.
+app.post('/finance/supplier-invoices/:id/pay', authenticateRequest, requireRole(['admin']),
+  requireInternalOrg, writeOpLimiter, auditLog('pay_supplier_invoice'), (req, res) => {
+  try {
+    const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(req.params.id);
+    if (!inv) return res.status(404).json({ error: 'not_found' });
+    if (inv.status !== 'accepted') return res.status(409).json({ error: 'not_accepted', status: inv.status });
+    const b = req.body || {};
+    const paidAt = String(b.paid_at || '').trim() || new Date().toISOString().slice(0, 10);
+    const t = SI_TYPES[inv.invoice_type] || {};
+    const client = siClientForFacility(t.facility);
+    const expId = siNewId('exp');
+    db.transaction(() => {
+      db.prepare(`INSERT INTO fin_expenses (id, category, description, amount, currency, expense_date,
+                    month_key, client_id, supplier, supplier_invoice_id)
+                  VALUES (?,?,?,?,?,?,?,?,?,?)`)
+        .run(expId, t.shape === 'vas' ? 'VAS' : (inv.invoice_type === 'SEA' ? 'Sea freight' : 'Air freight'),
+             `${inv.supplier} — ${t.label || inv.invoice_type} — ${inv.month_key} (inv ${inv.invoice_number || 'n/a'})`,
+             inv.total_amount, inv.currency || 'USD', paidAt, inv.month_key, client, inv.supplier, inv.id);
+      db.prepare(`UPDATE supplier_invoice SET status='paid', paid_by=?, paid_at=?, payment_ref=?,
+                  expense_id=?, updated_at=datetime('now') WHERE id=?`)
+        .run(aqUserEmail(req) || null, paidAt, String(b.payment_ref || '').trim() || null, expId, inv.id);
+    })();
+    res.json({ id: inv.id, status: 'paid', expense_id: expId, amount: inv.total_amount });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Reversal must remove the expense it created, or the P&L keeps a row for a payment that
+// no longer exists.
+app.post('/finance/supplier-invoices/:id/unpay', authenticateRequest, requireRole(['admin']),
+  requireInternalOrg, writeOpLimiter, auditLog('unpay_supplier_invoice'), (req, res) => {
+  try {
+    const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(req.params.id);
+    if (!inv) return res.status(404).json({ error: 'not_found' });
+    if (inv.status !== 'paid') return res.status(409).json({ error: 'not_paid', status: inv.status });
+    db.transaction(() => {
+      if (inv.expense_id) db.prepare('DELETE FROM fin_expenses WHERE id=?').run(inv.expense_id);
+      db.prepare(`UPDATE supplier_invoice SET status='accepted', paid_by=NULL, paid_at=NULL,
+                  payment_ref=NULL, expense_id=NULL, updated_at=datetime('now') WHERE id=?`).run(inv.id);
+    })();
+    res.json({ id: inv.id, status: 'accepted', expense_removed: !!inv.expense_id });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Supplier contacts ──
+app.get('/finance/supplier-contacts', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM supplier_contact ORDER BY supplier, invoice_type').all();
+    const suppliers = ['Kerry Logistics Shenzhen', 'Kerry Logistics US'];
+    res.json({ contacts: rows, suppliers, types: Object.keys(SI_TYPES),
+      resolved: suppliers.flatMap(sup => Object.keys(SI_TYPES).map(t => ({ supplier: sup, type: t, ...siContactFor(sup, t) }))) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/finance/supplier-contacts', authenticateRequest, requireRole(['admin']), requireInternalOrg,
+  writeOpLimiter, auditLog('edit_supplier_contact'), (req, res) => {
+  try {
+    const b = req.body || {};
+    const sup = String(b.supplier || '').trim();
+    const type = String(b.invoice_type || '*').trim() || '*';
+    const to = parseEmailList(b.to_emails);
+    if (!sup) return res.status(400).json({ error: 'supplier required' });
+    if (!to.length) return res.status(400).json({ error: 'at least one recipient is required' });
+    if (type !== '*' && !SI_TYPES[type]) return res.status(400).json({ error: 'unknown invoice_type' });
+    db.prepare(`INSERT INTO supplier_contact (id, supplier, invoice_type, to_emails, cc_emails, active, updated_at)
+                VALUES (?,?,?,?,?,1,datetime('now'))
+                ON CONFLICT(supplier, invoice_type) DO UPDATE SET
+                  to_emails=excluded.to_emails, cc_emails=excluded.cc_emails,
+                  active=1, updated_at=datetime('now')`)
+      .run(siNewId('sc'), sup, type, to.join(','), parseEmailList(b.cc_emails).join(',') || null);
+    res.json({ ok: true, supplier: sup, invoice_type: type, to });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Cron: monthly request run ──
+// Scheduled for the 7th. A month is only complete once its last week has ended, and the
+// latest a month can close is the 6th (when the final Monday is the 31st), so the 7th is
+// always safe. Same secret-header pattern as the exception email run.
+app.post('/ops/supplier-invoice-requests/run', (req, res, next) => {
+  const cronSecret = process.env.LANE_CRON_SECRET;
+  const supplied = req.headers['x-lane-cron-secret'];
+  if (cronSecret && supplied === cronSecret) return next();
+  return authenticateRequest(req, res, next);
+}, auditLog('run_supplier_invoice_requests'), async (req, res) => {
+  const dryRun = String(req.query.dryRun || '') === '1';
+  const trigger = req.headers['x-lane-cron-secret'] ? 'cron' : 'manual_api';
+  try {
+    // Default to the previous calendar month, which on the 7th is always closed.
+    let month = String(req.query.month || '').trim();
+    if (!month) {
+      const now = new Date();
+      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+      month = d.toISOString().slice(0, 7);
+    }
+    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM' });
+
+    const closes = siMonthCloses(month);
+    const today = new Date().toISOString().slice(0, 10);
+    if (closes && closes > today && !String(req.query.force || '') ) {
+      return res.status(409).json({ error: 'month_not_closed', month, closes,
+        message: `${month} does not close until ${closes}. Pass force=1 to send anyway.` });
+    }
+
+    const r = siEnsureMonth(month);
+    if (r.error) return res.status(400).json(r);
+    const sent = [];
+    for (const m of r.invoices) {
+      const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(m.id);
+      // Never re-request something already submitted, accepted or paid.
+      if (inv.status !== 'requested') { sent.push({ ...m, skipped: inv.status }); continue; }
+      if (dryRun) { sent.push({ ...m, dryRun: true, contact: siContactFor(inv.supplier, inv.invoice_type) }); continue; }
+      sent.push({ ...m, ...(await siSendRequest(inv, `${req.protocol}://${req.get('host')}`)) });
+    }
+    console.log(`[supplier-invoice] ${trigger} run for ${month}: ${sent.length} submission(s)${dryRun ? ' (dry run)' : ''}`);
+    res.json({ month, weeks: r.weeks, closes, dryRun, trigger, invoices: sent });
+  } catch (e) {
+    console.error('[POST /ops/supplier-invoice-requests/run]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 // ═══════════════════ AIR FREIGHT QUOTATION ═══════════════════
 // Three-party workflow: the client raises a request, our partner returns a cost against a
 // magic link, a VelOzity reviewer applies the rate-card markup and releases it, and the
