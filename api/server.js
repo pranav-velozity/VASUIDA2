@@ -15785,18 +15785,48 @@ app.get('/ehp/batch/:id/labels.pdf', authenticateRequest, auditLog('ehp_labels_p
         doc.addPage({ size: [W, H], margin: 0 });
         labelCount++;
         // Small reference line, so a multi-envelope order is identifiable on the floor.
+        const INNER = W - PAD_X * 2;
         doc.font('Helvetica').fontSize(5.5).fillColor('#888888')
            .text(String(o.order_number || '') + (qty > 1 ? `  ${i}/${qty}` : ''),
-                 PAD_X, PAD_Y, { width: W - PAD_X * 2, lineBreak: false });
-        let y = PAD_Y + 7;
-        doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#000000')
-           .text(name, PAD_X, y, { width: W - PAD_X * 2, lineBreak: false });
-        y += 12;
-        doc.font('Helvetica').fontSize(9);
+                 PAD_X, PAD_Y, { width: INNER, lineBreak: false });
+
+        // Lines are MEASURED, not assumed. The previous layout advanced a fixed 11pt per
+        // line, so any address long enough to wrap had the following field drawn on top of
+        // its second line — the recipient then saw a street address with a suburb printed
+        // through it. Every line's real height is measured, and the block shrinks to fit
+        // rather than overlapping or running off the label.
+        const blockTop = PAD_Y + 7;
+        const availH = H - PAD_Y - blockTop;
+
+        const measure = (nameSize, bodySize) => {
+          let h = 0;
+          doc.font('Helvetica-Bold').fontSize(nameSize);
+          h += doc.heightOfString(name, { width: INNER }) + 1;
+          doc.font('Helvetica').fontSize(bodySize);
+          for (const l of lines) h += doc.heightOfString(l, { width: INNER }) + 0.5;
+          return h;
+        };
+
+        // Step down together until the whole block fits. The floor keeps it legible on a
+        // thermal printer; below roughly 5.5pt an address stops being readable at arm's
+        // length, and a clipped line is better than an unreadable one.
+        let nameSize = 9.5, bodySize = 9;
+        while (bodySize > 5.5 && measure(nameSize, bodySize) > availH) {
+          bodySize -= 0.5;
+          nameSize = Math.max(bodySize + 0.5, bodySize);
+        }
+
+        let y = blockTop;
+        doc.font('Helvetica-Bold').fontSize(nameSize).fillColor('#000000');
+        doc.text(name, PAD_X, y, { width: INNER });
+        y += doc.heightOfString(name, { width: INNER }) + 1;
+
+        doc.font('Helvetica').fontSize(bodySize);
         for (const l of lines) {
-          if (y > H - PAD_Y - 4) break;                    // never spill off the label
-          doc.text(l, PAD_X, y, { width: W - PAD_X * 2, lineBreak: false });
-          y += 11;
+          const lh = doc.heightOfString(l, { width: INNER });
+          if (y + lh > H - PAD_Y) break;                   // never spill off the label
+          doc.text(l, PAD_X, y, { width: INNER });
+          y += lh + 0.5;
         }
       }
     }
