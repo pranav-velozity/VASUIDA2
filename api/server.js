@@ -7295,8 +7295,13 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
     const y = year || new Date().getUTCFullYear();
 
     // ── 1. Invoices by month and type — include draft so P&L shows accrual view ──
+    // Revenue is NET of GST. GST is collected as agent for the tax office and remitted, so
+    // it is a balance-sheet liability and never revenue — including it overstated both the
+    // revenue line and the margin, and unevenly, since customs lines are GST-free and the
+    // freight invoices carry proportionally more of them. Expenses are already net, so both
+    // sides of the margin now sit on the same basis.
     const invRows = db.prepare(`
-      SELECT type, week_start, invoice_date, total, ref_number, status
+      SELECT type, week_start, invoice_date, subtotal, total, ref_number, status
       FROM fin_invoices
       WHERE status IN ('draft','sent','paid') AND week_start >= ? AND week_start <= ?
       ORDER BY week_start
@@ -7399,11 +7404,14 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
       const dateForBucket = (inv.invoice_date && inv.invoice_date.length >= 7) ? inv.invoice_date : inv.week_start;
       const mk = dateForBucket.slice(0, 7);
       if (!months[mk]) continue;
-      months[mk].revenue += inv.total;
-      months[mk].invoices.push({ ref: inv.ref_number||inv.id, type: inv.type, amount: inv.total, status: inv.status });
-      if (inv.type === 'VAS') months[mk].rev_vas += inv.total;
-      else if (inv.type === 'SEA') months[mk].rev_sea += inv.total;
-      else if (inv.type === 'AIR') months[mk].rev_air += inv.total;
+      // Older rows may predate the subtotal column; fall back so history does not vanish.
+      const net = (inv.subtotal != null) ? Number(inv.subtotal) : Number(inv.total || 0);
+      months[mk].revenue += net;
+      months[mk].invoices.push({ ref: inv.ref_number||inv.id, type: inv.type, amount: net,
+                                 gross: Number(inv.total || 0), status: inv.status });
+      if (inv.type === 'VAS') months[mk].rev_vas += net;
+      else if (inv.type === 'SEA') months[mk].rev_sea += net;
+      else if (inv.type === 'AIR') months[mk].rev_air += net;
     }
 
     // ── 7. Allocate expenses to channel pools by category ──
@@ -7498,6 +7506,8 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
     ytd.blended_rev_pu  = ytd.units_vas > 0 ? Math.round(ytd.revenue / ytd.units_vas * 100) / 100 : null;
     ytd.blended_cost_pu = ytd.units_vas > 0 ? Math.round(ytd.expenses / ytd.units_vas * 100) / 100 : null;
 
+    // Outstanding stays GROSS: a customer owes the full invoice, GST included. This is a
+    // receivable, not revenue — the two are correctly on different bases.
     const outstanding = db.prepare(`SELECT COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE status IN ('draft','sent','overdue')`).get();
     res.json({ year: y, months: Object.values(months), ytd, outstanding });
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
@@ -7526,11 +7536,17 @@ app.post('/finance/fx', authenticateRequest, requireRole(['admin']), (req, res) 
 // ── GET /finance/summary — for PULSE context ──
 app.get('/finance/summary', authenticateRequest, requireRole(['admin']), (req, res) => {
   try {
+    // Outstanding stays GROSS: a customer owes the full invoice, GST included. This is a
+    // receivable, not revenue — the two are correctly on different bases.
     const outstanding = db.prepare(`SELECT COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE status IN ('draft','sent','overdue')`).get();
-    const paid_ytd = db.prepare(`SELECT COALESCE(SUM(total),0) as total FROM fin_invoices WHERE status='paid' AND week_start >= ?`).get(`${new Date().getUTCFullYear()}-01-01`);
+    // Net of GST, matching the P&L and the expense basis.
+    const paid_ytd = db.prepare(`SELECT COALESCE(SUM(COALESCE(subtotal, total)),0) as total
+                                 FROM fin_invoices WHERE status='paid' AND week_start >= ?`)
+                       .get(`${new Date().getUTCFullYear()}-01-01`);
     const expenses_ytd = db.prepare(`SELECT COALESCE(SUM(amount),0) as total FROM fin_expenses WHERE month_key >= ?`).get(`${new Date().getUTCFullYear()}-01`);
     const last_invoice = db.prepare(`SELECT * FROM fin_invoices ORDER BY created_at DESC LIMIT 1`).get();
-    const by_type = db.prepare(`SELECT type, COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE status='paid' GROUP BY type`).all();
+    const by_type = db.prepare(`SELECT type, COUNT(*) as n, COALESCE(SUM(COALESCE(subtotal, total)),0) as total
+                                FROM fin_invoices WHERE status='paid' GROUP BY type`).all();
     res.json({ outstanding, paid_ytd, expenses_ytd, last_invoice, by_type });
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
 });
