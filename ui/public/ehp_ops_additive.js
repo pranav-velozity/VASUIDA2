@@ -207,7 +207,12 @@
     const box = el('ehp-alerts'); if (!box) return;
     let d = null;
     try { d = await req('/ehp/alerts'); } catch (e) { return; }
-    if (!d || !d.holds || !d.holds.length) { box.innerHTML = ''; return; }
+    const n = (d && d.holds) ? d.holds.length : 0;
+    const nEl = el('ehp-holds-n'), sEl = el('ehp-holds-s'), tile = el('ehp-kpi-holds');
+    if (nEl) { nEl.textContent = nfmt(n); nEl.style.color = n ? RED : DARK; }
+    if (sEl) sEl.textContent = n ? 'resolve below' : 'cancelled after picking';
+    if (tile) tile.style.boxShadow = n ? '0 0 0 2px rgba(179,63,64,.35)' : '';
+    if (!n) { box.innerHTML = ''; return; }
     const age = (m) => m == null ? 'unknown' : (m < 60 ? `${m} minute${m === 1 ? '' : 's'} ago`
                      : `${Math.floor(m / 60)}h ${m % 60}m ago`);
     box.innerHTML = d.holds.map(h => `
@@ -310,6 +315,7 @@
         ${lineCards || `<div class="ehp-kpi"><div class="ehp-kl">Queued orders</div><div class="ehp-kv">${nfmt(q.queued_orders)}</div><div class="ehp-ks">awaiting a batch</div></div>`}
         <div class="ehp-kpi" id="ehp-kpi-queued" style="cursor:pointer;" title="Show the orders waiting for a batch"><div class="ehp-kl">Queued envelopes</div><div class="ehp-kv">${nfmt(q.queued_envelopes)}</div><div class="ehp-ks">billable units &middot; <span style="text-decoration:underline">view orders</span></div></div>
         <div class="ehp-kpi"><div class="ehp-kl">Flagged orders</div><div class="ehp-kv" style="color:${q.flagged_high_qty?AMBER_TXT:DARK}">${nfmt(q.flagged_high_qty)}</div><div class="ehp-ks">unusually large</div></div>
+        <div class="ehp-kpi" id="ehp-kpi-holds"><div class="ehp-kl">Needs attention</div><div class="ehp-kv" id="ehp-holds-n">0</div><div class="ehp-ks" id="ehp-holds-s">cancelled after picking</div></div>
       </div>
       ${unmapped.length ? msg('w','<b>'+unmapped.reduce((a,u)=>a+u.orders,0)+' queued order(s) cannot be batched</b> — their Shopify SKU is not mapped to a product line: '
           + unmapped.map(u=>'<code>'+esc(u.product_sku||'(no SKU)')+'</code> ('+u.orders+')').join(', ')
@@ -444,12 +450,21 @@
   }
 
   function openPickList(batchId, data) {
+    // A blocked order stays visible but cannot be selected and gets no label. Removing it
+    // silently would leave the picker wondering why the count changed mid-pick.
     const orders = data.orders || [];
     const w = window.open('', '_blank');
     if (!w) { alert('Pop-up blocked. Allow pop-ups for Pinpoint to print labels.'); return; }
 
     const rows = orders.map(o => {
       const done = !!o.labels_generated_at;
+      if (o.blocked) {
+        return '<tr style="opacity:.55;background:#FBEAEA;">'
+          + '<td class="c">&#9888;</td>'
+          + '<td>' + esc(o.order_number || '') + '</td>'
+          + '<td colspan="3"><b>' + (o.blocked === 'cancelled' ? 'CANCELLED' : 'ON HOLD')
+          + '</b> — do not pick or label this order</td></tr>';
+      }
       return '<tr data-id="' + esc(o.id) + '" data-qty="' + (o.envelope_qty || 1) + '">'
         + '<td class="c"><input type="checkbox" class="sel" checked></td>'
         + '<td>' + esc(o.order_number || '') + (o.flagged_high_qty ? ' <span class="flag">&#9873;</span>' : '') + '</td>'
@@ -1035,7 +1050,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(() => { if (document.visibilityState === 'visible') refreshEnabled(); }, 15000);
-    console.log('[ehp-ops] module v16 loaded');
+    console.log('[ehp-ops] module v17 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
