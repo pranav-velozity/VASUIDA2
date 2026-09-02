@@ -15854,10 +15854,17 @@ app.post('/ehp/batch/:id/dispatch', authenticateRequest, writeOpLimiter, auditLo
 app.get('/ehp/batch/:id/picklist', authenticateRequest, auditLog('view_ehp_picklist'), (req, res) => {
   try {
     const c = ehpGuard(req, res); if (!c) return;
-    const orders = db.prepare(`SELECT id, order_number, envelope_qty, recipient_name, recipient_address, recipient_address2,
-        recipient_city, recipient_state, recipient_postcode, recipient_country, flagged_high_qty, labels_generated_at
+    const allOrders = db.prepare(`SELECT id, order_number, envelope_qty, recipient_name, recipient_address, recipient_address2,
+        recipient_city, recipient_state, recipient_postcode, recipient_country, flagged_high_qty, labels_generated_at,
+        state, hold_reason, hold_resolved_at
       FROM ehp_order WHERE batch_id=? AND client_id=? ORDER BY order_number`).all(req.params.id, c);
-    const envelopes = orders.reduce((a, o) => a + (o.envelope_qty || 0), 0);
+    const isBlocked = (o) => o.state === 'cancelled' || (o.hold_reason && !o.hold_resolved_at);
+    // Blocked orders stay on the list, marked. Removing them silently would leave the
+    // picker wondering why the count changed mid-pick.
+    const orders = allOrders.map(o => ({ ...o, blocked: isBlocked(o) ? (o.state === 'cancelled' ? 'cancelled' : 'held') : null }));
+    const blocked = orders.filter(o => o.blocked);
+    // Sticks are pulled for what will actually ship.
+    const envelopes = orders.reduce((a, o) => a + (o.blocked ? 0 : (o.envelope_qty || 0)), 0);
     // What to physically pull. Same allocation the dispatch deduction will use, so the
     // shelf and the ledger are asked for the same thing.
     const bat = db.prepare('SELECT * FROM ehp_assembly_batch WHERE id=? AND client_id=?').get(req.params.id, c);
@@ -15878,7 +15885,10 @@ app.get('/ehp/batch/:id/picklist', authenticateRequest, auditLog('view_ehp_pickl
     }
     res.json({ batch_id: req.params.id, batch_ref: bat ? bat.batch_ref : null,
       product_line: bat ? bat.product_line : null, recipe: recipeInfo,
-      orders, order_count: orders.length, envelope_count: envelopes, pull });
+      orders, order_count: orders.length, envelope_count: envelopes, pull,
+      // Surfaced so the pick list can warn before anyone starts pulling.
+      blocked: blocked.map(o => ({ order_number: o.order_number, reason: o.blocked })),
+      blocked_count: blocked.length });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
@@ -15898,7 +15908,9 @@ app.get('/ehp/batch/:id/labels.pdf', authenticateRequest, auditLog('ehp_labels_p
 
     let sql = `SELECT id, order_number, envelope_qty, recipient_name, recipient_address, recipient_address2,
                       recipient_city, recipient_state, recipient_postcode, recipient_country
-               FROM ehp_order WHERE batch_id=? AND client_id=?`;
+               FROM ehp_order WHERE batch_id=? AND client_id=?
+                 AND state <> 'cancelled'
+                 AND (hold_reason IS NULL OR hold_resolved_at IS NOT NULL)`;
     const params = [req.params.id, c];
     if (only.length) { sql += ` AND id IN (${only.map(() => '?').join(',')})`; params.push(...only); }
     sql += ' ORDER BY order_number';
