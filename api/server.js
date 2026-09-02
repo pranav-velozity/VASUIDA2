@@ -10804,7 +10804,6 @@ CREATE TABLE IF NOT EXISTS ehp_order (
   created_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_ehp_order_shopify ON ehp_order(client_id, shopify_order_id);
-CREATE INDEX IF NOT EXISTS idx_ehp_order_hold ON ehp_order(client_id, hold_reason);
 CREATE INDEX IF NOT EXISTS idx_ehp_order_state ON ehp_order(client_id, state);
 CREATE INDEX IF NOT EXISTS idx_ehp_order_batch ON ehp_order(batch_id);
 
@@ -10925,6 +10924,10 @@ try {
   if (!c.includes('hold_resolution')) db.exec("ALTER TABLE ehp_order ADD COLUMN hold_resolution TEXT");
   if (!c.includes('hold_resolved_at'))db.exec("ALTER TABLE ehp_order ADD COLUMN hold_resolved_at TEXT");
   if (!c.includes('hold_resolved_by'))db.exec("ALTER TABLE ehp_order ADD COLUMN hold_resolved_by TEXT");
+  // Indexed here, not in the CREATE TABLE block: that block runs before this migration and
+  // is a no-op on an existing database, so an index on a column added below would fail on
+  // boot and take the process down.
+  db.exec("CREATE INDEX IF NOT EXISTS idx_ehp_order_hold ON ehp_order(client_id, hold_reason)");
 } catch (e) { console.error('[ehp_order:hold-migration]', e.message); }
 
 function ehpNewId(p) { return (p || 'ehp') + '_' + crypto.randomBytes(10).toString('hex'); }
