@@ -10804,6 +10804,7 @@ CREATE TABLE IF NOT EXISTS ehp_order (
   created_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_ehp_order_shopify ON ehp_order(client_id, shopify_order_id);
+CREATE INDEX IF NOT EXISTS idx_ehp_order_hold ON ehp_order(client_id, hold_reason);
 CREATE INDEX IF NOT EXISTS idx_ehp_order_state ON ehp_order(client_id, state);
 CREATE INDEX IF NOT EXISTS idx_ehp_order_batch ON ehp_order(batch_id);
 
@@ -10912,6 +10913,19 @@ try {
 
 // Flag (not a block) when a single order asks for an unusual number of envelopes.
 const EHP_ENVELOPE_ALERT_QTY = Number(process.env.EHP_ENVELOPE_ALERT_QTY || 5);
+
+// A hold is distinct from fulfil_error. An error means Shopify write-back failed and the
+// order SHOULD still ship; a hold means someone must decide before it does. Conflating the
+// two would let a transient Shopify outage stop the whole operation.
+try {
+  const c = db.prepare("PRAGMA table_info(ehp_order)").all().map(x => x.name);
+  if (!c.includes('hold_reason'))     db.exec("ALTER TABLE ehp_order ADD COLUMN hold_reason TEXT");
+  if (!c.includes('hold_at'))         db.exec("ALTER TABLE ehp_order ADD COLUMN hold_at TEXT");
+  if (!c.includes('hold_state'))      db.exec("ALTER TABLE ehp_order ADD COLUMN hold_state TEXT");
+  if (!c.includes('hold_resolution')) db.exec("ALTER TABLE ehp_order ADD COLUMN hold_resolution TEXT");
+  if (!c.includes('hold_resolved_at'))db.exec("ALTER TABLE ehp_order ADD COLUMN hold_resolved_at TEXT");
+  if (!c.includes('hold_resolved_by'))db.exec("ALTER TABLE ehp_order ADD COLUMN hold_resolved_by TEXT");
+} catch (e) { console.error('[ehp_order:hold-migration]', e.message); }
 
 function ehpNewId(p) { return (p || 'ehp') + '_' + crypto.randomBytes(10).toString('hex'); }
 
@@ -11231,6 +11245,118 @@ app.post('/report/supplier-discrepancy/auth', authenticateRequest, (req, res) =>
   const token = randomUUID();
   _ncReportTokens.set(token, { ts: Date.now(), cost, client: curClient() });
   res.json({ token, cost });
+});
+
+// ── Holds: an order that must not ship until someone decides ──
+
+async function ehpNotifyHold(clientId, row) {
+  const to = parseEmailList(process.env.EHP_ALERT_EMAIL_TO || process.env.AIR_QUOTE_INTERNAL_EMAIL_TO);
+  const from = process.env.EXCEPTION_EMAIL_FROM;
+  if (!to.length || !from) return;
+  const rows = [
+    ['Order', row.order_number || row.id],
+    ['Status when cancelled', row.state],
+    ['Envelopes', row.envelope_qty || 1],
+    ['Recipient', row.recipient_name || ''],
+  ];
+  const html = aqMailShell(`Order cancelled after ${row.state} — ${row.order_number || ''}`, rows, '',
+    row.state === 'dispatched'
+      ? 'This order has already been dispatched, so it cannot be recovered. Resolve it in Pinpoint on the Assembly tab.'
+      : 'This envelope has been assembled and may be minutes from handover. Check the bin before it goes out, then resolve it on the Assembly tab in Pinpoint.');
+  try {
+    await sendViaResend({ from, to, subject: `ACTION — order ${row.order_number || ''} cancelled after ${row.state}`,
+      html, text: rows.map(r => `${r[0]}: ${r[1]}`).join('\n') });
+  } catch (e) { console.error('[ehp:hold-mail]', e.message); }
+}
+
+// Deliberately tiny. The Assembly render is expensive and polls once a minute; this carries
+// only what a banner needs, so it can poll every fifteen seconds without cost.
+app.get('/ehp/alerts', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const rows = db.prepare(`SELECT o.id, o.order_number, o.envelope_qty, o.hold_reason, o.hold_state, o.hold_at,
+                                    b.assembled_at
+                             FROM ehp_order o
+                             LEFT JOIN ehp_assembly_batch b ON b.id = o.batch_id
+                             WHERE o.client_id=? AND o.hold_reason IS NOT NULL AND o.hold_resolved_at IS NULL
+                             ORDER BY o.hold_at DESC LIMIT 50`).all(c);
+    const mins = (t) => t ? Math.max(0, Math.round((Date.now() - Date.parse(String(t).replace(' ', 'T') + 'Z')) / 60000)) : null;
+    res.json({
+      client_id: c,
+      holds: rows.map(r => ({
+        id: r.id, order_number: r.order_number, envelopes: r.envelope_qty || 1,
+        reason: r.hold_reason, state: r.hold_state,
+        held_minutes: mins(r.hold_at),
+        // Minutes since assembly is what decides the action: fourteen means go and look,
+        // six hours means it has probably gone.
+        assembled_minutes: mins(r.assembled_at),
+      })),
+      count: rows.length,
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Three resolutions, each with the inventory consequence that matches what physically
+// happened. "Already shipped" exists because blocking a dispatch that already left the
+// building would leave stock on the books that is not on the shelf — the fortnightly count
+// would then absorb a real loss as shrinkage, where nobody can see it.
+app.post('/ehp/order/:id/resolve-hold', authenticateRequest, writeOpLimiter,
+  auditLog('ehp_resolve_hold'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const row = db.prepare('SELECT * FROM ehp_order WHERE id=? AND client_id=?').get(req.params.id, c);
+    if (!row) return res.status(404).json({ error: 'not_found' });
+    if (!row.hold_reason || row.hold_resolved_at) return res.status(409).json({ error: 'not_held' });
+
+    const r = String((req.body || {}).resolution || '').trim();
+    if (!['pulled', 'written_off', 'already_shipped'].includes(r))
+      return res.status(400).json({ error: 'resolution must be pulled, written_off or already_shipped' });
+
+    const who = aqUserEmail(req) || null;
+    const recipe = ehpActiveRecipe(c, row.product_line || null);
+    const qty = Math.max(1, row.envelope_qty || 1);
+
+    db.transaction(() => {
+      if (r !== 'pulled' && recipe) {
+        // Sticks left the shelf. Post the consumption so the ledger matches reality, and
+        // tag write-off distinctly so waste is visible rather than buried in count variance.
+        const pool = (recipe.pool || []).map(x => x.sku || x);
+        const per = recipe.sticks_per_envelope || 5;
+        const alloc = ehpAllocateSticks(qty * per, pool, 0);
+        const ins = db.prepare(`INSERT INTO ehp_inventory_txn (id, client_id, sku, qty_each, txn_type, ref_type, ref_id)
+                                VALUES (?,?,?,?,?,?,?)`);
+        pool.forEach((sku, i) => {
+          if (!alloc[i]) return;
+          ins.run(ehpNewId('itx'), c, sku, -alloc[i],
+                  r === 'written_off' ? 'write_off' : 'consume', 'order_hold', row.id);
+        });
+      }
+      db.prepare(`UPDATE ehp_order SET hold_resolution=?, hold_resolved_at=datetime('now'),
+                  hold_resolved_by=?, state=? WHERE id=?`)
+        .run(r, who, r === 'already_shipped' ? 'dispatched' : 'cancelled', row.id);
+    })();
+
+    console.log(`[ehp:hold] ${row.order_number} resolved as ${r} by ${who || 'unknown'}`);
+    res.json({ id: row.id, order_number: row.order_number, resolution: r,
+      inventory_posted: r !== 'pulled' });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Queued but not yet batched — the counts existed, the rows did not, so nobody could see
+// WHICH orders were waiting or for how long.
+app.get('/ehp/queued-orders', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const rows = db.prepare(`SELECT id, order_number, envelope_qty, product_sku, product_line,
+                                    placed_at, flagged_high_qty, created_at
+                             FROM ehp_order
+                             WHERE client_id=? AND state='queued' AND batch_id IS NULL
+                             ORDER BY COALESCE(placed_at, created_at) LIMIT 500`).all(c);
+    const days = (t) => t ? Math.floor((Date.now() - Date.parse(String(t).replace(' ', 'T') + 'Z')) / 86400000) : null;
+    res.json({ client_id: c, orders: rows.map(r => ({ ...r, age_days: days(r.placed_at || r.created_at) })),
+      total_orders: rows.length,
+      total_envelopes: rows.reduce((a, r) => a + (r.envelope_qty || 1), 0) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
 // ═══════════════════ SUPPLIER INVOICES ═══════════════════
@@ -15676,9 +15802,22 @@ app.post('/ehp/batch/:id/dispatch', authenticateRequest, writeOpLimiter, auditLo
         product_line: b.product_line || null, recipe_id: b.recipe_id || null,
         message: 'No flavour pool on this batch\'s recipe — set the recipe flavours before dispatching.' });
     }
+    // Held orders are excluded from the dispatch and from its consumption. One cancelled
+    // order must never stop the other thirty-nine, and its sticks must not be deducted here
+    // — that decision belongs to whoever resolves the hold, because only they know whether
+    // the envelope was pulled from the bin or had already gone to USPS.
+    const held = db.prepare(`SELECT id, order_number, envelope_qty FROM ehp_order
+                             WHERE batch_id=? AND client_id=? AND hold_reason IS NOT NULL
+                               AND hold_resolved_at IS NULL`).all(b.id, c);
+    const heldEnvelopes = held.reduce((a, x) => a + (x.envelope_qty || 1), 0);
+    const dispatchEnvelopes = Math.max(0, (b.actual_envelopes || 0) - heldEnvelopes);
+    if (held.length && dispatchEnvelopes === 0)
+      return res.status(409).json({ error: 'all_orders_held', held: held.map(x => x.order_number),
+        message: 'Every order in this batch is on hold. Resolve them on the Assembly tab first.' });
+
     // Exact integer total, spread across the pool. Rotate the extra stick by how many
     // batches this line has already dispatched, so no single flavour absorbs it every time.
-    const totalSticks = (b.actual_envelopes || 0) * (recipe.sticks_per_envelope || 5);
+    const totalSticks = dispatchEnvelopes * (recipe.sticks_per_envelope || 5);
     const prior = db.prepare(`SELECT COUNT(*) n FROM ehp_assembly_batch
                               WHERE client_id=? AND dispatched_at IS NOT NULL AND product_line IS ?`)
                     .get(c, b.product_line || null).n;
@@ -15686,7 +15825,9 @@ app.post('/ehp/batch/:id/dispatch', authenticateRequest, writeOpLimiter, auditLo
 
     db.transaction(() => {
       db.prepare(`UPDATE ehp_assembly_batch SET state='dispatched', dispatched_at=datetime('now') WHERE id=?`).run(b.id);
-      db.prepare(`UPDATE ehp_order SET state='dispatched', fulfilled_at=datetime('now') WHERE batch_id=? AND client_id=?`).run(b.id, c);
+      db.prepare(`UPDATE ehp_order SET state='dispatched', fulfilled_at=datetime('now')
+                  WHERE batch_id=? AND client_id=?
+                    AND (hold_reason IS NULL OR hold_resolved_at IS NOT NULL)`).run(b.id, c);
       const ins = db.prepare(`INSERT INTO ehp_inventory_txn (id, client_id, sku, qty_each, txn_type, ref_type, ref_id)
                               VALUES (?,?,?,?, 'consumption', 'assembly_batch', ?)`);
       for (const a of alloc) ins.run(ehpNewId('inv'), c, a.sku, -a.qty, b.id);
@@ -15696,7 +15837,12 @@ app.post('/ehp/batch/:id/dispatch', authenticateRequest, writeOpLimiter, auditLo
     let shop = { skipped: 'not_connected' };
     try { shop = await shopifyFulfilBatch(c, b.id); } catch (e) { shop = { error: String(e.message || e) }; }
     res.json({ batch_id: b.id, batch_ref: b.batch_ref || null, product_line: b.product_line || null,
-      envelopes: b.actual_envelopes, orders: b.order_count, state: 'dispatched',
+      // Report what actually shipped, not what the batch was built for — a silent
+      // difference between the two is how a held order gets assumed to have gone out.
+      envelopes: dispatchEnvelopes, batch_envelopes: b.actual_envelopes,
+      held: held.map(x => ({ order_number: x.order_number, envelopes: x.envelope_qty || 1 })),
+      held_envelopes: heldEnvelopes,
+      orders: b.order_count, state: 'dispatched',
       consumed: { total_sticks: totalSticks, by_flavour: alloc }, shopify: shop });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
@@ -17173,12 +17319,14 @@ app.post('/shopify/webhooks/orders-cancelled', (req, res) => {
       console.log(`[shopify:orders-cancelled] ${o.name || o.id} removed from queue`);
       return res.status(200).json({ ok: true, cancelled: true });
     }
-    // Already assembled or dispatched: the physical work happened, so the record stands.
-    // Flagged for a human rather than silently reversed.
-    db.prepare(`UPDATE ehp_order SET fulfil_error=? WHERE id=?`)
-      .run(`cancelled in Shopify after ${row.state}`, row.id);
-    console.warn(`[shopify:orders-cancelled] ${o.name || o.id} cancelled but already ${row.state} — flagged for review`);
-    res.status(200).json({ ok: true, flagged: true, state: row.state });
+    // Already assembled or dispatched: the physical work happened, so nothing is reversed.
+    // The envelope may already be on its way to USPS, so this is a race — raise the hold,
+    // surface it on the floor immediately, and email in case nobody is looking at a screen.
+    db.prepare(`UPDATE ehp_order SET hold_reason=?, hold_at=datetime('now'), hold_state=? WHERE id=?`)
+      .run('cancelled_in_shopify', row.state, row.id);
+    console.warn(`[shopify:orders-cancelled] ${o.name || o.id} cancelled but already ${row.state} — HELD for review`);
+    ehpNotifyHold(ctx.it.client_id, row).catch(e => console.error('[ehp:hold-mail]', e.message));
+    res.status(200).json({ ok: true, held: true, state: row.state });
   } catch (e) { console.error('[shopify:orders-cancelled]', e); res.status(200).send('ok'); }
 });
 
