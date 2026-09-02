@@ -196,6 +196,100 @@
   }
 
   // ── Assembly: queue + batches ──
+  // ── Cancellation alerts ──
+  // Polled separately and cheaply: the Assembly render is expensive and runs once a minute,
+  // but a cancelled order that has been assembled may be minutes from handover, so this
+  // needs to be seen quickly. Failure here never blocks the page — an alert system that can
+  // take down the operational screen is worse than no alerts.
+  let _alertTimer = null;
+
+  async function paintAlerts() {
+    const box = el('ehp-alerts'); if (!box) return;
+    let d = null;
+    try { d = await req('/ehp/alerts'); } catch (e) { return; }
+    if (!d || !d.holds || !d.holds.length) { box.innerHTML = ''; return; }
+    const age = (m) => m == null ? 'unknown' : (m < 60 ? `${m} minute${m === 1 ? '' : 's'} ago`
+                     : `${Math.floor(m / 60)}h ${m % 60}m ago`);
+    box.innerHTML = d.holds.map(h => `
+      <div style="background:#FBEAEA;border:1px solid rgba(179,63,64,.35);border-radius:11px;
+                  padding:12px 14px;margin-bottom:10px;">
+        <div style="font-size:13px;font-weight:700;color:#B33F40;">
+          ${esc(h.order_number || h.id)} cancelled in Shopify${h.state ? ' after ' + esc(h.state) : ''}</div>
+        <div style="font-size:11px;color:#1C1C1E;margin-top:3px;">
+          ${h.envelopes} envelope${h.envelopes === 1 ? '' : 's'} &middot;
+          ${h.state === 'dispatched'
+            ? 'Already dispatched — it cannot be recovered.'
+            : `Assembled <b>${esc(age(h.assembled_minutes))}</b>. Check the bin before handover.`}
+        </div>
+        <div style="margin-top:9px;display:flex;gap:8px;flex-wrap:wrap;">
+          ${h.state === 'dispatched' ? '' :
+            `<button class="ehp-btn g" data-hold="${esc(h.id)}" data-r="pulled">Pulled from bin</button>
+             <button class="ehp-btn g" data-hold="${esc(h.id)}" data-r="written_off">Written off</button>`}
+          <button class="ehp-btn g" data-hold="${esc(h.id)}" data-r="already_shipped">Already shipped</button>
+        </div>
+      </div>`).join('');
+
+    box.querySelectorAll('[data-hold]').forEach(b => b.addEventListener('click', async () => {
+      const id = b.getAttribute('data-hold'), r = b.getAttribute('data-r');
+      const label = { pulled: 'pulled from the bin and returned to stock',
+                      written_off: 'written off — sticks consumed and recorded as waste',
+                      already_shipped: 'already shipped — sticks consumed' }[r];
+      if (!confirm(`Resolve this order as: ${label}?`)) return;
+      b.disabled = true;
+      try {
+        await req('/ehp/order/' + encodeURIComponent(id) + '/resolve-hold',
+          { method: 'POST', body: JSON.stringify({ resolution: r }) });
+        await paintAlerts();
+        window.dispatchEvent(new CustomEvent('ehp:changed'));
+      } catch (e) { alert('Could not resolve: ' + (e.message || e)); b.disabled = false; }
+    }));
+  }
+
+  function startAlerts() {
+    if (_alertTimer) return;
+    _alertTimer = setInterval(() => {
+      if (!document.querySelector('.ehp-ov')) { clearInterval(_alertTimer); _alertTimer = null; return; }
+      if (document.visibilityState !== 'visible') return;
+      if (_tab === 'queue') paintAlerts();
+    }, 15000);
+  }
+
+  // Which orders are waiting, and for how long. The count alone never showed whether the
+  // queue was one large order or forty small ones, or that something had been sitting for
+  // a week.
+  async function showQueued() {
+    let d;
+    try { d = await req('/ehp/queued-orders'); }
+    catch (e) { alert('Could not load: ' + (e.message || e)); return; }
+    const rows = d.orders || [];
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.34);z-index:9700;display:flex;'
+      + 'align-items:flex-start;justify-content:center;padding:24px 18px;overflow:auto;';
+    ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+    ov.innerHTML = `<div style="background:#fff;border-radius:14px;width:min(760px,100%);padding:20px 22px;
+        box-shadow:0 18px 60px rgba(0,0,0,.22);">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;">
+        <div><div style="font-size:15px;font-weight:700;">Queued, not yet batched</div>
+          <div style="font-size:11px;color:${LIGHT};">${nfmt(d.total_orders)} order(s) &middot; ${nfmt(d.total_envelopes)} envelope(s)</div></div>
+        <button id="qx" style="background:none;border:0;font-size:22px;color:${LIGHT};cursor:pointer;">&times;</button>
+      </div>
+      ${rows.length ? `<table style="width:100%;border-collapse:collapse;font-size:11px;margin-top:12px;">
+        <thead><tr>${['Order','Line','Envelopes','Age'].map(h => `<th style="text-align:left;font-size:9px;
+          text-transform:uppercase;letter-spacing:.05em;color:${LIGHT};padding:6px;
+          border-bottom:.5px solid rgba(0,0,0,.08);">${h}</th>`).join('')}</tr></thead>
+        <tbody>${rows.map(r => `<tr>
+          <td style="padding:7px 6px;border-bottom:.5px solid rgba(0,0,0,.05);"><b>${esc(r.order_number || '')}</b>${r.flagged_high_qty ? ` <span style="color:${AMBER_TXT};font-size:9px;">large</span>` : ''}</td>
+          <td style="padding:7px 6px;border-bottom:.5px solid rgba(0,0,0,.05);color:${MID}">${esc(r.product_line || '—')}</td>
+          <td style="padding:7px 6px;border-bottom:.5px solid rgba(0,0,0,.05);text-align:right;">${nfmt(r.envelope_qty || 1)}</td>
+          <td style="padding:7px 6px;border-bottom:.5px solid rgba(0,0,0,.05);color:${(r.age_days || 0) >= 3 ? AMBER_TXT : MID};">
+            ${r.age_days == null ? '—' : (r.age_days === 0 ? 'today' : r.age_days + 'd')}</td>
+        </tr>`).join('')}</tbody></table>`
+        : `<div style="font-size:11px;color:${LIGHT};padding:16px 2px;">Nothing waiting.</div>`}
+    </div>`;
+    document.body.appendChild(ov);
+    ov.querySelector('#qx').addEventListener('click', () => ov.remove());
+  }
+
   async function renderQueue(body) {
     const [q, batches] = await Promise.all([req('/ehp/queue'), req('/ehp/batches')]);
     _cache.recipe = q.active_recipe;
@@ -211,9 +305,10 @@
           <div class="ehp-ks">${nfmt(l.queued_orders)} order(s) · ${l.recipe ? esc(l.recipe.name) : '<span style="color:'+RED+'">no recipe</span>'}</div>
         </div>`).join('');
     body.innerHTML = `
+      <div id="ehp-alerts"></div>
       <div class="ehp-kpis">
         ${lineCards || `<div class="ehp-kpi"><div class="ehp-kl">Queued orders</div><div class="ehp-kv">${nfmt(q.queued_orders)}</div><div class="ehp-ks">awaiting a batch</div></div>`}
-        <div class="ehp-kpi"><div class="ehp-kl">Queued envelopes</div><div class="ehp-kv">${nfmt(q.queued_envelopes)}</div><div class="ehp-ks">billable units</div></div>
+        <div class="ehp-kpi" id="ehp-kpi-queued" style="cursor:pointer;" title="Show the orders waiting for a batch"><div class="ehp-kl">Queued envelopes</div><div class="ehp-kv">${nfmt(q.queued_envelopes)}</div><div class="ehp-ks">billable units &middot; <span style="text-decoration:underline">view orders</span></div></div>
         <div class="ehp-kpi"><div class="ehp-kl">Flagged orders</div><div class="ehp-kv" style="color:${q.flagged_high_qty?AMBER_TXT:DARK}">${nfmt(q.flagged_high_qty)}</div><div class="ehp-ks">unusually large</div></div>
       </div>
       ${unmapped.length ? msg('w','<b>'+unmapped.reduce((a,u)=>a+u.orders,0)+' queued order(s) cannot be batched</b> — their Shopify SKU is not mapped to a product line: '
@@ -272,6 +367,9 @@
         setTimeout(render, 900);
       } catch (e) { el('ehp-batchmsg').innerHTML = msg('e', e.message || String(e)); el('ehp-mkbatch').disabled = false; }
     });
+    el('ehp-kpi-queued')?.addEventListener('click', showQueued);
+    paintAlerts();
+
     body.querySelectorAll('[data-asm]').forEach(x => x.addEventListener('click', async () => {
       x.disabled = true;
       try {
@@ -920,6 +1018,7 @@
   let _liveTimer = null;
   function startLive() {
     stopLive();
+    startAlerts();
     _liveTimer = setInterval(() => {
       // Only the read-mostly tabs; never re-render a form mid-entry.
       if (!document.querySelector('.ehp-ov')) return stopLive();
@@ -936,7 +1035,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(() => { if (document.visibilityState === 'visible') refreshEnabled(); }, 15000);
-    console.log('[ehp-ops] module v15 loaded');
+    console.log('[ehp-ops] module v16 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
