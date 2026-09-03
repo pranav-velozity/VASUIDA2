@@ -15170,6 +15170,85 @@ app.get('/ehp/sku-audit', authenticateRequest, (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Envelope photos ──
+// Marketing imagery from the packing bench, shown on the EHP Week Hub. Deliberately not
+// linked to an order or a batch: these are not evidence, and tying them to a shipment would
+// imply a quality record that nobody is maintaining.
+db.exec(`
+CREATE TABLE IF NOT EXISTS ehp_photo (
+  id          TEXT PRIMARY KEY,
+  client_id   TEXT NOT NULL,
+  r2_key      TEXT NOT NULL,
+  caption     TEXT,
+  uploaded_by TEXT,
+  active      INTEGER NOT NULL DEFAULT 1,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ehp_photo ON ehp_photo(client_id, active, created_at);
+`);
+
+// Only the most recent rotate. Without a cap the carousel eventually cycles two hundred
+// photos and the same ones rarely reappear, which defeats the point of it.
+const EHP_PHOTO_ROTATE = 20;
+
+app.get('/ehp/photos', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const all = String(req.query.all || '') === '1';
+    const rows = db.prepare(`SELECT id, r2_key, caption, uploaded_by, created_at
+                             FROM ehp_photo WHERE client_id=? AND active=1
+                             ORDER BY created_at DESC LIMIT ?`)
+                   .all(c, all ? 200 : EHP_PHOTO_ROTATE);
+    res.json({
+      client_id: c,
+      photos: rows.map(r => ({ id: r.id, caption: r.caption, uploaded_by: r.uploaded_by,
+        created_at: r.created_at, url: R2_PUBLIC ? `${R2_PUBLIC}/${r.r2_key}` : null })),
+      total: db.prepare('SELECT COUNT(*) n FROM ehp_photo WHERE client_id=? AND active=1').get(c).n,
+      rotate_limit: EHP_PHOTO_ROTATE,
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/ehp/photo', authenticateRequest, upload.single('file'), async (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+    if (!/^image\//.test(req.file.mimetype || ''))
+      return res.status(400).json({ error: 'Only image files can be uploaded.' });
+    // The browser resizes before sending; this is the backstop for anything that bypasses
+    // it, so a 6MB phone original can never reach the bucket.
+    if (req.file.buffer.length > 3 * 1024 * 1024)
+      return res.status(400).json({ error: 'Image too large after resizing — please try again.' });
+
+    const ext = path.extname(req.file.originalname) || '.jpg';
+    const key = `ehp-photos/${c}/${Date.now()}-${crypto.randomBytes(6).toString('hex')}${ext}`;
+    await r2Client.send(new PutObjectCommand({ Bucket: R2_BUCKET, Key: key,
+      Body: req.file.buffer, ContentType: req.file.mimetype }));
+    const id = ehpNewId('pho');
+    db.prepare(`INSERT INTO ehp_photo (id, client_id, r2_key, caption, uploaded_by)
+                VALUES (?,?,?,?,?)`)
+      .run(id, c, key, String((req.body || {}).caption || '').trim().slice(0, 120) || null,
+           aqUserEmail(req) || null);
+    res.json({ id, url: R2_PUBLIC ? `${R2_PUBLIC}/${key}` : null,
+               bytes: req.file.buffer.length });
+  } catch (e) {
+    console.error('[POST /ehp/photo]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// Soft delete. The object stays in R2 rather than being removed, so an accidental deletion
+// is recoverable — these are cheap to store and impossible to get back once purged.
+app.delete('/ehp/photo/:id', authenticateRequest, writeOpLimiter, auditLog('delete_ehp_photo'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const r = db.prepare('SELECT id FROM ehp_photo WHERE id=? AND client_id=?').get(req.params.id, c);
+    if (!r) return res.status(404).json({ error: 'not_found' });
+    db.prepare('UPDATE ehp_photo SET active=0 WHERE id=?').run(req.params.id);
+    res.json({ id: req.params.id, removed: true });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ═══════════════════ EHP GEOGRAPHY ═══════════════════
 // Aggregates only. Recipient names and street addresses never leave the database for
 // this feature — the browser receives city/state counts and nothing more.
