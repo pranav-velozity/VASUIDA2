@@ -4689,7 +4689,7 @@ function renderEmailText(report, narrative) {
 
 // ---- Resend send ----
 
-async function sendViaResend({ from, replyTo, to, subject, html, text }) {
+async function sendViaResend({ from, replyTo, to, cc, subject, html, text, attachments }) {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) throw new Error('RESEND_API_KEY not set');
   const body = {
@@ -4700,6 +4700,9 @@ async function sendViaResend({ from, replyTo, to, subject, html, text }) {
     text,
   };
   if (replyTo) body.reply_to = replyTo;
+  // Optional, so every existing caller behaves exactly as before.
+  if (cc && cc.length) body.cc = Array.isArray(cc) ? cc : [cc];
+  if (attachments && attachments.length) body.attachments = attachments;
 
   const resp = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -10199,6 +10202,244 @@ const MCR_VAS_COLUMNS = [
   { header: 'VAS CHARGES TOTAL', key: 'vas_charges_total', width: 16 },
 ];
 
+// ── Report recipients ──
+app.get('/report/recipients', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+  try {
+    const key = String(req.query.key || 'monthly-client');
+    res.json({ report_key: key,
+      recipients: db.prepare(`SELECT id, email, kind, active FROM report_recipient
+                              WHERE report_key=? ORDER BY kind, email`).all(key),
+      resolved: mcrRecipients() });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/report/recipients', authenticateRequest, requireRole(['admin']), requireInternalOrg,
+  writeOpLimiter, auditLog('edit_report_recipient'), (req, res) => {
+  try {
+    const b = req.body || {};
+    const key = String(b.report_key || 'monthly-client').trim();
+    const email = String(b.email || '').trim();
+    const kind = b.kind === 'cc' ? 'cc' : 'to';
+    if (!email || email.indexOf('@') < 0) return res.status(400).json({ error: 'a valid email is required' });
+    db.prepare(`INSERT INTO report_recipient (id, report_key, email, kind, active, updated_at)
+                VALUES (?,?,?,?,1,datetime('now'))
+                ON CONFLICT(report_key, email) DO UPDATE SET kind=excluded.kind, active=1,
+                  updated_at=datetime('now')`)
+      .run(siNewId('rr'), key, email, kind);
+    res.json({ ok: true, report_key: key, email, kind });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.delete('/report/recipients/:id', authenticateRequest, requireRole(['admin']), requireInternalOrg,
+  writeOpLimiter, auditLog('remove_report_recipient'), (req, res) => {
+  try {
+    db.prepare('UPDATE report_recipient SET active=0, updated_at=datetime(\'now\') WHERE id=?').run(req.params.id);
+    res.json({ ok: true, removed: req.params.id });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// ── Monthly client report: scheduled send ──
+// The cron fires DAILY at 15:00 UTC and this decides whether to act. Sydney is UTC+10 or
+// +11 depending on daylight saving, so any fixed monthly cron expression drifts by an hour
+// twice a year. Intl handles the zone correctly; the schedule stays dumb.
+function sydneyParts(d) {
+  const f = new Intl.DateTimeFormat('en-AU', { timeZone: 'Australia/Sydney',
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hour12: false });
+  const p = Object.fromEntries(f.formatToParts(d || new Date()).map(x => [x.type, x.value]));
+  return { y: +p.year, m: +p.month, d: +p.day, h: +p.hour };
+}
+
+// The month before the current Sydney month.
+function sydneyPreviousMonth(now) {
+  const p = sydneyParts(now);
+  const d = new Date(Date.UTC(p.y, p.m - 2, 1));
+  return d.toISOString().slice(0, 7);
+}
+
+async function mcrSendMonthly(month, origin, opts) {
+  const o = opts || {};
+  const fx = await mcrResolveRate(month);
+  // No live rate and nothing stored: a file labelled AUD converted at an unknown rate is
+  // far worse than a report that arrives late.
+  if (fx.error) return { sent: false, reason: 'no_fx_rate',
+    message: 'No live or stored USD to AUD rate. Nothing was sent.' };
+
+  const shipping = mcrBuildWorkbook('shipping', month, 'AUD', fx.rate, fx.note);
+  const vas = mcrBuildWorkbook('vas', month, 'AUD', fx.rate, fx.note);
+
+  // An empty month means something did not finish, not that the month was quiet.
+  if (!shipping.rowCount && !vas.rowCount && !o.force)
+    return { sent: false, reason: 'empty_month',
+      message: `${month} produced no rows. Nothing was sent — check the month is complete.` };
+
+  const { to, cc } = mcrRecipients();
+  const from = process.env.MONTHLY_CLIENT_REPORT_FROM || process.env.EXCEPTION_EMAIL_FROM;
+  if (!to.length || !from) return { sent: false, reason: 'no_recipients' };
+
+  const b64 = async (built) => Buffer.from(await built.wb.xlsx.writeBuffer()).toString('base64');
+  const mLabel = new Date(month + '-01T00:00:00Z')
+    .toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+  const rows = [
+    ['Period', mLabel],
+    ['Shipping Data', `${shipping.rowCount} row(s)`],
+    ['VAS Dashboard', `${vas.rowCount} row(s)`],
+    ['Currency', 'AUD'],
+  ];
+  const html = aqMailShell(`Monthly report — ${mLabel}`, rows, '', escHtml(fx.note));
+  const text = rows.map(r => `${r[0]}: ${r[1]}`).join('\n') + `\n\n${fx.note}`;
+
+  if (o.dryRun) return { sent: false, dryRun: true, month, to, cc,
+    fx: { rate: fx.rate, date: fx.date, source: fx.source },
+    rows: { shipping: shipping.rowCount, vas: vas.rowCount } };
+
+  const r = await sendViaResend({ from, to, cc,
+    replyTo: process.env.EXCEPTION_EMAIL_REPLY_TO || undefined,
+    subject: `VelOzity monthly report — ${mLabel}`, html, text,
+    attachments: [
+      { filename: shipping.filename, content: await b64(shipping) },
+      { filename: vas.filename,      content: await b64(vas) },
+    ] });
+  console.log(`[mcr] ${month} sent to ${to.join(', ')} — rate ${fx.rate} (${fx.source}, ${fx.date})`);
+  return { sent: true, month, to, cc, resend_id: r.id,
+    fx: { rate: fx.rate, date: fx.date, source: fx.source },
+    rows: { shipping: shipping.rowCount, vas: vas.rowCount } };
+}
+
+app.post('/ops/monthly-client-report/run', (req, res, next) => {
+  const cronSecret = process.env.LANE_CRON_SECRET;
+  if (cronSecret && req.headers['x-lane-cron-secret'] === cronSecret) return next();
+  return authenticateRequest(req, res, next);
+}, auditLog('run_monthly_client_report'), async (req, res) => {
+  try {
+    const cron = req.headers['x-lane-cron-secret'] ? true : false;
+    const dryRun = String(req.query.dryRun || '') === '1';
+    const force = String(req.query.force || '') === '1';
+    const syd = sydneyParts();
+
+    // The daily trigger only acts on the 1st in Sydney, at or after 02:00 local.
+    if (cron && !force && !(syd.d === 1 && syd.h >= 2)) {
+      return res.json({ skipped: true, reason: 'not_due',
+        sydney: `${syd.y}-${String(syd.m).padStart(2, '0')}-${String(syd.d).padStart(2, '0')} ${syd.h}:00` });
+    }
+
+    const month = String(req.query.month || '').trim() || sydneyPreviousMonth();
+    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM' });
+
+    // A month is only sent once. Without this a retry, or a second cron on the same day,
+    // would deliver the client a duplicate.
+    const key = `mcr_sent_${month}`;
+    if (!dryRun && !force &&
+        db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability=?`).get(key))
+      return res.json({ skipped: true, reason: 'already_sent', month });
+
+    const out = await mcrSendMonthly(month, `${req.protocol}://${req.get('host')}`, { dryRun, force });
+    if (out.sent) db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled)
+                              VALUES ('__meta', ?, 1)`).run(key);
+    if (!out.sent && !out.dryRun) console.warn(`[mcr] ${month} NOT sent: ${out.reason}`);
+    res.json({ trigger: cron ? 'cron' : 'manual', sydney_hour: syd.h, ...out });
+  } catch (e) {
+    console.error('[POST /ops/monthly-client-report/run]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// ── Live FX ──
+// An ECB reference rate is independently published, so ICONIC can verify it themselves.
+// It is a MID-MARKET rate — a bank converts a percent or two worse — which is defensible
+// for a client report precisely because it is not a rate we chose, but only while it is
+// labelled on the file with its date.
+async function mcrFetchUsdAud(onDate) {
+  const url = `https://api.frankfurter.dev/v1/${onDate || 'latest'}?base=USD&symbols=AUD`;
+  const r = await fetch(url, { signal: AbortSignal.timeout(12000) });
+  if (!r.ok) throw new Error(`frankfurter HTTP ${r.status}`);
+  const j = await r.json();
+  const rate = j && j.rates && j.rates.AUD;
+  if (!rate || !isFinite(rate)) throw new Error('no AUD rate in response');
+  // ECB publishes on business days only, so a request for a weekend date returns the last
+  // published day. j.date is the date that actually applies, not the one we asked for.
+  return { rate: Number(rate), date: String(j.date || onDate) };
+}
+
+// Resolve the rate for a month, storing whatever we get so the emailed file and any later
+// manual download agree, and so a six-month-old report can be reproduced exactly.
+async function mcrResolveRate(month) {
+  const lastDay = new Date(Date.UTC(+month.slice(0, 4), +month.slice(5, 7), 0)).toISOString().slice(0, 10);
+  try {
+    const { rate, date } = await mcrFetchUsdAud(lastDay);
+    db.prepare(`INSERT INTO fin_fx_rates (from_curr, to_curr, rate, updated_at)
+                VALUES ('USD','AUD',?, datetime('now'))
+                ON CONFLICT(from_curr, to_curr) DO UPDATE SET rate=excluded.rate, updated_at=datetime('now')`)
+      .run(rate);
+    return { rate, date, source: 'live',
+      note: `Converted at 1 USD = ${rate} AUD — European Central Bank reference rate, ${date}.` };
+  } catch (e) {
+    console.warn('[mcr:fx] live rate unavailable:', e.message);
+    const fx = db.prepare(`SELECT rate, updated_at FROM fin_fx_rates WHERE from_curr='USD' AND to_curr='AUD'`).get();
+    if (!fx || !fx.rate) return { error: 'no_rate' };
+    // Falling back silently would send a file labelled AUD converted at an unknown rate.
+    return { rate: fx.rate, date: String(fx.updated_at || '').slice(0, 10), source: 'stored',
+      note: `Converted at 1 USD = ${fx.rate} AUD — rate of ${String(fx.updated_at || '').slice(0, 10)}; a live rate was unavailable at the time of sending.` };
+  }
+}
+
+// Recipients live in the database, not an environment variable: a client distribution list
+// changes when someone joins or leaves, and needing a deploy for that means it eventually
+// gets sent by hand instead.
+db.exec(`
+CREATE TABLE IF NOT EXISTS report_recipient (
+  id         TEXT PRIMARY KEY,
+  report_key TEXT NOT NULL,
+  email      TEXT NOT NULL,
+  kind       TEXT NOT NULL DEFAULT 'to',      -- to | cc
+  active     INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (report_key, email)
+);
+`);
+
+function mcrRecipients() {
+  const rows = db.prepare(`SELECT email, kind FROM report_recipient
+                           WHERE report_key='monthly-client' AND active=1`).all();
+  const to = rows.filter(r => r.kind === 'to').map(r => r.email);
+  const cc = rows.filter(r => r.kind === 'cc').map(r => r.email);
+  return {
+    to: to.length ? to : parseEmailList(process.env.MONTHLY_CLIENT_REPORT_TO),
+    cc: cc.length ? cc : parseEmailList(process.env.MONTHLY_CLIENT_REPORT_CC),
+  };
+}
+
+// Shared builder. The scheduled email and the manual download must produce byte-identical
+// files, so both call this rather than each assembling a workbook of their own.
+function mcrBuildWorkbook(type, month, currency, fxRate, fxNote) {
+  const rows = _mcrBuildContainerRows(month, fxRate);
+  for (const r of rows) r.currency_code = currency;
+
+  const cols = type === 'shipping' ? MCR_SHIPPING_COLUMNS : MCR_VAS_COLUMNS;
+  const filename = (type === 'shipping' ? 'Shipping_Data' : 'VAS_Dashboard') + `_${month}.xlsx`;
+
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet(type === 'shipping' ? 'Shipping Data' : 'VAS Dashbaord');
+  ws.columns = cols.map(c => ({ header: c.header, key: c.key, width: c.width }));
+  ws.getRow(1).font = { bold: true };
+  ws.getRow(1).alignment = { vertical: 'middle', horizontal: 'left' };
+
+  for (const r of rows) {
+    const row = ws.addRow(r);
+    cols.forEach((c, i) => { if (c.isDate) row.getCell(i + 1).numFmt = 'dd.mm.yyyy'; });
+  }
+
+  // The conversion basis goes ON the file. A converted figure the client cannot reproduce
+  // is a figure they will query, and "which rate did you use" is a bad first question about
+  // a report you send them automatically every month.
+  if (fxNote) {
+    ws.addRow([]);
+    const n = ws.addRow([fxNote]);
+    n.font = { italic: true, color: { argb: 'FF6E6E73' }, size: 9 };
+  }
+  return { wb, filename, rowCount: rows.length };
+}
+
 // GET /report/monthly-client?type=shipping|vas&month=YYYY-MM&currency=USD|AUD&token=...
 app.get('/report/monthly-client',
   (req, res, next) => {
@@ -10228,46 +10469,17 @@ app.get('/report/monthly-client',
     }
 
     // FX rate
-    let fxRate = 1;
+    let fxRate = 1, fxNote = '';
     if (currency === 'AUD') {
       const fx = db.prepare(`SELECT rate FROM fin_fx_rates WHERE from_curr='USD' AND to_curr='AUD'`).get();
       if (fx) fxRate = fx.rate;
+      fxNote = `Converted at 1 USD = ${fxRate} AUD`;
     }
 
-    const rows = _mcrBuildContainerRows(month, fxRate);
-
-    // Stamp currency code on every row
-    for (const r of rows) {
-      r.currency_code = currency;
-    }
-
-    // Select column set + filename
-    const cols = type === 'shipping' ? MCR_SHIPPING_COLUMNS : MCR_VAS_COLUMNS;
-    const filename = (type === 'shipping' ? 'Shipping_Data' : 'VAS_Dashboard') + `_${month}.xlsx`;
-
-    // Build workbook
-    const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet(type === 'shipping' ? 'Shipping Data' : 'VAS Dashbaord');
-    ws.columns = cols.map(c => ({ header: c.header, key: c.key, width: c.width }));
-
-    // Header style
-    ws.getRow(1).font = { bold: true };
-    ws.getRow(1).alignment = { vertical: 'middle', horizontal: 'left' };
-
-    // Add rows; apply date format where needed
-    for (const r of rows) {
-      const row = ws.addRow(r);
-      cols.forEach((c, i) => {
-        if (c.isDate) {
-          const cell = row.getCell(i + 1);
-          cell.numFmt = 'dd.mm.yyyy';
-        }
-      });
-    }
-
+    const built = mcrBuildWorkbook(type, month, currency, fxRate, fxNote);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    await wb.xlsx.write(res);
+    res.setHeader('Content-Disposition', `attachment; filename="${built.filename}"`);
+    await built.wb.xlsx.write(res);
     res.end();
   } catch (e) {
     console.error('GET /report/monthly-client failed:', e);
