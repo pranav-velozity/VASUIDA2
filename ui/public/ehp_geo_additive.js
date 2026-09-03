@@ -361,16 +361,29 @@
 
   // ── downloads ──
   let _reports = [];
-  async function download(id, name, fmt) {
+  // A dated report asks for its own day rather than using the month selector, because the
+  // question is "what was on the shelf on this date" — which may not be in the selected
+  // month at all.
+  async function download(id, name, fmt, dated) {
+    let asOf = null;
+    if (dated) {
+      const suggestion = new Date().toISOString().slice(0, 10);
+      asOf = prompt('Stock on hand at the end of which day?  (YYYY-MM-DD)', suggestion);
+      if (!asOf) return;
+      asOf = String(asOf).trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(asOf)) { alert('Enter the date as YYYY-MM-DD, for example 2026-08-14.'); return; }
+    }
     const t = await tok();
     const headers = {}; if (t) headers.Authorization = 'Bearer ' + t;
     if (window.pinpointClient) headers['x-pinpoint-client'] = window.pinpointClient;
-    const r = await fetch(apiBase() + '/ehp/report/' + id + '?month=' + encodeURIComponent(_month), { headers });
+    const qs = dated ? 'as_of=' + encodeURIComponent(asOf)
+                     : 'month=' + encodeURIComponent(_month);
+    const r = await fetch(apiBase() + '/ehp/report/' + id + '?' + qs, { headers });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const blob = await r.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `EHP_${name.replace(/[^A-Za-z0-9]+/g, '_')}_${_month}.${fmt}`;
+    a.download = `EHP_${name.replace(/[^A-Za-z0-9]+/g, '_')}_${dated ? asOf : _month}.${fmt}`;
     document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
   }
@@ -536,7 +549,7 @@
 
       <div class="eg-sec">Reports &amp; downloads</div>
       <div class="eg-tiles">
-        ${_reports.map(r => `<button class="eg-tile" data-rep="${esc(r.id)}" data-rn="${esc(r.name)}" data-rf="${esc(r.format)}">
+        ${_reports.map(r => `<button class="eg-tile" data-rep="${esc(r.id)}" data-rn="${esc(r.name)}" data-rf="${esc(r.format)}" data-rd="${r.dated ? '1' : ''}">
           <div class="eg-thead">
             <span class="eg-ico">${icon(r.id)}</span>
             <span class="eg-tn">${esc(r.name)}</span>
@@ -546,7 +559,8 @@
         </button>`).join('')}
       </div>
       <div class="eg-note" style="margin-top:10px;">
-        All reports cover the calendar month selected above and contain quantities only — no rates or values.
+        Reports cover the calendar month selected above and contain quantities only — no rates or values.
+        Stock on hand asks for its own date.
       </div>`;
 
     el('eg-month').addEventListener('change', e => { _month = e.target.value; _sel = null; load(); });
@@ -560,7 +574,8 @@
       const label = b.querySelector('.eg-tn');
       const orig = label.textContent;
       b.disabled = true; label.textContent = 'Preparing…';
-      try { await download(b.getAttribute('data-rep'), b.getAttribute('data-rn'), b.getAttribute('data-rf')); }
+      try { await download(b.getAttribute('data-rep'), b.getAttribute('data-rn'), b.getAttribute('data-rf'),
+                           b.getAttribute('data-rd') === '1'); }
       catch (e) { label.textContent = 'Failed — retry'; setTimeout(() => { label.textContent = orig; }, 2500); }
       finally { setTimeout(() => { b.disabled = false; if (label.textContent === 'Preparing…') label.textContent = orig; }, 400); }
     }));
@@ -614,7 +629,7 @@
     // Capability re-check only; it early-returns unless the client actually changed.
     setInterval(() => { if (document.visibilityState === 'visible') refreshEnabled(); }, 15000);
     if (location.hash === '#ehp-geo') setTimeout(open, 600);
-    console.log('[ehp-geo] module v8 loaded');
+    console.log('[ehp-geo] module v9 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
