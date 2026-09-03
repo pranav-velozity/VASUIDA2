@@ -11031,6 +11031,20 @@ function ehpOnHand(clientId, sku) {
            .get(clientId, sku).n;
 }
 
+// On hand at the END of a given day. Every movement is a dated transaction, so a
+// point-in-time balance is just the sum of everything up to that date — no snapshots, and
+// it stays correct however far back you ask.
+//
+// One caveat this cannot solve: a stock count posts an adjustment on the day it happens, so
+// asking for a date BEFORE a correcting count returns what the system believed at the time,
+// not the truth discovered later. That is right for an audit and misleading for planning,
+// which is why the report prints the last count date beside the figure.
+function ehpOnHandAsOf(clientId, sku, asOf) {
+  return db.prepare(`SELECT COALESCE(SUM(qty_each),0) n FROM ehp_inventory_txn
+                     WHERE client_id=? AND sku=? AND date(created_at) <= ?`)
+           .get(clientId, sku, asOf).n;
+}
+
 // Shopify sends a product-level SKU (oxyshredstickpack-us), never a flavour SKU. The map
 // is the only place that knows which line it is — deliberately not a field on the recipe,
 // so recipe versioning does not have to re-declare it every time.
@@ -15314,6 +15328,11 @@ const EHP_REPORTS = [
     desc: 'Every batch dispatched in the month: date, reference, product line, envelopes and orders.' },
   { id: 'inventory-cover',  name: 'Inventory & days of cover', format: 'csv',
     desc: 'Closing stock per flavour with burn rate and days of cover at month end.' },
+  // Deliberately separate from inventory-cover rather than folded into it: that report is
+  // month-based and answers "how did the month end", this answers "what was on the shelf
+  // on a given day". One report doing both would leave every column ambiguous.
+  { id: 'stock-as-at',      name: 'Stock on hand as at a date', format: 'csv', dated: true,
+    desc: 'Sticks on hand per flavour at the end of any chosen day, with the last movement and last count before it.' },
   { id: 'count-variance',   name: 'Cycle count variance', format: 'csv',
     desc: 'Counted versus ledger at each cycle count, with the adjustment posted.' },
   { id: 'geography',        name: 'Geographic summary', format: 'csv',
@@ -15424,6 +15443,40 @@ app.get('/ehp/report/:id', authenticateRequest, auditLog('ehp_report_download'),
         ['Posted at', 'Flavour SKU', 'Flavour', 'Product line', 'Movement', 'Sticks (signed)', 'Source', 'Reference', 'Lot'],
         rows.map(r => [r.created_at, r.sku, r.flavour || '', r.product_line || '', r.txn_type,
                        r.qty_each, r.ref_type || '', r.ref_id || '', r.lot_code || '']));
+    }
+
+    if (id === 'stock-as-at') {
+      // Its own date, independent of the month selector — the whole point is asking about a
+      // specific day, which may not be in the selected month at all.
+      const asOf = String(req.query.as_of || '').trim() || new Date().toISOString().slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(asOf))
+        return res.status(400).json({ error: 'as_of must be YYYY-MM-DD' });
+
+      const comps = db.prepare(`SELECT sku, name, flavour, product_line FROM ehp_sku
+                                WHERE client_id=? AND active=1 AND is_component=1
+                                ORDER BY product_line, sku`).all(c);
+      const rows = comps.map(k => {
+        const onHand = ehpOnHandAsOf(c, k.sku, asOf);
+        const last = db.prepare(`SELECT date(created_at) d, txn_type FROM ehp_inventory_txn
+                                 WHERE client_id=? AND sku=? AND date(created_at) <= ?
+                                 ORDER BY created_at DESC LIMIT 1`).get(c, k.sku, asOf);
+        // Whether the figure is counted truth or an estimate since the last count is the
+        // difference between a number you can act on and one you cannot.
+        let lastCount = null;
+        try {
+          lastCount = db.prepare(`SELECT date(counted_at) d FROM ehp_stock_count
+                                  WHERE client_id=? AND sku=? AND date(counted_at) <= ?
+                                  ORDER BY counted_at DESC LIMIT 1`).get(c, k.sku, asOf);
+        } catch (e) { /* table may not exist on an older database */ }
+        const stale = last ? Math.floor((Date.parse(asOf) - Date.parse(last.d)) / 86400000) : '';
+        return [k.sku, k.flavour || k.name || '', k.product_line || '', onHand,
+                last ? last.d : '', last ? last.txn_type : '', stale,
+                lastCount ? lastCount.d : 'never counted'];
+      });
+      return sendCsv(res, `EHP_Stock_On_Hand_${c}_${asOf}.csv`,
+        ['Flavour SKU', 'Flavour', 'Product line', `Sticks on hand at ${asOf}`,
+         'Last movement', 'Movement type', 'Days since last movement', 'Last stock count on or before'],
+        rows);
     }
 
     if (id === 'inventory-cover') {
