@@ -196,6 +196,113 @@
   }
 
   // ── Assembly: queue + batches ──
+  // ── Envelope photos ──
+  // Resized in the browser before upload. A phone original is 4-6MB; a carousel pulling
+  // several of those is heavy on the bench connection and on egress, and none of that
+  // detail survives being drawn at tile size. 1600px on the long edge at quality 82 stays
+  // sharp full-screen on a laptop and is roughly a tenth of the bytes.
+  const PHOTO_MAX_EDGE = 1600, PHOTO_QUALITY = 0.82, PHOTO_MIN_EDGE = 600;
+
+  function resizePhoto(file) {
+    return new Promise((resolve, reject) => {
+      const img = new Image(), url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const long = Math.max(img.width, img.height);
+        if (long < PHOTO_MIN_EDGE)
+          return reject(new Error(`That image is only ${img.width}x${img.height}. Please use a photo at least ${PHOTO_MIN_EDGE}px on the long edge.`));
+        // Never upscale — stretching a small photo only makes it soft.
+        const scale = long > PHOTO_MAX_EDGE ? PHOTO_MAX_EDGE / long : 1;
+        const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+        const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+        cv.getContext('2d').drawImage(img, 0, 0, w, h);
+        cv.toBlob(b => b ? resolve({ blob: b, w, h }) : reject(new Error('Could not process that image.')),
+                  'image/jpeg', PHOTO_QUALITY);
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('That file could not be read as an image.')); };
+      img.src = url;
+    });
+  }
+
+  async function openPhotoUpload() {
+    let d = { photos: [], total: 0 };
+    try { d = await req('/ehp/photos?all=1'); } catch (e) {}
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.34);z-index:9750;display:flex;'
+      + 'align-items:flex-start;justify-content:center;padding:24px 18px;overflow:auto;';
+    ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+    const list = (ps) => ps.length
+      ? ps.map(p => `<div style="display:flex;gap:10px;align-items:center;padding:7px 0;
+            border-bottom:.5px solid rgba(0,0,0,.06);">
+          <img src="${esc(p.url)}" style="width:52px;height:40px;object-fit:cover;border-radius:6px;">
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:11px;color:${DARK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(p.caption || 'No caption')}</div>
+            <div style="font-size:9px;color:${LIGHT};">${esc(String(p.created_at || '').slice(0, 16))}</div></div>
+          <button class="ehp-btn g" data-del="${esc(p.id)}" style="padding:5px 10px;color:${RED};">Remove</button>
+        </div>`).join('')
+      : `<div style="font-size:11px;color:${LIGHT};padding:12px 0;">No photos yet.</div>`;
+
+    ov.innerHTML = `<div style="background:#fff;border-radius:14px;width:min(560px,100%);padding:20px 22px;
+        box-shadow:0 18px 60px rgba(0,0,0,.22);">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;">
+        <div><div style="font-size:15px;font-weight:700;">Envelope photos</div>
+          <div style="font-size:11px;color:${LIGHT};">Shown on the EHP dashboard. The most recent ${d.rotate_limit || 20} rotate.</div></div>
+        <button id="px" style="background:none;border:0;font-size:22px;color:${LIGHT};cursor:pointer;">&times;</button>
+      </div>
+      <label style="display:block;font-size:11px;font-weight:600;color:${MID};margin:14px 0 4px;">Caption (optional)</label>
+      <input id="pcap" placeholder="e.g. OxyShred stick packs, ready to ship"
+             style="width:100%;padding:9px 11px;border:.5px solid rgba(0,0,0,.14);border-radius:9px;font:inherit;font-size:13px;">
+      <label style="display:block;font-size:11px;font-weight:600;color:${MID};margin:12px 0 4px;">Photo</label>
+      <input id="pfile" type="file" accept="image/*" capture="environment" style="width:100%;font-size:12px;">
+      <button class="ehp-btn" id="pup" style="width:100%;margin-top:12px;">Upload</button>
+      <div id="pmsg" style="font-size:11px;margin-top:8px;"></div>
+      <div style="font-size:10px;font-weight:700;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;margin:16px 0 2px;">
+        Uploaded &middot; ${d.total || 0}</div>
+      <div id="plist">${list(d.photos || [])}</div>
+    </div>`;
+    document.body.appendChild(ov);
+
+    const msg = (t, c) => { const m = ov.querySelector('#pmsg'); m.style.color = c || MID; m.textContent = t; };
+    ov.querySelector('#px').addEventListener('click', () => ov.remove());
+
+    const wireDel = () => ov.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
+      if (!confirm('Remove this photo from the dashboard?')) return;
+      b.disabled = true;
+      try {
+        await req('/ehp/photo/' + encodeURIComponent(b.getAttribute('data-del')), { method: 'DELETE' });
+        const nd = await req('/ehp/photos?all=1');
+        ov.querySelector('#plist').innerHTML = list(nd.photos || []); wireDel();
+        window.dispatchEvent(new CustomEvent('ehp:photos-changed'));
+      } catch (e) { msg('Could not remove: ' + (e.message || e), RED); b.disabled = false; }
+    }));
+    wireDel();
+
+    ov.querySelector('#pup').addEventListener('click', async function () {
+      const f = ov.querySelector('#pfile').files[0];
+      if (!f) return msg('Choose a photo first.', RED);
+      this.disabled = true; msg('Resizing…');
+      try {
+        const { blob, w, h } = await resizePhoto(f);
+        msg(`Uploading ${w}×${h}, ${Math.round(blob.size / 1024)}KB…`);
+        const fd = new FormData();
+        fd.append('file', blob, (f.name || 'photo').replace(/\.\w+$/, '') + '.jpg');
+        fd.append('caption', ov.querySelector('#pcap').value || '');
+        const t = await tok();
+        const headers = {}; if (t) headers.Authorization = 'Bearer ' + t;
+        if (window.pinpointClient) headers['x-pinpoint-client'] = window.pinpointClient;
+        const r = await fetch(apiBase() + '/ehp/photo', { method: 'POST', headers, body: fd });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+        msg('Uploaded.', GREEN);
+        ov.querySelector('#pfile').value = ''; ov.querySelector('#pcap').value = '';
+        const nd = await req('/ehp/photos?all=1');
+        ov.querySelector('#plist').innerHTML = list(nd.photos || []); wireDel();
+        window.dispatchEvent(new CustomEvent('ehp:photos-changed'));
+      } catch (e) { msg(e.message || String(e), RED); }
+      this.disabled = false;
+    });
+  }
+
   // ── Cancellation alerts ──
   // Polled separately and cheaply: the Assembly render is expensive and runs once a minute,
   // but a cancelled order that has been assembled may be minutes from handover, so this
@@ -311,6 +418,9 @@
         </div>`).join('');
     body.innerHTML = `
       <div id="ehp-alerts"></div>
+      <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
+        <button class="ehp-btn g" id="ehp-photo-btn">Upload envelope photos</button>
+      </div>
       <div class="ehp-kpis">
         ${lineCards || `<div class="ehp-kpi"><div class="ehp-kl">Queued orders</div><div class="ehp-kv">${nfmt(q.queued_orders)}</div><div class="ehp-ks">awaiting a batch</div></div>`}
         <div class="ehp-kpi" id="ehp-kpi-queued" style="cursor:pointer;" title="Show the orders waiting for a batch"><div class="ehp-kl">Queued envelopes</div><div class="ehp-kv">${nfmt(q.queued_envelopes)}</div><div class="ehp-ks">billable units &middot; <span style="text-decoration:underline">view orders</span></div></div>
@@ -374,6 +484,7 @@
       } catch (e) { el('ehp-batchmsg').innerHTML = msg('e', e.message || String(e)); el('ehp-mkbatch').disabled = false; }
     });
     el('ehp-kpi-queued')?.addEventListener('click', showQueued);
+    el('ehp-photo-btn')?.addEventListener('click', openPhotoUpload);
     paintAlerts();
 
     body.querySelectorAll('[data-asm]').forEach(x => x.addEventListener('click', async () => {
@@ -1044,13 +1155,16 @@
   }
   function stopLive() { if (_liveTimer) { clearInterval(_liveTimer); _liveTimer = null; } }
 
+  // The empty dashboard tile routes here, so the upload surface is discoverable from both.
+  window.addEventListener('ehp:upload-photos', () => openPhotoUpload());
+
   function init() {
     styles();
     window.openEhpOps = open;
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(() => { if (document.visibilityState === 'visible') refreshEnabled(); }, 15000);
-    console.log('[ehp-ops] module v17 loaded');
+    console.log('[ehp-ops] module v18 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

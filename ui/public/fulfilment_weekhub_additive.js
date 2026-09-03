@@ -40,6 +40,21 @@
       .fwh-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px;}
       .fwh-kpi{background:#fff;border:0.5px solid rgba(0,0,0,0.09);border-radius:12px;padding:13px 15px;
                box-shadow:0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.06);}
+      /* The tile is a signal, not a gallery — at this size a photo is a thumbnail. The
+         modal is where the photos are actually looked at. */
+      .fwh-photo{position:relative;overflow:hidden;cursor:pointer;padding:0;min-height:92px;}
+      .fwh-photo .fwh-kl{position:absolute;top:11px;left:14px;z-index:2;color:#fff;
+                         text-shadow:0 1px 3px rgba(0,0,0,.55);}
+      .fwh-photo img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+                     opacity:0;transition:opacity .7s ease;}
+      .fwh-photo img.on{opacity:1;}
+      .fwh-photo .shade{position:absolute;inset:0;z-index:1;
+        background:linear-gradient(180deg,rgba(0,0,0,.42) 0%,rgba(0,0,0,0) 45%,rgba(0,0,0,.55) 100%);}
+      .fwh-photo .cap{position:absolute;left:14px;right:14px;bottom:10px;z-index:2;color:#fff;
+        font-size:10px;line-height:1.3;text-shadow:0 1px 3px rgba(0,0,0,.6);
+        overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .fwh-photo.empty{padding:13px 15px;}
+      .fwh-photo.empty .fwh-kl{position:static;color:${LIGHT};text-shadow:none;}
       .fwh-kl{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};}
       .fwh-kv{font-size:26px;font-weight:700;color:${DARK};margin-top:4px;letter-spacing:-0.02em;}
       .fwh-ks{font-size:10px;color:${MID};margin-top:1px;}
@@ -173,6 +188,7 @@
   // render() skips a week it has already drawn, so a receipt saved on another tab left the
   // tile showing a stale figure. Other EHP modules raise this after a write.
   window.addEventListener('ehp:changed', () => { _lastWeek = null; render(true); });
+  window.addEventListener('ehp:photos-changed', () => { _pi = 0; loadPhotos(true).then(paintPhoto); });
 
   const _prev = {};
   function shortTs(v) {
@@ -182,6 +198,82 @@
     return d.toLocaleString('en-US', { timeZone: 'America/Chicago', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:true });
   }
   // Highlight a tile whose value moved since the last refresh.
+  // ── Envelope photos ──
+  let _photos = [], _pi = 0, _photoTimer = null, _photoFetched = 0;
+
+  async function loadPhotos(force) {
+    // Photos change rarely; refetch every few minutes rather than on every hub render.
+    if (!force && Date.now() - _photoFetched < 5 * 60 * 1000) return;
+    try {
+      const d = await req('/ehp/photos');
+      _photos = (d.photos || []).filter(p => p.url);
+      _photoFetched = Date.now();
+    } catch (e) { /* leave whatever we had; a photo tile must never break the hub */ }
+  }
+
+  function paintPhoto() {
+    const tile = el('fwh-photo'), body = el('fwh-photo-body');
+    if (!tile || !body) return;
+    if (!_photos.length) {
+      tile.classList.add('empty');
+      body.innerHTML = `<div class="fwh-kv" style="font-size:15px;">Add photos</div>
+        <div class="fwh-ks">tap to upload from the floor</div>`;
+      return;
+    }
+    tile.classList.remove('empty');
+    const p = _photos[_pi % _photos.length];
+    const nxt = _photos[(_pi + 1) % _photos.length];
+    body.innerHTML = `<img src="${esc(p.url)}" alt="" class="on">
+      <div class="shade"></div>
+      <div class="cap">${esc(p.caption || 'From the packing bench')}${_photos.length > 1 ? ` &middot; ${(_pi % _photos.length) + 1}/${_photos.length}` : ''}</div>`;
+    // Pre-load the next one so the cross-fade does not flash a blank frame.
+    if (nxt && nxt !== p) { const im = new Image(); im.src = nxt.url; }
+  }
+
+  function startPhotos() {
+    if (_photoTimer) return;
+    _photoTimer = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      if (!el('fwh-photo')) return;
+      if (_photos.length > 1) { _pi++; paintPhoto(); }
+    }, 6000);
+  }
+
+  function openPhotos() {
+    if (!_photos.length) { window.dispatchEvent(new CustomEvent('ehp:upload-photos')); return; }
+    let i = _pi % _photos.length;
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.86);z-index:9800;display:flex;'
+      + 'align-items:center;justify-content:center;padding:24px;';
+    const draw = () => {
+      const p = _photos[i];
+      ov.innerHTML = `<div style="max-width:min(1000px,94vw);width:100%;text-align:center;">
+        <img src="${esc(p.url)}" style="max-width:100%;max-height:76vh;border-radius:12px;
+             box-shadow:0 20px 60px rgba(0,0,0,.5);">
+        <div style="color:#fff;font-size:13px;margin-top:12px;">${esc(p.caption || '')}</div>
+        <div style="color:rgba(255,255,255,.55);font-size:11px;margin-top:3px;">
+          ${esc(String(p.created_at || '').slice(0, 10))} &middot; ${i + 1} of ${_photos.length}</div>
+        <div style="margin-top:14px;display:flex;gap:10px;justify-content:center;">
+          <button id="pp" style="background:rgba(255,255,255,.14);color:#fff;border:0;border-radius:9px;padding:9px 16px;cursor:pointer;font:600 12px inherit;">&larr; Previous</button>
+          <button id="pn" style="background:rgba(255,255,255,.14);color:#fff;border:0;border-radius:9px;padding:9px 16px;cursor:pointer;font:600 12px inherit;">Next &rarr;</button>
+          <button id="pc" style="background:#fff;color:#1C1C1E;border:0;border-radius:9px;padding:9px 16px;cursor:pointer;font:600 12px inherit;">Close</button>
+        </div></div>`;
+      ov.querySelector('#pp').onclick = (e) => { e.stopPropagation(); i = (i - 1 + _photos.length) % _photos.length; draw(); };
+      ov.querySelector('#pn').onclick = (e) => { e.stopPropagation(); i = (i + 1) % _photos.length; draw(); };
+      ov.querySelector('#pc').onclick = () => close();
+    };
+    const key = (e) => {
+      if (e.key === 'Escape') close();
+      if (e.key === 'ArrowRight') { i = (i + 1) % _photos.length; draw(); }
+      if (e.key === 'ArrowLeft') { i = (i - 1 + _photos.length) % _photos.length; draw(); }
+    };
+    const close = () => { ov.remove(); document.removeEventListener('keydown', key); };
+    ov.addEventListener('click', e => { if (e.target === ov) close(); });
+    document.addEventListener('keydown', key);
+    draw();
+    document.body.appendChild(ov);
+  }
+
   function flashChanged(vals) {
     for (const [k, v] of Object.entries(vals)) {
       if (_prev[k] !== undefined && _prev[k] !== v) {
@@ -250,6 +342,9 @@
         </div>
       </div>
       <div class="fwh-kpis">
+        <div class="fwh-kpi fwh-photo" id="fwh-photo"><div class="fwh-kl">From the floor</div>
+          <div id="fwh-photo-body"><div class="fwh-kv" style="font-size:16px;">&mdash;</div>
+          <div class="fwh-ks">no photos yet</div></div></div>
         <div class="fwh-kpi" data-k="pallets"><div class="fwh-kl">Pallets received</div><div class="fwh-kv">${nf(s.pallets_received)}</div><div class="fwh-ks">billable inbound</div></div>
         <div class="fwh-kpi" data-k="orders"><div class="fwh-kl">Orders received</div><div class="fwh-kv">${nf(s.orders_received)}</div><div class="fwh-ks">${nf(s.envelopes_ordered)} envelopes</div></div>
         <div class="fwh-kpi" data-k="assembled"><div class="fwh-kl">Envelopes assembled</div><div class="fwh-kv">${nf(s.envelopes_assembled)}</div><div class="fwh-ks">this week</div></div>
@@ -339,6 +434,11 @@
     drawCharts(ts);
     startExScroll(ex.length);
     wireSettings(ts.settings || {});
+    el('fwh-photo')?.addEventListener('click', openPhotos);
+    // Photos are fetched and drawn after the hub has rendered, so a slow image request can
+    // never delay the operational figures.
+    loadPhotos().then(() => { paintPhoto(); startPhotos(); });
+
     flashChanged({ pallets: s.pallets_received, orders: s.orders_received,
                    assembled: s.envelopes_assembled, dispatched: s.envelopes_dispatched, queue: queuedEnv });
   }
@@ -583,7 +683,7 @@
     // meant a needless pass fifteen times a minute.
     setInterval(() => { if (document.visibilityState === 'visible') check(); }, 15000);
     window.refreshFulfilmentWeekHub = () => render(true);
-    console.log('[fulfilment-weekhub] module v10 loaded');
+    console.log('[fulfilment-weekhub] module v11 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
