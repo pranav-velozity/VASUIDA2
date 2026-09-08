@@ -108,6 +108,9 @@
       .fwh-gauge canvas{max-height:104px;}
       .fwh-gsku{font-size:10px;font-weight:600;color:${DARK};margin-top:2px;
                 white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .fwh-scope{display:inline-flex;border:.5px solid rgba(0,0,0,.14);border-radius:8px;overflow:hidden;flex:0 0 auto;}
+      .fwh-scope button{border:0;background:#fff;color:${MID};font:600 10px inherit;padding:5px 11px;cursor:pointer;}
+      .fwh-scope button.on{background:${DARK};color:#fff;}
       .fwh-backlog{display:flex;align-items:center;gap:16px;margin-top:14px;padding:13px 16px;
                    border-radius:11px;border:0.5px solid rgba(0,0,0,.08);background:#FAFAFA;}
       .fwh-bnum{font-size:34px;font-weight:700;letter-spacing:-.02em;line-height:1;}
@@ -189,6 +192,11 @@
   // tile showing a stale figure. Other EHP modules raise this after a write.
   window.addEventListener('ehp:changed', () => { _lastWeek = null; render(true); });
   window.addEventListener('ehp:photos-changed', () => { _pi = 0; loadPhotos(true).then(paintPhoto); });
+
+  const scopeToggle = () => `<div class="fwh-scope">
+      <button data-scope="all"  class="${_scope === 'all' ? 'on' : ''}">All time</button>
+      <button data-scope="week" class="${_scope === 'week' ? 'on' : ''}">Week</button>
+    </div>`;
 
   const _prev = {};
   function shortTs(v) {
@@ -284,7 +292,7 @@
     }
   }
 
-  function draw(host, s, q, batches, inv, billing, rng, ts) {
+  function draw(host, s, q, batches, inv, billing, rng, ts, tsRange) {
     ts = ts || {};
     const queuedOrders = q ? q.queued_orders : s.queued_orders;
     const queuedEnv = q ? q.queued_envelopes : s.queued_envelopes;
@@ -382,16 +390,27 @@
 
       <div class="fwh-grid">
         <div class="fwh-card">
-          <div class="fwh-t">Fulfilment flow</div>
-          <div class="fwh-s">Week of ${esc(rng.from)} &middot; ${esc(rng.to)}</div>
-          <div class="fwh-flow">
-            ${node('📦', 'Received', nf(s.pallets_received), 'pallets', s.pallets_received > 0)}
-            ${node('🧾', 'Ordered', nf(s.envelopes_ordered), 'envelopes', s.envelopes_ordered > 0)}
-            ${node('🧰', 'Assembled', nf(s.envelopes_assembled), 'envelopes', s.envelopes_assembled > 0)}
-            ${node('📮', 'Lodged with USPS', nf(s.envelopes_dispatched), 'envelopes', s.envelopes_dispatched > 0, true)}
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+            <div><div class="fwh-t">Fulfilment flow</div>
+              <div class="fwh-s">${_scope === 'all'
+                ? `All time${s.first_activity ? ` &middot; since ${esc(String(s.first_activity).slice(0, 10))}` : ''}`
+                : `Week of ${esc(rng.from)} &middot; ${esc(rng.to)}`}</div></div>
+            ${scopeToggle()}
           </div>
+          ${(() => {
+            // Same four stages, counted over whichever scope is selected.
+            const a = (_scope === 'all' && s.all_time) ? s.all_time : s;
+            return `<div class="fwh-flow">
+            ${node('📦', 'Received', nf(a.pallets_received), 'pallets', a.pallets_received > 0)}
+            ${node('🧾', 'Ordered', nf(a.envelopes_ordered), 'envelopes', a.envelopes_ordered > 0)}
+            ${node('🧰', 'Assembled', nf(a.envelopes_assembled), 'envelopes', a.envelopes_assembled > 0)}
+            ${node('📮', 'Lodged with USPS', nf(a.envelopes_dispatched), 'envelopes', a.envelopes_dispatched > 0, true)}
+          </div>`; })()}
           <div style="font-size:10px;color:${LIGHT};margin-top:2px;">
-            All four are totals for the selected week &mdash; see Open position above for where things stand overall. USPS transit is not shown: letter-mail samples carry no tracking, so there is no signal after lodgement.
+            ${_scope === 'all'
+              ? 'Totals since the first order. Switch to Week for the figures behind a weekly invoice.'
+              : 'Totals for the selected week only &mdash; switch to All time for where things actually stand.'}
+            USPS transit is not shown: letter-mail samples carry no tracking, so there is no signal after lodgement.
           </div>
           ${(() => {
             // The real backlog is everything not yet lodged, whenever it arrived: assembled
@@ -446,8 +465,11 @@
 
       <div class="fwh-grid" style="margin-top:12px;">
         <div class="fwh-card">
-          <div class="fwh-t"><span>Throughput</span><button class="fwh-cfg" data-cfg="sla" title="Edit SLA">&#9881;</button></div>
-          <div class="fwh-s">Cumulative across the week. <b>Backlog</b> is ordered but not yet lodged &mdash; above the dashed SLA limit means dispatch is falling behind intake.</div>
+          <div class="fwh-t"><span>Throughput</span>
+            <span style="display:flex;gap:8px;align-items:center;">${scopeToggle()}<button class="fwh-cfg" data-cfg="sla" title="Edit SLA">&#9881;</button></span></div>
+          <div class="fwh-s">Cumulative ${_scope === 'all'
+            ? `since ${esc((tsRange && tsRange.from) || '')}` : 'across the week'}.
+            <b>Backlog</b> is ordered but not yet lodged &mdash; above the dashed SLA limit means dispatch is falling behind intake.</div>
           <div style="height:210px;position:relative;"><canvas id="fwh-c-flow"></canvas></div>
         </div>
         <div class="fwh-card">
@@ -466,6 +488,14 @@
     drawCharts(ts);
     startExScroll(ex.length);
     wireSettings(ts.settings || {});
+    host.querySelectorAll('[data-scope]').forEach(b => b.addEventListener('click', () => {
+      const v = b.getAttribute('data-scope');
+      if (v === _scope) return;
+      setScope(v);
+      _lastWeek = null;                 // force a refetch: the chart range changes with scope
+      render(true);
+    }));
+
     el('fwh-photo')?.addEventListener('click', openPhotos);
     // Photos are fetched and drawn after the hub has rendered, so a slow image request can
     // never delay the operational figures.
@@ -560,19 +590,33 @@
     if (!ts || !window.Chart) return;
     const labels = (ts.series || []).map(d => d.date.slice(5));
     const cum = (key) => { let a = 0; return (ts.series || []).map(d => (a += d[key] || 0)); };
+    // A week is seven points; all time can be a hundred and eighty. Thin the labels and drop
+    // the point markers on a long series, or the axis becomes an unreadable smear and the
+    // line disappears under its own dots.
+    const many = labels.length > 31;
+    const tickStep = many ? Math.ceil(labels.length / 10) : 1;
+    const pointR = many ? 0 : 2;
 
     // 1. running throughput — lines, not bars
     const backlog = ts.backlog || [];
     const limit = ts.backlog_limit || 0;
     mkChart('fwh-c-flow', { type: 'line', data: { labels, datasets: [
-      { label: 'Ordered',   data: cum('envelopes_ordered'),   borderColor: PALETTE[1], backgroundColor: 'rgba(14,165,233,.10)', fill: true, tension: .32, pointRadius: 2, borderWidth: 2 },
-      { label: 'Assembled', data: cum('envelopes_assembled'), borderColor: PALETTE[2], backgroundColor: 'transparent', tension: .32, pointRadius: 2, borderWidth: 2 },
-      { label: 'Lodged',    data: cum('envelopes_dispatched'),borderColor: PALETTE[0], backgroundColor: 'transparent', tension: .32, pointRadius: 2, borderWidth: 2 },
+      { label: 'Ordered',   data: cum('envelopes_ordered'),   borderColor: PALETTE[1], backgroundColor: 'rgba(14,165,233,.10)', fill: true, tension: .32, pointRadius: pointR, borderWidth: 2 },
+      { label: 'Assembled', data: cum('envelopes_assembled'), borderColor: PALETTE[2], backgroundColor: 'transparent', tension: .32, pointRadius: pointR, borderWidth: 2 },
+      { label: 'Lodged',    data: cum('envelopes_dispatched'),borderColor: PALETTE[0], backgroundColor: 'transparent', tension: .32, pointRadius: pointR, borderWidth: 2 },
       { label: 'Backlog',   data: backlog, borderColor: RED, backgroundColor: 'rgba(179,63,64,.10)',
         fill: true, tension: .32, pointRadius: 0, borderWidth: 1.5, borderDash: [4,3] },
       ...(limit > 0 ? [{ label: `SLA limit (${nf(limit)})`, data: labels.map(()=>limit),
         borderColor: 'rgba(179,63,64,.5)', borderDash: [2,4], pointRadius: 0, borderWidth: 1, fill: false }] : []),
-    ] }, options: baseOpts });
+    ] }, options: {
+      ...baseOpts,
+      scales: { ...baseOpts.scales,
+        // maxTicksLimit alone still crowds a 180-point axis; stepping the callback drops
+        // labels outright and leaves the ones that remain readable.
+        x: { ...baseOpts.scales.x, ticks: { ...baseOpts.scales.x.ticks, autoSkip: false,
+             maxRotation: many ? 45 : 0, minRotation: 0,
+             callback(v, i) { return (i % tickStep === 0) ? this.getLabelForValue(v) : ''; } } } },
+    } });
 
     // 2. days of cover — radial gauges, one per flavour
     // Keep flavours with no burn rate. Filtering them out meant freshly received stock
@@ -631,7 +675,7 @@
         datasets: [
           ...inv.map((i, k) => ({ label: i.sku, data: i.points.map(p => p.on_hand),
             borderColor: PALETTE[(k + 1) % PALETTE.length], backgroundColor: 'transparent',
-            tension: .3, pointRadius: 2, borderWidth: 2 })),
+            tension: .3, pointRadius: pointR, borderWidth: 2 })),
           // One reorder line at the highest reorder point — below it, an order placed today lands late.
           ...(() => { const rp = Math.max(0, ...inv.map(i => i.reorder_point || 0));
               return rp > 0 ? [{ label: `Reorder point (${nf(rp)})`, data: labels.map(()=>rp),
@@ -715,7 +759,7 @@
     // meant a needless pass fifteen times a minute.
     setInterval(() => { if (document.visibilityState === 'visible') check(); }, 15000);
     window.refreshFulfilmentWeekHub = () => render(true);
-    console.log('[fulfilment-weekhub] module v12 loaded');
+    console.log('[fulfilment-weekhub] module v13 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
