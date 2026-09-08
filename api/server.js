@@ -3598,6 +3598,13 @@ function buildExceptionReport(opts) {
     if (hasContent) reportWeeks.push(wkBlock);
   }
 
+  // Ownership is scoped to the CURRENT week only. Older weeks stay in the report for
+  // context, but an action list that reaches back three weeks stops being actionable.
+  const currentWeek = reportWeeks.find(w => w.week_start === currentWs);
+  const department_ownership = currentWeek
+    ? buildDepartmentOwnership(currentWeek.receiving || [])
+    : null;
+
   return {
     generated_at: now.toISOString(),
     current_week_start: currentWs,
@@ -3605,6 +3612,7 @@ function buildExceptionReport(opts) {
     age_cutoff_days: AGE_CUTOFF_DAYS,
     age_cutoff_week: cutoffWs,
     weeks: reportWeeks,
+    department_ownership,
     summary,
   };
 }
@@ -3848,6 +3856,106 @@ function emailFreightMode(planRow) {
   if (raw.startsWith('air')) return 'Air';
   if (raw.startsWith('sea') || raw.startsWith('ocean') || raw.startsWith('fcl') || raw.startsWith('lcl')) return 'Sea';
   return null;
+}
+
+// ── Department ownership ──
+// The first four characters of a PO are its department code, and every department has a
+// category admin who is the person who can actually chase it. The supplier grouping below
+// answers "which factory is late"; this answers "who at the client needs to act".
+db.exec(`
+CREATE TABLE IF NOT EXISTS department_owner (
+  code       TEXT PRIMARY KEY,
+  segment    TEXT,
+  name       TEXT,
+  admin      TEXT NOT NULL,
+  active     INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+
+(function seedDepartmentOwners() {
+  const n = db.prepare('SELECT COUNT(*) n FROM department_owner').get().n;
+  if (n > 0) return;
+  const rows = [
+    ['WAPP','WADA','Womens Apparel — Own Brand','Christine Joyce Gallardo'],
+    ['WAPP','WALO','Womens Apparel — Own Brand','Christine Joyce Gallardo'],
+    ['WAPP','WAAE','Womens Apparel — Own Brand','Mark Baybay'],
+    ['WAPP','WAMI','Womens Apparel — Own Brand','Ann-Kathrin Monserrate'],
+    ['WAPP','WAFA','Womens Apparel — Own Brand','Kenneth Mallari'],
+    ['WAPP','WATU','Womens Apparel — Own Brand','Kenneth Mallari'],
+    ['WAPP','WACA','Womens Apparel — Own Brand','Kenneth Mallari'],
+    ['WAPP','WACN','Womens Apparel — Own Brand','Kenneth Mallari'],
+    ['WAPP','WAAT','Womens Apparel — Own Brand','Grace Bonilla'],
+    ['WAPP','WACY','Womens Apparel — Own Brand','Grace Bonilla'],
+    ['WFTW','WFDA','Womens Footwear — Own Brand','Christine Joyce Gallardo'],
+    ['WFTW','WFAT','Womens Footwear — Own Brand','Grace Bonilla'],
+    ['WFTW','WFAE','Womens Footwear — Own Brand','Ann-Kathrin Monserrate'],
+    ['MAPP','MAPS','Mens Apparel — Own Brand','Ann-Kathrin Monserrate'],
+    ['MAPP','MAAE','Mens Apparel — Own Brand','Ann-Kathrin Monserrate'],
+    ['MACP','MAEB','Mens Accessories — Own Brand','Ann-Kathrin Monserrate'],
+    ['MFPL','MAEF','Mens Footwear — Own Brand','Ann-Kathrin Monserrate'],
+  ];
+  const ins = db.prepare(`INSERT OR IGNORE INTO department_owner (code, segment, name, admin) VALUES (?,?,?,?)`);
+  for (const [seg, code, name, admin] of rows) ins.run(code, seg, name, admin);
+  console.log(`[department_owner] seeded ${rows.length} department code(s)`);
+})();
+
+const DEPT_UNASSIGNED = 'Owner To Be Assigned';
+const deptCodeOf = (po) => String(po || '').trim().toUpperCase().slice(0, 4);
+
+function deptOwnerMap() {
+  const m = new Map();
+  for (const r of db.prepare('SELECT * FROM department_owner WHERE active=1').all()) m.set(r.code, r);
+  return m;
+}
+
+// Groups the UNRECEIVED POs by owner, then by department code. Owners with nothing
+// outstanding do not appear: this is an action list, not a roster.
+function buildDepartmentOwnership(rows) {
+  const map = deptOwnerMap();
+  const late = (rows || []).filter(r => r.status === 'off_track');
+  if (!late.length) return null;
+
+  const byOwner = new Map();
+  for (const r of late) {
+    const code = deptCodeOf(r.po_number);
+    const d = map.get(code);
+    const admin = (d && d.admin) || DEPT_UNASSIGNED;
+    if (!byOwner.has(admin)) byOwner.set(admin, { admin, total: 0, codes: new Map() });
+    const o = byOwner.get(admin);
+    o.total++;
+    if (!o.codes.has(code)) o.codes.set(code, { code, name: (d && d.name) || null, pos: [] });
+    o.codes.get(code).pos.push({ po: r.po_number, supplier: r.supplier || '' });
+  }
+
+  const total = late.length;
+  const owners = Array.from(byOwner.values())
+    .map(o => ({
+      admin: o.admin,
+      count: o.total,
+      // Concentration: this owner's share of everything outstanding. The blocks sum to 100%.
+      pct: Math.round(o.total / total * 100),
+      codes: Array.from(o.codes.values())
+        .map(c => {
+          // When every PO under a code comes from one supplier, name it once on the code
+          // line instead of repeating it against each PO. The repetition is noise; its
+          // absence is information.
+          const sup = [...new Set(c.pos.map(x => emailShortSupplier(x.supplier)).filter(Boolean))];
+          return { ...c, count: c.pos.length, single_supplier: sup.length === 1 ? sup[0] : null,
+                   pct: Math.round(c.pos.length / total * 100) };
+        })
+        .sort((a, b) => b.count - a.count),
+    }))
+    // Whoever holds the most reads first.
+    .sort((a, b) => b.count - a.count || a.admin.localeCompare(b.admin));
+
+  return { total, owners, unassigned: owners.some(o => o.admin === DEPT_UNASSIGNED),
+           unmapped_codes: [...new Set(late.map(r => deptCodeOf(r.po_number)).filter(c => !map.has(c)))] };
+}
+
+// First two words, so a table cell stays readable.
+function emailShortSupplier(s) {
+  return String(s || '').trim().split(/\s+/).slice(0, 2).join(' ');
 }
 
 function buildReceivingRows(ws, planRows, summary) {
@@ -4538,6 +4646,66 @@ function renderEmailHtml(report, narrative) {
     return parts.join('\n');
   }).join('\n');
 
+  // Department ownership, grouped by the person who can act. Nested tables with fully
+  // inline styles — Outlook ignores flexbox and grid, and Gmail strips <style> blocks.
+  function renderDepartmentHtml(dept) {
+    if (!dept || !dept.owners || !dept.owners.length) return '';
+    // Concentration, so the colour marks where the volume sits rather than who is failing.
+    // Average share across five owners is 20%, so 30% is genuinely a hotspot.
+    const pillColour = (pct) => pct >= 30 ? ['#7f1d1d', '#fee2e2']
+                             : pct >= 15 ? ['#78350f', '#fef3c7']
+                             : ['#374151', '#f3f4f6'];
+    const top = dept.owners[0];
+    const blocks = dept.owners.map(o => {
+      const [fg, bg] = pillColour(o.pct);
+      const codeRows = o.codes.map(c => `
+        <tr><td style="padding: 7px 0 0 0;">
+          <table role="presentation" cellpadding="0" cellspacing="0" width="100%"><tr>
+            <td style="font-size: 12px; font-weight: 600; color: #111827; padding: 0 0 2px 0;">
+              ${escHtml(c.code)}${c.name ? ` <span style="font-weight: 400; color: ${mutedColor};">${escHtml(c.name)}</span>` : ''}
+              ${c.single_supplier ? `<span style="color: ${mutedColor}; font-weight: 400;"> &middot; ${escHtml(c.single_supplier)}</span>` : ''}
+            </td>
+            <td align="right" style="font-size: 12px; color: ${mutedColor}; white-space: nowrap;">${c.count} PO${c.count === 1 ? '' : 's'}</td>
+          </tr></table>
+          <div style="font-size: 11px; color: #4b5563; line-height: 1.7; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;">
+            ${c.pos.map(x => c.single_supplier
+                ? escHtml(x.po)
+                : `${escHtml(x.po)} <span style="color: ${mutedColor}; font-family: inherit;">(${escHtml(emailShortSupplier(x.supplier))})</span>`)
+              .join('<span style="color: #d1d5db;"> &nbsp;·&nbsp; </span>')}
+          </div>
+        </td></tr>`).join('');
+      return `
+        <tr><td style="padding: 0 0 14px 0;">
+          <table role="presentation" cellpadding="0" cellspacing="0" width="100%"
+                 style="border: 1px solid ${borderColor}; border-radius: 6px;">
+            <tr><td style="padding: 11px 14px 12px 14px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" width="100%"><tr>
+                <td style="font-size: 14px; font-weight: 700; color: #111827;">${escHtml(o.admin)}</td>
+                <td align="right" style="white-space: nowrap;">
+                  <span style="font-size: 12px; color: ${mutedColor};">${o.count} outstanding</span>
+                  <span style="font-size: 11px; font-weight: 700; color: ${fg}; background: ${bg};
+                               padding: 2px 8px; border-radius: 10px; margin-left: 8px;">${o.pct}%</span>
+                </td>
+              </tr></table>
+              <table role="presentation" cellpadding="0" cellspacing="0" width="100%">${codeRows}</table>
+            </td></tr>
+          </table>
+        </td></tr>`;
+    }).join('');
+
+    return `
+      <div style="${S.sectionHeader}">Outstanding by department owner</div>
+      <div style="font-size: 12px; color: ${mutedColor}; margin: 0 0 12px 0;">
+        ${dept.total} PO${dept.total === 1 ? '' : 's'} not yet received across
+        ${dept.owners.length} owner${dept.owners.length === 1 ? '' : 's'} &mdash;
+        <b style="color: #111827;">${escHtml(top.admin)}</b> holds the most at ${top.count}.
+        ${dept.unmapped_codes && dept.unmapped_codes.length
+          ? `<br><span style="color: #78350f;">${dept.unmapped_codes.length} department code(s) have no owner mapped: ${dept.unmapped_codes.map(escHtml).join(', ')}.</span>`
+          : ''}
+      </div>
+      <table role="presentation" cellpadding="0" cellspacing="0" width="100%">${blocks}</table>`;
+  }
+
   // Parse narrative into bullet list with inline-styled ul/li
   function renderNarrativeHtml(text) {
     const raw = String(text || '').trim();
@@ -4570,6 +4738,7 @@ function renderEmailHtml(report, narrative) {
   <div style="${S.subtitle}">${escHtml(report.current_week_label)} · generated ${escHtml(report.generated_at.slice(0, 16).replace('T', ' '))} UTC</div>
   <div style="${S.narrative}">${renderNarrativeHtml(narrative.text)}</div>
   <div style="${S.attribution}">${escHtml(attributionText)}</div>
+  ${renderDepartmentHtml(report.department_ownership)}
   ${weekSections || `<div style="${S.subtitle} padding: 40px; text-align: center;">No tracked items in the current window.</div>`}
   <div style="${S.summaryBox}">
     <strong>Summary:</strong> ${s.total_items} items tracked ·
