@@ -353,6 +353,33 @@
 
       </div>
 
+      ${(() => {
+        const a = s.all_time || {}, op = s.open || {};
+        // EHP work spills across weeks — a batch assembled on Friday dispatches on Monday.
+        // The row above answers "what happened since Monday"; this answers "where do we
+        // actually stand", which is the question the floor is asking.
+        return `<div class="fwh-card" style="margin-bottom:14px;">
+          <div class="fwh-t">Open position <span style="font-weight:400;color:${LIGHT};font-size:11px;">&mdash; all time, not this week</span></div>
+          <div class="fwh-kpis" style="margin-top:10px;margin-bottom:0;">
+            <div class="fwh-kpi"><div class="fwh-kl">Orders received</div>
+              <div class="fwh-kv">${nf(a.orders_received)}</div>
+              <div class="fwh-ks">${nf(a.envelopes_ordered)} envelopes, all time</div></div>
+            <div class="fwh-kpi"><div class="fwh-kl">Envelopes assembled</div>
+              <div class="fwh-kv">${nf(a.envelopes_assembled)}</div>
+              <div class="fwh-ks">all time</div></div>
+            <div class="fwh-kpi"><div class="fwh-kl">Envelopes dispatched</div>
+              <div class="fwh-kv">${nf(a.envelopes_dispatched)}</div>
+              <div class="fwh-ks">all time</div></div>
+            <div class="fwh-kpi"><div class="fwh-kl">In hand now</div>
+              <div class="fwh-kv" style="color:${(op.in_hand_envelopes || 0) > 0 ? AMBER : DARK}">${nf(op.in_hand_envelopes)}</div>
+              <div class="fwh-ks">${nf(op.in_hand_batches)} batch(es) assembled, not dispatched</div></div>
+            <div class="fwh-kpi"><div class="fwh-kl">Awaiting a batch</div>
+              <div class="fwh-kv">${nf(op.waiting_envelopes)}</div>
+              <div class="fwh-ks">${nf(op.waiting_orders)} order(s) queued</div></div>
+          </div>
+        </div>`;
+      })()}
+
       <div class="fwh-grid">
         <div class="fwh-card">
           <div class="fwh-t">Fulfilment flow</div>
@@ -364,10 +391,15 @@
             ${node('📮', 'Lodged with USPS', nf(s.envelopes_dispatched), 'envelopes', s.envelopes_dispatched > 0, true)}
           </div>
           <div style="font-size:10px;color:${LIGHT};margin-top:2px;">
-            All four are totals for this week. USPS transit is not shown: letter-mail samples carry no tracking, so there is no signal after lodgement.
+            All four are totals for the selected week &mdash; see Open position above for where things stand overall. USPS transit is not shown: letter-mail samples carry no tracking, so there is no signal after lodgement.
           </div>
           ${(() => {
-            const bl = ts.backlog_now != null ? ts.backlog_now : queuedEnv;
+            // The real backlog is everything not yet lodged, whenever it arrived: assembled
+            // and waiting, plus ordered and not yet batched. The weekly figure showed 53
+            // while 209 envelopes sat physically assembled from earlier weeks.
+            const bl = (s.open && s.open.backlog_envelopes != null)
+                     ? s.open.backlog_envelopes
+                     : (ts.backlog_now != null ? ts.backlog_now : queuedEnv);
             const lim = ts.backlog_limit || 0;
             const over = lim > 0 && bl > lim;
             const pct = lim > 0 ? Math.min(100, Math.round(bl / lim * 100)) : (bl > 0 ? 100 : 0);
@@ -375,7 +407,7 @@
             return `<div class="fwh-backlog">
               <div><div class="fwh-kl">Current backlog</div>
                 <div class="fwh-bnum" style="color:${col}">${nf(bl)}</div>
-                <div class="fwh-ks">envelopes ordered, not yet lodged</div></div>
+                <div class="fwh-ks">envelopes not yet lodged &middot; all time</div></div>
               <div class="fwh-bmeta">
                 <div style="font-size:11px;color:${over ? RED : MID};font-weight:${over ? '600' : '400'};">
                   ${lim > 0 ? (over
@@ -683,7 +715,7 @@
     // meant a needless pass fifteen times a minute.
     setInterval(() => { if (document.visibilityState === 'visible') check(); }, 15000);
     window.refreshFulfilmentWeekHub = () => render(true);
-    console.log('[fulfilment-weekhub] module v11 loaded');
+    console.log('[fulfilment-weekhub] module v12 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
