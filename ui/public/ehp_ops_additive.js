@@ -58,7 +58,11 @@
       .ehp-tabs{display:flex;gap:6px;padding:10px 20px 0;flex-wrap:wrap;}
       .ehp-tab{border:0.5px solid rgba(0,0,0,0.12);background:#fff;border-radius:999px;padding:5px 12px;font:600 11px/1 inherit;color:${MID};cursor:pointer;}
       .ehp-tab.on{border-color:${BRAND};color:${BRAND};}
-      .ehp-body{padding:16px 20px 22px;}
+      /* The panel is overflow:hidden, so without a scrollable body anything past the
+         panel height is clipped and unreachable. Short tabs never hit it; a two-hundred
+         row order list is cut off at whatever fits. */
+      .ehp-body{padding:16px 20px 22px;max-height:calc(90vh - 132px);overflow-y:auto;overscroll-behavior:contain;}
+      .ehp-ov.full .ehp-body{max-height:calc(100vh - 132px);}
       .ehp-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px;}
       .ehp-kpi{border:0.5px solid rgba(0,0,0,0.1);border-radius:10px;padding:11px 13px;
                background:#fff;box-shadow:0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.06);}
@@ -223,7 +227,8 @@
     };
 
     body.innerHTML = `
-      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;
+                  position:sticky;top:-16px;background:#fff;padding:8px 0;z-index:3;">
         <input id="ehp-osearch" placeholder="Search order number, name, address, city, state, postcode or batch"
                value="${esc(_oq)}" autocomplete="off"
                style="flex:1;min-width:280px;padding:9px 12px;border:.5px solid rgba(0,0,0,.14);
@@ -232,6 +237,7 @@
                 border-radius:9px;font:inherit;font-size:12px;">
           ${ORDER_STATES.map(([v, l]) => `<option value="${v}" ${v === _ostate ? 'selected' : ''}>${l}${v && bs[v] != null ? ` (${bs[v]})` : ''}</option>`).join('')}
         </select>
+        <button class="ehp-btn g" id="ehp-oxl">Download Excel</button>
       </div>
       <div style="font-size:11px;color:${LIGHT};margin-bottom:8px;">
         ${nfmt(d.returned)} of ${nfmt(d.total)} order(s)${_oq ? ` matching “${esc(_oq)}”` : ''}${d.total > d.returned ? ' — refine the search to narrow it' : ''}
@@ -265,6 +271,28 @@
       si.setSelectionRange(si.value.length, si.value.length);
     }
     el('ehp-ostate')?.addEventListener('change', e => { _ostate = e.target.value; render(); });
+
+    // Downloads the whole matching set, not the page on screen — the point of an export is
+    // everything the filter selects, not the two hundred rows that happened to be fetched.
+    el('ehp-oxl')?.addEventListener('click', async function () {
+      this.disabled = true; const label = this.textContent; this.textContent = 'Preparing…';
+      try {
+        const p = new URLSearchParams();
+        if (_oq) p.set('q', _oq);
+        if (_ostate) p.set('state', _ostate);
+        const t = await tok();
+        const headers = {}; if (t) headers.Authorization = 'Bearer ' + t;
+        if (window.pinpointClient) headers['x-pinpoint-client'] = window.pinpointClient;
+        const r = await fetch(apiBase() + '/ehp/orders.xlsx' + (p.toString() ? '?' + p : ''), { headers });
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || ('HTTP ' + r.status)); }
+        const blob = await r.blob(), a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `EHP_Orders_${new Date().toISOString().slice(0, 10)}.xlsx`;
+        document.body.appendChild(a); a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+      } catch (e) { alert('Could not download: ' + (e.message || e)); }
+      this.disabled = false; this.textContent = label;
+    });
   }
 
   // ── Envelope photos ──
@@ -1235,7 +1263,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(() => { if (document.visibilityState === 'visible') refreshEnabled(); }, 15000);
-    console.log('[ehp-ops] module v19 loaded');
+    console.log('[ehp-ops] module v20 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
