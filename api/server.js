@@ -17429,6 +17429,10 @@ app.get('/ehp/summary', authenticateRequest, (req, res) => {
         envelopes_assembled: allTime.assembled,
         envelopes_dispatched: allTime.dispatched,
       },
+      // Earliest order date, so an all-time chart can start where the data does rather than
+      // padding empty weeks before the client went live.
+      first_activity: db.prepare(`SELECT MIN(date(COALESCE(placed_at, created_at))) d
+                                  FROM ehp_order WHERE client_id=?`).get(c).d || null,
       open: {
         in_hand_batches: inHand.batches, in_hand_envelopes: inHand.envelopes,
         waiting_orders: waiting.orders, waiting_envelopes: waiting.envelopes,
