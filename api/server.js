@@ -4912,7 +4912,10 @@ function getRecipients() {
   const internal = parseEmailList(process.env.EXCEPTION_EMAIL_TO_INTERNAL);
   const client = parseEmailList(process.env.EXCEPTION_EMAIL_TO_CLIENT);
   // Deduplicate in case the same address is on both lists
-  const union = Array.from(new Set([...internal, ...client]));
+  // Normalised before deduping: the Set alone let the same address through twice when it
+  // differed by case or trailing space, which is how one client address was listed twice.
+  const norm = (a) => String(a || '').trim().toLowerCase();
+  const union = Array.from(new Set([...internal, ...client].map(norm).filter(Boolean)));
   return { internal, client, union };
 }
 
@@ -4936,6 +4939,12 @@ app.post('/ops/exception-email/run', (req, res, next) => {
   return authenticateRequest(req, res, next);
 }, auditLog('run_exception_email'), async (req, res) => {
   const dryRun = String(req.query.dryRun || '') === '1';
+  // A dry run that returns nothing visual cannot answer "does this look right". preview=1
+  // returns the rendered HTML so it can be opened in a browser without sending to anyone.
+  const preview = String(req.query.preview || '') === '1';
+  // Send the real thing to a chosen address instead of the distribution list — the only
+  // honest way to check an email is to receive it.
+  const toOverride = parseEmailList(req.query.to);
   const trigger = (req.headers['x-lane-cron-secret']) ? 'cron' : 'manual_api';
 
   try {
@@ -4966,16 +4975,29 @@ app.post('/ops/exception-email/run', (req, res, next) => {
       email_log_insert.run('exception_report', trigger + '_dryrun', internal.join(','), client.join(','),
         from, replyTo || '', subject, narrative.source, narrative.text, null, 'dry_run',
         null, JSON.stringify(report));
+      // preview=1 returns the rendered email so it can be opened in a browser. Without it
+      // a dry run reports that it would have sent something, without showing what.
+      if (preview) return res.type('html').send(html);
       return res.json({
         ok: true, dryRun: true, subject, narrative: narrative.text, narrative_source: narrative.source,
         recipients: { internal, client, total: union.length },
         summary: report.summary,
+        department_ownership: report.department_ownership
+          ? { total: report.department_ownership.total,
+              owners: report.department_ownership.owners.map(o => ({
+                admin: o.admin, count: o.count, pct: o.pct,
+                codes: o.codes.map(c => ({ code: c.code, count: c.count, supplier: c.single_supplier })) })),
+              unmapped_codes: report.department_ownership.unmapped_codes }
+          : null,
       });
     }
 
     let sendResult;
     try {
-      sendResult = await sendViaResend({ from, replyTo, to: union, subject, html, text });
+      // A test send goes only to the override, never to the distribution list.
+      const recipients = toOverride.length ? toOverride : union;
+      if (toOverride.length) console.log(`[exception-email] TEST send to ${toOverride.join(', ')} — client list not used`);
+      sendResult = await sendViaResend({ from, replyTo, to: recipients, subject, html, text });
     } catch (e) {
       email_log_insert.run('exception_report', trigger, internal.join(','), client.join(','),
         from, replyTo || '', subject, narrative.source, narrative.text, null, 'failed',
