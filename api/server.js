@@ -3900,6 +3900,66 @@ CREATE TABLE IF NOT EXISTS department_owner (
 })();
 
 const DEPT_UNASSIGNED = 'Owner To Be Assigned';
+
+// Admin + internal org: these are people's names attached to accountability figures in a
+// client-facing email, so a client admin must not be able to edit them.
+app.get('/department-owners', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM department_owner ORDER BY segment, code').all();
+    const mapped = new Set(rows.filter(r => r.active).map(r => r.code));
+
+    // Codes seen on real POs but never mapped. Without this the first anyone knows about a
+    // new department is UNKNOWN appearing in the client email, with nowhere to go and fix it.
+    // Sourced from `receiving`, which holds real PO numbers. Plans are stored as a JSON
+    // blob keyed by week, so they cannot be queried by column.
+    let seen = [];
+    try {
+      seen = db.prepare(`SELECT substr(upper(trim(po_number)), 1, 4) code, COUNT(*) n
+                         FROM receiving
+                         WHERE po_number IS NOT NULL AND trim(po_number) <> ''
+                         GROUP BY code HAVING code <> '' ORDER BY n DESC`).all();
+    } catch (e) { console.warn('[department-owners] unmapped scan failed:', e.message); }
+
+    res.json({
+      owners: rows,
+      admins: [...new Set(rows.filter(r => r.active).map(r => r.admin))].sort(),
+      unmapped: seen.filter(x => x.code && !mapped.has(x.code)).slice(0, 40),
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/department-owners', authenticateRequest, requireRole(['admin']), requireInternalOrg,
+  writeOpLimiter, auditLog('edit_department_owner'), (req, res) => {
+  try {
+    const b = req.body || {};
+    const code = String(b.code || '').trim().toUpperCase();
+    const admin = String(b.admin || '').trim();
+    if (!/^[A-Z0-9]{4}$/.test(code))
+      return res.status(400).json({ error: 'code must be exactly 4 characters — it is the PO prefix' });
+    if (!admin) return res.status(400).json({ error: 'a category admin is required' });
+    db.prepare(`INSERT INTO department_owner (code, segment, name, admin, active, updated_at)
+                VALUES (?,?,?,?,1,datetime('now'))
+                ON CONFLICT(code) DO UPDATE SET segment=excluded.segment, name=excluded.name,
+                  admin=excluded.admin, active=1, updated_at=datetime('now')`)
+      .run(code, String(b.segment || '').trim().toUpperCase() || null,
+           String(b.name || '').trim() || null, admin);
+    res.json({ ok: true, code, admin });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Deactivated rather than deleted: a removed code would silently fall back to
+// "Owner To Be Assigned" with no record that it was ever mapped.
+app.delete('/department-owners/:code', authenticateRequest, requireRole(['admin']), requireInternalOrg,
+  writeOpLimiter, auditLog('remove_department_owner'), (req, res) => {
+  try {
+    const code = String(req.params.code || '').trim().toUpperCase();
+    const r = db.prepare('SELECT code FROM department_owner WHERE code=?').get(code);
+    if (!r) return res.status(404).json({ error: 'not_found' });
+    db.prepare(`UPDATE department_owner SET active=0, updated_at=datetime('now') WHERE code=?`).run(code);
+    res.json({ ok: true, code, removed: true });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 const deptCodeOf = (po) => String(po || '').trim().toUpperCase().slice(0, 4);
 
 function deptOwnerMap() {
