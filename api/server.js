@@ -15458,6 +15458,79 @@ app.get('/ehp/orders', authenticateRequest, (req, res) => {
   }
 });
 
+// Export honours the same search and filter as the screen, but returns EVERYTHING that
+// matches rather than a page — an export of the visible page would be a worse version of
+// what the user is already looking at.
+app.get('/ehp/orders.xlsx', authenticateRequest, auditLog('download_ehp_orders'), async (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const q = String(req.query.q || '').trim();
+    const state = String(req.query.state || '').trim();
+
+    const where = ['o.client_id = ?']; const p = [c];
+    if (state) { where.push('o.state = ?'); p.push(state); }
+    if (q) {
+      const like = '%' + q.replace(/[%_]/g, m => '\\' + m) + '%';
+      where.push(`(o.order_number LIKE ? ESCAPE '\\' OR o.recipient_name LIKE ? ESCAPE '\\'
+                OR o.recipient_address LIKE ? ESCAPE '\\' OR o.recipient_address2 LIKE ? ESCAPE '\\'
+                OR o.recipient_city LIKE ? ESCAPE '\\' OR o.recipient_state LIKE ? ESCAPE '\\'
+                OR o.recipient_postcode LIKE ? ESCAPE '\\' OR o.product_sku LIKE ? ESCAPE '\\'
+                OR b.batch_ref LIKE ? ESCAPE '\\')`);
+      for (let i = 0; i < 9; i++) p.push(like);
+    }
+    const rows = db.prepare(`SELECT o.order_number, o.recipient_name, o.recipient_address,
+        o.recipient_address2, o.recipient_city, o.recipient_state, o.recipient_postcode,
+        o.recipient_country, o.envelope_qty, o.product_sku, o.product_line, o.state,
+        o.placed_at, o.fulfilled_at, o.flagged_high_qty, o.hold_reason, o.hold_resolved_at,
+        o.fulfil_error, b.batch_ref, b.assembled_at, b.dispatched_at
+      FROM ehp_order o LEFT JOIN ehp_assembly_batch b ON b.id = o.batch_id
+      WHERE ${where.join(' AND ')}
+      ORDER BY COALESCE(o.placed_at, o.created_at) DESC`).all(...p);
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'VelOzity Pinpoint';
+    const ws = wb.addWorksheet('Orders');
+    ws.columns = [
+      { header: 'Order number', key: 'order_number', width: 16 },
+      { header: 'Recipient', key: 'recipient_name', width: 26 },
+      { header: 'Address', key: 'recipient_address', width: 32 },
+      { header: 'Address 2', key: 'recipient_address2', width: 18 },
+      { header: 'City', key: 'recipient_city', width: 18 },
+      { header: 'State', key: 'recipient_state', width: 8 },
+      { header: 'Postcode', key: 'recipient_postcode', width: 11 },
+      { header: 'Country', key: 'recipient_country', width: 9 },
+      { header: 'Envelopes', key: 'envelope_qty', width: 11 },
+      { header: 'Product SKU', key: 'product_sku', width: 22 },
+      { header: 'Product line', key: 'product_line', width: 16 },
+      { header: 'Status', key: 'state', width: 12 },
+      { header: 'Held', key: 'held', width: 8 },
+      { header: 'Batch', key: 'batch_ref', width: 17 },
+      { header: 'Placed', key: 'placed_at', width: 20 },
+      { header: 'Assembled', key: 'assembled_at', width: 20 },
+      { header: 'Dispatched', key: 'dispatched_at', width: 20 },
+      { header: 'Large order', key: 'flagged_high_qty', width: 12 },
+      { header: 'Issue', key: 'fulfil_error', width: 30 },
+    ];
+    ws.getRow(1).font = { bold: true };
+    ws.views = [{ state: 'frozen', ySplit: 1 }];
+    ws.autoFilter = { from: 'A1', to: 'S1' };
+    for (const r of rows) {
+      ws.addRow({ ...r,
+        held: (r.hold_reason && !r.hold_resolved_at) ? 'YES' : '',
+        flagged_high_qty: r.flagged_high_qty ? 'YES' : '' });
+    }
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition',
+      `attachment; filename="EHP_Orders_${new Date().toISOString().slice(0, 10)}.xlsx"`);
+    await wb.xlsx.write(res);
+    return res.end();
+  } catch (e) {
+    console.error('[GET /ehp/orders.xlsx]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 // ── Envelope photos ──
 // Marketing imagery from the packing bench, shown on the EHP Week Hub. Deliberately not
 // linked to an order or a batch: these are not evidence, and tying them to a shipment would
