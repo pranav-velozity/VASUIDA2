@@ -143,7 +143,7 @@
   }
 
   function renderTabs() {
-    const tabs = [['queue','Assembly'],['inbound','Inbound'],['inventory','Inventory'],['recipe','Recipe'],['shopify','Shopify']];
+    const tabs = [['queue','Assembly'],['orders','Orders'],['inbound','Inbound'],['inventory','Inventory'],['recipe','Recipe'],['shopify','Shopify']];
     const c = el('ehp-tabs'); if (!c) return;
     c.innerHTML = tabs.map(([k,l]) => `<button class="ehp-tab ${_tab===k?'on':''}" data-tab="${k}">${l}</button>`).join('');
     c.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => { _tab = b.getAttribute('data-tab'); renderTabs(); render(); }));
@@ -181,6 +181,7 @@
       else if (_tab === 'inbound')   await renderInbound(body);
       else if (_tab === 'inventory') await renderInventory(body);
       else if (_tab === 'recipe')    await renderRecipe(body);
+      else if (_tab === 'orders')    await renderOrders(body);
       else if (_tab === 'shopify')   await renderShopify(body);
     } catch (e) {
       // A background failure leaves the last good content in place rather than replacing
@@ -196,6 +197,76 @@
   }
 
   // ── Assembly: queue + batches ──
+  // ── Orders ──
+  // Search is debounced and runs server-side. Filtering a fetched page in the browser would
+  // only ever search the two hundred rows already on screen, which is useless for the actual
+  // question: find one order among all of them.
+  let _oq = '', _ostate = '', _oTimer = null;
+
+  const ORDER_STATES = [['', 'All'], ['queued', 'Queued'], ['assembled', 'Assembled'],
+                        ['dispatched', 'Dispatched'], ['cancelled', 'Cancelled']];
+
+  async function renderOrders(body) {
+    const qs = new URLSearchParams();
+    if (_oq) qs.set('q', _oq);
+    if (_ostate) qs.set('state', _ostate);
+    const d = await req('/ehp/orders' + (qs.toString() ? '?' + qs : ''));
+    const rows = d.orders || [];
+    const bs = d.by_state || {};
+
+    const pill = (st, held) => {
+      if (held) return `<span class="ehp-chip" style="color:${RED};background:rgba(179,63,64,.12)">Held</span>`;
+      const m = { queued: [MID, 'rgba(0,0,0,.05)'], assembled: [AMBER_TXT, 'rgba(255,208,20,.20)'],
+                  dispatched: [GREEN, 'rgba(52,199,89,.14)'], cancelled: [LIGHT, 'rgba(0,0,0,.05)'] }[st]
+              || [MID, 'rgba(0,0,0,.05)'];
+      return `<span class="ehp-chip" style="color:${m[0]};background:${m[1]}">${esc(st || '—')}</span>`;
+    };
+
+    body.innerHTML = `
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+        <input id="ehp-osearch" placeholder="Search order number, name, address, city, state, postcode or batch"
+               value="${esc(_oq)}" autocomplete="off"
+               style="flex:1;min-width:280px;padding:9px 12px;border:.5px solid rgba(0,0,0,.14);
+                      border-radius:9px;font:inherit;font-size:13px;">
+        <select id="ehp-ostate" style="padding:9px 11px;border:.5px solid rgba(0,0,0,.14);
+                border-radius:9px;font:inherit;font-size:12px;">
+          ${ORDER_STATES.map(([v, l]) => `<option value="${v}" ${v === _ostate ? 'selected' : ''}>${l}${v && bs[v] != null ? ` (${bs[v]})` : ''}</option>`).join('')}
+        </select>
+      </div>
+      <div style="font-size:11px;color:${LIGHT};margin-bottom:8px;">
+        ${nfmt(d.returned)} of ${nfmt(d.total)} order(s)${_oq ? ` matching “${esc(_oq)}”` : ''}${d.total > d.returned ? ' — refine the search to narrow it' : ''}
+      </div>
+      ${rows.length ? `<table class="ehp"><thead><tr>
+          <th>Order</th><th>Recipient</th><th>Address</th><th class="n">Env</th>
+          <th>Line</th><th>Batch</th><th>Status</th><th>Placed</th>
+        </tr></thead><tbody>${rows.map(r => `<tr>
+          <td><b>${esc(r.order_number || '')}</b>${r.flagged_high_qty ? ` <span style="color:${AMBER_TXT};font-size:9px;">large</span>` : ''}</td>
+          <td>${esc(r.recipient_name || '')}</td>
+          <td style="max-width:260px;font-size:10px;color:${MID};line-height:1.35;">
+            ${esc(r.address || '')}${r.city_line ? `<br>${esc(r.city_line)}` : ''}</td>
+          <td class="n">${nfmt(r.envelope_qty || 1)}</td>
+          <td style="color:${MID}">${esc(r.product_line || '—')}</td>
+          <td style="font-size:10px;color:${MID}">${esc(r.batch_ref || '—')}</td>
+          <td>${pill(r.state, r.held)}</td>
+          <td style="font-size:10px;color:${LIGHT};white-space:nowrap;">${esc(String(r.placed_at || '').slice(0, 10))}</td>
+        </tr>`).join('')}</tbody></table>`
+        : `<div class="ehp-s" style="padding:16px 2px;">${_oq ? 'Nothing matches that search.' : 'No orders yet.'}</div>`}`;
+
+    const si = el('ehp-osearch');
+    if (si) {
+      si.addEventListener('input', () => {
+        clearTimeout(_oTimer);
+        // Debounced so a search does not fire a query per keystroke.
+        _oTimer = setTimeout(() => { _oq = si.value.trim(); render(); }, 280);
+      });
+      // Re-focus and restore the caret: render() rebuilds the panel, and losing focus
+      // mid-word would make the box unusable.
+      si.focus();
+      si.setSelectionRange(si.value.length, si.value.length);
+    }
+    el('ehp-ostate')?.addEventListener('change', e => { _ostate = e.target.value; render(); });
+  }
+
   // ── Envelope photos ──
   // Resized in the browser before upload. A phone original is 4-6MB; a carousel pulling
   // several of those is heavy on the bench connection and on egress, and none of that
@@ -1164,7 +1235,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(() => { if (document.visibilityState === 'visible') refreshEnabled(); }, 15000);
-    console.log('[ehp-ops] module v18 loaded');
+    console.log('[ehp-ops] module v19 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
