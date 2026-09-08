@@ -178,9 +178,19 @@
       let inv = null, billing = null, ts = null;
       try { inv = await req('/ehp/inventory'); } catch (e) {}
       try { billing = await req(`/finance/fulfilment-billing?from=${rng.from}&to=${rng.to}`); } catch (e) {}
-      try { ts = await req(`/ehp/timeseries?from=${rng.from}&to=${rng.to}`); } catch (e) {}
+      // All-time charts run from the first order to today, capped at 180 days so the daily
+      // series stays readable rather than becoming a smear of points.
+      const tsRange = (_scope === 'all')
+        ? { from: (() => {
+              const cap = new Date(Date.now() - 179 * 86400000).toISOString().slice(0, 10);
+              const first = String(sum.first_activity || '').slice(0, 10);
+              return (first && first > cap) ? first : cap;
+            })(),
+            to: new Date().toISOString().slice(0, 10) }
+        : rng;
+      try { ts = await req(`/ehp/timeseries?from=${tsRange.from}&to=${tsRange.to}`); } catch (e) {}
       await loadConn();
-      draw(host, sum, queue, batches.batches || [], inv, billing, rng, ts);
+      draw(host, sum, queue, batches.batches || [], inv, billing, rng, ts, tsRange);
       host.dataset.loaded = '1';
     } catch (e) {
       host.innerHTML = `<div class="fwh-card" style="color:${RED};font-size:12px;">Could not load fulfilment summary: ${esc(e.message || e)}</div>`;
@@ -192,6 +202,12 @@
   // tile showing a stale figure. Other EHP modules raise this after a write.
   window.addEventListener('ehp:changed', () => { _lastWeek = null; render(true); });
   window.addEventListener('ehp:photos-changed', () => { _pi = 0; loadPhotos(true).then(paintPhoto); });
+
+  // All-time is the honest default for EHP: work spills across weeks, so a weekly frame
+  // shows zero assembled beside two hundred envelopes physically waiting. Week stays
+  // available because invoicing genuinely needs it.
+  let _scope = (() => { try { return localStorage.getItem('pinpoint.ehpScope') || 'all'; } catch (e) { return 'all'; } })();
+  const setScope = (v) => { _scope = v; try { localStorage.setItem('pinpoint.ehpScope', v); } catch (e) {} };
 
   const scopeToggle = () => `<div class="fwh-scope">
       <button data-scope="all"  class="${_scope === 'all' ? 'on' : ''}">All time</button>
@@ -759,7 +775,7 @@
     // meant a needless pass fifteen times a minute.
     setInterval(() => { if (document.visibilityState === 'visible') check(); }, 15000);
     window.refreshFulfilmentWeekHub = () => render(true);
-    console.log('[fulfilment-weekhub] module v13 loaded');
+    console.log('[fulfilment-weekhub] module v14 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
