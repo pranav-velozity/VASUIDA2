@@ -3835,7 +3835,6 @@ function groupReceivingRows(rows, threshold) {
         mode: members[0].mode || 'Unspecified',
         status: members[0].status,
         note,
-        pos: members.map(m => m.po_number),
         cartons_received: cartons,
         target_qty: target,
         pos: members.map(m => m.po_number),
@@ -3913,19 +3912,34 @@ function deptOwnerMap() {
 // outstanding do not appear: this is an action list, not a roster.
 function buildDepartmentOwnership(rows) {
   const map = deptOwnerMap();
-  const late = (rows || []).filter(r => r.status === 'off_track');
+
+  // Receiving rows arrive in two shapes: individual POs, and grouped rows that stand for
+  // several POs and carry them in `pos`. Counting rows treated a group of five as one, so
+  // eleven outstanding POs reported as five — and because a grouped row has no po_number,
+  // its department code resolved to an empty string and landed under "Owner To Be
+  // Assigned" with no PO numbers to act on. Expand groups back into their members.
+  const late = [];
+  for (const r of (rows || [])) {
+    if (r.status !== 'off_track') continue;
+    const mode = r.mode || 'Unspecified';
+    if (r.is_grouped && Array.isArray(r.pos) && r.pos.length) {
+      for (const po of r.pos) late.push({ po_number: po, supplier: r.supplier, mode });
+    } else if (r.po_number) {
+      late.push({ po_number: r.po_number, supplier: r.supplier, mode });
+    }
+  }
   if (!late.length) return null;
 
   const byOwner = new Map();
   for (const r of late) {
-    const code = deptCodeOf(r.po_number);
+    const code = deptCodeOf(r.po_number) || 'UNKNOWN';
     const d = map.get(code);
     const admin = (d && d.admin) || DEPT_UNASSIGNED;
     if (!byOwner.has(admin)) byOwner.set(admin, { admin, total: 0, codes: new Map() });
     const o = byOwner.get(admin);
     o.total++;
     if (!o.codes.has(code)) o.codes.set(code, { code, name: (d && d.name) || null, pos: [] });
-    o.codes.get(code).pos.push({ po: r.po_number, supplier: r.supplier || '' });
+    o.codes.get(code).pos.push({ po: r.po_number, supplier: r.supplier || '', mode: r.mode || 'Unspecified' });
   }
 
   const total = late.length;
@@ -3933,6 +3947,7 @@ function buildDepartmentOwnership(rows) {
     .map(o => ({
       admin: o.admin,
       count: o.total,
+      air: [...o.codes.values()].reduce((a, c) => a + c.pos.filter(x => /air/i.test(x.mode)).length, 0),
       // Concentration: this owner's share of everything outstanding. The blocks sum to 100%.
       pct: Math.round(o.total / total * 100),
       codes: Array.from(o.codes.values())
@@ -3949,8 +3964,17 @@ function buildDepartmentOwnership(rows) {
     // Whoever holds the most reads first.
     .sort((a, b) => b.count - a.count || a.admin.localeCompare(b.admin));
 
-  return { total, owners, unassigned: owners.some(o => o.admin === DEPT_UNASSIGNED),
-           unmapped_codes: [...new Set(late.map(r => deptCodeOf(r.po_number)).filter(c => !map.has(c)))] };
+  // Air against sea matters more than the totals suggest: an air PO is on a short lead time
+  // and a missed one is usually a missed launch, where a sea PO has weeks of slack.
+  const byMode = late.reduce((a, r) => {
+    const m = /air/i.test(r.mode) ? 'air' : (/sea/i.test(r.mode) ? 'sea' : 'other');
+    a[m] = (a[m] || 0) + 1; return a;
+  }, {});
+
+  return { total, owners, by_mode: { air: byMode.air || 0, sea: byMode.sea || 0, other: byMode.other || 0 },
+           unassigned: owners.some(o => o.admin === DEPT_UNASSIGNED),
+           unmapped_codes: [...new Set(late.map(r => deptCodeOf(r.po_number) || 'UNKNOWN')
+                              .filter(c => !map.has(c)))] };
 }
 
 // First two words, so a table cell stays readable.
@@ -4602,7 +4626,11 @@ function renderEmailHtml(report, narrative) {
     return makeRow(isOff, headline, identifier, detail);
   };
 
-  const weekSections = report.weeks.map(wk => {
+  // Current week first, history below. The weeks were built oldest-first, so the week that
+  // needs action sat underneath five weeks of "all on track" — the reader had to scroll past
+  // everything settled to reach the only part that mattered. Reversed at render time only,
+  // so report.weeks keeps its chronological order for anything else reading it.
+  const weekSections = [...report.weeks].reverse().map(wk => {
     const parts = [];
     parts.push(`<h2 style="${S.h2}">${escHtml(wk.week_label)}${wk.is_current ? ` <span style="${S.subtitle}">· current</span>` : ''}</h2>`);
 
@@ -4668,10 +4696,13 @@ function renderEmailHtml(report, narrative) {
             <td align="right" style="font-size: 12px; color: ${mutedColor}; white-space: nowrap;">${c.count} PO${c.count === 1 ? '' : 's'}</td>
           </tr></table>
           <div style="font-size: 11px; color: #4b5563; line-height: 1.7; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;">
-            ${c.pos.map(x => c.single_supplier
-                ? escHtml(x.po)
-                : `${escHtml(x.po)} <span style="color: ${mutedColor}; font-family: inherit;">(${escHtml(emailShortSupplier(x.supplier))})</span>`)
-              .join('<span style="color: #d1d5db;"> &nbsp;·&nbsp; </span>')}
+            ${c.pos.map(x => {
+                const air = /air/i.test(x.mode)
+                  ? ` <span style="color: #7f1d1d; font-weight: 700; font-family: inherit;">AIR</span>` : '';
+                return c.single_supplier
+                  ? `${escHtml(x.po)}${air}`
+                  : `${escHtml(x.po)}${air} <span style="color: ${mutedColor}; font-family: inherit;">(${escHtml(emailShortSupplier(x.supplier))})</span>`;
+              }).join('<span style="color: #d1d5db;"> &nbsp;·&nbsp; </span>')}
           </div>
         </td></tr>`).join('');
       return `
@@ -4682,6 +4713,8 @@ function renderEmailHtml(report, narrative) {
               <table role="presentation" cellpadding="0" cellspacing="0" width="100%"><tr>
                 <td style="font-size: 14px; font-weight: 700; color: #111827;">${escHtml(o.admin)}</td>
                 <td align="right" style="white-space: nowrap;">
+                  ${o.air > 0 ? `<span style="font-size: 10px; font-weight: 700; color: #7f1d1d;
+                     background: #fee2e2; padding: 2px 7px; border-radius: 10px; margin-right: 6px;">${o.air} AIR</span>` : ''}
                   <span style="font-size: 12px; color: ${mutedColor};">${o.count} outstanding</span>
                   <span style="font-size: 11px; font-weight: 700; color: ${fg}; background: ${bg};
                                padding: 2px 8px; border-radius: 10px; margin-left: 8px;">${o.pct}%</span>
@@ -4693,9 +4726,25 @@ function renderEmailHtml(report, narrative) {
         </td></tr>`;
     }).join('');
 
+    const m = dept.by_mode || { air: 0, sea: 0, other: 0 };
+    // Air first: it is the shorter lead time, so a missed air PO has less room to recover.
+    const modeCell = (label, n, urgent) => `
+      <td width="33%" style="padding: 0 6px 0 0;">
+        <table role="presentation" cellpadding="0" cellspacing="0" width="100%"
+               style="border: 1px solid ${borderColor}; border-radius: 6px;
+                      background: ${urgent && n > 0 ? '#fef2f2' : '#f9fafb'};">
+          <tr><td style="padding: 9px 12px;">
+            <div style="font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+                        color: ${mutedColor};">${escHtml(label)}</div>
+            <div style="font-size: 20px; font-weight: 700;
+                        color: ${urgent && n > 0 ? '#7f1d1d' : '#111827'}; padding-top: 2px;">${n}</div>
+          </td></tr>
+        </table>
+      </td>`;
+
     return `
       <div style="${S.sectionHeader}">Outstanding by department owner</div>
-      <div style="font-size: 12px; color: ${mutedColor}; margin: 0 0 12px 0;">
+      <div style="font-size: 12px; color: ${mutedColor}; margin: 0 0 10px 0;">
         ${dept.total} PO${dept.total === 1 ? '' : 's'} not yet received across
         ${dept.owners.length} owner${dept.owners.length === 1 ? '' : 's'} &mdash;
         <b style="color: #111827;">${escHtml(top.admin)}</b> holds the most at ${top.count}.
@@ -4703,6 +4752,13 @@ function renderEmailHtml(report, narrative) {
           ? `<br><span style="color: #78350f;">${dept.unmapped_codes.length} department code(s) have no owner mapped: ${dept.unmapped_codes.map(escHtml).join(', ')}.</span>`
           : ''}
       </div>
+      <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin: 0 0 14px 0;">
+        <tr>
+          ${modeCell('Air, not received', m.air, true)}
+          ${modeCell('Sea, not received', m.sea, false)}
+          ${m.other > 0 ? modeCell('Mode unspecified', m.other, false) : '<td width="33%"></td>'}
+        </tr>
+      </table>
       <table role="presentation" cellpadding="0" cellspacing="0" width="100%">${blocks}</table>`;
   }
 
