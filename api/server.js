@@ -17183,11 +17183,34 @@ app.get('/ehp/timeseries', authenticateRequest, (req, res) => {
         cumEnv += (lineAsm[d] || 0);
         return { date: d, on_hand: Math.round(bal - cumEnv * perFlavour) };
       });
-      // Days of cover at the recent average burn rate.
-      const totalEnv = days.reduce((a, d) => a + (lineAsm[d] || 0), 0);
-      const perDay = totalEnv / Math.max(1, days.length) * perFlavour;
+      // Burn rate over a 90-DAY ROLLING WINDOW, not the selected week.
+      //
+      // Using the week meant the denominator reset every Monday: with nothing assembled
+      // yet, the rate collapsed and cover jumped to the full received quantity — showing
+      // green when stock was actually nine days from running out. EHP work spills across
+      // weeks, so the burn rate must too.
+      //
+      // Divided by days SINCE THE FIRST ASSEMBLY where that is less than 90, otherwise a
+      // client three weeks into operation is divided by 90 and gets a quarter of the truth.
+      const BURN_WINDOW_DAYS = 90;
+      const winFrom = new Date(Date.parse(to + 'T00:00:00Z') - (BURN_WINDOW_DAYS - 1) * 86400000)
+                        .toISOString().slice(0, 10);
+      const burn = db.prepare(`SELECT COALESCE(SUM(actual_envelopes),0) env,
+                                      MIN(date(assembled_at)) first_day
+                               FROM ehp_assembly_batch
+                               WHERE client_id=? AND assembled_at IS NOT NULL
+                                 AND date(assembled_at) BETWEEN ? AND ?
+                                 AND product_line IS ?`).get(c, winFrom, to, product_line || null);
+      const firstDay = burn && burn.first_day ? burn.first_day : null;
+      const elapsed = firstDay
+        ? Math.max(1, Math.round((Date.parse(to) - Date.parse(firstDay)) / 86400000) + 1)
+        : BURN_WINDOW_DAYS;
+      const perDay = (burn ? burn.env : 0) / Math.min(BURN_WINDOW_DAYS, elapsed) * perFlavour;
       const last = points.length ? points[points.length - 1].on_hand : 0;
-      return { sku, product_line: product_line || null, points, on_hand: last, daily_burn: Math.round(perDay),
+      return { sku, product_line: product_line || null, points, on_hand: last,
+               daily_burn: Math.round(perDay * 100) / 100,
+               burn_window_days: Math.min(BURN_WINDOW_DAYS, elapsed),
+               burn_envelopes: burn ? burn.env : 0,
                days_cover: perDay > 0 ? Math.floor(last / perDay) : null };
     });
 
@@ -17234,10 +17257,46 @@ app.get('/ehp/summary', authenticateRequest, (req, res) => {
                             WHERE client_id=? AND date(dispatched_at) BETWEEN ? AND ?`).get(c, from, to).n;
     const q = db.prepare(`SELECT COUNT(*) orders, COALESCE(SUM(envelope_qty),0) envelopes
                           FROM ehp_order WHERE client_id=? AND state='queued'`).get(c);
+
+    // EHP work is not week-bounded. Orders arrive continuously, a batch spans weeks, and
+    // envelopes sit assembled over a weekend — so a weekly figure of 0 assembled can sit
+    // beside 209 envelopes physically waiting. These are the totals and the open position,
+    // and they answer "where do we actually stand" rather than "what happened since Monday".
+    const allTime = {
+      orders_received: db.prepare(`SELECT COUNT(*) o, COALESCE(SUM(envelope_qty),0) e
+                                   FROM ehp_order WHERE client_id=?`).get(c),
+      assembled: db.prepare(`SELECT COALESCE(SUM(actual_envelopes),0) n FROM ehp_assembly_batch
+                             WHERE client_id=? AND assembled_at IS NOT NULL`).get(c).n,
+      dispatched: db.prepare(`SELECT COALESCE(SUM(actual_envelopes),0) n FROM ehp_assembly_batch
+                              WHERE client_id=? AND dispatched_at IS NOT NULL`).get(c).n,
+      pallets: db.prepare(`SELECT COALESCE(SUM(pallets),0) n FROM ehp_pallet_receipt
+                           WHERE client_id=?`).get(c).n,
+    };
+    // Assembled but not yet dispatched — physically on the floor right now.
+    const inHand = db.prepare(`SELECT COUNT(*) batches, COALESCE(SUM(actual_envelopes),0) envelopes
+                               FROM ehp_assembly_batch
+                               WHERE client_id=? AND assembled_at IS NOT NULL AND dispatched_at IS NULL`).get(c);
+    // Ordered but not yet batched.
+    const waiting = db.prepare(`SELECT COUNT(*) orders, COALESCE(SUM(envelope_qty),0) envelopes
+                                FROM ehp_order WHERE client_id=? AND state='queued' AND batch_id IS NULL`).get(c);
     res.json({ client_id: c, from, to,
       pallets_received: pal,
       orders_received: ordersIn.orders, envelopes_ordered: ordersIn.envelopes,
       envelopes_assembled: asm, envelopes_dispatched: dis,
+      // Everything under all_time and open ignores the selected week entirely.
+      all_time: {
+        pallets_received: allTime.pallets,
+        orders_received: allTime.orders_received.o,
+        envelopes_ordered: allTime.orders_received.e,
+        envelopes_assembled: allTime.assembled,
+        envelopes_dispatched: allTime.dispatched,
+      },
+      open: {
+        in_hand_batches: inHand.batches, in_hand_envelopes: inHand.envelopes,
+        waiting_orders: waiting.orders, waiting_envelopes: waiting.envelopes,
+        // The true backlog: assembled and waiting, plus ordered and not yet batched.
+        backlog_envelopes: (inHand.envelopes || 0) + (waiting.envelopes || 0),
+      },
       queued_orders: q.orders, queued_envelopes: q.envelopes });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
