@@ -15393,6 +15393,71 @@ app.get('/ehp/sku-audit', authenticateRequest, (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Orders: every order, searchable ──
+// Search runs server-side rather than filtering a page of results in the browser: the point
+// is to find one order among all of them, and a client-side filter can only search what has
+// already been fetched.
+//
+// Recipient name and address are consumer PII. They are returned here because the warehouse
+// genuinely needs to identify a parcel, but this endpoint is the only place they leave the
+// database in bulk, and it stays behind the EHP capability guard.
+app.get('/ehp/orders', authenticateRequest, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const q = String(req.query.q || '').trim();
+    const state = String(req.query.state || '').trim();
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200));
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+
+    const where = ['o.client_id = ?']; const p = [c];
+    if (state) { where.push('o.state = ?'); p.push(state); }
+    if (q) {
+      // One term across every field someone might have to hand — an order number from
+      // Shopify, a name from an email, or a postcode from a returned parcel.
+      const like = '%' + q.replace(/[%_]/g, m => '\\' + m) + '%';
+      where.push(`(o.order_number LIKE ? ESCAPE '\\' OR o.recipient_name LIKE ? ESCAPE '\\'
+                OR o.recipient_address LIKE ? ESCAPE '\\' OR o.recipient_address2 LIKE ? ESCAPE '\\'
+                OR o.recipient_city LIKE ? ESCAPE '\\' OR o.recipient_state LIKE ? ESCAPE '\\'
+                OR o.recipient_postcode LIKE ? ESCAPE '\\' OR o.product_sku LIKE ? ESCAPE '\\'
+                OR b.batch_ref LIKE ? ESCAPE '\\')`);
+      for (let i = 0; i < 9; i++) p.push(like);
+    }
+    const sql = `SELECT o.id, o.order_number, o.envelope_qty, o.product_sku, o.product_line,
+                        o.recipient_name, o.recipient_address, o.recipient_address2,
+                        o.recipient_city, o.recipient_state, o.recipient_postcode, o.recipient_country,
+                        o.state, o.placed_at, o.fulfilled_at, o.flagged_high_qty,
+                        o.hold_reason, o.hold_resolved_at, o.fulfil_error,
+                        b.batch_ref, b.assembled_at, b.dispatched_at
+                 FROM ehp_order o
+                 LEFT JOIN ehp_assembly_batch b ON b.id = o.batch_id
+                 WHERE ${where.join(' AND ')}
+                 ORDER BY COALESCE(o.placed_at, o.created_at) DESC
+                 LIMIT ? OFFSET ?`;
+    const rows = db.prepare(sql).all(...p, limit, offset);
+    const total = db.prepare(`SELECT COUNT(*) n FROM ehp_order o
+                              LEFT JOIN ehp_assembly_batch b ON b.id = o.batch_id
+                              WHERE ${where.join(' AND ')}`).get(...p).n;
+
+    res.json({
+      client_id: c, q, state, limit, offset, total,
+      returned: rows.length,
+      // Counts across the whole set, not the page — so the state filter shows what is
+      // there to filter to.
+      by_state: db.prepare(`SELECT state, COUNT(*) n FROM ehp_order WHERE client_id=? GROUP BY state`)
+                  .all(c).reduce((a, r) => (a[r.state] = r.n, a), {}),
+      orders: rows.map(r => ({
+        ...r,
+        held: !!(r.hold_reason && !r.hold_resolved_at),
+        address: [r.recipient_address, r.recipient_address2].filter(Boolean).join(', '),
+        city_line: [r.recipient_city, r.recipient_state, r.recipient_postcode].filter(Boolean).join(' '),
+      })),
+    });
+  } catch (e) {
+    console.error('[GET /ehp/orders]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 // ── Envelope photos ──
 // Marketing imagery from the packing bench, shown on the EHP Week Hub. Deliberately not
 // linked to an order or a batch: these are not evidence, and tying them to a shipment would
