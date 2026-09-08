@@ -3810,10 +3810,15 @@ function groupReceivingRows(rows, threshold) {
     if (members.length >= threshold) {
       const cartons = members.reduce((s, m) => s + (Number(m.cartons_received) || 0), 0);
       const target = members.reduce((s, m) => s + (Number(m.target_qty) || 0), 0);
-      // Pick a clean outcome note that summarizes the group
+      // Count what was ACTUALLY received. "12 POs received" described the group, not the
+      // receipts — so a group of twelve with five receipts read as twelve received, which
+      // is exactly the line that made an all-on-track report look wrong.
+      const got = members.filter(m => (Number(m.cartons_received) || 0) > 0).length;
       const note = members[0].status === 'off_track'
         ? `${members.length} POs past due, not received`
-        : `${members.length} POs received · ${cartons} cartons`;
+        : (got === members.length
+            ? `${members.length} POs received · ${cartons} cartons`
+            : `${got} of ${members.length} POs received · ${cartons} cartons · not yet due`);
       out.push({
         type: 'receiving',
         is_grouped: true,
@@ -3857,9 +3862,15 @@ function buildReceivingRows(ws, planRows, summary) {
   const out = [];
   const seen = new Set();
   const now = new Date();
-  // "Due" is Monday noon Shanghai = 04:00 UTC of Monday
+  // "Due" is Monday noon Shanghai = 04:00 UTC of Monday. NO GRACE PERIOD.
+  //
+  // A business day of grace pushed the deadline to Tuesday 04:00 UTC, and the Tuesday
+  // 06:00 Sydney email runs at Monday 20:01 UTC — eight hours BEFORE that. So the one
+  // report sent after the cutoff had passed was the only one that could not see it, and
+  // it read "all on track" while 67 POs were outstanding. The cutoff is Monday noon
+  // Shanghai; the report now says so.
   const mondayNoon = new Date(`${ws}T04:00:00.000Z`);
-  const pastDue = now > addBusinessDays(mondayNoon, EMAIL_GRACE_BUSINESS_DAYS);
+  const pastDue = now > mondayNoon;
 
   // Pre-aggregate target_qty per PO across all SKU rows. A plan is PO × SKU,
   // so a single PO can have multiple rows — summing across them gives the
