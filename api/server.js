@@ -7337,19 +7337,29 @@ app.get('/finance/invoice/:id/pdf', async (req, res) => {
     if (!inv) return res.status(404).json({ error: 'Not found' });
     inv.lines = db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id = ? ORDER BY sort_order').all(inv.id);
 
+    const pdf = await renderInvoicePdfBuffer(inv);
+    const filename = (inv.ref_number || 'invoice').replace(/[^a-zA-Z0-9\-_]/g, '_') + '.pdf';
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', pdf.length);
+    return res.send(pdf);
+  } catch(e) {
+    console.error('[finance/pdf]', e);
+    if (!res.headersSent) res.status(500).json({ error: String(e.message||e) });
+  }
+});
+
+// Extracted so the download and the emailed attachment are the same bytes. Takes the
+// invoice with its lines already loaded.
+function renderInvoicePdfBuffer(inv) {
+  return new Promise((resolve, reject) => {
     const PDFDocument = require('pdfkit');
     const doc = new PDFDocument({ size: 'A4', margin: 50 });
-
     const chunks = [];
     doc.on('data', chunk => chunks.push(chunk));
-    doc.on('end', () => {
-      const pdf = Buffer.concat(chunks);
-      const filename = (inv.ref_number || 'invoice').replace(/[^a-zA-Z0-9\-_]/g, '_') + '.pdf';
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.setHeader('Content-Length', pdf.length);
-      res.send(pdf);
-    });
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    try {
 
     const BRAND = '#990033';
     const DARK  = '#1C1C1E';
@@ -7550,11 +7560,9 @@ app.get('/finance/invoice/:id/pdf', async (req, res) => {
     });
 
     doc.end();
-  } catch(e) {
-    console.error('[finance/pdf]', e);
-    if (!res.headersSent) res.status(500).json({ error: String(e.message||e) });
-  }
-});
+    } catch (e) { reject(e); }
+  });
+}
 
 // ── GET /finance/expenses — list expenses ──
 app.get('/finance/expenses', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
@@ -14715,19 +14723,14 @@ app.post('/report/supplier-allocation/auth', authenticateRequest, requireRole(['
   res.json({ token });
 });
 
-app.get('/report/vas-supplier-allocation', authenticateRequest, requireRole(['admin']),
-  auditLog('download_vas_allocation'), async (req, res) => {
-  try {
-    _cleanAllocTokens();
-    const t = _allocTokens.get(String(req.query.token || ''));
-    if (!t) return res.status(403).json({ error: 'invalid_or_expired_token',
-      message: 'Enter the report password to generate this file.' });
-    const c = curClient();
-    if (t.client && t.client !== c)
-      return res.status(403).json({ error: 'token_client_mismatch',
-        message: 'This token was issued for a different client.' });
-    const ws = String(req.query.week || '').trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) return res.status(400).json({ error: 'week required as YYYY-MM-DD (Monday)' });
+// Extracted so the invoice email and the manual download build the same workbook. Throws
+// on a bad week rather than writing to a response, so it can be called off-request.
+async function buildVasAllocationWorkbook(c, ws) {
+  {
+    {
+    // Token and client checks stay on the route: this builder is also called off-request by
+    // the invoice email, where there is no token and no response to write to.
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(ws || ''))) throw new Error('week must be YYYY-MM-DD');
     const we = new Date(Date.parse(ws + 'T00:00:00Z') + 6 * 86400000).toISOString().slice(0, 10);
 
     // PO -> supplier, from this week's plan and the seven before it: work completed this
@@ -14908,9 +14911,26 @@ app.get('/report/vas-supplier-allocation', authenticateRequest, requireRole(['ad
       v: `${cartonQtyInvoiced} cartons invoiced against ${totalRep} recorded in receiving — a difference of ${Math.abs(cartonQtyInvoiced - totalRep)}.` })
       .font = { bold: true };
 
+    return { wb, filename: `VelOzity_Supplier_Allocation_${ws}.xlsx` };
+  }
+  }
+}
+
+app.get('/report/vas-supplier-allocation', authenticateRequest, requireRole(['admin']),
+  auditLog('download_vas_allocation'), async (req, res) => {
+  try {
+    _cleanAllocTokens();
+    const t = _allocTokens.get(String(req.query.token || ''));
+    if (!t) return res.status(403).json({ error: 'invalid_or_expired_token',
+      message: 'Enter the report password to generate this file.' });
+    const c = curClient();
+    if (t.client && t.client !== c)
+      return res.status(403).json({ error: 'token_client_mismatch',
+        message: 'This token was issued for a different client.' });
+    const built = await buildVasAllocationWorkbook(c, String(req.query.week || '').trim());
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="VelOzity_Supplier_Allocation_${ws}.xlsx"`);
-    await wb.xlsx.write(res);
+    res.setHeader('Content-Disposition', `attachment; filename="${built.filename}"`);
+    await built.wb.xlsx.write(res);
     return res.end();
   } catch (e) {
     console.error('[GET /report/vas-supplier-allocation]', e);
@@ -17528,6 +17548,154 @@ try {
     console.log(`[fin_invoices] client_id backfilled: ${done} from the reference, ${defaulted} defaulted to ${DEFAULT_CLIENT} (pre-multi-tenant), ${rows.length} total`);
   }
 } catch (e) { console.error('[fin_invoices:client-migration]', e.message); }
+
+// ── Sending an invoice ──
+// Draft -> sent, with the PDF attached, and for ICONIC VAS the supplier cost allocation
+// alongside it. That allocation shows how the amount we billed splits across the client's
+// own suppliers — their spend, not our cost — so it is theirs to receive.
+try {
+  const c = db.prepare("PRAGMA table_info(fin_invoices)").all().map(x => x.name);
+  if (!c.includes('sent_at'))  db.exec("ALTER TABLE fin_invoices ADD COLUMN sent_at TEXT");
+  if (!c.includes('sent_by'))  db.exec("ALTER TABLE fin_invoices ADD COLUMN sent_by TEXT");
+  if (!c.includes('sent_to'))  db.exec("ALTER TABLE fin_invoices ADD COLUMN sent_to TEXT");
+  if (!c.includes('send_count')) db.exec("ALTER TABLE fin_invoices ADD COLUMN send_count INTEGER NOT NULL DEFAULT 0");
+} catch (e) { console.error('[fin_invoices:send-migration]', e.message); }
+
+const INVOICE_REMITTANCE = [
+  ['Account Beneficiary Name', 'OGEO PTY LTD'],
+  ['Bank Name', 'COMMONWEALTH BANK'],
+  ['Bank Address', '2 Sentry Dr, Stanhope Gardens NSW 2768, Australia'],
+  ['Bank Account Number', '10199366'],
+  ['SWIFT Code', 'CTBAAU2S'],
+  ['BSB / IBAN', '062-704'],
+];
+
+// Same rule as the PDF, taken from one place so the covering email and the attachment can
+// never state different terms.
+const invoiceTerms = (type) => (type === 'VAS' ? '30 Days' : '7 Days');
+
+function invoiceEmailHtml(inv, bill) {
+  const money = (n) => `${inv.currency || 'USD'} ${Number(n || 0).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const rows = [
+    ['Invoice number', inv.ref_number],
+    ['Invoice date', inv.invoice_date || '—'],
+    ['Week', inv.week_start || '—'],
+    ['Payment terms', invoiceTerms(inv.type)],
+    ['Due date', inv.due_date || '—'],
+    ['Amount due', money(inv.total)],
+  ];
+  // Summary only. The PDF carries the lines, and a long HTML table renders poorly in
+  // Outlook while duplicating the attachment.
+  const body = `
+    <table role="presentation" cellpadding="0" cellspacing="0" width="100%"
+           style="border:1px solid #e5e7eb;border-radius:8px;margin:0 0 16px;">
+      ${rows.map(([k, v], i) => `<tr>
+        <td style="padding:9px 14px;font-size:12px;color:#6b7280;${i ? 'border-top:1px solid #f3f4f6;' : ''}">${escHtml(k)}</td>
+        <td align="right" style="padding:9px 14px;font-size:12px;color:#111827;font-weight:${k === 'Amount due' ? '700' : '400'};${i ? 'border-top:1px solid #f3f4f6;' : ''}">${escHtml(String(v))}</td>
+      </tr>`).join('')}
+    </table>
+    <div style="font-size:12px;font-weight:700;color:#111827;margin:0 0 6px;">Remittance information</div>
+    <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:0 0 16px;">
+      ${INVOICE_REMITTANCE.map(([k, v]) => `<tr>
+        <td style="padding:3px 0;font-size:11px;color:#6b7280;width:190px;">${escHtml(k)}</td>
+        <td style="padding:3px 0;font-size:11px;color:#111827;">${escHtml(v)}</td>
+      </tr>`).join('')}
+    </table>`;
+  return aqMailShell(`Invoice ${inv.ref_number}`,
+    [['Billed to', bill.legal_name || inv.client_id], ['Service', inv.type]],
+    body,
+    `Please reply to this email with any questions. Payment terms are ${invoiceTerms(inv.type)} from the invoice date.`);
+}
+
+// What WOULD be sent, so the confirmation can state recipients and attachments rather than
+// asking someone to approve something they cannot see.
+app.get('/finance/invoice/:id/send-preview', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+  try {
+    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ? AND client_id = ?')
+                  .get(req.params.id, curClient());
+    if (!inv) return res.status(404).json({ error: 'Not found' });
+    const bill = clientBilling(inv.client_id);
+    const to = parseEmailList(bill.invoice_emails);
+    if (!to.length) return res.status(400).json({ error: 'no_recipients',
+      message: `No invoice recipients are set for ${inv.client_id}. Add them under Finance → Rates.` });
+    const files = [`${String(inv.ref_number).replace(/[^A-Za-z0-9\-_]/g, '_')}.pdf`];
+    if (inv.client_id === 'ICONIC' && inv.type === 'VAS')
+      files.push(`VelOzity_Supplier_Allocation_${inv.week_start}.xlsx`);
+    res.json({ ref_number: inv.ref_number, to, cc: parseEmailList(bill.invoice_cc),
+      attachments: files, billed_to: bill.legal_name,
+      amount: `${inv.currency || 'USD'} ${Number(inv.total || 0).toFixed(2)}`,
+      due_date: inv.due_date || '—', terms: invoiceTerms(inv.type),
+      sent_at: inv.sent_at || null, send_count: inv.send_count || 0 });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/finance/invoice/:id/send', authenticateRequest, requireRole(['admin']), requireInternalOrg,
+  writeOpLimiter, auditLog('send_invoice'), async (req, res) => {
+  try {
+    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ? AND client_id = ?')
+                  .get(req.params.id, curClient());
+    if (!inv) return res.status(404).json({ error: 'Not found' });
+    if (inv.status === 'paid')
+      return res.status(409).json({ error: 'already_paid', message: 'This invoice is already marked paid.' });
+
+    const bill = clientBilling(inv.client_id);
+    const to = parseEmailList(bill.invoice_emails);
+    const cc = parseEmailList(bill.invoice_cc);
+    if (!to.length) return res.status(400).json({ error: 'no_recipients',
+      message: `No invoice recipients are set for ${inv.client_id}. Add them under Finance → Rates.` });
+    if (!bill.legal_name) return res.status(400).json({ error: 'no_billing_details',
+      message: `No billing name is set for ${inv.client_id}. The invoice would be addressed to nobody.` });
+
+    const from = process.env.INVOICE_EMAIL_FROM || 'accounts@velozity.au';
+    const attachments = [];
+
+    // PDF, generated through the same route the UI uses so the attachment is byte-identical
+    // to what anyone downloads.
+    inv.lines = db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id = ? ORDER BY sort_order').all(inv.id);
+    const pdfBuf = await renderInvoicePdfBuffer(inv);
+    attachments.push({ filename: `${String(inv.ref_number).replace(/[^A-Za-z0-9\-_]/g, '_')}.pdf`,
+                       content: pdfBuf.toString('base64') });
+
+    // ICONIC VAS also carries the supplier cost allocation. Driven by client and type, so a
+    // future client does not inherit ICONIC's rules by accident.
+    let allocationAttached = false;
+    if (inv.client_id === 'ICONIC' && inv.type === 'VAS') {
+      try {
+        const built = await buildVasAllocationWorkbook(inv.client_id, inv.week_start);
+        const buf = await built.wb.xlsx.writeBuffer();
+        attachments.push({ filename: built.filename, content: Buffer.from(buf).toString('base64') });
+        allocationAttached = true;
+      } catch (e) {
+        // A missing allocation must not silently drop out of an email the client expects it in.
+        console.error('[invoice:send] allocation failed:', e.message);
+        return res.status(500).json({ error: 'allocation_failed',
+          message: `The supplier cost allocation could not be built: ${e.message}. Nothing was sent.` });
+      }
+    }
+
+    const subject = `VelOzity invoice ${inv.ref_number} — ${bill.legal_name}`;
+    const html = invoiceEmailHtml(inv, bill);
+    const text = `Invoice ${inv.ref_number}\nDate: ${inv.invoice_date || '—'}\nWeek: ${inv.week_start || '—'}\n`
+      + `Terms: ${invoiceTerms(inv.type)}\nDue: ${inv.due_date || '—'}\n`
+      + `Amount due: ${inv.currency || 'USD'} ${Number(inv.total || 0).toFixed(2)}\n\n`
+      + INVOICE_REMITTANCE.map(([k, v]) => `${k}: ${v}`).join('\n');
+
+    const r = await sendViaResend({ from, replyTo: 'accounts@velozity.au', to, cc, subject, html, text, attachments });
+
+    db.prepare(`UPDATE fin_invoices SET status = CASE WHEN status='draft' THEN 'sent' ELSE status END,
+                sent_at=datetime('now'), sent_by=?, sent_to=?, send_count=COALESCE(send_count,0)+1,
+                updated_at=datetime('now') WHERE id=?`)
+      .run(aqUserEmail(req) || null, to.concat(cc).join(', '), inv.id);
+
+    console.log(`[invoice:send] ${inv.ref_number} -> ${to.join(', ')}${allocationAttached ? ' (with allocation)' : ''}`);
+    res.json({ ok: true, ref_number: inv.ref_number, to, cc,
+               attachments: attachments.map(a => a.filename), resend_id: r.id,
+               resend: (inv.send_count || 0) > 0 });
+  } catch (e) {
+    console.error('[POST /finance/invoice/:id/send]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
 
 // ── Client billing details ──
 // The invoice PDF hardcoded "The Iconic" as the bill-to, so every EHP invoice carried
