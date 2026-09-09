@@ -17456,18 +17456,23 @@ try {
 
     const rows = db.prepare('SELECT id, ref_number FROM fin_invoices').all();
     const upd = db.prepare('UPDATE fin_invoices SET client_id=? WHERE id=?');
-    let done = 0; const unresolved = [];
+    // Any segment may carry the code, because older references predate it entirely:
+    //   INVVAS_EHP_W372026-1      -> EHP   (code in segment 2)
+    //   VOZ_TIC_INSD2D_W342026-1  -> TIC   (code in segment 2)
+    //   VOZ_INSD2D_W342026-1      -> none  (no client segment at all)
+    //   INVVAS046                 -> none  (legacy format)
+    // Everything without a code predates multi-tenancy, when ICONIC was the only client,
+    // so it attributes to ICONIC. That is a fact about the history rather than a guess:
+    // EHP references have always carried _EHP_.
+    const DEFAULT_CLIENT = 'ICONIC';
+    let done = 0, defaulted = 0;
     for (const r of rows) {
-      const parts = String(r.ref_number || '').split('_');
-      // The code is the second segment in both layouts.
-      const code = (parts[1] || '').toUpperCase();
-      const client = codeToClient.get(code);
-      if (client) { upd.run(client, r.id); done++; }
-      else unresolved.push(r.ref_number || r.id);
+      const segs = String(r.ref_number || '').toUpperCase().split(/[_-]/);
+      const code = segs.find(x => codeToClient.has(x));
+      if (code) { upd.run(codeToClient.get(code), r.id); done++; }
+      else { upd.run(DEFAULT_CLIENT, r.id); defaulted++; }
     }
-    console.log(`[fin_invoices] client_id backfilled on ${done}/${rows.length} invoice(s)`);
-    if (unresolved.length)
-      console.warn(`[fin_invoices] ${unresolved.length} invoice(s) could not be attributed and are left unassigned: ${unresolved.slice(0, 10).join(', ')}`);
+    console.log(`[fin_invoices] client_id backfilled: ${done} from the reference, ${defaulted} defaulted to ${DEFAULT_CLIENT} (pre-multi-tenant), ${rows.length} total`);
   }
 } catch (e) { console.error('[fin_invoices:client-migration]', e.message); }
 
