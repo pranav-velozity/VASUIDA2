@@ -6967,7 +6967,7 @@ function getISOWeek(d) {
 }
 
 // ── GET /finance/invoices — list invoices ──
-app.get('/finance/invoices', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/finance/invoices', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const { week_start, type, status } = req.query;
     // Scoped to the active client. Without this every client saw every invoice, which is
@@ -6988,7 +6988,7 @@ app.get('/finance/invoices', authenticateRequest, requireRole(['admin']), (req, 
 });
 
 // ── GET /finance/invoices/:id ──
-app.get('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ? AND client_id = ?').get(req.params.id, curClient());
     if (!inv) return res.status(404).json({ error: 'Not found' });
@@ -6998,7 +6998,7 @@ app.get('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), (r
 });
 
 // ── POST /finance/invoices — create invoice ──
-app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const { type, week_start, lines = [], invoice_date, due_date, notes, customs, misc_total, ref_override, status } = req.body;
     if (!type || !week_start) return res.status(400).json({ error: 'type and week_start required' });
@@ -7030,7 +7030,7 @@ app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), (req,
 });
 
 // ── PATCH /finance/invoices/:id — update invoice ──
-app.patch('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.patch('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ? AND client_id = ?').get(req.params.id, curClient());
     if (!inv) return res.status(404).json({ error: 'Not found' });
@@ -7072,7 +7072,7 @@ app.patch('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), 
 });
 
 // ── DELETE /finance/invoices/:id ──
-app.delete('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.delete('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     // Scoped: an id alone would let an admin viewing one client delete another client's
     // invoice, and the lines would go with it.
@@ -7086,7 +7086,7 @@ app.delete('/finance/invoices/:id', authenticateRequest, requireRole(['admin']),
 });
 
 // ── GET /finance/prefill/:type/:week_start — auto-populate invoice data from Pinpoint ──
-app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const { type, week_start } = req.params;
     const weDate = new Date(week_start + 'T00:00:00Z'); weDate.setUTCDate(weDate.getUTCDate() + 6);
@@ -7551,7 +7551,7 @@ app.get('/finance/invoice/:id/pdf', async (req, res) => {
 });
 
 // ── GET /finance/expenses — list expenses ──
-app.get('/finance/expenses', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/finance/expenses', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const { month_key, category } = req.query;
     let where = 'WHERE 1=1';
@@ -7564,7 +7564,7 @@ app.get('/finance/expenses', authenticateRequest, requireRole(['admin']), (req, 
 });
 
 // ── POST /finance/expenses ──
-app.post('/finance/expenses', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.post('/finance/expenses', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const { category, description, amount, currency, expense_date, is_recurring, recur_freq, recur_end } = req.body;
     if (!category || !description || !amount || !expense_date) return res.status(400).json({ error: 'Missing required fields' });
@@ -7590,7 +7590,7 @@ app.post('/finance/expenses', authenticateRequest, requireRole(['admin']), (req,
 });
 
 // ── PATCH /finance/expenses/:id ──
-app.patch('/finance/expenses/:id', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.patch('/finance/expenses/:id', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const { category, description, amount, currency, expense_date } = req.body;
     const exp = db.prepare('SELECT * FROM fin_expenses WHERE id = ?').get(req.params.id);
@@ -7610,7 +7610,7 @@ app.patch('/finance/expenses/:id', authenticateRequest, requireRole(['admin']), 
 });
 
 // ── DELETE /finance/expenses/:id ──
-app.delete('/finance/expenses/:id', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.delete('/finance/expenses/:id', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     db.prepare('DELETE FROM fin_expenses WHERE id = ? OR parent_id = ?').run(req.params.id, req.params.id);
     res.json({ ok: true });
@@ -7618,7 +7618,7 @@ app.delete('/finance/expenses/:id', authenticateRequest, requireRole(['admin']),
 });
 
 // ── GET /finance/pl — P&L summary by month with unit economics ──
-app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/finance/pl', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const { year } = req.query;
     const y = year || new Date().getUTCFullYear();
@@ -7837,21 +7837,21 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
 
     // Outstanding stays GROSS: a customer owes the full invoice, GST included. This is a
     // receivable, not revenue — the two are correctly on different bases.
-    const outstanding = db.prepare(`SELECT COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE client_id = ? AND status IN ('draft','sent','overdue')`).get(curClient());
+    const outstanding = db.prepare(`SELECT COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE status IN ('draft','sent','overdue')`).get();
     res.json({ year: y, months: Object.values(months), ytd, outstanding });
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
 });
 
 
 // ── GET/POST /finance/fx — FX rates ──
-app.get('/finance/fx', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/finance/fx', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const rates = db.prepare('SELECT * FROM fin_fx_rates ORDER BY from_curr, to_curr').all();
     res.json(rates);
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
 });
 
-app.post('/finance/fx', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.post('/finance/fx', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const { from_curr, to_curr, rate, source } = req.body;
     if (!from_curr || !to_curr || !rate) return res.status(400).json({ error: 'Missing fields' });
@@ -7863,25 +7863,25 @@ app.post('/finance/fx', authenticateRequest, requireRole(['admin']), (req, res) 
 });
 
 // ── GET /finance/summary — for PULSE context ──
-app.get('/finance/summary', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/finance/summary', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     // Outstanding stays GROSS: a customer owes the full invoice, GST included. This is a
     // receivable, not revenue — the two are correctly on different bases.
-    const outstanding = db.prepare(`SELECT COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE client_id = ? AND status IN ('draft','sent','overdue')`).get(curClient());
+    const outstanding = db.prepare(`SELECT COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE status IN ('draft','sent','overdue')`).get();
     // Net of GST, matching the P&L and the expense basis.
     const paid_ytd = db.prepare(`SELECT COALESCE(SUM(COALESCE(subtotal, total)),0) as total
-                                 FROM fin_invoices WHERE client_id = ? AND status='paid' AND week_start >= ?`)
-                       .get(curClient(), `${new Date().getUTCFullYear()}-01-01`);
+                                 FROM fin_invoices WHERE status='paid' AND week_start >= ?`)
+                       .get(`${new Date().getUTCFullYear()}-01-01`);
     const expenses_ytd = db.prepare(`SELECT COALESCE(SUM(amount),0) as total FROM fin_expenses WHERE month_key >= ?`).get(`${new Date().getUTCFullYear()}-01`);
-    const last_invoice = db.prepare(`SELECT * FROM fin_invoices WHERE client_id = ? ORDER BY created_at DESC LIMIT 1`).get(curClient());
+    const last_invoice = db.prepare(`SELECT * FROM fin_invoices ORDER BY created_at DESC LIMIT 1`).get();
     const by_type = db.prepare(`SELECT type, COUNT(*) as n, COALESCE(SUM(COALESCE(subtotal, total)),0) as total
-                                FROM fin_invoices WHERE client_id = ? AND status='paid' GROUP BY type`).all(curClient());
+                                FROM fin_invoices WHERE status='paid' GROUP BY type`).all();
     res.json({ outstanding, paid_ytd, expenses_ytd, last_invoice, by_type });
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
 });
 
 // ── POST /finance/insights — AI-powered P&L analysis ──
-app.post('/finance/insights', authenticateRequest, requireRole(['admin']), aiLimiter, async (req, res) => {
+app.post('/finance/insights', authenticateRequest, requireRole(['admin']), requireInternalOrg, aiLimiter, async (req, res) => {
   if (!aiAllowed(req, res)) return;
   try {
     const { pl_data } = req.body || {};
@@ -12641,7 +12641,7 @@ function siDetail(inv) {
   };
 }
 
-app.get('/finance/supplier-invoices', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+app.get('/finance/supplier-invoices', authenticateRequest, requireRole(['admin']),requireInternalOrg,  requireInternalOrg, (req, res) => {
   try {
     const p = []; let sql = 'SELECT * FROM supplier_invoice WHERE 1=1';
     if (req.query.month)  { sql += ' AND month_key=?'; p.push(String(req.query.month)); }
@@ -12677,7 +12677,7 @@ app.get('/finance/supplier-invoices', authenticateRequest, requireRole(['admin']
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
-app.get('/finance/supplier-invoices/:id', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+app.get('/finance/supplier-invoices/:id', authenticateRequest, requireRole(['admin']),requireInternalOrg,  requireInternalOrg, (req, res) => {
   try {
     const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(req.params.id);
     if (!inv) return res.status(404).json({ error: 'not_found' });
@@ -12688,7 +12688,7 @@ app.get('/finance/supplier-invoices/:id', authenticateRequest, requireRole(['adm
 // Generate the month's four submissions. Idempotent, and usable by hand for testing well
 // before the cron is due to run.
 app.post('/finance/supplier-invoices/generate', authenticateRequest, requireRole(['admin']),
-  requireInternalOrg, writeOpLimiter, auditLog('generate_supplier_invoices'), async (req, res) => {
+ requireInternalOrg,  requireInternalOrg, writeOpLimiter, auditLog('generate_supplier_invoices'), async (req, res) => {
   try {
     const month = String((req.body || {}).month || '').trim();
     if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month required as YYYY-MM' });
@@ -12712,7 +12712,7 @@ app.post('/finance/supplier-invoices/generate', authenticateRequest, requireRole
 });
 
 app.post('/finance/supplier-invoices/:id/send', authenticateRequest, requireRole(['admin']),
-  requireInternalOrg, writeOpLimiter, auditLog('send_supplier_invoice_request'), async (req, res) => {
+ requireInternalOrg,  requireInternalOrg, writeOpLimiter, auditLog('send_supplier_invoice_request'), async (req, res) => {
   try {
     const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(req.params.id);
     if (!inv) return res.status(404).json({ error: 'not_found' });
@@ -12723,7 +12723,7 @@ app.post('/finance/supplier-invoices/:id/send', authenticateRequest, requireRole
 });
 
 app.post('/finance/supplier-invoices/:id/query', authenticateRequest, requireRole(['admin']),
-  requireInternalOrg, writeOpLimiter, auditLog('query_supplier_invoice'), async (req, res) => {
+ requireInternalOrg,  requireInternalOrg, writeOpLimiter, auditLog('query_supplier_invoice'), async (req, res) => {
   try {
     const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(req.params.id);
     if (!inv) return res.status(404).json({ error: 'not_found' });
@@ -12740,7 +12740,7 @@ app.post('/finance/supplier-invoices/:id/query', authenticateRequest, requireRol
 });
 
 app.post('/finance/supplier-invoices/:id/accept', authenticateRequest, requireRole(['admin']),
-  requireInternalOrg, writeOpLimiter, auditLog('accept_supplier_invoice'), (req, res) => {
+ requireInternalOrg,  requireInternalOrg, writeOpLimiter, auditLog('accept_supplier_invoice'), (req, res) => {
   try {
     const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(req.params.id);
     if (!inv) return res.status(404).json({ error: 'not_found' });
@@ -12766,7 +12766,7 @@ app.post('/finance/supplier-invoices/:id/accept', authenticateRequest, requireRo
 // Payment is what posts the expense. Accepted-but-unpaid sits in payables and stays out of
 // the P&L, so the payable total and expenses can never double-count the same invoice.
 app.post('/finance/supplier-invoices/:id/pay', authenticateRequest, requireRole(['admin']),
-  requireInternalOrg, writeOpLimiter, auditLog('pay_supplier_invoice'), (req, res) => {
+ requireInternalOrg,  requireInternalOrg, writeOpLimiter, auditLog('pay_supplier_invoice'), (req, res) => {
   try {
     const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(req.params.id);
     if (!inv) return res.status(404).json({ error: 'not_found' });
@@ -12794,7 +12794,7 @@ app.post('/finance/supplier-invoices/:id/pay', authenticateRequest, requireRole(
 // Reversal must remove the expense it created, or the P&L keeps a row for a payment that
 // no longer exists.
 app.post('/finance/supplier-invoices/:id/unpay', authenticateRequest, requireRole(['admin']),
-  requireInternalOrg, writeOpLimiter, auditLog('unpay_supplier_invoice'), (req, res) => {
+ requireInternalOrg,  requireInternalOrg, writeOpLimiter, auditLog('unpay_supplier_invoice'), (req, res) => {
   try {
     const inv = db.prepare('SELECT * FROM supplier_invoice WHERE id=?').get(req.params.id);
     if (!inv) return res.status(404).json({ error: 'not_found' });
@@ -12809,7 +12809,7 @@ app.post('/finance/supplier-invoices/:id/unpay', authenticateRequest, requireRol
 });
 
 // ── Supplier contacts ──
-app.get('/finance/supplier-contacts', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+app.get('/finance/supplier-contacts', authenticateRequest, requireRole(['admin']),requireInternalOrg,  requireInternalOrg, (req, res) => {
   try {
     const rows = db.prepare('SELECT * FROM supplier_contact ORDER BY supplier, invoice_type').all();
     const suppliers = ['Kerry Logistics Shenzhen', 'Kerry Logistics US'];
@@ -12818,7 +12818,7 @@ app.get('/finance/supplier-contacts', authenticateRequest, requireRole(['admin']
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
-app.post('/finance/supplier-contacts', authenticateRequest, requireRole(['admin']), requireInternalOrg,
+app.post('/finance/supplier-contacts', authenticateRequest, requireRole(['admin']),requireInternalOrg,  requireInternalOrg,
   writeOpLimiter, auditLog('edit_supplier_contact'), (req, res) => {
   try {
     const b = req.body || {};
@@ -16972,7 +16972,7 @@ app.post('/ehp/count-period/:id/close', authenticateRequest, writeOpLimiter, aud
 // ── Explain a month's VAS cost per unit, term by term ──
 // Read-only. Shows the invoices counted, the lines behind them, the applied units and the
 // division, so a wrong figure can be traced to its input rather than guessed at.
-app.get('/finance/explain-vas', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/finance/explain-vas', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const mk = String(req.query.month || '').trim();          // YYYY-MM
     if (!/^\d{4}-\d{2}$/.test(mk)) return res.status(400).json({ error: 'month=YYYY-MM required' });
@@ -17023,7 +17023,7 @@ app.get('/finance/explain-vas', authenticateRequest, requireRole(['admin']), (re
 });
 
 // Invoices whose stored total is zero — these predate the line loss and are worth a look.
-app.get('/finance/zero-invoices', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/finance/zero-invoices', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     res.json({ invoices: db.prepare(`SELECT ref_number, type, status, week_start, invoice_date,
         subtotal, gst, total, client_id,
@@ -17035,7 +17035,7 @@ app.get('/finance/zero-invoices', authenticateRequest, requireRole(['admin']), (
 // ── Export / import invoice lines ──
 // Lets the real line detail be lifted off a restored disk snapshot and re-applied to the
 // current database, so recovering the lines does not mean losing everything since.
-app.get('/finance/export-lines', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/finance/export-lines', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const lines = db.prepare(`SELECT l.*, i.ref_number FROM fin_invoice_lines l
       JOIN fin_invoices i ON i.id = l.invoice_id ORDER BY i.ref_number, l.sort_order`).all();
@@ -17054,7 +17054,7 @@ app.get('/finance/export-lines', authenticateRequest, requireRole(['admin']), (r
 // Re-applies exported lines. Matched by ref_number, because invoice ids are stable but
 // matching on them alone would silently skip anything renumbered. Only invoices that
 // currently have NO lines are touched, so this can never overwrite live data.
-app.post('/finance/import-lines', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+app.post('/finance/import-lines', authenticateRequest, requireRole(['admin']), requireInternalOrg, writeOpLimiter,
   auditLog('finance_import_lines'), (req, res) => {
   try {
     const b = req.body || {};
@@ -17104,7 +17104,7 @@ app.post('/finance/import-lines', authenticateRequest, requireRole(['admin']), w
 // invoice line. The headers survived with correct subtotal/gst/total, so a single
 // reconstructed line per invoice restores the figures the reports depend on. This is a
 // reconstruction, not the original detail: each line is marked as such.
-app.post('/finance/rebuild-missing-lines', authenticateRequest, requireRole(['admin']), writeOpLimiter,
+app.post('/finance/rebuild-missing-lines', authenticateRequest, requireRole(['admin']), requireInternalOrg, writeOpLimiter,
   auditLog('finance_rebuild_lines'), (req, res) => {
   try {
     const b = req.body || {};
@@ -17204,7 +17204,7 @@ app.get('/perf/probe', authenticateRequest, requireRole(['admin']), (req, res) =
 // ── Finance integrity: what is actually stored on invoices ──
 // Read-only. Reports totals, nulls and line linkage so a display problem can be told
 // apart from a data problem without guessing.
-app.get('/finance/integrity', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/finance/integrity', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const cols = db.prepare('PRAGMA table_info(fin_invoices)').all().map(c => c.name);
     const totals = db.prepare(`SELECT COUNT(*) n,
@@ -17539,7 +17539,7 @@ function rateFor(clientId, code, fallback) {
   } catch (e) { return fallback; }
 }
 
-app.get('/finance/rates', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/finance/rates', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const clientId = String(req.query.client_id || curClient());
     res.json({ client_id: clientId,
@@ -17551,7 +17551,7 @@ app.get('/finance/rates', authenticateRequest, requireRole(['admin']), (req, res
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
-app.post('/finance/rates', authenticateRequest, requireRole(['admin']), writeOpLimiter, auditLog('edit_client_rate'), (req, res) => {
+app.post('/finance/rates', authenticateRequest, requireRole(['admin']), requireInternalOrg, writeOpLimiter, auditLog('edit_client_rate'), (req, res) => {
   try {
     const b = req.body || {};
     const clientId = String(b.client_id || curClient());
@@ -17577,7 +17577,7 @@ app.post('/finance/rates', authenticateRequest, requireRole(['admin']), writeOpL
 });
 
 // Weekly billing preview: volumes x rates. Drives the weekly invoice.
-app.get('/finance/fulfilment-billing', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.get('/finance/fulfilment-billing', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const clientId = String(req.query.client_id || curClient());
     const from = String(req.query.from || '').trim(), to = String(req.query.to || '').trim();
