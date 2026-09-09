@@ -6970,8 +6970,10 @@ function getISOWeek(d) {
 app.get('/finance/invoices', authenticateRequest, requireRole(['admin']), (req, res) => {
   try {
     const { week_start, type, status } = req.query;
-    let where = 'WHERE 1=1';
-    const params = [];
+    // Scoped to the active client. Without this every client saw every invoice, which is
+    // how an EHP invoice appeared in ICONIC's list.
+    let where = 'WHERE client_id = ?';
+    const params = [curClient()];
     if (week_start) { where += ' AND week_start = ?'; params.push(week_start); }
     if (type)       { where += ' AND type = ?';       params.push(type); }
     if (status)     { where += ' AND status = ?';     params.push(status); }
@@ -6988,7 +6990,7 @@ app.get('/finance/invoices', authenticateRequest, requireRole(['admin']), (req, 
 // ── GET /finance/invoices/:id ──
 app.get('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), (req, res) => {
   try {
-    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ?').get(req.params.id);
+    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ? AND client_id = ?').get(req.params.id, curClient());
     if (!inv) return res.status(404).json({ error: 'Not found' });
     inv.lines = db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id = ? ORDER BY sort_order').all(inv.id);
     res.json(inv);
@@ -7000,7 +7002,8 @@ app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), (req,
   try {
     const { type, week_start, lines = [], invoice_date, due_date, notes, customs, misc_total, ref_override, status } = req.body;
     if (!type || !week_start) return res.status(400).json({ error: 'type and week_start required' });
-    const existing = db.prepare('SELECT COUNT(*) as n FROM fin_invoices WHERE type = ? AND week_start = ?').get(type, week_start);
+    const existing = db.prepare('SELECT COUNT(*) as n FROM fin_invoices WHERE type = ? AND week_start = ? AND client_id = ?')
+                       .get(type, week_start, curClient());
     const id = uuidv4();
     const ref = (ref_override && ref_override.trim()) ? ref_override.trim() : genInvoiceRef(type, week_start, existing.n);
     // Calculate totals — exclude gst_free lines from taxable subtotal
@@ -7013,14 +7016,14 @@ app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), (req,
     // so total = subtotal + gst + customs only — miscAmt is stored for reference but not added again
     const total = Math.round((subtotal + gst + customsAmt) * 100) / 100;
     const invStatus = status || 'draft';
-    db.prepare(`INSERT INTO fin_invoices (id,type,week_start,ref_number,status,invoice_date,due_date,subtotal,gst,customs,misc_total,total,notes)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, type, week_start, ref, invStatus, invoice_date||null, due_date||null, subtotal, gst, customsAmt, miscAmt, total, notes||null);
+    db.prepare(`INSERT INTO fin_invoices (id,client_id,type,week_start,ref_number,status,invoice_date,due_date,subtotal,gst,customs,misc_total,total,notes)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, curClient(), type, week_start, ref, invStatus, invoice_date||null, due_date||null, subtotal, gst, customsAmt, miscAmt, total, notes||null);
     // Insert lines
     lines.forEach((l, i) => {
       db.prepare(`INSERT INTO fin_invoice_lines (id,invoice_id,sort_order,description,unit_label,rate,quantity,total,gst_free,is_misc)
         VALUES (?,?,?,?,?,?,?,?,?,?)`).run(uuidv4(), id, i, l.description||'', l.unit_label||'', parseFloat(l.rate)||0, parseFloat(l.quantity)||0, parseFloat(l.total)||0, l.gst_free?1:0, l.is_misc?1:0);
     });
-    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ?').get(id);
+    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ? AND client_id = ?').get(id, curClient());
     inv.lines = db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id = ? ORDER BY sort_order').all(id);
     res.json(inv);
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
@@ -7029,7 +7032,7 @@ app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), (req,
 // ── PATCH /finance/invoices/:id — update invoice ──
 app.patch('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), (req, res) => {
   try {
-    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ?').get(req.params.id);
+    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ? AND client_id = ?').get(req.params.id, curClient());
     if (!inv) return res.status(404).json({ error: 'Not found' });
     const { lines, status, invoice_date, due_date, notes, customs, misc_total, ref_override } = req.body;
     // Update ref_number if override provided
@@ -7062,7 +7065,7 @@ app.patch('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), 
       const total = Math.round((cur.subtotal + cur.gst + parseFloat(customs)) * 100) / 100;
       db.prepare(`UPDATE fin_invoices SET customs=?,total=?,updated_at=datetime('now') WHERE id=?`).run(parseFloat(customs)||0, total, inv.id);
     }
-    const updated = db.prepare('SELECT * FROM fin_invoices WHERE id = ?').get(inv.id);
+    const updated = db.prepare('SELECT * FROM fin_invoices WHERE id = ? AND client_id = ?').get(inv.id, curClient());
     updated.lines = db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id = ? ORDER BY sort_order').all(inv.id);
     res.json(updated);
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
@@ -7071,6 +7074,11 @@ app.patch('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), 
 // ── DELETE /finance/invoices/:id ──
 app.delete('/finance/invoices/:id', authenticateRequest, requireRole(['admin']), (req, res) => {
   try {
+    // Scoped: an id alone would let an admin viewing one client delete another client's
+    // invoice, and the lines would go with it.
+    const own = db.prepare('SELECT id FROM fin_invoices WHERE id = ? AND client_id = ?')
+                  .get(req.params.id, curClient());
+    if (!own) return res.status(404).json({ error: 'Not found' });
     db.prepare('DELETE FROM fin_invoice_lines WHERE invoice_id = ?').run(req.params.id);
     db.prepare('DELETE FROM fin_invoices WHERE id = ?').run(req.params.id);
     res.json({ ok: true });
@@ -7325,7 +7333,7 @@ app.get('/finance/invoice/:id/pdf', async (req, res) => {
     const token = authHeader.replace('Bearer ', '').trim();
     if (!token) return res.status(401).json({ error: 'No token' });
 
-    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ?').get(req.params.id);
+    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ? AND client_id = ?').get(req.params.id, curClient());
     if (!inv) return res.status(404).json({ error: 'Not found' });
     inv.lines = db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id = ? ORDER BY sort_order').all(inv.id);
 
@@ -7624,9 +7632,9 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
     const invRows = db.prepare(`
       SELECT type, week_start, invoice_date, subtotal, total, ref_number, status
       FROM fin_invoices
-      WHERE status IN ('draft','sent','paid') AND week_start >= ? AND week_start <= ?
+      WHERE client_id = ? AND status IN ('draft','sent','paid') AND week_start >= ? AND week_start <= ?
       ORDER BY week_start
-    `).all(`${y}-01-01`, `${y}-12-31`);
+    `).all(curClient(), `${y}-01-01`, `${y}-12-31`);
 
     // ── 2. Expenses by month and category ──
     const expRows = db.prepare(`
@@ -7829,7 +7837,7 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), (req, res) =
 
     // Outstanding stays GROSS: a customer owes the full invoice, GST included. This is a
     // receivable, not revenue — the two are correctly on different bases.
-    const outstanding = db.prepare(`SELECT COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE status IN ('draft','sent','overdue')`).get();
+    const outstanding = db.prepare(`SELECT COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE client_id = ? AND status IN ('draft','sent','overdue')`).get(curClient());
     res.json({ year: y, months: Object.values(months), ytd, outstanding });
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
 });
@@ -7859,15 +7867,15 @@ app.get('/finance/summary', authenticateRequest, requireRole(['admin']), (req, r
   try {
     // Outstanding stays GROSS: a customer owes the full invoice, GST included. This is a
     // receivable, not revenue — the two are correctly on different bases.
-    const outstanding = db.prepare(`SELECT COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE status IN ('draft','sent','overdue')`).get();
+    const outstanding = db.prepare(`SELECT COUNT(*) as n, COALESCE(SUM(total),0) as total FROM fin_invoices WHERE client_id = ? AND status IN ('draft','sent','overdue')`).get(curClient());
     // Net of GST, matching the P&L and the expense basis.
     const paid_ytd = db.prepare(`SELECT COALESCE(SUM(COALESCE(subtotal, total)),0) as total
-                                 FROM fin_invoices WHERE status='paid' AND week_start >= ?`)
-                       .get(`${new Date().getUTCFullYear()}-01-01`);
+                                 FROM fin_invoices WHERE client_id = ? AND status='paid' AND week_start >= ?`)
+                       .get(curClient(), `${new Date().getUTCFullYear()}-01-01`);
     const expenses_ytd = db.prepare(`SELECT COALESCE(SUM(amount),0) as total FROM fin_expenses WHERE month_key >= ?`).get(`${new Date().getUTCFullYear()}-01`);
-    const last_invoice = db.prepare(`SELECT * FROM fin_invoices ORDER BY created_at DESC LIMIT 1`).get();
+    const last_invoice = db.prepare(`SELECT * FROM fin_invoices WHERE client_id = ? ORDER BY created_at DESC LIMIT 1`).get(curClient());
     const by_type = db.prepare(`SELECT type, COUNT(*) as n, COALESCE(SUM(COALESCE(subtotal, total)),0) as total
-                                FROM fin_invoices WHERE status='paid' GROUP BY type`).all();
+                                FROM fin_invoices WHERE client_id = ? AND status='paid' GROUP BY type`).all(curClient());
     res.json({ outstanding, paid_ytd, expenses_ytd, last_invoice, by_type });
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
 });
@@ -8389,8 +8397,9 @@ app.get('/report/cost-utilisation/data',
       // All VAS invoices for this month
       const invs = db.prepare(`
         SELECT i.id, i.invoice_date, i.ref_number, i.week_start, i.subtotal FROM fin_invoices i
-        WHERE i.type='VAS' AND substr(i.week_start,1,7)=? ORDER BY i.week_start, i.ref_number
-      `).all(mk);
+        WHERE i.client_id = ? AND i.type='VAS' AND substr(i.week_start,1,7)=?
+        ORDER BY i.week_start, i.ref_number
+      `).all(curClient(), mk);
 
       let vasRev = 0, cartonRev = 0, cartonQty = 0;
       for (const inv of invs) {
@@ -8475,8 +8484,9 @@ app.get('/report/cost-utilisation/data',
       for (const [type, store] of [['SEA', seaData], ['AIR', airData]]) {
         const invs = db.prepare(`
           SELECT ref_number, week_start, subtotal FROM fin_invoices
-          WHERE type=? AND substr(week_start,1,7)=? ORDER BY week_start, ref_number
-        `).all(type, mk);
+          WHERE client_id = ? AND type=? AND substr(week_start,1,7)=?
+          ORDER BY week_start, ref_number
+        `).all(curClient(), type, mk);
         const invoiceTotal = invs.reduce((s, i) => s + (i.subtotal || 0), 0);
 
         // Applied units by freight type (from plan + records join)
@@ -10327,8 +10337,8 @@ function _mcrAllocateInvoiceAmounts(rows, month, fxRate) {
   // Load invoices for this month (all types)
   const invoices = db.prepare(`
     SELECT * FROM fin_invoices
-    WHERE substr(week_start, 1, 7) = ?
-  `).all(month);
+    WHERE client_id = ? AND substr(week_start, 1, 7) = ?
+  `).all(curClient(), month);
 
   // Group rows by week_start + mode → set of container rows
   const rowsByWeekMode = new Map();
@@ -17421,6 +17431,45 @@ function clientInvoiceTypes(clientId) {
   if (has('freight_lanes') || has('transit_clearing')) { types.push('SEA', 'AIR'); }
   return types;
 }
+
+// fin_invoices predates multi-tenancy: it was built when ICONIC was the only client, so
+// every invoice sat in one undifferentiated pool. The client picker changed nothing because
+// there was nothing to filter on — which is how an EHP invoice appeared under ICONIC.
+//
+// The client is recoverable from ref_number, which has always carried the code:
+//   INVVAS_TIC_W362026-1        VOZ_TIC_INSD2D_W312026-1
+//   INVVAS_EHP_W372026-1        VOZ_EHP_INAD2D_W312026-1
+// so the backfill is derived from the data rather than assumed. Anything unparseable is
+// left NULL and logged — a wrongly attributed invoice would quietly corrupt a month's P&L,
+// which is worse than one that needs a human to look at it.
+try {
+  const cols = db.prepare("PRAGMA table_info(fin_invoices)").all().map(c => c.name);
+  if (!cols.includes('client_id')) {
+    db.exec("ALTER TABLE fin_invoices ADD COLUMN client_id TEXT");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_fin_inv_client ON fin_invoices(client_id, week_start)");
+
+    const codeToClient = new Map();
+    try {
+      for (const r of db.prepare('SELECT id, invoice_code FROM client').all())
+        if (r.invoice_code) codeToClient.set(String(r.invoice_code).toUpperCase(), r.id);
+    } catch (e) { /* fall through to the segment heuristic below */ }
+
+    const rows = db.prepare('SELECT id, ref_number FROM fin_invoices').all();
+    const upd = db.prepare('UPDATE fin_invoices SET client_id=? WHERE id=?');
+    let done = 0; const unresolved = [];
+    for (const r of rows) {
+      const parts = String(r.ref_number || '').split('_');
+      // The code is the second segment in both layouts.
+      const code = (parts[1] || '').toUpperCase();
+      const client = codeToClient.get(code);
+      if (client) { upd.run(client, r.id); done++; }
+      else unresolved.push(r.ref_number || r.id);
+    }
+    console.log(`[fin_invoices] client_id backfilled on ${done}/${rows.length} invoice(s)`);
+    if (unresolved.length)
+      console.warn(`[fin_invoices] ${unresolved.length} invoice(s) could not be attributed and are left unassigned: ${unresolved.slice(0, 10).join(', ')}`);
+  }
+} catch (e) { console.error('[fin_invoices:client-migration]', e.message); }
 
 function clientInvoiceCode(clientId) {
   try {
