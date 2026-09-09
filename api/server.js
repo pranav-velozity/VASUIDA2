@@ -7411,10 +7411,16 @@ app.get('/finance/invoice/:id/pdf', async (req, res) => {
     let y = 158;
     doc.fontSize(8).font('Helvetica-Bold').fillColor(BRAND).text('BILL TO', 50, y);
     y += 12;
-    doc.fontSize(9).font('Helvetica-Bold').fillColor(DARK).text('The Iconic [ABN 50 152 631 082]', 50, y);
+    // Taken from the invoice's own client, not the viewer's — a PDF fetched by a token has
+    // no client context, and an invoice must always print the party it was raised against.
+    const _bill = clientBilling(inv.client_id || curClient());
+    doc.fontSize(9).font('Helvetica-Bold').fillColor(DARK)
+       .text(`${_bill.legal_name || ''}${_bill.abn ? ` [ABN ${_bill.abn}]` : ''}`, 50, y);
     y += 12;
-    doc.fontSize(8).font('Helvetica').fillColor(MID).text('Level 18, Tower Two, International Towers, 200 Barangaroo Avenue, Barangaroo NSW 2000', 50, y);
-    y += 14;
+    if (_bill.address) {
+      doc.fontSize(8).font('Helvetica').fillColor(MID).text(_bill.address, 50, y, { width: 495 });
+      y += 14;
+    } else { y += 2; }
 
     // Description
     doc.moveTo(50, y).lineTo(545, y).lineWidth(0.5).strokeColor('#E5E5EA').stroke();
@@ -17522,6 +17528,77 @@ try {
     console.log(`[fin_invoices] client_id backfilled: ${done} from the reference, ${defaulted} defaulted to ${DEFAULT_CLIENT} (pre-multi-tenant), ${rows.length} total`);
   }
 } catch (e) { console.error('[fin_invoices:client-migration]', e.message); }
+
+// ── Client billing details ──
+// The invoice PDF hardcoded "The Iconic" as the bill-to, so every EHP invoice carried
+// another company's name and ABN. Invisible with one client; wrong the moment there were
+// two. Held per client so a third is a row rather than a code change.
+db.exec(`
+CREATE TABLE IF NOT EXISTS client_billing (
+  client_id      TEXT PRIMARY KEY,
+  legal_name     TEXT,
+  abn            TEXT,
+  address        TEXT,
+  invoice_emails TEXT,                       -- comma separated; recipients for a sent invoice
+  invoice_cc     TEXT,
+  updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+
+// Seeded from the values that were hardcoded in the PDF, so nothing changes for ICONIC
+// until someone edits it.
+(function seedClientBilling() {
+  try {
+    const n = db.prepare("SELECT COUNT(*) n FROM client_billing WHERE client_id='ICONIC'").get().n;
+    if (n) return;
+    db.prepare(`INSERT OR IGNORE INTO client_billing (client_id, legal_name, abn, address)
+                VALUES ('ICONIC','The Iconic','50 152 631 082',
+                        'Level 18, Tower Two, International Towers, 200 Barangaroo Avenue, Barangaroo NSW 2000')`).run();
+    console.log('[client_billing] seeded ICONIC from the previously hardcoded PDF values');
+  } catch (e) { console.error('[client_billing:seed]', e.message); }
+})();
+
+function clientBilling(clientId) {
+  try {
+    const r = db.prepare('SELECT * FROM client_billing WHERE client_id=?').get(clientId);
+    if (r) return r;
+  } catch (e) {}
+  // No details on file: fall back to the client's display name so an invoice can still be
+  // produced, rather than silently printing another client's name.
+  let name = clientId;
+  try { const c = db.prepare('SELECT name FROM client WHERE id=?').get(clientId); if (c) name = c.name; } catch (e) {}
+  return { client_id: clientId, legal_name: name, abn: null, address: null,
+           invoice_emails: null, invoice_cc: null, incomplete: true };
+}
+
+app.get('/finance/client-billing', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+  try {
+    const clients = db.prepare("SELECT id, name FROM client WHERE kind <> 'internal' ORDER BY sort_order, id").all();
+    res.json({ clients: clients.map(c => ({ ...c, billing: clientBilling(c.id) })) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/finance/client-billing', authenticateRequest, requireRole(['admin']), requireInternalOrg,
+  writeOpLimiter, auditLog('edit_client_billing'), (req, res) => {
+  try {
+    const b = req.body || {};
+    const id = String(b.client_id || '').trim();
+    if (!id) return res.status(400).json({ error: 'client_id is required' });
+    const exists = db.prepare('SELECT id FROM client WHERE id=?').get(id);
+    if (!exists) return res.status(400).json({ error: 'unknown client' });
+    db.prepare(`INSERT INTO client_billing (client_id, legal_name, abn, address, invoice_emails, invoice_cc, updated_at)
+                VALUES (?,?,?,?,?,?, datetime('now'))
+                ON CONFLICT(client_id) DO UPDATE SET
+                  legal_name=excluded.legal_name, abn=excluded.abn, address=excluded.address,
+                  invoice_emails=excluded.invoice_emails, invoice_cc=excluded.invoice_cc,
+                  updated_at=datetime('now')`)
+      .run(id, String(b.legal_name || '').trim() || null, String(b.abn || '').trim() || null,
+           String(b.address || '').trim() || null,
+           parseEmailList(b.invoice_emails).join(',') || null,
+           parseEmailList(b.invoice_cc).join(',') || null);
+    res.json({ ok: true, client_id: id, billing: clientBilling(id) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
 
 function clientInvoiceCode(clientId) {
   try {
