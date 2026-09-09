@@ -307,6 +307,30 @@ window._finTab=function(tab){
 
 // ── Rates: the client's invoice line template — rate, quantity source and multiplier ──
 const QTY_LABEL={applied_units:'Applied units',carton_delta:'Carton delta',pallets_received:'Pallets received',envelopes_dispatched:'Envelopes dispatched',manual:'Manual entry'};
+window._finSendInvoice = async function(id, ref, status){
+  let pre;
+  try{ pre = await api('/finance/invoice/'+encodeURIComponent(id)+'/send-preview'); }
+  catch(e){ alert('Could not prepare the send: '+(e.message||e)); return; }
+  const lines = [
+    'Send invoice '+ref+'?','',
+    'To:   '+(pre.to||[]).join(', '),
+    (pre.cc||[]).length ? 'Cc:   '+pre.cc.join(', ') : null,
+    'Attached: '+(pre.attachments||[]).join(', '),
+    'Amount:   '+pre.amount,
+    'Due:      '+pre.due_date,
+  ].filter(Boolean);
+  if (status !== 'draft' && pre.sent_at) {
+    lines.push('', 'This was already sent on '+String(pre.sent_at).slice(0,10)+
+      ' ('+pre.send_count+' time'+(pre.send_count===1?'':'s')+'). Sending again will deliver a duplicate.');
+  }
+  if(!confirm(lines.join('\n'))) return;
+  try{
+    const r = await api('/finance/invoice/'+encodeURIComponent(id)+'/send',{method:'POST',body:'{}'});
+    alert('Sent to '+(r.to||[]).join(', ')+'.');
+    if(typeof window._finReload==='function') window._finReload(); else location.reload();
+  }catch(e){ alert('Could not send: '+(e.message||e)); }
+};
+
 async function renderBillingCard(){
   const host=el('fin-billing-host'); if(!host) return;
   let d;
@@ -510,6 +534,10 @@ function renderInvoiceGrid(){
           <button class="fin-btn fin-btn-ghost" style="flex:1;font-size:11px;" onclick="event.stopPropagation();window._finEditInvoice('${inv.id}')">Edit</button>
           <button class="fin-btn fin-btn-ghost" style="flex:1;font-size:11px;" onclick="event.stopPropagation();window._finDownloadPDF('${inv.id}','${esc(inv.ref_number)}')">⬇ PDF</button>
         </div>
+        <button class="fin-btn" style="width:100%;margin-top:6px;font-size:11px;background:${BRAND};color:#fff;border:0;"
+                onclick="event.stopPropagation();window._finSendInvoice('${inv.id}','${esc(inv.ref_number)}','${esc(inv.status)}')">
+          ${inv.status === 'draft' ? 'Send to client' : 'Resend'}
+        </button>
       </div>`;
     }
     return`<div class="fin-card" style="cursor:pointer;border:1.5px dashed rgba(0,0,0,0.1);text-align:center;transition:all .15s;" onmouseenter="this.style.borderColor='${BRAND}'" onmouseleave="this.style.borderColor='rgba(0,0,0,0.1)'" onclick="window._finCreateInvoice('${type}','${ws}')">
