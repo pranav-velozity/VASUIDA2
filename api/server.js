@@ -18645,8 +18645,21 @@ app.get('/shopify/webhooks', authenticateRequest, requireRole(['admin']), async 
 async function shopifyFulfilOrder(clientId, orderRow) {
   if (!orderRow || !orderRow.shopify_order_id) return { skipped: 'no_shopify_id' };
   const fo = await shopifyApi(clientId, `/orders/${orderRow.shopify_order_id}/fulfillment_orders.json`);
-  const open = (fo.fulfillment_orders || []).filter(x => ['open', 'in_progress', 'scheduled'].includes(String(x.status)));
-  if (!open.length) return { skipped: 'no_open_fulfillment_orders' };
+  const all = fo.fulfillment_orders || [];
+  const open = all.filter(x => ['open', 'in_progress', 'scheduled'].includes(String(x.status)));
+  if (!open.length) {
+    // "no_open_fulfillment_orders" on its own says nothing about the cause, which is why
+    // twenty-two identical failures gave no clue. Report what Shopify actually returned:
+    // closed means already fulfilled, on_hold means Shopify is holding it, cancelled means
+    // the order is gone, and none at all usually means an unassigned location.
+    const seen = all.map(x => String(x.status)).filter(Boolean);
+    const counts = seen.reduce((a, x) => (a[x] = (a[x] || 0) + 1, a), {});
+    const detail = seen.length
+      ? Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(', ')
+      : 'none returned';
+    return { skipped: 'no_open_fulfillment_orders', statuses: detail,
+             assigned_location: all.length ? (all[0].assigned_location_id || null) : null };
+  }
   const payload = { fulfillment: {
     // No tracking: EHP's Shopify workflow decides whether the customer is emailed.
     line_items_by_fulfillment_order: open.map(x => ({ fulfillment_order_id: x.id })),
@@ -18670,8 +18683,12 @@ async function shopifyFulfilBatch(clientId, batchId) {
         ok++;
       } else {
         // Not an error, but nothing changed in Shopify — must not be reported as fulfilled.
-        skipped++; skips.push({ order: o.order_number, reason: r.skipped || 'no_fulfillment_id' });
-        db.prepare(`UPDATE ehp_order SET fulfil_error=? WHERE id=?`).run('skipped: ' + (r.skipped || 'no_fulfillment_id'), o.id);
+        // Carry the detail through, so the operator sees "2 closed" rather than a reason
+        // code that could mean any of four different things.
+        const why = (r.skipped || 'no_fulfillment_id') + (r.statuses ? ` (${r.statuses})` : '');
+        skipped++; skips.push({ order: o.order_number, reason: why,
+                                assigned_location: r.assigned_location || null });
+        db.prepare(`UPDATE ehp_order SET fulfil_error=? WHERE id=?`).run('skipped: ' + why, o.id);
       }
     } catch (e) {
       failed++; errors.push({ order: o.order_number, error: String(e.message || e) });
@@ -18681,21 +18698,69 @@ async function shopifyFulfilBatch(clientId, batchId) {
   return { ok, failed, skipped, errors: errors.slice(0, 10), skips: skips.slice(0, 10) };
 }
 
+// Read-only. Shows exactly what Shopify returns for one order, so a fulfilment failure can
+// be diagnosed without dispatching another batch to reproduce it.
+app.get('/shopify/order-fulfilment-status', authenticateRequest, requireRole(['admin']), async (req, res) => {
+  try {
+    const clientId = String(req.query.client_id || curClient());
+    const num = String(req.query.order_number || '').trim();
+    if (!num) return res.status(400).json({ error: 'order_number is required' });
+    const o = db.prepare(`SELECT id, order_number, shopify_order_id, state, shopify_fulfilment_id, fulfil_error
+                          FROM ehp_order WHERE client_id=? AND order_number=?`).get(clientId, num);
+    if (!o) return res.status(404).json({ error: 'order not found in Pinpoint' });
+    if (!o.shopify_order_id) return res.json({ order: o, note: 'no shopify_order_id stored' });
+    const fo = await shopifyApi(clientId, `/orders/${o.shopify_order_id}/fulfillment_orders.json`);
+    res.json({
+      order: o,
+      fulfillment_orders: (fo.fulfillment_orders || []).map(x => ({
+        id: x.id, status: x.status, request_status: x.request_status,
+        assigned_location_id: x.assigned_location_id,
+        assigned_location: x.assigned_location ? x.assigned_location.name : null,
+        line_items: (x.line_items || []).length,
+      })),
+      count: (fo.fulfillment_orders || []).length,
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e), body: e.body }); }
+});
+
 // Retry any order whose fulfilment failed.
 app.post('/shopify/retry-fulfilments', authenticateRequest, requireRole(['admin']), writeOpLimiter, auditLog('shopify_retry_fulfil'), async (req, res) => {
   try {
     const clientId = String((req.body || {}).client_id || curClient());
-    const rows = db.prepare(`SELECT * FROM ehp_order WHERE client_id=? AND state='dispatched'
-                             AND shopify_fulfilment_id IS NULL`).all(clientId);
-    let ok = 0, failed = 0; const errors = [];
+    // Scoped to one batch when given, so "Try again" on a row retries that row rather than
+    // every outstanding order for the client.
+    const batchId = String((req.body || {}).batch_id || '').trim();
+    const rows = batchId
+      ? db.prepare(`SELECT * FROM ehp_order WHERE client_id=? AND batch_id=? AND state='dispatched'
+                    AND shopify_fulfilment_id IS NULL`).all(clientId, batchId)
+      : db.prepare(`SELECT * FROM ehp_order WHERE client_id=? AND state='dispatched'
+                    AND shopify_fulfilment_id IS NULL`).all(clientId);
+
+    let ok = 0, failed = 0, skipped = 0; const errors = [], skips = [];
     for (const o of rows) {
-      try { const r = await shopifyFulfilOrder(clientId, o);
-            db.prepare(`UPDATE ehp_order SET shopify_fulfilment_id=?, fulfil_error=NULL WHERE id=?`)
-              .run(r.fulfillment_id || (r.skipped ? 'skipped:' + r.skipped : null), o.id); ok++; }
-      catch (e) { failed++; errors.push({ order: o.order_number, error: String(e.message || e) });
-            db.prepare(`UPDATE ehp_order SET fulfil_error=? WHERE id=?`).run(String(e.message || e).slice(0,300), o.id); }
+      try {
+        const r = await shopifyFulfilOrder(clientId, o);
+        if (r.fulfillment_id) {
+          db.prepare(`UPDATE ehp_order SET shopify_fulfilment_id=?, fulfil_error=NULL WHERE id=?`)
+            .run(r.fulfillment_id, o.id);
+          ok++;
+        } else {
+          // Previously this wrote "skipped:reason" INTO shopify_fulfilment_id — a fake id in
+          // a column meant for a real one — cleared fulfil_error so the reason disappeared,
+          // and counted the skip as a success. The envelope is dispatched either way; only
+          // the Shopify write-back is still outstanding, so the reason is kept and the
+          // order stays retryable.
+          const why = (r.skipped || 'no_fulfillment_id') + (r.statuses ? ` (${r.statuses})` : '');
+          db.prepare(`UPDATE ehp_order SET fulfil_error=? WHERE id=?`).run('skipped: ' + why, o.id);
+          skipped++; skips.push({ order: o.order_number, reason: why });
+        }
+      } catch (e) {
+        failed++; errors.push({ order: o.order_number, error: String(e.message || e) });
+        db.prepare(`UPDATE ehp_order SET fulfil_error=? WHERE id=?`).run(String(e.message || e).slice(0,300), o.id);
+      }
     }
-    res.json({ attempted: rows.length, ok, failed, errors: errors.slice(0, 10) });
+    res.json({ attempted: rows.length, ok, failed, skipped,
+               errors: errors.slice(0, 10), skips: skips.slice(0, 10) });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
