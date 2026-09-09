@@ -3,6 +3,9 @@
 'use strict';
 
 const BRAND='#990033',DARK='#1C1C1E',MID='#6E6E73',LIGHT='#AEAEB2';
+const RED='#B33F40';
+// Shared input styling for the billing card, so the fields match the rate rows.
+const INP='width:100%;padding:7px 9px;border:0.5px solid rgba(0,0,0,0.14);border-radius:7px;font:inherit;font-size:12px;color:'+DARK+';background:#fff;box-sizing:border-box;';
 const BG='#F5F5F7',GREEN='#34C759',AMBER='#C8860A',BLUE='#3B82F6';
 const EXPENSE_CATS=['VAS Cost','Sea Freight Cost','Air Freight Cost','Internal Overhead – Salaries','Internal Overhead – Software','Internal Overhead – Office','Internal Overhead – Other','Direct Labour','Duties & Customs','Storage','Marketing','Other'];
 const EXPENSE_CAT_GROUPS={'Operations':['VAS Cost','Sea Freight Cost','Air Freight Cost','Direct Labour'],'Internal Overhead':['Internal Overhead – Salaries','Internal Overhead – Software','Internal Overhead – Office','Internal Overhead – Other'],'Other':['Duties & Customs','Storage','Marketing','Other']};
@@ -304,6 +307,62 @@ window._finTab=function(tab){
 
 // ── Rates: the client's invoice line template — rate, quantity source and multiplier ──
 const QTY_LABEL={applied_units:'Applied units',carton_delta:'Carton delta',pallets_received:'Pallets received',envelopes_dispatched:'Envelopes dispatched',manual:'Manual entry'};
+async function renderBillingCard(){
+  const host=el('fin-billing-host'); if(!host) return;
+  let d;
+  try{ d=await api('/finance/client-billing'); }
+  catch(e){ host.innerHTML='<div style="font-size:12px;color:'+RED+';">Could not load billing details: '+esc(e.message||e)+'</div>'; return; }
+
+  const card=(c)=>{
+    const b=c.billing||{};
+    return '<div style="border:0.5px solid rgba(0,0,0,0.09);border-radius:10px;padding:14px 16px;margin-bottom:10px;">'
+      +'<div style="display:flex;justify-content:space-between;align-items:baseline;">'
+        +'<div style="font-size:12px;font-weight:700;color:'+DARK+';">'+esc(c.name)+' <span style="font-weight:400;color:'+LIGHT+';">'+esc(c.id)+'</span></div>'
+        +(b.incomplete?'<span style="font-size:10px;font-weight:600;color:#8A6D00;background:rgba(138,109,0,.12);padding:2px 8px;border-radius:10px;">not set up</span>':'')
+      +'</div>'
+      +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">'
+        +'<div><label style="display:block;font-size:10px;font-weight:600;color:'+MID+';margin-bottom:3px;">Legal name (as it prints on the invoice)</label>'
+          +'<input class="fin-bill" data-c="'+esc(c.id)+'" data-f="legal_name" value="'+esc(b.legal_name||'')+'" style="'+INP+'"></div>'
+        +'<div><label style="display:block;font-size:10px;font-weight:600;color:'+MID+';margin-bottom:3px;">ABN</label>'
+          +'<input class="fin-bill" data-c="'+esc(c.id)+'" data-f="abn" value="'+esc(b.abn||'')+'" style="'+INP+'"></div>'
+      +'</div>'
+      +'<label style="display:block;font-size:10px;font-weight:600;color:'+MID+';margin:10px 0 3px;">Billing address</label>'
+      +'<input class="fin-bill" data-c="'+esc(c.id)+'" data-f="address" value="'+esc(b.address||'')+'" style="'+INP+'">'
+      +'<label style="display:block;font-size:10px;font-weight:600;color:'+MID+';margin:10px 0 3px;">Invoice recipients &mdash; comma separated</label>'
+      +'<input class="fin-bill" data-c="'+esc(c.id)+'" data-f="invoice_emails" value="'+esc(b.invoice_emails||'')+'" placeholder="ap@client.com, finance@client.com" style="'+INP+'">'
+      +'<label style="display:block;font-size:10px;font-weight:600;color:'+MID+';margin:10px 0 3px;">Copy to</label>'
+      +'<input class="fin-bill" data-c="'+esc(c.id)+'" data-f="invoice_cc" value="'+esc(b.invoice_cc||'')+'" placeholder="accounts@velozity.au" style="'+INP+'">'
+      +'<div style="text-align:right;margin-top:10px;">'
+        +'<button data-savebill="'+esc(c.id)+'" style="background:'+BRAND+';color:#fff;border:0;border-radius:8px;padding:7px 14px;font:600 11px inherit;cursor:pointer;">Save</button>'
+      +'</div></div>';
+  };
+
+  host.innerHTML='<div style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;padding:18px 20px;">'
+    +'<div style="font-size:13px;font-weight:700;color:'+DARK+';">Client billing &amp; invoice recipients</div>'
+    +'<div style="font-size:11px;color:'+LIGHT+';margin:2px 0 12px;">The legal name and ABN print on the invoice PDF. Recipients are used when an invoice is sent.</div>'
+    +'<div id="fin-bill-msg"></div>'
+    +(d.clients||[]).map(card).join('')
+    +'</div>';
+
+  host.querySelectorAll('[data-savebill]').forEach(function(btn){
+    btn.addEventListener('click', async function(){
+      const cid=btn.getAttribute('data-savebill');
+      const body={client_id:cid};
+      host.querySelectorAll('.fin-bill[data-c="'+cid+'"]').forEach(function(i){ body[i.getAttribute('data-f')]=i.value; });
+      btn.disabled=true;
+      const m=el('fin-bill-msg');
+      try{
+        await api('/finance/client-billing',{method:'POST',body:JSON.stringify(body)});
+        m.innerHTML='<div style="background:rgba(27,127,59,.10);color:#1B7F3B;padding:8px 11px;border-radius:8px;font-size:11px;margin-bottom:10px;">Saved '+esc(cid)+'.</div>';
+        renderBillingCard();
+      }catch(e){
+        m.innerHTML='<div style="background:rgba(179,63,64,.10);color:'+RED+';padding:8px 11px;border-radius:8px;font-size:11px;margin-bottom:10px;">'+esc(e.message||e)+'</div>';
+        btn.disabled=false;
+      }
+    });
+  });
+}
+
 async function renderRatesTab(){
   const host=el('fin-tab-rates');
   if(!host){
@@ -343,7 +402,9 @@ async function renderRatesTab(){
       +'<div id="fin-rates-msg" style="margin-top:10px;"></div>'
       +(rows.length?Object.keys(groups).sort().map(t=>section(t,groups[t])).join('')
         :'<div style="color:'+LIGHT+';font-size:12px;text-align:center;padding:22px;">No rate card for this client yet.</div>')
-      +'</div>';
+      +'</div>'
+      +'<div id="fin-billing-host" style="margin-top:14px;"></div>';
+    renderBillingCard();
     host.querySelectorAll('[data-save-rate]').forEach(b=>b.addEventListener('click',async()=>{
       const code=b.getAttribute('data-save-rate');
       const g=f=>host.querySelector('[data-f="'+f+'"][data-code="'+code+'"]');
