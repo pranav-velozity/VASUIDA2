@@ -17432,6 +17432,57 @@ function clientInvoiceTypes(clientId) {
   return types;
 }
 
+// Maps an invoice-reference code back to a client id.
+//
+// The `client` table has no invoice_code column, so clientInvoiceCode() has always used its
+// fallback — the first three characters of the client id. That is why references read
+// INVVAS_EHP_… . TIC is older still and derivable from nothing in the database, so it is
+// declared here rather than inferred.
+function finInvoiceCodeMap() {
+  const m = new Map([['TIC', 'ICONIC']]);          // historic ICONIC code
+  try {
+    for (const r of db.prepare("SELECT id FROM client WHERE kind <> 'internal'").all()) {
+      // VOZ is deliberately excluded: it is the internal entity, and it is ALSO the literal
+      // first segment of every sea and air reference (VOZ_TIC_INSD2D_...). Including it
+      // would claim those ICONIC invoices for VelOzity.
+      if (!r.id) continue;
+      let code = null;
+      try { code = clientInvoiceCode(r.id); } catch (e) {}
+      if (code) m.set(String(code).toUpperCase(), r.id);
+      // The generator's own fallback, so the map matches what actually gets written.
+      m.set(String(r.id).slice(0, 3).toUpperCase(), r.id);
+    }
+  } catch (e) { console.warn('[fin_invoices] client code map:', e.message); }
+  m.delete('VOZ');
+  return m;
+}
+
+// One-time repair. The first run of the migration below built its map from a column that
+// does not exist, so it was empty and every invoice — including EHP's — defaulted to
+// ICONIC. This re-attributes from the reference with the corrected map. Keyed on a marker
+// so it runs once and never fights a manual correction afterwards.
+try {
+  const cols = db.prepare("PRAGMA table_info(fin_invoices)").all().map(c => c.name);
+  const marker = db.prepare(`SELECT 1 x FROM client_capability
+                             WHERE client_id='__meta' AND capability='fin_client_backfill_v2'`).get();
+  if (cols.includes('client_id') && !marker) {
+    const map = finInvoiceCodeMap();
+    const rows = db.prepare('SELECT id, ref_number FROM fin_invoices').all();
+    const upd = db.prepare('UPDATE fin_invoices SET client_id=? WHERE id=?');
+    let moved = 0;
+    for (const r of rows) {
+      const segs = String(r.ref_number || '').toUpperCase().split(/[_-]/);
+      const code = segs.find(x => map.has(x));
+      const target = code ? map.get(code) : 'ICONIC';
+      upd.run(target, r.id);
+      if (code && map.get(code) !== 'ICONIC') moved++;
+    }
+    db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled)
+                VALUES ('__meta','fin_client_backfill_v2',1)`).run();
+    console.log(`[fin_invoices] re-attribution v2: ${rows.length} invoice(s) checked, ${moved} assigned to a non-ICONIC client`);
+  }
+} catch (e) { console.error('[fin_invoices:backfill-v2]', e.message); }
+
 // fin_invoices predates multi-tenancy: it was built when ICONIC was the only client, so
 // every invoice sat in one undifferentiated pool. The client picker changed nothing because
 // there was nothing to filter on — which is how an EHP invoice appeared under ICONIC.
@@ -17448,11 +17499,7 @@ try {
     db.exec("ALTER TABLE fin_invoices ADD COLUMN client_id TEXT");
     db.exec("CREATE INDEX IF NOT EXISTS idx_fin_inv_client ON fin_invoices(client_id, week_start)");
 
-    const codeToClient = new Map();
-    try {
-      for (const r of db.prepare('SELECT id, invoice_code FROM client').all())
-        if (r.invoice_code) codeToClient.set(String(r.invoice_code).toUpperCase(), r.id);
-    } catch (e) { /* fall through to the segment heuristic below */ }
+    const codeToClient = finInvoiceCodeMap();
 
     const rows = db.prepare('SELECT id, ref_number FROM fin_invoices').all();
     const upd = db.prepare('UPDATE fin_invoices SET client_id=? WHERE id=?');
