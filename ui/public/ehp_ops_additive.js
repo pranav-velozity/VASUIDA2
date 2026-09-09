@@ -557,7 +557,7 @@
         })()}</td>
         <td class="n" style="font-size:10px;">${x.state==='dispatched'
           ? `<span style="color:${GREEN}">${(x.fulfilment&&x.fulfilment.fulfilled)||0} ok</span>` +
-            (((x.fulfilment&&x.fulfilment.not_fulfilled)||0) ? ` · <span style="color:${AMBER_TXT}">${x.fulfilment.not_fulfilled} not sent</span>` : '')
+            (((x.fulfilment&&x.fulfilment.not_fulfilled)||0) ? ` · <span style="color:${AMBER_TXT}">${x.fulfilment.not_fulfilled} pending Shopify</span>` : '')
           : `<span style="color:${LIGHT}">—</span>`}</td>
         <td style="font-size:10px;color:${MID}">${esc(localTs(x.assembled_at))}</td>
         <td style="font-size:10px;color:${MID}">${esc(localTs(x.dispatched_at))}</td>
@@ -565,7 +565,9 @@
           ${x.state==='queued' ? `<button class="ehp-btn g" data-asm="${esc(x.id)}">Assemble</button>` : ''}
           ${x.state==='assembled' ? `<button class="ehp-btn g" data-dis="${esc(x.id)}">Dispatch</button>` : ''}
           <button class="ehp-btn g" data-pick="${esc(x.id)}">Pick list</button>
-          ${x.state==='dispatched' && ((x.fulfilment&&x.fulfilment.not_fulfilled)||0) ? `<button class="ehp-btn g" data-why="${esc(x.id)}">Why?</button>` : ''}
+          ${x.state==='dispatched' && ((x.fulfilment&&x.fulfilment.not_fulfilled)||0)
+            ? `<button class="ehp-btn g" data-retry="${esc(x.id)}">Try again</button>
+               <button class="ehp-btn g" data-why="${esc(x.id)}">Why?</button>` : ''}
         </td></tr>`).join('') : `<tr><td colspan="11" style="color:${LIGHT};text-align:center;padding:18px;">No batches yet.</td></tr>`}
       </tbody></table>`;
 
@@ -629,6 +631,24 @@
           nf.map(o=>`${o.order_number}: ${o.reason}`).join(' · '));
       } catch (e) { el('ehp-batchmsg').innerHTML = msg('e', e.message || String(e)); }
     }));
+    body.querySelectorAll('[data-retry]').forEach(x => x.addEventListener('click', async () => {
+      const id = x.getAttribute('data-retry');
+      x.disabled = true; const label = x.textContent; x.textContent = 'Trying…';
+      try {
+        const r = await req('/shopify/retry-fulfilments', { method: 'POST',
+          body: JSON.stringify({ batch_id: id }) });
+        const ok = r.ok || 0, still = (r.skipped || 0) + (r.failed || 0);
+        el('ehp-batchmsg').innerHTML = msg(still ? 'w' : 'k',
+          `${ok} order(s) updated in Shopify.` +
+          (still ? ` ${still} still pending — use Why? for the reason from Shopify.` : ''));
+        window.dispatchEvent(new CustomEvent('ehp:changed'));
+        render();
+      } catch (e) {
+        el('ehp-batchmsg').innerHTML = msg('e', 'Could not retry: ' + (e.message || e));
+        x.disabled = false; x.textContent = label;
+      }
+    }));
+
     body.querySelectorAll('[data-pick]').forEach(x => x.addEventListener('click', async () => {
       const batchId = x.getAttribute('data-pick');
       try {
@@ -1263,7 +1283,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(() => { if (document.visibilityState === 'visible') refreshEnabled(); }, 15000);
-    console.log('[ehp-ops] module v20 loaded');
+    console.log('[ehp-ops] module v21 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
