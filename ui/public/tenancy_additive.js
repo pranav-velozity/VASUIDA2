@@ -76,7 +76,11 @@
   };
 
   // Elements only ever shown to VelOzity staff, whichever client they are viewing.
-  const INTERNAL_ONLY = ['nav-aqi'];
+  // Finance shows revenue, expenses, margin and the rate card across the whole business,
+  // so it follows Quote Review: entitlement comes from the org type, not a client
+  // capability. It was granted as a capability to both clients, and the endpoints checked
+  // only the Clerk admin role — which a client's own org admin passes.
+  const INTERNAL_ONLY = ['nav-aqi', 'nav-finance'];
 
   // Hidden from partner organisations regardless of capability. A partner resolves to the
   // client that owns its facility, so it inherits that client's capabilities — Kerry
