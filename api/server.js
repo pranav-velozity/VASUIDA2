@@ -11796,6 +11796,92 @@ function ehpCloseCountPeriod(clientId, periodId, counts, by) {
                                : 'Shelf holds more than the ledger — check for unrecorded receipts or a miscount.' };
 }
 
+// ── Reversing a count period ──
+// Closing a period writes, per SKU, a stock_count row and an adjustment transaction equal
+// to (counted - system), then marks the period closed. A count entered by mistake therefore
+// moves the ledger to the counted figure and locks the period behind it.
+//
+// Inspect before acting: this returns exactly what would be undone and changes nothing.
+app.get('/ehp/count-period/:id/reversal-preview', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const per = db.prepare('SELECT * FROM ehp_count_period WHERE id=? AND client_id=?').get(req.params.id, c);
+    if (!per) return res.status(404).json({ error: 'period_not_found' });
+    const counts = db.prepare('SELECT * FROM ehp_stock_count WHERE period_id=? AND client_id=?')
+                     .all(req.params.id, c);
+    const txns = db.prepare(`SELECT * FROM ehp_inventory_txn
+                             WHERE client_id=? AND ref_type='count_period' AND ref_id=?`)
+                   .all(c, req.params.id);
+    res.json({
+      period: per,
+      counts: counts.map(x => ({ sku: x.sku, counted_each: x.counted_each,
+        system_each: x.system_each, variance_each: x.variance_each, counted_at: x.counted_at })),
+      adjustments: txns.map(x => ({ sku: x.sku, qty_each: x.qty_each })),
+      effect: counts.map(x => ({ sku: x.sku,
+        on_hand_now: ehpOnHand(c, x.sku),
+        on_hand_after_reversal: ehpOnHand(c, x.sku) - (x.variance_each || 0) })),
+      note: 'Nothing has been changed. POST to /reverse with confirm=1 to apply this.',
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Reverses by DELETING the adjustment transactions and the count rows, and reopening the
+// period — rather than posting a compensating entry. A compensating entry would leave the
+// mistaken count in the history as though it were real, and the period would stay closed
+// with a count date that never legitimately happened.
+//
+// The original close is already in audit_log, and what is removed is logged here too, so
+// the correction is traceable without the wrong figure remaining part of the ledger.
+app.post('/ehp/count-period/:id/reverse', authenticateRequest, requireRole(['admin']),
+  writeOpLimiter, auditLog('reverse_ehp_count_period'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    if (String((req.body || {}).confirm || '') !== '1')
+      return res.status(400).json({ error: 'confirm_required',
+        message: 'Pass confirm=1. Check /reversal-preview first.' });
+    const per = db.prepare('SELECT * FROM ehp_count_period WHERE id=? AND client_id=?').get(req.params.id, c);
+    if (!per) return res.status(404).json({ error: 'period_not_found' });
+    if (per.status !== 'closed') return res.status(409).json({ error: 'period_not_closed', status: per.status });
+
+    const counts = db.prepare('SELECT * FROM ehp_stock_count WHERE period_id=? AND client_id=?')
+                     .all(req.params.id, c);
+    const before = counts.map(x => ({ sku: x.sku, on_hand: ehpOnHand(c, x.sku),
+                                      variance_removed: x.variance_each }));
+    db.transaction(() => {
+      db.prepare(`DELETE FROM ehp_inventory_txn
+                  WHERE client_id=? AND ref_type='count_period' AND ref_id=?`).run(c, req.params.id);
+      db.prepare('DELETE FROM ehp_stock_count WHERE period_id=? AND client_id=?').run(req.params.id, c);
+      db.prepare(`UPDATE ehp_count_period SET status='open', period_end=NULL,
+                  closed_at=NULL, closed_by=NULL WHERE id=?`).run(req.params.id);
+    })();
+    const after = counts.map(x => ({ sku: x.sku, on_hand: ehpOnHand(c, x.sku) }));
+    console.warn(`[ehp:count-reversal] period ${req.params.id} reversed by ${aqUserEmail(req) || 'unknown'} — `
+      + before.map(b => `${b.sku}: removed ${b.variance_removed}`).join(', '));
+    res.json({ ok: true, period_id: req.params.id, reopened: true,
+      skus: counts.length, before, after,
+      note: 'The period is open again. To ADD stock, use an inbound receipt rather than a count.' });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Reverses a single ad-hoc count (the per-SKU Save on the Inventory tab), which writes a
+// stock_count row with ref_type 'stock_count' and no period.
+app.post('/ehp/stock-count/:id/reverse', authenticateRequest, requireRole(['admin']),
+  writeOpLimiter, auditLog('reverse_ehp_stock_count'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const row = db.prepare('SELECT * FROM ehp_stock_count WHERE id=? AND client_id=?').get(req.params.id, c);
+    if (!row) return res.status(404).json({ error: 'not_found' });
+    const before = ehpOnHand(c, row.sku);
+    db.transaction(() => {
+      db.prepare(`DELETE FROM ehp_inventory_txn
+                  WHERE client_id=? AND ref_type='stock_count' AND ref_id=?`).run(c, row.id);
+      db.prepare('DELETE FROM ehp_stock_count WHERE id=?').run(row.id);
+    })();
+    res.json({ ok: true, sku: row.sku, removed_variance: row.variance_each,
+      on_hand_before: before, on_hand_after: ehpOnHand(c, row.sku) });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ═══════════════════ SUPPLIER DISCREPANCY REPORT (non-compliance) ═══════════════════
 const _ncReportTokens = new Map();               // token -> { ts, cost }
 const _NC_TOKEN_TTL = 30 * 60 * 1000;
@@ -12897,6 +12983,69 @@ app.post('/ops/supplier-invoice-requests/run', (req, res, next) => {
     console.error('[POST /ops/supplier-invoice-requests/run]', e);
     res.status(500).json({ error: String(e.message || e) });
   }
+});
+
+// ── Approved-quote divergence audit ──
+// The internal review recomputes sell from the cost lines and shows that instead of
+// air_quote.sell_amount. For a quote still being priced that is right — the header is a
+// rollup. For an APPROVED quote it is wrong: sell_amount is the figure released to the
+// client and agreed by them, and it is what can be invoiced.
+//
+// READ ONLY. Changes nothing, so the divergence can be measured before anything is decided.
+app.get('/air-quotes/divergence-audit', authenticateRequest, requireRole(['admin']),
+  requireInternalOrg, (req, res) => {
+  try {
+    const c = curClient();
+    const rows = db.prepare(`SELECT * FROM air_quote WHERE client_id=?
+                             AND state IN ('approved','declined','quoted','expired')
+                             ORDER BY created_at DESC`).all(c);
+    const dflt = aqMarkupDefault(c);
+    const out = [];
+    for (const q of rows) {
+      const lines = aqLines(q.id);
+      const lineSell = Math.round(lines.reduce((a, l) => a + (l.sell_amount || 0), 0) * 100) / 100;
+      const approved = q.sell_amount != null ? Math.round(q.sell_amount * 100) / 100 : null;
+      if (approved == null || lineSell <= 0) continue;
+      const diff = Math.round((lineSell - approved) * 100) / 100;
+      if (Math.abs(diff) < 0.01) continue;
+
+      const k = db.prepare('SELECT * FROM air_quote_cost WHERE quote_id=?').get(q.id) || {};
+      // The event trail says whether the lines were edited BEFORE release (the client was
+      // quoted the wrong figure) or AFTER approval (reporting drifted but the deal is sound).
+      // The table records state transitions, not named events: to_state is the column.
+      const events = db.prepare(`SELECT to_state, created_at FROM air_quote_event
+                                 WHERE quote_id=? ORDER BY created_at`).all(q.id);
+      const at = (st) => { const r = events.find(x => x.to_state === st); return r ? r.created_at : null; };
+      out.push({
+        ref: q.ref, id: q.id, state: q.state, week: q.week_label, vendor: q.vendor_raw,
+        approved_sell: approved,
+        line_total: lineSell,
+        difference: diff,
+        cost: k.cost_amount != null ? k.cost_amount : null,
+        markup_stored_pct: k.markup_pct != null ? k.markup_pct : null,
+        markup_default_pct: dflt,
+        implied_markup_on_approved: (k.cost_amount > 0)
+          ? Math.round((approved / k.cost_amount - 1) * 1000) / 10 : null,
+        released_at: at('quoted'),
+        decided_at: at('approved') || at('declined'),
+        pricing_saved_at: k.updated_at || null,
+        // The comparison that decides which story it is.
+        edited_after_decision: !!(k.updated_at && (at('approved') || at('declined'))
+                                  && k.updated_at > (at('approved') || at('declined'))),
+      });
+    }
+    const totalDiff = Math.round(out.reduce((a, x) => a + x.difference, 0) * 100) / 100;
+    res.json({
+      client_id: c,
+      quotes_checked: rows.length,
+      diverged: out.length,
+      total_difference: totalDiff,
+      after_decision: out.filter(x => x.edited_after_decision).length,
+      before_or_unknown: out.filter(x => !x.edited_after_decision).length,
+      quotes: out,
+      note: 'Read only. Nothing has been changed.',
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
 // ═══════════════════ AIR FREIGHT QUOTATION ═══════════════════
