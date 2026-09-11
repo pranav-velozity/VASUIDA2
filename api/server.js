@@ -13048,6 +13048,20 @@ app.get('/air-quotes/divergence-audit', authenticateRequest, requireRole(['admin
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+db.exec(`
+CREATE TABLE IF NOT EXISTS air_quote_price_history (
+  id         TEXT PRIMARY KEY,
+  quote_id   TEXT NOT NULL REFERENCES air_quote(id) ON DELETE CASCADE,
+  sell_amount REAL NOT NULL,
+  cost_amount REAL,
+  markup_pct  REAL,
+  reason     TEXT,
+  actor      TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_aqph ON air_quote_price_history(quote_id, created_at);
+`);
+
 // ═══════════════════ AIR FREIGHT QUOTATION ═══════════════════
 // Three-party workflow: the client raises a request, our partner returns a cost against a
 // magic link, a VelOzity reviewer applies the rate-card markup and releases it, and the
@@ -13650,11 +13664,24 @@ app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), req
         const lineSell = lines.reduce((a, l) => a + (l.sell_amount || 0), 0);
         const per = (n, d) => (n != null && d > 0) ? Math.round(n / d * 10000) / 10000 : null;
         const markup = k.markup_pct != null ? k.markup_pct : dflt;
-        // Sell always comes from the lines when they exist — the header is a rollup, never
-        // an independent figure that could disagree with its own components.
-        const sell = lineSell > 0 ? Math.round(lineSell * 100) / 100
+        // Before release, the lines are the truth and the header is their rollup.
+        // ONCE RELEASED, sell_amount is the figure the client was sent and agreed to — it is
+        // what can be invoiced, and it outranks anything the lines now say. Showing the line
+        // total instead reported AQ-81317-02 at 10,941.49 against an approved 9,881.88, and
+        // carried that inflated figure into the margin tiles and the vendor benchmark.
+        const released = ['quoted', 'approved', 'declined', 'expired'].includes(q.state);
+        const lineRollup = lineSell > 0 ? Math.round(lineSell * 100) / 100 : null;
+        const sell = released && q.sell_amount != null
+                   ? Math.round(q.sell_amount * 100) / 100
+                   : (lineRollup != null ? lineRollup
                    : (q.sell_amount != null ? q.sell_amount
-                   : (k.cost_amount != null ? aqSell(k.cost_amount, markup) : null));
+                   : (k.cost_amount != null ? aqSell(k.cost_amount, markup) : null)));
+        // Surfaced rather than silently substituted: a mismatch on a released quote is a
+        // problem to look at, not an alternative price to choose between.
+        const sellMismatch = (released && lineRollup != null && sell != null
+                              && Math.abs(lineRollup - sell) >= 0.01)
+                           ? { line_total: lineRollup, difference: Math.round((lineRollup - sell) * 100) / 100 }
+                           : null;
         return {
           ...q,
           lines: lines.map(l => ({
@@ -13664,6 +13691,9 @@ app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), req
             sell_per_kg: per(l.sell_amount, q.chargeable_kg),
             sell_per_unit: per(l.sell_amount, q.units),
           })),
+          sell_mismatch: sellMismatch,
+          price_history: db.prepare(`SELECT sell_amount, cost_amount, markup_pct, reason, created_at
+                                     FROM air_quote_price_history WHERE quote_id=? ORDER BY created_at`).all(q.id),
           review_state: q.state === 'quoted' ? 'sent' : (q.review_saved_at ? 'draft' : 'new'),
           messages: aqMessages(q.id),
           rounds: aqRounds(q.id).map(r => ({ round_no: r.round_no, total_cost: r.total_cost, created_at: r.created_at })),
@@ -14690,9 +14720,28 @@ app.post('/air-quotes/:id/pricing', authenticateRequest, requireRole(['admin']),
     const q = db.prepare('SELECT * FROM air_quote WHERE id=? AND client_id=?').get(req.params.id, c);
     if (!q) return res.status(404).json({ error: 'not_found' });
     if (['approved', 'declined'].includes(q.state))
-      return res.status(409).json({ error: 'already_decided', state: q.state });
+      return res.status(409).json({ error: 'already_decided', state: q.state,
+        message: 'This quote has been decided. Use Revise to issue a new one.' });
 
     const b = req.body || {};
+
+    // RELEASE is the boundary, not approval. AQ-81317-02 was released at 9,881.88 and the
+    // markup overridden 58 seconds later: the client approved the figure in their inbox
+    // while the internal record moved to 10,941.49. Locking only at approval leaves exactly
+    // that window open. Past release, a price change is a re-issue — password gated, and it
+    // must reach the client.
+    if (q.state === 'quoted') {
+      const supplied = String(b.password || '');
+      const expected = process.env.AIR_QUOTE_DELETE_PASSWORD || 'Velozity2026!';
+      const okPw = supplied.length === expected.length &&
+        crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+      if (!okPw) return res.status(403).json({ error: 'password_required',
+        message: 'This quote has already been sent to the client. Changing the price requires the password and will re-issue the quote to them.' });
+      if (String(b.reissue || '') !== '1')
+        return res.status(409).json({ error: 'reissue_required',
+          message: 'Editing a released price must re-issue the quote to the client. Confirm to send the revised figure.' });
+    }
+
     const current = aqLines(q.id);
     const costTotal = current.reduce((a, l) => a + (l.cost_amount || 0), 0);
     const upd = db.prepare(`UPDATE air_quote_cost_line SET markup_pct=?, sell_amount=?,
@@ -14744,6 +14793,36 @@ app.post('/air-quotes/:id/pricing', authenticateRequest, requireRole(['admin']),
 
     const roll = aqRollup(q.id);
     db.prepare(`UPDATE air_quote SET review_saved_at=datetime('now'), updated_at=datetime('now') WHERE id=?`).run(q.id);
+
+    // A released quote re-issues rather than saving a draft: the header moves to the new
+    // figure, the client is emailed, and the previous decision link is expired so the old
+    // Approve button cannot be used to accept a price the recipient is not looking at.
+    if (q.state === 'quoted') {
+      const k = db.prepare('SELECT * FROM air_quote_cost WHERE quote_id=?').get(q.id) || {};
+      const prev = q.sell_amount;
+      db.prepare(`INSERT INTO air_quote_price_history (id, quote_id, sell_amount, cost_amount, markup_pct, reason, actor)
+                  VALUES (?,?,?,?,?,?,?)`)
+        .run(aqNewId('aqph'), q.id, roll.sell, k.cost_amount != null ? k.cost_amount : null,
+             k.markup_pct != null ? k.markup_pct : null,
+             String(b.reissue_reason || '').trim() || 'repriced after release',
+             aqUserEmail(req) || null);
+      db.prepare(`UPDATE air_quote SET sell_amount=?, updated_at=datetime('now') WHERE id=?`).run(roll.sell, q.id);
+      // Expire outstanding decision tokens so the earlier email cannot approve the new price.
+      try { db.prepare(`UPDATE air_quote_token SET expires_at=datetime('now','-1 second')
+                        WHERE quote_id=? AND used_at IS NULL`).run(q.id); } catch (e) {}
+      aqEvent(q.id, 'quoted', 'quoted', (req.auth && req.auth.userId) || null, 'internal',
+              `re-issued · ${prev} -> ${roll.sell}`);
+      // The same mail the original release sends, which also mints a fresh decision token —
+      // so expiring the old one above leaves the client with exactly one live link, pointing
+      // at the price they are now being shown.
+      aqNotifyQuoted(q.id, `${req.protocol}://${req.get('host')}`)
+        .catch(e => console.error('[air-quote:reissue-mail]', e.message));
+      console.warn(`[air-quote] ${q.ref} re-issued ${prev} -> ${roll.sell} by ${aqUserEmail(req) || 'unknown'}`);
+      return res.json({ quote_id: q.id, ref: q.ref, ...roll, review_state: 'sent',
+        reissued: true, previous_sell: prev,
+        message: `Re-issued to the client at ${roll.sell}. The previous approval link has been expired.` });
+    }
+
     aqEvent(q.id, q.state, q.state, (req.auth && req.auth.userId) || null, 'internal',
             `pricing saved as draft · sell ${roll.sell}`);
     res.json({ quote_id: q.id, ref: q.ref, ...roll, review_state: 'draft' });
