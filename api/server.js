@@ -108,6 +108,21 @@ const corsDelegate = (req, cb) => {
 };
 app.use(cors(corsDelegate));
 app.options('*', cors(corsDelegate));
+// Establish per-request tenant context for every request. Read-only: it only supplies a
+// client_id for write tagging; nothing is denied here.
+//
+// THIS MUST RUN BEFORE BODY PARSING. It used to sit after express.json(), which worked for
+// JSON because the body was already consumed by then — everything downstream ran inside the
+// context. A multipart upload skips express.json(), so its stream was still unread when the
+// context was established; multer then consumed it and the continuation resumed from a
+// context captured earlier, leaving getStore() undefined and curClient() falling back to
+// ICONIC. An EHP photo upload therefore failed the fulfilment capability check despite
+// sending x-pinpoint-client: EHP. Wrapping body parsing keeps the context intact for
+// streamed requests.
+app.use((req, _res, next) => {
+  tenancyALS.run({ req }, () => next());
+});
+
 app.use(express.json({ limit: '100mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
 // 🔐 Rate Limiting
@@ -118,12 +133,6 @@ app.use(apiLimiter);
    /plan, /records, /bins, /flow/... without duplicating code.
    Place ABOVE all your app.get('/...') routes.
 */
-// Establish per-request tenant context for every request. Read-only in this batch:
-// it only supplies a client_id for write tagging; nothing is denied here.
-app.use((req, _res, next) => {
-  tenancyALS.run({ req }, () => next());
-});
-
 app.use((req, _res, next) => {
   if (req.url === '/api' || req.url === '/api/') {
     req.url = '/';
@@ -15901,6 +15910,35 @@ function ehpClient(req) {
                .get(c, 'envelope_fulfilment');
   return ok ? c : null;
 }
+// Resolves the client from the REQUEST rather than the ambient context. Used by streamed
+// uploads: multer consumes the body asynchronously, and a context that does not survive
+// that leaves curClient() falling back to ICONIC — which failed the capability check on an
+// EHP photo upload that had sent the correct header.
+function ehpClientFromReq(req) {
+  let c = null;
+  try {
+    const w = tenancyWriteClient(req);
+    if (w && w.client_id) c = w.client_id;
+  } catch (e) { /* fall through */ }
+  if (!c) { try { c = curClient(); } catch (e) {} }
+  if (!c) return null;
+  const ok = db.prepare(`SELECT 1 x FROM client_capability WHERE client_id=? AND capability=? AND enabled=1`)
+               .get(c, 'envelope_fulfilment');
+  return ok ? c : null;
+}
+
+function ehpGuardReq(req, res) {
+  const c = ehpClientFromReq(req);
+  if (!c) {
+    res.status(409).json({ error: 'client_not_enabled_for_fulfilment',
+      message: 'Select the EHP client before recording fulfilment activity.',
+      resolved_client: (() => { try { const w = tenancyWriteClient(req); return (w && w.client_id) || curClient(); }
+                                catch (e) { return null; } })() });
+    return null;
+  }
+  return c;
+}
+
 function ehpGuard(req, res) {
   const c = ehpClient(req);
   if (!c) {
@@ -16143,7 +16181,7 @@ app.get('/ehp/photos', authenticateRequest, (req, res) => {
 
 app.post('/ehp/photo', authenticateRequest, upload.single('file'), async (req, res) => {
   try {
-    const c = ehpGuard(req, res); if (!c) return;
+    const c = ehpGuardReq(req, res); if (!c) return;
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
     if (!/^image\//.test(req.file.mimetype || ''))
       return res.status(400).json({ error: 'Only image files can be uploaded.' });
