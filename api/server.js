@@ -16467,7 +16467,21 @@ app.get('/ehp/geo', authenticateRequest, (req, res) => {
       repeat: { addresses_repeating: rep.addrs || 0, repeat_orders: rep.orders || 0,
                 distinct_addresses: distinctAddrs,
                 rate_pct: distinctAddrs ? Math.round((rep.addrs || 0) / distinctAddrs * 1000) / 10 : 0 },
-      previous: { month: prevKey, envelopes: prev.e || 0, states: prev.st || 0 },
+      // Per-state prior volume, so the insight panel can report MOVEMENT rather than
+      // restating what the map already shows. A rank change is worth reading; a share is not.
+      previous: { month: prevKey, envelopes: prev.e || 0, states: prev.st || 0,
+        by_state: (() => {
+          try {
+            const pr = ehpMonthRange(prevKey);
+            return db.prepare(`SELECT recipient_state st, COALESCE(SUM(envelope_qty),0) e
+                               FROM ehp_order
+                               WHERE client_id=? AND state='dispatched'
+                                 AND date(fulfilled_at) BETWEEN ? AND ?
+                                 AND recipient_state IS NOT NULL AND recipient_state <> ''
+                               GROUP BY recipient_state`).all(c, pr.from, pr.to)
+                     .reduce((a, r) => (a[r.st] = r.e, a), {});
+          } catch (e) { return {}; }
+        })() },
       states, cities, available_months: months, small_cell_min: EHP_SMALL_CELL });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
