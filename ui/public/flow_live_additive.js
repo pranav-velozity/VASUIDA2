@@ -805,12 +805,26 @@ function computeCartonStatsFromRecords(records) {
       }
     } catch {}
 
+    // Units on POs that have arrived. Receiving counts CARTONS, not units, so this is the
+    // planned unit quantity of every PO with a receipt against it — the same basis as
+    // "POs planned - received" one line above. It answers "how much of the week's volume is
+    // physically here", which is the gap between planned and applied.
+    const receivedSet = new Set(receivedPOs);
+    let receivedUnits = 0;
+    for (const r of (planRows || [])) {
+      const po = getPO(r);
+      // Same accessor chain groupPlanBySupplier uses — plan sheets vary in column naming.
+      if (po && receivedSet.has(po)) receivedUnits += num(
+        r.target_qty ?? r.targetQty ?? r.planned_qty ?? r.plannedQty ?? r.qty ?? r.units ?? r.quantity ?? r.target ?? 0);
+    }
+
     return {
       due,
       lastReceived,
       level: st.level,
       plannedPOs: plannedPOs.length,
       receivedPOs: receivedPOs.length,
+      receivedUnits,
       latePOs: latePOs.length,
       missingPOs: missingPOs.length,
       cartonsInTotal,
@@ -3336,6 +3350,7 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
 
     const recPlannedPOs = num(receiving?.plannedPOs || 0);
     const recReceivedPOs = num(receiving?.receivedPOs || 0);
+    const recUnits = num(receiving?.receivedUnits || 0);
 
     const cartonsIn = num(receiving?.cartonsInTotal || 0);
     const cartonsOut = num(receiving?.cartonsOutTotal || 0);
@@ -3438,7 +3453,7 @@ const signoffSection = (context) => {
         <div class="space-y-3">
           <div class="rounded-2xl border bg-gray-50 p-3">
             ${hRow(icon.po, 'POs planned – received', `${fmtInt(recPlannedPOs)} – ${fmtInt(recReceivedPOs)}`)}
-            ${hRow(icon.units, 'Units planned – applied', `${fmtInt(plannedUnits)} – ${fmtInt(appliedUnits)}`)}
+            ${hRow(icon.units, 'Units planned – received – applied', `${fmtInt(plannedUnits)} – ${fmtInt(recUnits)} – ${fmtInt(appliedUnits)}`)}
             ${hRow(icon.cartons, 'Cartons in – cartons out', `${fmtInt(cartonsIn)} – ${fmtInt(cartonsOut)}`)}
           </div>
 
