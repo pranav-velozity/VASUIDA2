@@ -356,6 +356,8 @@ async function renderBillingCard(){
       +'<input class="fin-bill" data-c="'+esc(c.id)+'" data-f="invoice_emails" value="'+esc(b.invoice_emails||'')+'" placeholder="ap@client.com, finance@client.com" style="'+INP+'">'
       +'<label style="display:block;font-size:10px;font-weight:600;color:'+MID+';margin:10px 0 3px;">Copy to</label>'
       +'<input class="fin-bill" data-c="'+esc(c.id)+'" data-f="invoice_cc" value="'+esc(b.invoice_cc||'')+'" placeholder="accounts@velozity.au" style="'+INP+'">'
+      +'<label style="display:block;font-size:10px;font-weight:600;color:'+MID+';margin:10px 0 3px;">Destination facility &mdash; named on sea and air invoices, leave blank to omit</label>'
+      +'<input class="fin-bill" data-c="'+esc(c.id)+'" data-f="destination_facility" value="'+esc(b.destination_facility||'')+'" placeholder="e.g. FC Yennora" style="'+INP+'">'
       +'<div style="text-align:right;margin-top:10px;">'
         +'<button data-savebill="'+esc(c.id)+'" style="background:'+BRAND+';color:#fff;border:0;border-radius:8px;padding:7px 14px;font:600 11px inherit;cursor:pointer;">Save</button>'
       +'</div></div>';
