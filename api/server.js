@@ -7446,11 +7446,19 @@ function renderInvoicePdfBuffer(inv) {
     y += 10;
     doc.fontSize(8).font('Helvetica-Bold').fillColor(BRAND).text('DESCRIPTION OF SERVICES', 50, y);
     y += 11;
+    // The client name came from the same hardcoding as the bill-to, so an EHP invoice read
+    // "Services provided to The Iconic". The freight lines also named FC Yennora, which is
+    // ICONIC's destination facility and meaningless for any other client — so the
+    // destination is taken from the billing record too, and simply omitted when not set
+    // rather than naming the wrong one.
+    const _party = _bill.legal_name || inv.client_id || 'the client';
+    const _dest = (_bill.destination_facility || '').trim();
+    const _to = _dest ? ` to ${_dest}` : '';
     const descText = type === 'VAS'
-      ? 'Services provided to The Iconic by VelOzity: VAS base processing, outbound activities, additional labelling, and carton replacement labour as detailed below.'
+      ? `Services provided to ${_party} by VelOzity: VAS base processing, outbound activities, additional labelling, and carton replacement labour as detailed below.`
       : type === 'SEA'
-      ? 'Services provided to The Iconic by VelOzity: transportation from warehouse to port, origin customs clearing and declaration, sea freight, destination customs declaration and clearing, and transportation from port to FC Yennora.'
-      : 'Services provided to The Iconic by VelOzity: transportation from warehouse to airport, origin customs clearing and declaration, air freight, destination customs declaration and clearing, and transportation from airport to FC Yennora.';
+      ? `Services provided to ${_party} by VelOzity: transportation from warehouse to port, origin customs clearing and declaration, sea freight, destination customs declaration and clearing, and transportation from port${_to}.`
+      : `Services provided to ${_party} by VelOzity: transportation from warehouse to airport, origin customs clearing and declaration, air freight, destination customs declaration and clearing, and transportation from airport${_to}.`;
     doc.fontSize(8).font('Helvetica').fillColor(DARK).text(descText, 50, y, { width: W });
     y += 28;
 
@@ -18110,6 +18118,7 @@ CREATE TABLE IF NOT EXISTS client_billing (
   address        TEXT,
   invoice_emails TEXT,                       -- comma separated; recipients for a sent invoice
   invoice_cc     TEXT,
+  destination_facility TEXT,                 -- named on sea and air invoices; omitted if blank
   updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `);
@@ -18120,12 +18129,22 @@ CREATE TABLE IF NOT EXISTS client_billing (
   try {
     const n = db.prepare("SELECT COUNT(*) n FROM client_billing WHERE client_id='ICONIC'").get().n;
     if (n) return;
-    db.prepare(`INSERT OR IGNORE INTO client_billing (client_id, legal_name, abn, address)
+    db.prepare(`INSERT OR IGNORE INTO client_billing (client_id, legal_name, abn, address, destination_facility)
                 VALUES ('ICONIC','The Iconic','50 152 631 082',
-                        'Level 18, Tower Two, International Towers, 200 Barangaroo Avenue, Barangaroo NSW 2000')`).run();
+                        'Level 18, Tower Two, International Towers, 200 Barangaroo Avenue, Barangaroo NSW 2000',
+                        'FC Yennora')`).run();
     console.log('[client_billing] seeded ICONIC from the previously hardcoded PDF values');
   } catch (e) { console.error('[client_billing:seed]', e.message); }
 })();
+
+try {
+  const c = db.prepare("PRAGMA table_info(client_billing)").all().map(x => x.name);
+  if (!c.includes('destination_facility')) {
+    db.exec("ALTER TABLE client_billing ADD COLUMN destination_facility TEXT");
+    db.prepare(`UPDATE client_billing SET destination_facility='FC Yennora'
+                WHERE client_id='ICONIC' AND (destination_facility IS NULL OR destination_facility='')`).run();
+  }
+} catch (e) { console.error('[client_billing:destination-migration]', e.message); }
 
 function clientBilling(clientId) {
   try {
@@ -18137,7 +18156,7 @@ function clientBilling(clientId) {
   let name = clientId;
   try { const c = db.prepare('SELECT name FROM client WHERE id=?').get(clientId); if (c) name = c.name; } catch (e) {}
   return { client_id: clientId, legal_name: name, abn: null, address: null,
-           invoice_emails: null, invoice_cc: null, incomplete: true };
+           invoice_emails: null, invoice_cc: null, destination_facility: null, incomplete: true };
 }
 
 app.get('/finance/client-billing', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
@@ -18155,16 +18174,18 @@ app.post('/finance/client-billing', authenticateRequest, requireRole(['admin']),
     if (!id) return res.status(400).json({ error: 'client_id is required' });
     const exists = db.prepare('SELECT id FROM client WHERE id=?').get(id);
     if (!exists) return res.status(400).json({ error: 'unknown client' });
-    db.prepare(`INSERT INTO client_billing (client_id, legal_name, abn, address, invoice_emails, invoice_cc, updated_at)
-                VALUES (?,?,?,?,?,?, datetime('now'))
+    db.prepare(`INSERT INTO client_billing (client_id, legal_name, abn, address, invoice_emails, invoice_cc, destination_facility, updated_at)
+                VALUES (?,?,?,?,?,?,?, datetime('now'))
                 ON CONFLICT(client_id) DO UPDATE SET
                   legal_name=excluded.legal_name, abn=excluded.abn, address=excluded.address,
                   invoice_emails=excluded.invoice_emails, invoice_cc=excluded.invoice_cc,
+                  destination_facility=excluded.destination_facility,
                   updated_at=datetime('now')`)
       .run(id, String(b.legal_name || '').trim() || null, String(b.abn || '').trim() || null,
            String(b.address || '').trim() || null,
            parseEmailList(b.invoice_emails).join(',') || null,
-           parseEmailList(b.invoice_cc).join(',') || null);
+           parseEmailList(b.invoice_cc).join(',') || null,
+           String(b.destination_facility || '').trim() || null);
     res.json({ ok: true, client_id: id, billing: clientBilling(id) });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
