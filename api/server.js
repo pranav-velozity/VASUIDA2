@@ -7331,18 +7331,21 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
 });
 
 // ── GET /finance/invoice/:id/pdf — generate PDF (pure Node, no Python) ──
-app.get('/finance/invoice/:id/pdf', async (req, res) => {
+// A direct browser download carries its token in the query string, so it is promoted to a
+// header BEFORE authenticateRequest rather than inside the handler — the route previously
+// checked only that a token existed and never verified it, so req.auth was never populated.
+app.get('/finance/invoice/:id/pdf', (req, _res, next) => {
+  if (req.query._token) req.headers['authorization'] = 'Bearer ' + req.query._token;
+  next();
+}, authenticateRequest, async (req, res) => {
   try {
-    // Accept token from query param (for direct browser downloads)
-    if (req.query._token) {
-      req.headers['authorization'] = 'Bearer ' + req.query._token;
-    }
-    // Auth check via existing middleware pattern
-    const authHeader = req.headers['authorization'] || '';
-    const token = authHeader.replace('Bearer ', '').trim();
-    if (!token) return res.status(401).json({ error: 'No token' });
-
-    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ? AND client_id = ?').get(req.params.id, curClient());
+    // Scoped to the invoice's own client, resolved from the request. curClient() reads the
+    // tenancy context, which needs req.auth — without the middleware above it fell back to
+    // ICONIC, and every EHP invoice PDF returned "Not found".
+    let client = null;
+    try { const w = tenancyWriteClient(req); if (w && w.client_id) client = w.client_id; } catch (e) {}
+    if (!client) client = curClient();
+    const inv = db.prepare('SELECT * FROM fin_invoices WHERE id = ? AND client_id = ?').get(req.params.id, client);
     if (!inv) return res.status(404).json({ error: 'Not found' });
     inv.lines = db.prepare('SELECT * FROM fin_invoice_lines WHERE invoice_id = ? ORDER BY sort_order').all(inv.id);
 
