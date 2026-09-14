@@ -11805,6 +11805,39 @@ function ehpCloseCountPeriod(clientId, periodId, counts, by) {
                                : 'Shelf holds more than the ledger — check for unrecorded receipts or a miscount.' };
 }
 
+// Read-only ledger dump. Every movement for a SKU with its source, so a correction can be
+// computed from what actually happened rather than from a tile. Changes nothing.
+app.get('/ehp/ledger', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const sku = String(req.query.sku || '').trim();
+    const where = sku ? 'AND t.sku = ?' : '';
+    const p = sku ? [c, sku] : [c];
+    const txns = db.prepare(`SELECT t.id, t.sku, t.qty_each, t.txn_type, t.ref_type, t.ref_id, t.created_at
+                             FROM ehp_inventory_txn t
+                             WHERE t.client_id = ? ${where}
+                             ORDER BY t.sku, t.created_at`).all(...p);
+    const counts = db.prepare(`SELECT id, sku, counted_each, system_each, variance_each, period_id, counted_at
+                               FROM ehp_stock_count WHERE client_id=? ${sku ? 'AND sku=?' : ''}
+                               ORDER BY counted_at`).all(...p);
+    const periods = db.prepare(`SELECT id, period_start, period_end, status, closed_at
+                                FROM ehp_count_period WHERE client_id=? ORDER BY period_start`).all(c);
+    // Grouped so the shape of the problem is visible without reading every row.
+    const bySku = {};
+    for (const t of txns) {
+      const k = t.sku;
+      bySku[k] = bySku[k] || { sku: k, on_hand: 0, by_type: {}, movements: [] };
+      bySku[k].on_hand += t.qty_each;
+      const key = `${t.txn_type}/${t.ref_type || '-'}`;
+      bySku[k].by_type[key] = (bySku[k].by_type[key] || 0) + t.qty_each;
+      bySku[k].movements.push({ qty: t.qty_each, type: t.txn_type, ref_type: t.ref_type,
+                                ref_id: t.ref_id, at: t.created_at });
+    }
+    res.json({ client_id: c, skus: Object.values(bySku), counts, periods,
+               note: 'Read only. Nothing has been changed.' });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 // ── Reversing a count period ──
 // Closing a period writes, per SKU, a stock_count row and an adjustment transaction equal
 // to (counted - system), then marks the period closed. A count entered by mistake therefore
