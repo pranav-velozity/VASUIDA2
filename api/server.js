@@ -11838,6 +11838,101 @@ app.get('/ehp/ledger', authenticateRequest, requireRole(['admin']), (req, res) =
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ── Receipt unit correction ──
+// A receipt entered in the wrong unit cannot be fixed by a count: a count sets the ledger to
+// a figure, so it papers over the error and the next dispatch drives the balance wrong
+// again. The receipt itself has to be corrected.
+//
+// This does both halves in ONE transaction — removing a mistaken count and correcting the
+// receipt — because between them the balance is briefly negative, and that state should
+// never be observable or interruptible.
+//
+// PREVIEW first. Changes nothing.
+app.post('/ehp/correct-receipt-units/preview', authenticateRequest, requireRole(['admin']),
+  requireInternalOrg, (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const b = req.body || {};
+    const periodId = String(b.reverse_period_id || '').trim() || null;
+    const items = Array.isArray(b.items) ? b.items : [];
+    if (!items.length) return res.status(400).json({ error: 'items required: [{sku, true_quantity}]' });
+
+    const out = items.map(it => {
+      const sku = String(it.sku || '').trim();
+      const target = Math.round(Number(it.true_quantity));
+      const now = ehpOnHand(c, sku);
+      const rows = db.prepare(`SELECT txn_type, ref_type, COALESCE(SUM(qty_each),0) n
+                               FROM ehp_inventory_txn WHERE client_id=? AND sku=?
+                               GROUP BY txn_type, ref_type`).all(c, sku);
+      const sum = (f) => rows.filter(f).reduce((a, r) => a + r.n, 0);
+      const receipt = sum(r => r.txn_type === 'receipt');
+      const consumed = sum(r => r.txn_type === 'consumption' || r.txn_type === 'write_off');
+      const countAdj = periodId
+        ? db.prepare(`SELECT COALESCE(SUM(qty_each),0) n FROM ehp_inventory_txn
+                      WHERE client_id=? AND sku=? AND ref_type='count_period' AND ref_id=?`)
+            .get(c, sku, periodId).n
+        : 0;
+      const afterReversal = now - countAdj;
+      return { sku, on_hand_now: now, receipt_recorded: receipt, consumed,
+               count_adjustment_removed: countAdj, after_reversal: afterReversal,
+               receipt_correction: Math.round((target - consumed) - afterReversal),
+               true_receipt: target + consumed, final_on_hand: target };
+    });
+    res.json({ client_id: c, reverse_period_id: periodId, items: out,
+               note: 'Read only. Nothing has been changed.' });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/ehp/correct-receipt-units', authenticateRequest, requireRole(['admin']),
+  requireInternalOrg, writeOpLimiter, auditLog('ehp_correct_receipt_units'), (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const b = req.body || {};
+    if (String(b.confirm || '') !== '1')
+      return res.status(400).json({ error: 'confirm_required', message: 'Run the preview first, then pass confirm=1.' });
+    const periodId = String(b.reverse_period_id || '').trim() || null;
+    const items = Array.isArray(b.items) ? b.items : [];
+    if (!items.length) return res.status(400).json({ error: 'items required' });
+    const reason = String(b.reason || '').trim()
+      || 'receipt entered in boxes rather than sticks — corrected to the true unit';
+
+    const before = {}, after = {};
+    for (const it of items) before[String(it.sku)] = ehpOnHand(c, String(it.sku));
+
+    db.transaction(() => {
+      if (periodId) {
+        const per = db.prepare('SELECT * FROM ehp_count_period WHERE id=? AND client_id=?').get(periodId, c);
+        if (!per) throw new Error('period_not_found');
+        db.prepare(`DELETE FROM ehp_inventory_txn
+                    WHERE client_id=? AND ref_type='count_period' AND ref_id=?`).run(c, periodId);
+        db.prepare('DELETE FROM ehp_stock_count WHERE period_id=? AND client_id=?').run(periodId, c);
+        db.prepare(`UPDATE ehp_count_period SET status='open', period_end=NULL,
+                    closed_at=NULL, closed_by=NULL WHERE id=?`).run(periodId);
+      }
+      const ins = db.prepare(`INSERT INTO ehp_inventory_txn (id, client_id, sku, qty_each, txn_type, ref_type, ref_id)
+                              VALUES (?,?,?,?, 'receipt', 'unit_correction', ?)`);
+      for (const it of items) {
+        const sku = String(it.sku || '').trim();
+        const target = Math.round(Number(it.true_quantity));
+        if (!sku || !isFinite(target)) throw new Error('bad item: ' + JSON.stringify(it));
+        // Whatever it takes to land on the true figure from wherever the ledger now sits,
+        // so the result does not depend on the order the two halves are applied.
+        const delta = target - ehpOnHand(c, sku);
+        if (delta !== 0) ins.run(ehpNewId('itx'), c, sku, delta, 'receipt_unit_fix');
+      }
+    })();
+
+    for (const it of items) after[String(it.sku)] = ehpOnHand(c, String(it.sku));
+    console.warn(`[ehp:unit-correction] by ${aqUserEmail(req) || 'unknown'} — ${reason} — `
+      + items.map(i => `${i.sku}: ${before[i.sku]} -> ${after[i.sku]}`).join(', '));
+    res.json({ ok: true, reason, period_reopened: !!periodId,
+      results: items.map(i => ({ sku: i.sku, before: before[i.sku], after: after[i.sku] })) });
+  } catch (e) {
+    console.error('[POST /ehp/correct-receipt-units]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 // ── Reversing a count period ──
 // Closing a period writes, per SKU, a stock_count row and an adjustment transaction equal
 // to (counted - system), then marks the period closed. A count entered by mistake therefore
