@@ -11,6 +11,7 @@
   'use strict';
 
   const DARK = '#1C1C1E', MID = '#6E6E73', LIGHT = '#AEAEB2';
+  const BRAND = '#990033';
   const AMBER = '#FFD014', RED = '#B33F40', GREEN = '#34C759';
   // One hue per product line. Two hues on ONE map cannot be read where both ship to the
   // same state, so the two lines get their own grid and share a scale instead.
@@ -137,24 +138,26 @@
       .eg-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:8px;}
       @media (max-width:1180px){ .eg-tiles{grid-template-columns:repeat(2,minmax(0,1fr));} }
       @media (max-width:620px){ .eg-tiles{grid-template-columns:1fr;} }
-      .eg-tile{text-align:left;border:0.5px solid rgba(0,0,0,0.1);border-radius:12px;padding:14px 15px;
+      .eg-tile{text-align:left;border:0.5px solid rgba(0,0,0,0.1);border-left:3px solid ${BRAND};
+               border-radius:12px;padding:14px 15px;
                background:#fff;cursor:pointer;display:flex;flex-direction:column;height:128px;
                box-shadow:${LIFT};
                transition:border-color .16s ease,transform .16s ease,box-shadow .16s ease;}
-      .eg-tile:hover{border-color:rgba(0,0,0,0.22);transform:translateY(-4px);
+      .eg-tile:hover{border-color:rgba(0,0,0,0.22);border-left-color:${BRAND};transform:translateY(-4px);
                      box-shadow:0 12px 26px rgba(0,0,0,0.11);}
       .eg-tile:active{transform:translateY(-1px);}
       .eg-tile:disabled{opacity:.5;cursor:default;transform:none;box-shadow:none;}
       .eg-thead{display:flex;align-items:flex-start;gap:9px;}
-      .eg-ico{flex:0 0 auto;width:26px;height:26px;border-radius:7px;background:#F5F5F7;
-              display:flex;align-items:center;justify-content:center;color:${MID};}
-      .eg-tile:hover .eg-ico{background:${DARK};color:#fff;}
+      .eg-ico{flex:0 0 auto;width:26px;height:26px;border-radius:7px;background:rgba(153,0,51,0.09);
+              display:flex;align-items:center;justify-content:center;color:${BRAND};}
+      .eg-tile:hover .eg-ico{background:${BRAND};color:#fff;}
       .eg-tn{font-size:12px;font-weight:600;color:${DARK};line-height:1.3;flex:1;}
       /* Clamped so a long description can never make one tile taller than its neighbour. */
-      .eg-td{font-size:10px;color:${LIGHT};margin-top:9px;line-height:1.45;flex:1;overflow:hidden;
+      .eg-td{font-size:10px;color:${MID};margin-top:9px;line-height:1.45;flex:1;overflow:hidden;
              display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;}
       .eg-thead{min-height:34px;}
-      .eg-fmt{font-size:8.5px;font-weight:700;color:${LIGHT};letter-spacing:.05em;}
+      .eg-fmt{font-size:8.5px;font-weight:700;color:${BRAND};letter-spacing:.05em;
+              background:rgba(153,0,51,0.08);padding:2px 6px;border-radius:5px;}
       .eg-tbl{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px;}
       .eg-tbl th{text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:${LIGHT};
                  font-weight:600;padding:5px 6px;border-bottom:0.5px solid rgba(0,0,0,0.08);}
@@ -266,6 +269,53 @@
         obs: `${nfmt(total)} envelope(s) across ${st.length} state(s). Share and concentration figures at this volume describe the sample, not the market.`,
         act: `Geographic insights start once around ${MIN_FOR_GEO} envelopes have dispatched in a month.` });
       return early;
+    }
+
+    // MOVEMENT first. A share or a rank restates the map sitting beside it; what changed
+    // since last month does not, and it is the thing worth acting on.
+    const prevBy = (_data.previous && _data.previous.by_state) || {};
+    const prevMonth = (_data.previous && _data.previous.month) || null;
+    const hasPrev = prevMonth && Object.keys(prevBy).length > 0;
+
+    if (hasPrev) {
+      const rankOf = (map) => Object.entries(map).sort((a, b) => b[1] - a[1])
+                                    .reduce((acc, [k], i) => (acc[k] = i + 1, acc), {});
+      const nowMap = st.reduce((a, x) => (a[x.state] = x.envelopes, a), {});
+      const rNow = rankOf(nowMap), rPrev = rankOf(prevBy);
+
+      // Biggest climb among states with enough volume for the move to mean something.
+      const movers = st.filter(x => x.envelopes >= 10 && rPrev[x.state])
+        .map(x => ({ state: x.state, env: x.envelopes, was: prevBy[x.state] || 0,
+                     climb: rPrev[x.state] - rNow[x.state] }))
+        .sort((a, b) => b.climb - a.climb);
+      const up = movers[0];
+      if (up && up.climb >= 2) {
+        const pct = up.was ? Math.round((up.env - up.was) / up.was * 100) : null;
+        out.push({ cat: 'movement', col: '#1B7F3B',
+          title: `${up.state} climbed ${up.climb} place${up.climb === 1 ? '' : 's'} this month`,
+          obs: `${nfmt(up.env)} envelopes against ${nfmt(up.was)} in ${prevMonth}`
+               + (pct != null ? `, up ${pct}%.` : '.'),
+          act: 'If nothing regional changed on your side, this is organic demand worth supporting before it cools.' });
+      }
+      const down = movers[movers.length - 1];
+      if (down && down.climb <= -2 && down !== up) {
+        out.push({ cat: 'movement', col: AMBER,
+          title: `${down.state} slipped ${Math.abs(down.climb)} place${Math.abs(down.climb) === 1 ? '' : 's'}`,
+          obs: `${nfmt(down.env)} envelopes against ${nfmt(down.was)} in ${prevMonth}.`,
+          act: 'Worth checking whether a campaign ended or stock ran short in that window.' });
+      }
+      const fresh = st.filter(x => x.envelopes >= 5 && !prevBy[x.state]).sort((a, b) => b.envelopes - a.envelopes)[0];
+      if (fresh) {
+        out.push({ cat: 'movement', col: '#2E7D9E',
+          title: `${fresh.state} is new this month`,
+          obs: `${nfmt(fresh.envelopes)} envelopes, with nothing dispatched there in ${prevMonth}.`,
+          act: 'A first month in a state is the cheapest time to learn whether it repeats.' });
+      }
+    } else {
+      out.push({ cat: 'coverage', col: LIGHT,
+        title: 'First month of data',
+        obs: 'There is no prior month to compare against, so movement cannot be reported yet.',
+        act: 'Month-on-month shifts appear here from the next reporting period.' });
     }
 
     const ranked = st.filter(s => s.per_100k != null).sort((a, b) => b.per_100k - a.per_100k);
@@ -391,53 +441,79 @@
   // ── dispatch trend ──
   // A plain area sparkline per line. Enough to see shape and cadence; anything more
   // elaborate would compete with the cartogram.
-  function trendChart() {
+  // Product mix, not a trend. Two bars over one month told nobody anything and would only
+  // get noisier as recipes are added — where mix gets MORE useful. With a single line there
+  // is no pie to draw, so it states the position plainly rather than rendering a full circle
+  // and pretending to be a chart.
+  function mixChart() {
     const t = _data.trend || [];
-    if (!t.length) return `<div class="eg-note" style="padding:16px 2px;">No dispatches yet this month.</div>`;
-    const days = Array.from(new Set(t.map(r => r.d))).sort();
-    const lines = (_data.product_lines || []).length ? _data.product_lines.slice(0, 2) : [null];
-    const series = lines.map((l, i) => ({
-      line: l, hue: LINE_HUES[i] || LINE_HUES[0],
-      pts: days.map(d => t.filter(r => r.d === d && (l == null || r.pl === l))
-                          .reduce((a, r) => a + r.envelopes, 0))
-    }));
-    const max = Math.max(1, ...series.flatMap(x => x.pts));
-    const W = 560, H = 132, pad = 8;
-    const Y = v => H - pad - (v / max) * (H - pad * 2 - 8);
-    let body;
-    if (days.length < 3) {
-      // A line through one or two points draws nothing useful. Bars read correctly from
-      // the first day of activity.
-      // Cap the bar width: one day of data spread across the full card reads as a slab,
-      // not a chart.
-      const slot = (W - pad * 2) / Math.max(days.length, 6);
-      const bw = Math.min(26, slot / (series.length + 0.4));
-      body = days.map((d, i) => series.map((sr, k) => {
-        const v = sr.pts[i]; if (!v) return '';
-        const x = pad + (i + 0.5) * slot - (series.length * bw) / 2 + k * bw;
-        const y = Y(v);
-        return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(bw-3).toFixed(1)}" height="${(H-pad-y).toFixed(1)}"
-                  rx="3" fill="hsl(${sr.hue.h} ${sr.hue.s}% 46%)"><title>${esc(d)} — ${nfmt(v)}</title></rect>`;
-      }).join('')).join('');
-    } else {
-      const X = i => pad + i * (W - pad * 2) / (days.length - 1);
-      body = series.map(sr => {
-        const d = sr.pts.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join('');
-        const area = `${d}L${X(sr.pts.length-1).toFixed(1)},${H-pad}L${X(0).toFixed(1)},${H-pad}Z`;
-        const col = `hsl(${sr.hue.h} ${sr.hue.s}% 46%)`;
-        return `<path d="${area}" fill="${col}" opacity="0.10"/><path d="${d}" fill="none" stroke="${col}" stroke-width="1.8" stroke-linejoin="round"/>`;
-      }).join('');
+    const tot = _data.totals || {};
+    if (!t.length) return `<div class="eg-ml">Product mix</div>
+      <div class="eg-note" style="padding:16px 2px;">No dispatches yet this month.</div>`;
+
+    const byLine = {};
+    for (const r of t) { const k = r.pl || 'Unspecified'; byLine[k] = (byLine[k] || 0) + (r.envelopes || 0); }
+    const rows = Object.entries(byLine).map(([line, env]) => ({ line, env }))
+                       .filter(x => x.env > 0).sort((a, b) => b.env - a.env);
+    const total = rows.reduce((a, x) => a + x.env, 0) || 1;
+    const orders = tot.orders || 0;
+
+    if (rows.length <= 1) {
+      const only = rows[0] || { line: 'Unspecified', env: 0 };
+      const per = orders ? (tot.envelopes / orders) : 0;
+      return `<div class="eg-ml">Product mix</div>
+        <div class="eg-mv">One product line in play</div>
+        <div style="display:flex;flex-direction:column;justify-content:center;flex:1;gap:10px;padding:6px 0;">
+          <div style="display:flex;align-items:baseline;gap:10px;">
+            <span style="width:11px;height:11px;border-radius:3px;background:hsl(${LINE_HUES[0].h} ${LINE_HUES[0].s}% 46%);"></span>
+            <span style="font-size:15px;font-weight:700;color:${DARK};">${esc(only.line)}</span>
+          </div>
+          <div style="font-size:12px;color:${MID};line-height:1.7;">
+            <b style="color:${DARK};">${nfmt(only.env)}</b> envelopes across
+            <b style="color:${DARK};">${nfmt(orders)}</b> order${orders === 1 ? '' : 's'} &middot;
+            <b style="color:${DARK};">100%</b> of this month's volume<br>
+            Averaging <b style="color:${DARK};">${per.toFixed(2)}</b> envelopes per order.
+          </div>
+          <div class="eg-note">The split appears here once a second product line dispatches.</div>
+        </div>`;
     }
-    const paths = body + `<line x1="${pad}" y1="${H-pad}" x2="${W-pad}" y2="${H-pad}" stroke="rgba(0,0,0,0.10)" stroke-width="1"/>`;
-    const legend = series.filter(x => x.line).map(sr =>
-      `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:12px;">
-        <span style="width:8px;height:8px;border-radius:2px;background:hsl(${sr.hue.h} ${sr.hue.s}% 46%);"></span>
-        <span style="font-size:10px;color:${MID};">${esc(sr.line)}</span></span>`).join('');
-    return `<div style="display:flex;justify-content:space-between;align-items:baseline;">
-        <div class="eg-ml">Dispatch trend</div><div>${legend}</div></div>
-      <div class="eg-mv">${days.length} day(s) with activity · peak ${nfmt(max)} envelopes</div>
-      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMax meet"
-           style="width:100%;height:148px;margin-top:auto;">${paths}</svg>`;
+
+    // Two or more lines: a donut, largest first.
+    const R = 52, C = 62, SW = 20, circ = 2 * Math.PI * R;
+    let off = 0;
+    const arcs = rows.map((x, i) => {
+      const frac = x.env / total;
+      const hue = LINE_HUES[i % LINE_HUES.length];
+      const seg = `<circle cx="${C}" cy="${C}" r="${R}" fill="none"
+        stroke="hsl(${hue.h} ${hue.s}% 46%)" stroke-width="${SW}"
+        stroke-dasharray="${(frac * circ).toFixed(2)} ${circ.toFixed(2)}"
+        stroke-dashoffset="${(-off * circ).toFixed(2)}"
+        transform="rotate(-90 ${C} ${C})"/>`;
+      off += frac; return seg;
+    }).join('');
+
+    const legend = rows.map((x, i) => {
+      const hue = LINE_HUES[i % LINE_HUES.length];
+      const pct = Math.round(x.env / total * 100);
+      return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+        <span style="width:9px;height:9px;border-radius:2px;flex:0 0 auto;
+              background:hsl(${hue.h} ${hue.s}% 46%);"></span>
+        <span style="font-size:11px;color:${DARK};flex:1;min-width:0;overflow:hidden;
+              text-overflow:ellipsis;white-space:nowrap;">${esc(x.line)}</span>
+        <span style="font-size:11px;color:${MID};white-space:nowrap;">${nfmt(x.env)} &middot; <b style="color:${DARK};">${pct}%</b></span>
+      </div>`;
+    }).join('');
+
+    return `<div class="eg-ml">Product mix</div>
+      <div class="eg-mv">${rows.length} product lines &middot; ${nfmt(total)} envelopes</div>
+      <div style="display:flex;gap:18px;align-items:center;margin-top:auto;">
+        <svg viewBox="0 0 124 124" style="width:124px;height:124px;flex:0 0 auto;">
+          ${arcs}
+          <text x="${C}" y="${C - 3}" text-anchor="middle" style="font-size:17px;font-weight:700;fill:${DARK};">${nfmt(total)}</text>
+          <text x="${C}" y="${C + 12}" text-anchor="middle" style="font-size:8px;fill:${LIGHT};">ENVELOPES</text>
+        </svg>
+        <div style="flex:1;min-width:0;">${legend}</div>
+      </div>`;
   }
 
   function strip() {
@@ -470,10 +546,13 @@
   }
 
   function topCitiesCard() {
-    const topCities = (_data.cities || []).sort((a, b) => b.envelopes - a.envelopes).slice(0, 8);
+    const isGrouped = (c) => /^other\b/i.test(String(c.recipient_city || ''));
+    const topCities = (_data.cities || [])
+      .sort((a, b) => (isGrouped(a) - isGrouped(b)) || (b.envelopes - a.envelopes))
+      .slice(0, 8);
     return `<div class="eg-card">
         <div class="eg-ml">Top cities</div>
-        <div class="eg-mv">Cities under ${_data.small_cell_min} envelopes are grouped</div>
+        <div class="eg-mv">Named cities first &middot; under ${_data.small_cell_min} envelopes grouped for privacy</div>
         <table class="eg-tbl"><thead><tr><th>City</th><th>State</th><th>Line</th><th class="n">Envelopes</th></tr></thead>
         <tbody>${topCities.length ? topCities.map(c => `<tr>
           <td>${esc(c.recipient_city || '—')}</td><td style="color:${MID}">${esc(c.recipient_state || '')}</td>
@@ -488,8 +567,9 @@
     if (!_sel) return `<div class="eg-note" style="padding:14px 2px;">Click any state to see its cities, orders and product mix.</div>`;
     const s = (_data.states || []).find(x => x.state === _sel);
     if (!s) return `<div class="eg-note" style="padding:14px 2px;">No dispatches to ${esc(_sel)} in this month.</div>`;
+    const grouped = (c) => /^other\b/i.test(String(c.recipient_city || ''));
     const cities = (_data.cities || []).filter(c => c.recipient_state === _sel)
-      .sort((a, b) => b.envelopes - a.envelopes).slice(0, 12);
+      .sort((a, b) => (grouped(a) - grouped(b)) || (b.envelopes - a.envelopes)).slice(0, 12);
     return `
       <div style="display:flex;gap:16px;flex-wrap:wrap;margin:10px 0 6px;">
         <div><div class="eg-mv">Envelopes</div><div style="font-size:18px;font-weight:700;color:${DARK};">${nfmt(s.envelopes)}</div></div>
@@ -529,7 +609,7 @@
           ${strip()}
           <div class="eg-top">
             <div class="eg-maps">${maps}</div>
-            <div class="eg-card">${trendChart()}</div>
+            <div class="eg-card">${mixChart()}</div>
           </div>
           <div class="eg-sec">Detail</div>
           <div class="eg-two">
@@ -589,6 +669,12 @@
         _reports.length ? Promise.resolve({ reports: _reports }) : req('/ehp/reports')
       ]);
       _data = g; _month = g.month; _reports = r.reports || _reports;
+      // Open on the busiest state rather than an empty panel. A click still overrides it,
+      // and changing month clears the selection so it re-picks for that month.
+      if (!_sel) {
+        const top = (_data.states || []).slice().sort((a, b) => (b.envelopes || 0) - (a.envelopes || 0))[0];
+        if (top && top.envelopes > 0) _sel = top.state;
+      }
       paint();
     } catch (e) {
       if (body) body.innerHTML = `<div style="color:${RED};font-size:12px;padding:30px;text-align:center;">Could not load: ${esc(e.message || e)}</div>`;
