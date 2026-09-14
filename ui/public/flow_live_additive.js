@@ -946,6 +946,12 @@ function computeCartonStatsFromRecords(records) {
     level,
     plannedUnits,
     appliedUnits,
+    // POs finished, reusing the existing progress buckets rather than a second definition:
+    // complete is >= 98% of planned, over is >= 105%. "Received" is binary but "applied" is
+    // a percentage, so a threshold is needed — and counting a PO with one unit applied
+    // would show the week nearly done on its first morning. The 98% tolerance matters
+    // because applied counts rarely land exactly on the planned figure.
+    appliedPOs: buckets.complete + buckets.over,
     plannedPOs,
     completion,
     supplierRows,
@@ -3351,6 +3357,8 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
     const recPlannedPOs = num(receiving?.plannedPOs || 0);
     const recReceivedPOs = num(receiving?.receivedPOs || 0);
     const recUnits = num(receiving?.receivedUnits || 0);
+    // A PO counts as applied only when every planned unit on it is applied.
+    const appliedPOsCount = num(vas?.appliedPOs || 0);
 
     const cartonsIn = num(receiving?.cartonsInTotal || 0);
     const cartonsOut = num(receiving?.cartonsOutTotal || 0);
@@ -3452,7 +3460,7 @@ const signoffSection = (context) => {
       return `
         <div class="space-y-3">
           <div class="rounded-2xl border bg-gray-50 p-3">
-            ${hRow(icon.po, 'POs planned – received', `${fmtInt(recPlannedPOs)} – ${fmtInt(recReceivedPOs)}`)}
+            ${hRow(icon.po, 'POs planned – received – applied', `${fmtInt(recPlannedPOs)} – ${fmtInt(recReceivedPOs)} – ${fmtInt(appliedPOsCount)}`)}
             ${hRow(icon.units, 'Units planned – received – applied', `${fmtInt(plannedUnits)} – ${fmtInt(recUnits)} – ${fmtInt(appliedUnits)}`)}
             ${hRow(icon.cartons, 'Cartons in – cartons out', `${fmtInt(cartonsIn)} – ${fmtInt(cartonsOut)}`)}
           </div>
