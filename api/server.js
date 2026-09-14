@@ -11866,17 +11866,24 @@ app.post('/ehp/correct-receipt-units/preview', authenticateRequest, requireRole(
                                GROUP BY txn_type, ref_type`).all(c, sku);
       const sum = (f) => rows.filter(f).reduce((a, r) => a + r.n, 0);
       const receipt = sum(r => r.txn_type === 'receipt');
-      const consumed = sum(r => r.txn_type === 'consumption' || r.txn_type === 'write_off');
+      // Consumption is stored as negative transactions. Reported as a positive quantity
+      // consumed, or the derived figures below invert and the preview cannot be checked.
+      const consumed = Math.abs(sum(r => r.txn_type === 'consumption' || r.txn_type === 'write_off'));
       const countAdj = periodId
         ? db.prepare(`SELECT COALESCE(SUM(qty_each),0) n FROM ehp_inventory_txn
                       WHERE client_id=? AND sku=? AND ref_type='count_period' AND ref_id=?`)
             .get(c, sku, periodId).n
         : 0;
       const afterReversal = now - countAdj;
+      const trueReceipt = target + consumed;
       return { sku, on_hand_now: now, receipt_recorded: receipt, consumed,
                count_adjustment_removed: countAdj, after_reversal: afterReversal,
-               receipt_correction: Math.round((target - consumed) - afterReversal),
-               true_receipt: target + consumed, final_on_hand: target };
+               true_receipt: trueReceipt,
+               receipt_shortfall: trueReceipt - receipt,
+               // What the write will actually post: whatever lands on the true figure from
+               // where the ledger sits once the count adjustment is removed.
+               net_adjustment: target - afterReversal,
+               final_on_hand: target };
     });
     res.json({ client_id: c, reverse_period_id: periodId, items: out,
                note: 'Read only. Nothing has been changed.' });
