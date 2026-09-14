@@ -8441,6 +8441,10 @@ function renderReportsPage(container){
         row['logistic_type']          = dflt.logistic_type;
         row['logistic_method']        = method;                 // SHIP / AIR / TBD
         row['logistic_date']          = logisticDateFor(method);// Friday + offset (yyyymmdd)
+        // logistic_eta was declared in the column list but never assigned, so every
+        // published APO carried it empty. Same basis as logistic_date for now — a genuine
+        // ETA would use measured transit per lane rather than a flat lead time.
+        row['logistic_eta']           = row['logistic_date'];
         row['inbound_tracking']       = cleanTicket(g.zendesk_ticket);
         row['supplier_contact_name']  = g.supplier_contact_name;
         row['supplier_contact_phone'] = g.supplier_contact_phone;
