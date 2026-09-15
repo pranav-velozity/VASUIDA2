@@ -190,6 +190,10 @@
         : rng;
       try { ts = await req(`/ehp/timeseries?from=${tsRange.from}&to=${tsRange.to}`); } catch (e) {}
       await loadConn();
+      // Published so the Week Hub ticker has EHP figures to fall back on. Without it the
+      // ticker reads ICONIC's plan/records structures, finds nothing, and shows
+      // "loading operational data…" indefinitely.
+      window.__EHP_SUMMARY__ = sum;
       draw(host, sum, queue, batches.batches || [], inv, billing, rng, ts, tsRange);
       host.dataset.loaded = '1';
     } catch (e) {
@@ -775,7 +779,7 @@
     // meant a needless pass fifteen times a minute.
     setInterval(() => { if (document.visibilityState === 'visible') check(); }, 15000);
     window.refreshFulfilmentWeekHub = () => render(true);
-    console.log('[fulfilment-weekhub] module v14 loaded');
+    console.log('[fulfilment-weekhub] module v15 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
