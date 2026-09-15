@@ -6476,7 +6476,7 @@ window.__openPrebookModal = function(){
   <script src="/public/air_quotes_internal_additive.js?v=18" defer></script>
   <script src="/public/supplier_invoices_additive.js?v=3" defer></script>
   <script src="/public/dept_owners_additive.js?v=1" defer></script>
-  <script src="/public/fulfilment_weekhub_additive.js?v=17" defer></script>
+  <script src="/public/fulfilment_weekhub_additive.js?v=18" defer></script>
 
 
 <!-- ── Week Hub Split-Flap Insight Flipper ── -->
@@ -6558,6 +6558,31 @@ window.__openPrebookModal = function(){
   // ── Fallback computed insights if Claude call fails ──
   function _computeFallback(ws) {
     var ins = [];
+
+    // EHP has no plan, no records and no receiving rows — those are ICONIC structures. The
+    // fallback read them regardless, found nothing, and fell through to "loading
+    // operational data…", which is what EHP saw whenever the AI call failed.
+    if (/^EHP/i.test(String(window.pinpointClient || ''))) {
+      var fw = window.__EHP_SUMMARY__ || null;
+      if (fw) {
+        var at = fw.all_time || {}, op = fw.open || {};
+        if (at.orders_received != null) ins.push({ icon: 'box',
+          text: Number(at.envelopes_ordered || 0).toLocaleString() + ' envelopes ordered all time',
+          pulse_question: 'How many envelopes have been ordered and dispatched in total?' });
+        if (at.envelopes_dispatched != null) ins.push({ icon: 'truck',
+          text: Number(at.envelopes_dispatched || 0).toLocaleString() + ' envelopes lodged with USPS',
+          pulse_question: 'What is the dispatch position for EHP Labs?' });
+        if (op.in_hand_envelopes) ins.push({ icon: 'clock',
+          text: Number(op.in_hand_envelopes).toLocaleString() + ' assembled, waiting to be lodged',
+          pulse_question: 'Which batches are assembled but not yet dispatched?' });
+        if (op.waiting_envelopes) ins.push({ icon: 'warning',
+          text: Number(op.waiting_envelopes).toLocaleString() + ' envelope(s) queued for a batch',
+          pulse_question: 'What is in the assembly queue right now?' });
+      }
+      return ins.length ? ins : [{ icon: 'clock', text: 'EHP Labs · envelope fulfilment',
+        pulse_question: 'Give me a summary of EHP Labs fulfilment operations.' }];
+    }
+
     var plan = Array.isArray(window.state && window.state.plan) ? window.state.plan : [];
     var recs = Array.isArray(window.state && window.state.records) ? window.state.records : [];
     var receiving = Array.isArray(window.state && window.state.receiving) ? window.state.receiving : [];
@@ -6586,11 +6611,29 @@ window.__openPrebookModal = function(){
   }
 
   // ── Main: fetch insights from /pulse/chat ──
+  // The client picker may change without a week re-render. Without this the ticker keeps
+  // showing the previous client's lines until something else happens to redraw.
+  window.addEventListener('tenancy:ready', function(){
+    try {
+      var cur = String(window.pinpointClient || '');
+      if (_flipperWeek && _flipperWeek.indexOf(cur + '|') !== 0) {
+        _flipperWeek = null; _flipperInsights = [];
+        var ws = (window.state && window.state.week_start) || null;
+        if (ws) refreshFlipperInsights(ws);
+      }
+    } catch (e) {}
+  });
+
   window.refreshFlipperInsights = async function(ws) {
     if (_flipperLoading) return;
-    if (_flipperWeek === ws && _flipperInsights.length) return; // already loaded for this week
+    var _client = String(window.pinpointClient || '');
+    // Keyed on client AND week. Keyed on week alone, switching client kept the previous
+    // client's insights because the week had not changed — so EHP showed ICONIC's numbers.
+    var _key = _client + '|' + ws;
+    if (_flipperWeek === _key && _flipperInsights.length) return;
     _flipperLoading = true;
-    _flipperWeek = ws;
+    _flipperWeek = _key;
+    _flipperInsights = [];
 
     if (_flipperTimer) { clearInterval(_flipperTimer); _flipperTimer = null; }
     _showLoading();
@@ -6605,8 +6648,13 @@ window.__openPrebookModal = function(){
 
       var facility = ((window.state?.plan)||[]).map(function(p){ return String(p.facility_name||p.facility||'').trim(); }).find(Boolean) || String(window.state?.facility||'').trim() || '';
 
+      var _isEHP = /^EHP/i.test(_client);
       var prompt = 'Generate exactly 5 short operational insight lines for the Week Hub header display for week ' + ws + '. '
-        + 'Cover VAS processing, Receiving, Transit & Clearing, Last Mile, and one overall risk or highlight. '
+        + (_isEHP
+            ? 'This client is EHP Labs: envelope fulfilment from stick pack inventory. Cover orders received, '
+              + 'envelopes assembled, envelopes dispatched to USPS, flavour stock cover, and one overall risk or highlight. '
+              + 'Do NOT mention VAS processing, containers, transit or last mile — none of those apply to this client. '
+            : 'Cover VAS processing, Receiving, Transit & Clearing, Last Mile, and one overall risk or highlight. ')
         + 'Each insight must be under 12 words. Be specific — use real numbers from the data. '
         + 'Return ONLY a JSON array of 5 objects, no markdown, no explanation. '
         + 'Each object must have exactly these fields: '
@@ -6617,7 +6665,11 @@ window.__openPrebookModal = function(){
 
       var resp = await fetch(apiBase + '/pulse/chat', {
         method: 'POST',
-        headers: Object.assign({'Content-Type':'application/json'}, token ? {'Authorization':'Bearer '+token} : {}),
+        // Without this the server falls back to ICONIC and the ticker reports another
+        // client's operation under EHP's name.
+        headers: Object.assign({'Content-Type':'application/json'},
+          token ? {'Authorization':'Bearer '+token} : {},
+          _client ? {'x-pinpoint-client': _client} : {}),
         body: JSON.stringify({
           messages: [{ role: 'user', content: prompt }],
           pulseContext: window._pulseSessionContext || null,
