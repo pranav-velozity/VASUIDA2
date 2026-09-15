@@ -12179,6 +12179,428 @@ app.get('/ehp/queued-orders', authenticateRequest, (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// ═══════════════════ SEA CONTAINER COSTS ═══════════════════
+//
+// A weekly cost capture, NOT a quote. Nothing is released, approved or marked up — no
+// client is waiting on it. It exists so the container cost quoted during the week can be
+// held against the sea invoice that arrives a month later, which nothing checks today.
+//
+// Compared at WEEK level rather than per container: the partner may reference a container
+// differently on the weekly form and the monthly invoice, and a comparison that depends on
+// two humans typing the same string the same way is a comparison that quietly stops working.
+db.exec(`
+CREATE TABLE IF NOT EXISTS sea_quote (
+  id           TEXT PRIMARY KEY,
+  client_id    TEXT NOT NULL,
+  supplier     TEXT NOT NULL,
+  week_start   TEXT NOT NULL,
+  state        TEXT NOT NULL DEFAULT 'requested',   -- requested | received
+  currency     TEXT NOT NULL DEFAULT 'USD',
+  total_cost   REAL,
+  submitted_by TEXT,
+  submitted_at TEXT,
+  partner_note TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (client_id, supplier, week_start)
+);
+CREATE INDEX IF NOT EXISTS idx_sea_quote_week ON sea_quote(client_id, week_start);
+
+CREATE TABLE IF NOT EXISTS sea_quote_line (
+  id            TEXT PRIMARY KEY,
+  quote_id      TEXT NOT NULL REFERENCES sea_quote(id) ON DELETE CASCADE,
+  container_ref TEXT,
+  size          TEXT,                                -- 20GP | 40GP | 40HQ | 45HQ
+  carrier       TEXT,
+  transit_days  INTEGER,                             -- PORT TO PORT only
+  cost_amount   REAL NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sea_quote_line ON sea_quote_line(quote_id);
+
+CREATE TABLE IF NOT EXISTS sea_quote_token (
+  token      TEXT PRIMARY KEY,
+  quote_id   TEXT NOT NULL REFERENCES sea_quote(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  used_at    TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+
+const SEA_SIZES = ['20GP', '40GP', '40HQ', '45HQ'];
+const seaNewId = (p) => (p || 'sq') + '_' + crypto.randomBytes(10).toString('hex');
+
+function seaQuoteSupplier() {
+  return process.env.SEA_QUOTE_SUPPLIER || 'Kerry Logistics Shenzhen';
+}
+
+// Containers Pinpoint already knows about for the week, so the partner confirms and prices
+// a list rather than typing one. The same prefill is what made the supplier invoice form
+// workable.
+function seaKnownContainers(clientId, weekStart) {
+  const fac = (() => {
+    try { const r = db.prepare('SELECT facility_code FROM client_facility WHERE client_id=?').all(clientId);
+          return r.length ? r[0].facility_code : null; } catch (e) { return null; }
+  })();
+  if (!fac) return [];
+  try {
+    return siContainersForWeek(fac, weekStart).map(c => ({ ref: c.ref, size: c.size ? `${c.size}GP` : null }));
+  } catch (e) { return []; }
+}
+
+// Carriers already seen, so the field can offer them instead of collecting "Maersk",
+// "MAERSK" and "Maersk Line" as three different carriers.
+function seaKnownCarriers(clientId) {
+  try {
+    return db.prepare(`SELECT DISTINCT l.carrier c FROM sea_quote_line l
+                       JOIN sea_quote q ON q.id = l.quote_id
+                       WHERE q.client_id=? AND l.carrier IS NOT NULL AND trim(l.carrier) <> ''
+                       ORDER BY l.carrier`).all(clientId).map(r => r.c);
+  } catch (e) { return []; }
+}
+
+function seaQuoteDetail(q) {
+  const lines = db.prepare('SELECT * FROM sea_quote_line WHERE quote_id=? ORDER BY created_at').all(q.id);
+  const bySize = lines.reduce((a, l) => {
+    const k = l.size || 'unspecified';
+    a[k] = a[k] || { containers: 0, cost: 0 };
+    a[k].containers++; a[k].cost += (l.cost_amount || 0);
+    return a;
+  }, {});
+  const transit = lines.map(l => l.transit_days).filter(x => x != null && x > 0);
+  return {
+    ...q, lines,
+    container_count: lines.length,
+    by_size: bySize,
+    carriers: [...new Set(lines.map(l => l.carrier).filter(Boolean))],
+    // Port to port only. Door to door would include last mile and is a different number.
+    transit_days_avg: transit.length ? Math.round(transit.reduce((a, b) => a + b, 0) / transit.length) : null,
+    transit_days_range: transit.length ? [Math.min(...transit), Math.max(...transit)] : null,
+  };
+}
+
+// ── Weekly request and partner submission ──
+
+function seaEnsureWeek(clientId, weekStart) {
+  const sup = seaQuoteSupplier();
+  const found = db.prepare('SELECT * FROM sea_quote WHERE client_id=? AND supplier=? AND week_start=?')
+                  .get(clientId, sup, weekStart);
+  if (found) return { quote: found, created: false };
+  const id = seaNewId('sq');
+  db.prepare(`INSERT INTO sea_quote (id, client_id, supplier, week_start, state)
+              VALUES (?,?,?,?, 'requested')`).run(id, clientId, sup, weekStart);
+  return { quote: db.prepare('SELECT * FROM sea_quote WHERE id=?').get(id), created: true };
+}
+
+async function seaSendRequest(q, origin) {
+  const token = crypto.randomBytes(24).toString('hex');
+  db.prepare(`INSERT INTO sea_quote_token (token, quote_id, expires_at)
+              VALUES (?,?, datetime('now','+21 days'))`).run(token, q.id);
+  const base = String(process.env.PUBLIC_API_URL || origin || '').replace(/\/+$/, '');
+  const link = `${base}/sea-quote?token=${token}`;
+  const { to, cc } = siContactFor(q.supplier, 'SEA');
+  const from = process.env.SUPPLIER_INVOICE_FROM || process.env.EXCEPTION_EMAIL_FROM;
+  if (!to.length || !from) return { skipped: true, reason: !from ? 'no from address' : 'no contact configured' };
+
+  const known = seaKnownContainers(q.client_id, q.week_start);
+  const rows = [
+    ['Week', `${q.week_start} to ${siWeekEnd(q.week_start)}`],
+    ['Containers on our records', known.length ? String(known.length) : 'none yet — please add them'],
+    ['We need', 'container size, carrier, port-to-port transit days, and container cost'],
+  ];
+  const cta = `<div style="margin-top:20px;text-align:center;">
+      <a href="${link}" style="display:inline-block;padding:12px 26px;border-radius:9px;background:#990033;
+        color:#fff;text-decoration:none;font-size:14px;font-weight:600;">Enter container costs</a></div>`;
+  const foot = `Container cost only — other charges are handled on the monthly invoice.
+    Transit days are port to port.`;
+  const html = aqMailShell(`Container costs — week of ${q.week_start}`, rows, cta, foot);
+  const text = rows.map(r => `${r[0]}: ${r[1]}`).join('\n') + `\n\nEnter them here: ${link}`;
+
+  try {
+    const r = await sendViaResend({ from, replyTo: 'accounts@velozity.au',
+      to: cc.length ? to.concat(cc) : to,
+      subject: `Container costs — week of ${q.week_start}`, html, text });
+    db.prepare(`UPDATE sea_quote SET updated_at=datetime('now') WHERE id=?`).run(q.id);
+    return { link, emailed_to: to, resend_id: r.id };
+  } catch (e) {
+    console.error('[sea-quote:mail]', e.message);
+    return { link, error: String(e.message || e) };
+  }
+}
+
+function seaTokenQuote(token) {
+  const t = db.prepare('SELECT * FROM sea_quote_token WHERE token=?').get(String(token || ''));
+  if (!t) return { error: 'invalid_token' };
+  if (t.expires_at < new Date().toISOString().slice(0, 19).replace('T', ' ')) return { error: 'expired_token' };
+  const q = db.prepare('SELECT * FROM sea_quote WHERE id=?').get(t.quote_id);
+  if (!q) return { error: 'not_found' };
+  return { q, tok: t };
+}
+
+app.post('/sea-quote/submit', writeOpLimiter, (req, res) => {
+  try {
+    const b = req.body || {};
+    const r = seaTokenQuote(b.token);
+    if (r.error) return res.status(403).json({ error: r.error });
+    const q = r.q;
+    const lines = Array.isArray(b.lines) ? b.lines : [];
+    if (!lines.length) return res.status(400).json({ error: 'at least one container is required' });
+
+    const clean = [];
+    for (const l of lines) {
+      const cost = Math.round((Number(l.cost_amount) || 0) * 100) / 100;
+      const size = String(l.size || '').trim().toUpperCase();
+      if (size && !SEA_SIZES.includes(size))
+        return res.status(400).json({ error: 'bad_size', size, allowed: SEA_SIZES });
+      const td = l.transit_days == null || l.transit_days === '' ? null : parseInt(l.transit_days, 10);
+      if (td != null && (!isFinite(td) || td < 0 || td > 120))
+        return res.status(400).json({ error: 'transit_days must be between 0 and 120' });
+      clean.push({ container_ref: String(l.container_ref || '').trim() || null, size: size || null,
+                   carrier: String(l.carrier || '').trim() || null, transit_days: td, cost_amount: cost });
+    }
+    const total = Math.round(clean.reduce((a, l) => a + l.cost_amount, 0) * 100) / 100;
+
+    db.transaction(() => {
+      db.prepare('DELETE FROM sea_quote_line WHERE quote_id=?').run(q.id);
+      const ins = db.prepare(`INSERT INTO sea_quote_line
+        (id, quote_id, container_ref, size, carrier, transit_days, cost_amount) VALUES (?,?,?,?,?,?,?)`);
+      for (const l of clean) ins.run(seaNewId('sql'), q.id, l.container_ref, l.size, l.carrier, l.transit_days, l.cost_amount);
+      db.prepare(`UPDATE sea_quote SET state='received', total_cost=?, submitted_by=?,
+                  submitted_at=datetime('now'), partner_note=?, updated_at=datetime('now') WHERE id=?`)
+        .run(total, String(b.submitted_by || '').trim() || null,
+             String(b.note || '').trim() || null, q.id);
+    })();
+    db.prepare(`UPDATE sea_quote_token SET used_at=datetime('now') WHERE token=?`).run(r.tok.token);
+    res.json({ ok: true, week_start: q.week_start, containers: clean.length, total_cost: total });
+  } catch (e) {
+    console.error('[POST /sea-quote/submit]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// Server-rendered, same reasoning as the partner cost page: the partner has no account and
+// should not depend on the SPA loading.
+app.get('/sea-quote', (req, res) => {
+  const fail = (m) => res.status(403).type('html').send(aqPartnerPage(
+    `<div class="card done"><div class="tick" style="color:#B33F40">&#9888;</div>
+     <h1 style="margin-top:10px">${escHtml(m)}</h1>
+     <div class="sub" style="margin-top:6px">Please contact accounts@velozity.au.</div></div>`, 'Link unavailable'));
+  try {
+    const r = seaTokenQuote(req.query.token);
+    if (r.error) return fail(r.error === 'expired_token' ? 'This link has expired.' : 'This link is not valid.');
+    const q = r.q;
+    const prior = db.prepare('SELECT * FROM sea_quote_line WHERE quote_id=? ORDER BY created_at').all(q.id);
+    const known = seaKnownContainers(q.client_id, q.week_start);
+    const carriers = seaKnownCarriers(q.client_id);
+
+    // Our containers first, then anything they added last time that we did not know about.
+    const seen = new Set(known.map(k => String(k.ref).toUpperCase()));
+    const extra = prior.filter(l => !l.container_ref || !seen.has(String(l.container_ref).toUpperCase()));
+    const valOf = (ref, f) => { const m = prior.find(x => (x.container_ref || '') === ref); return m && m[f] != null ? m[f] : ''; };
+
+    const row = (ref, size, known_) => `<tr>
+      <td>${known_ ? `<b>${escHtml(ref)}</b><input type="hidden" class="cref" value="${escHtml(ref)}">`
+                   : `<input class="f cref" value="${escHtml(ref || '')}" placeholder="Container">`}</td>
+      <td><select class="f csize">${['', ...SEA_SIZES].map(x => {
+            const cur = valOf(ref, 'size') || size || '';
+            return `<option value="${x}" ${x === cur ? 'selected' : ''}>${x || '—'}</option>`; }).join('')}</select></td>
+      <td><input class="f ccar" list="carriers" value="${escHtml(valOf(ref, 'carrier') || '')}" placeholder="Carrier"></td>
+      <td><input class="f ctd" type="number" min="0" max="120" value="${escHtml(String(valOf(ref, 'transit_days') || ''))}" placeholder="days" style="width:80px"></td>
+      <td><input class="f ccost" type="number" min="0" step="0.01" value="${escHtml(String(valOf(ref, 'cost_amount') || ''))}" placeholder="0.00" style="width:120px"></td>
+    </tr>`;
+
+    const body = `
+  <div class="card">
+    <h1>Container costs</h1>
+    <div class="sub">Week of ${escHtml(q.week_start)} &rarr; ${escHtml(siWeekEnd(q.week_start))}</div>
+    <div class="ref">${escHtml(q.supplier)}</div>
+    <div class="note">Container cost only &mdash; other charges belong on the monthly invoice.
+      <b>Transit days are port to port.</b> All amounts in USD.</div>
+  </div>
+
+  <div class="card">
+    <div class="note" style="margin-bottom:8px;">${known.length
+      ? `We have <b>${known.length}</b> container${known.length === 1 ? '' : 's'} on record for this week. Please price each one and add any we have missed.`
+      : `We have no containers on record for this week yet &mdash; please add them.`}</div>
+    <table class="lt"><thead><tr>
+      <th>Container</th><th>Size</th><th>Carrier</th><th>Transit (days)</th><th>Cost (USD)</th>
+    </tr></thead><tbody id="rows">
+      ${known.map(k => row(k.ref, k.size, true)).join('')}
+      ${extra.map(l => row(l.container_ref || '', l.size, false)).join('')}
+      ${(!known.length && !extra.length) ? row('', '', false) : ''}
+    </tbody></table>
+    <datalist id="carriers">${carriers.map(c => `<option value="${escHtml(c)}">`).join('')}</datalist>
+    <button type="button" class="addrow" id="add">+ Add a container</button>
+  </div>
+
+  <div class="card">
+    <div class="tot"><span>Total container cost (USD)</span><b id="tot">0.00</b></div>
+    <label for="who">Your name</label><input id="who" placeholder="Name">
+    <label for="note">Notes (optional)</label><textarea id="note" placeholder="Anything we should know"></textarea>
+    <button id="go">Submit</button>
+    <div class="msg" id="msg"></div>
+  </div>
+
+  <style>
+    .lt{width:100%;border-collapse:collapse;font-size:12px;}
+    .lt th{text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:#AEAEB2;padding:4px;}
+    .lt td{padding:3px 4px;}
+    .lt input,.lt select{padding:7px 8px;font-size:12px;}
+    .note{font-size:11px;color:#6E6E73;line-height:1.5;}
+    .addrow{margin-top:8px;background:#fff;color:#6E6E73;border:.5px solid rgba(0,0,0,.16);
+            border-radius:8px;padding:6px 12px;font-size:11px;cursor:pointer;width:auto;}
+    .tot{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;
+         padding:10px 12px;background:#F5F5F7;border-radius:9px;margin-bottom:6px;}
+    .tot b{font-size:19px;}
+    label{display:block;font-size:11px;font-weight:600;color:#6E6E73;margin:10px 0 4px;}
+  </style>
+
+  <script>
+  (function(){
+    var TOKEN=${aqJsEmbed(String(req.query.token || ''))};
+    var SIZES=${aqJsEmbed(SEA_SIZES)};
+    var m=document.getElementById('msg');
+    function show(k,t){ m.className='msg '+k; m.textContent=t; }
+    function num(v){ var n=parseFloat(v); return isFinite(n)?n:0; }
+    function retotal(){
+      var t=0;
+      Array.prototype.forEach.call(document.querySelectorAll('.ccost'),function(i){ t+=num(i.value); });
+      document.getElementById('tot').textContent=t.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+      return Math.round(t*100)/100;
+    }
+    document.addEventListener('input',function(e){ if(e.target.classList.contains('f')) retotal(); });
+    document.getElementById('add').addEventListener('click',function(){
+      var tr=document.createElement('tr');
+      var opts=['']. concat(SIZES).map(function(x){ return '<option value="'+x+'">'+(x||'\\u2014')+'</option>'; }).join('');
+      tr.innerHTML='<td><input class="f cref" placeholder="Container"></td>'
+        +'<td><select class="f csize">'+opts+'</select></td>'
+        +'<td><input class="f ccar" list="carriers" placeholder="Carrier"></td>'
+        +'<td><input class="f ctd" type="number" min="0" max="120" placeholder="days" style="width:80px"></td>'
+        +'<td><input class="f ccost" type="number" min="0" step="0.01" placeholder="0.00" style="width:120px"></td>';
+      document.getElementById('rows').appendChild(tr);
+    });
+    document.getElementById('go').addEventListener('click',async function(){
+      var b=this, lines=[];
+      Array.prototype.forEach.call(document.querySelectorAll('#rows tr'),function(tr){
+        var ref=tr.querySelector('.cref'), cost=tr.querySelector('.ccost');
+        if(!cost) return;
+        var c=num(cost.value), r=(ref&&ref.value||'').trim();
+        if(!c && !r) return;
+        lines.push({ container_ref:r, size:(tr.querySelector('.csize')||{}).value||'',
+                     carrier:((tr.querySelector('.ccar')||{}).value||'').trim(),
+                     transit_days:(tr.querySelector('.ctd')||{}).value||null, cost_amount:c });
+      });
+      if(!lines.length){ show('err','Enter at least one container with a cost.'); return; }
+      b.disabled=true; b.textContent='Submitting\\u2026';
+      try{
+        var r=await fetch(location.pathname+'/submit',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({token:TOKEN,lines:lines,
+            submitted_by:document.getElementById('who').value||null,
+            note:document.getElementById('note').value||null})});
+        var j=await r.json();
+        if(!r.ok){ show('err', j.message||j.error||('Error '+r.status)); b.disabled=false; b.textContent='Submit'; return; }
+        document.querySelector('.wrap').innerHTML='<div class="card done"><div class="tick">\\u2713</div>'
+          +'<h1 style="margin-top:10px">Received</h1>'
+          +'<div class="sub" style="margin-top:6px">'+j.containers+' container(s), USD '+j.total_cost.toFixed(2)+'. Thank you.</div></div>';
+      }catch(e){ show('err','Could not submit: '+e.message); b.disabled=false; b.textContent='Submit'; }
+    });
+    retotal();
+  })();
+  </script>`;
+    res.type('html').send(aqPartnerPage(body, `Container costs — week of ${q.week_start}`));
+  } catch (e) {
+    console.error('[GET /sea-quote]', e);
+    res.status(500).type('html').send(aqPartnerPage(`<div class="card done"><h1>Something went wrong</h1></div>`, 'Error'));
+  }
+});
+
+// ── Internal: Sea Quotes ──
+app.get('/sea-quotes', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+  try {
+    const c = curClient();
+    const rows = db.prepare(`SELECT * FROM sea_quote WHERE client_id=? ORDER BY week_start DESC LIMIT 60`).all(c);
+    const list = rows.map(q => seaQuoteDetail(q));
+    const received = list.filter(x => x.state === 'received');
+    const allCtn = received.reduce((a, x) => a + x.container_count, 0);
+    const transits = received.map(x => x.transit_days_avg).filter(x => x != null);
+    res.json({
+      client_id: c, quotes: list,
+      summary: {
+        weeks_received: received.length,
+        outstanding: list.filter(x => x.state === 'requested').length,
+        containers: allCtn,
+        total_cost: Math.round(received.reduce((a, x) => a + (x.total_cost || 0), 0) * 100) / 100,
+        avg_per_container: allCtn ? Math.round(received.reduce((a, x) => a + (x.total_cost || 0), 0) / allCtn * 100) / 100 : null,
+        avg_transit_days: transits.length ? Math.round(transits.reduce((a, b) => a + b, 0) / transits.length) : null,
+      },
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/sea-quotes/request', authenticateRequest, requireRole(['admin']), requireInternalOrg,
+  writeOpLimiter, auditLog('request_sea_quote'), async (req, res) => {
+  try {
+    const c = curClient();
+    const ws = String((req.body || {}).week_start || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) return res.status(400).json({ error: 'week_start required as YYYY-MM-DD' });
+    const { quote, created } = seaEnsureWeek(c, ws);
+    const r = await seaSendRequest(quote, `${req.protocol}://${req.get('host')}`);
+    res.json({ week_start: ws, created, ...r });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+// Tuesday 20:00 America/Chicago. Scheduled twice because that is 01:00 UTC Wednesday in
+// daylight saving and 02:00 outside it; the weekly guard means only the first qualifying
+// run sends, so it lands at 8pm Central year-round.
+app.post('/ops/sea-quote-requests/run', (req, res, next) => {
+  const cronSecret = process.env.LANE_CRON_SECRET;
+  if (cronSecret && req.headers['x-lane-cron-secret'] === cronSecret) return next();
+  return authenticateRequest(req, res, next);
+}, auditLog('run_sea_quote_requests'), async (req, res) => {
+  try {
+    const cron = !!req.headers['x-lane-cron-secret'];
+    const force = String(req.query.force || '') === '1';
+    const dryRun = String(req.query.dryRun || '') === '1';
+
+    const f = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago',
+      weekday: 'short', hour: '2-digit', hour12: false });
+    const parts = Object.fromEntries(f.formatToParts(new Date()).map(x => [x.type, x.value]));
+    const isDue = parts.weekday === 'Tue' && Number(parts.hour) >= 20;
+    if (cron && !force && !isDue)
+      return res.json({ skipped: true, reason: 'not_due', chicago: `${parts.weekday} ${parts.hour}:00` });
+
+    const c = String(req.query.client_id || 'ICONIC');
+    // The week currently being shipped — its Monday.
+    const ws = String(req.query.week_start || '').trim() || (() => {
+      const d = new Date();
+      const dow = (d.getUTCDay() + 6) % 7;            // Monday = 0
+      d.setUTCDate(d.getUTCDate() - dow);
+      return d.toISOString().slice(0, 10);
+    })();
+
+    const { quote, created } = seaEnsureWeek(c, ws);
+    if (!force && quote.state === 'received')
+      return res.json({ skipped: true, reason: 'already_received', week_start: ws });
+    const sentKey = `sea_quote_sent_${c}_${ws}`;
+    if (!force && !dryRun &&
+        db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability=?`).get(sentKey))
+      return res.json({ skipped: true, reason: 'already_sent', week_start: ws });
+
+    if (dryRun) return res.json({ dryRun: true, week_start: ws, created,
+      contact: siContactFor(quote.supplier, 'SEA'),
+      known_containers: seaKnownContainers(c, ws).length });
+
+    const r = await seaSendRequest(quote, `${req.protocol}://${req.get('host')}`);
+    if (!r.skipped) db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled)
+                                VALUES ('__meta', ?, 1)`).run(sentKey);
+    console.log(`[sea-quote] request for ${ws} -> ${(r.emailed_to || []).join(', ')}`);
+    res.json({ week_start: ws, created, trigger: cron ? 'cron' : 'manual', ...r });
+  } catch (e) {
+    console.error('[POST /ops/sea-quote-requests/run]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 // ═══════════════════ SUPPLIER INVOICES ═══════════════════
 //
 // Monthly invoices from our service providers, submitted through a magic link and
@@ -12891,6 +13313,27 @@ function siDetail(inv) {
   const weeks = safeJsonParse(inv.week_starts, []) || [];
   return {
     ...inv,
+    // What the partner quoted during each week, held against what they later invoiced.
+    // Reference only — nothing is blocked or adjusted by it — and week level rather than
+    // per container, because the two forms are filled in a month apart by different people.
+    quoted: (() => {
+      if (inv.invoice_type !== 'SEA' && inv.invoice_type !== 'AIR') return null;
+      const weeks = safeJsonParse(inv.week_starts, []) || [];
+      const out = weeks.map(ws => {
+        if (inv.invoice_type === 'SEA') {
+          const q = db.prepare(`SELECT * FROM sea_quote WHERE client_id=? AND week_start=? AND state='received'`)
+                      .get(siClientForFacility((SI_TYPES[inv.invoice_type] || {}).facility), ws);
+          return q ? { week_start: ws, quoted: q.total_cost, containers:
+            db.prepare('SELECT COUNT(*) n FROM sea_quote_line WHERE quote_id=?').get(q.id).n } : { week_start: ws, quoted: null };
+        }
+        // Air quotes already carry the partner cost — nothing extra was collected for this.
+        const r = db.prepare(`SELECT COALESCE(SUM(k.cost_amount),0) c, COUNT(*) n
+                              FROM air_quote q JOIN air_quote_cost k ON k.quote_id = q.id
+                              WHERE q.week_start=? AND q.state='approved'`).get(ws);
+        return { week_start: ws, quoted: r && r.n ? Math.round(r.c * 100) / 100 : null, quotes: r ? r.n : 0 };
+      });
+      return out.some(x => x.quoted != null) ? out : null;
+    })(),
     type_label: (SI_TYPES[inv.invoice_type] || {}).label || inv.invoice_type,
     shape: (SI_TYPES[inv.invoice_type] || {}).shape,
     week_count: weeks.length,
