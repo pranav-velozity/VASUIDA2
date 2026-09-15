@@ -296,6 +296,26 @@
         <div class="si-sec" style="margin:16px 0 8px;">Week by week &middot; billed against recorded</div>
         ${(d.reconciliation || []).map(w => d.shape === 'vas' ? vasRow(w) : lineRow(w)).join('')}
         ${d.issue_count ? `<div style="font-size:11px;color:${AMBER};margin-top:4px;"><b>${d.issue_count} discrepancy(ies)</b> — acceptance is not blocked, but the variance is recorded against the invoice.</div>` : ''}
+
+        ${(d.quoted && d.quoted.length) ? `
+          <div class="si-sec" style="margin:16px 0 6px;">Quoted during the week &middot; reference only</div>
+          <table class="si"><thead><tr><th>Week</th><th class="n">Quoted</th><th class="n">Invoiced</th><th class="n">Difference</th></tr></thead>
+          <tbody>${d.quoted.map(q => {
+            const inv = (d.reconciliation || []).find(w => w.week_start === q.week_start);
+            const amt = inv ? inv.amount : null;
+            const diff = (q.quoted != null && amt != null) ? Math.round((amt - q.quoted) * 100) / 100 : null;
+            return `<tr>
+              <td>${esc(q.week_start)}</td>
+              <td class="n">${q.quoted == null ? '<span style="color:' + LIGHT + '">not quoted</span>' : money(q.quoted)}</td>
+              <td class="n">${amt == null ? '—' : money(amt)}</td>
+              <td class="n" style="color:${diff == null ? LIGHT : (Math.abs(diff) < 0.01 ? GREEN : AMBER)}">
+                ${diff == null ? '—' : (diff > 0 ? '+' : '') + money(diff)}</td>
+            </tr>`; }).join('')}</tbody></table>
+          <div style="font-size:10px;color:${LIGHT};margin-top:5px;">
+            ${d.shape === 'container'
+              ? 'Container cost quoted by the partner that week. The invoice also carries other charges, so a difference is expected — a large one is worth asking about.'
+              : 'Partner cost on approved air quotes for that week.'}
+          </div>` : ''}
       `}
 
       ${(d.messages || []).length ? `<div class="si-sec" style="margin:16px 0 6px;">Correspondence</div>
@@ -382,7 +402,7 @@
     }, 1200);
     window.addEventListener('tenancy:ready', () => { wrapTabs(); inject(); });
     setTimeout(() => { wrapTabs(); inject(); }, 900);
-    console.log('[supplier-invoices] module v1 loaded');
+    console.log('[supplier-invoices] module v2 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
