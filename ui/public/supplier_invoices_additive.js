@@ -27,6 +27,35 @@
 
   const entitled = () => window.pinpointIsInternal === true;
 
+  // ISO week number. "Weeks: 4" said how MANY weeks the month held, not which ones — so a
+  // reader could not tie an invoice line back to the week it covers. The week starts are
+  // already on the record; this turns them into the numbers everyone actually uses.
+  function isoWeek(ymd) {
+    const d = new Date(ymd + 'T00:00:00Z');
+    if (isNaN(d)) return null;
+    // Thursday of this week decides the year the week belongs to.
+    const day = (d.getUTCDay() + 6) % 7;
+    d.setUTCDate(d.getUTCDate() - day + 3);
+    const firstThu = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
+    const fDay = (firstThu.getUTCDay() + 6) % 7;
+    firstThu.setUTCDate(firstThu.getUTCDate() - fDay + 3);
+    return 1 + Math.round((d - firstThu) / (7 * 86400000));
+  }
+
+  // A contiguous run reads as a range; a gap is listed so it is not hidden.
+  function weekLabel(starts) {
+    const w = (starts || []).map(isoWeek).filter(x => x != null);
+    if (!w.length) return '—';
+    if (w.length === 1) return 'W' + w[0];
+    const contiguous = w.every((x, i) => i === 0 || x === w[i - 1] + 1);
+    return contiguous ? `W${w[0]}–W${w[w.length - 1]}` : w.map(x => 'W' + x).join(', ');
+  }
+
+  const weeksOf = (x) => {
+    try { return typeof x.week_starts === 'string' ? JSON.parse(x.week_starts) : (x.weeks || x.week_starts || []); }
+    catch (e) { return x.weeks || []; }
+  };
+
   async function tok() { if (window.Clerk?.session) { try { return await window.Clerk.session.getToken(); } catch (e) {} } return null; }
   async function req(path, opts) {
     const t = await tok(), o = opts || {};
@@ -196,7 +225,7 @@
               <td>${esc(x.month_key)}</td>
               <td>${esc(x.supplier)}</td>
               <td style="color:${MID}">${esc(x.type_label)}</td>
-              <td class="n">${x.week_count}</td>
+              <td class="n" style="white-space:nowrap;">${esc(weekLabel(weeksOf(x)))}</td>
               <td class="n">${x.total_amount == null ? '—' : money(x.total_amount)}</td>
               <td style="color:${x.overdue ? RED : MID};white-space:nowrap;">${esc(x.due_date || '—')}${x.overdue ? ' <b>overdue</b>' : ''}</td>
               <td>${pill(x.status)}</td>
@@ -261,7 +290,7 @@
       const cell = (billed, recorded, pct) => `${nf(billed)} <span style="color:${LIGHT}">/ ${nf(recorded)}</span>`
         + (pct == null || pct === 0 ? '' : ` <b style="color:${Math.abs(pct) > 2 ? AMBER : MID}">${pct > 0 ? '+' : ''}${pct}%</b>`);
       return `<div class="si-wk">
-        <div class="si-wkh"><span>${esc(w.week_start)} → ${esc(w.week_end)}</span><span>${money(w.amount)}</span></div>
+        <div class="si-wkh"><span><b>${esc(weekLabel([w.week_start]))}</b> &middot; ${esc(w.week_start)} → ${esc(w.week_end)}</span><span>${money(w.amount)}</span></div>
         <div style="font-size:11px;color:${DARK};margin-top:5px;line-height:1.6;">
           Units ${cell(b.units, r.units, v.units)} &middot; Cartons ${cell(b.cartons, r.cartons, v.cartons)} &middot; Pallets ${cell(b.pallets, r.pallets, v.pallets)}
           ${w.cost_per_unit != null ? `<br><span style="color:${MID}">Cost per unit <b>${w.cost_per_unit.toFixed(4)}</b> against our recorded units</span>` : ''}
@@ -276,7 +305,7 @@
     return `<div class="si-card">
       <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;">
         <div><div style="font-size:14px;font-weight:700;color:${DARK};">${esc(d.supplier)}</div>
-          <div style="font-size:11px;color:${LIGHT};">${esc(d.type_label)} &middot; ${esc(d.month_key)} &middot; ${d.week_count} weeks</div></div>
+          <div style="font-size:11px;color:${LIGHT};">${esc(d.type_label)} &middot; ${esc(d.month_key)} &middot; ${esc(weekLabel(weeksOf(d)))} (${d.week_count} week${d.week_count === 1 ? '' : 's'})</div></div>
         ${pill(d.status)}
       </div>
 
@@ -402,7 +431,7 @@
     }, 1200);
     window.addEventListener('tenancy:ready', () => { wrapTabs(); inject(); });
     setTimeout(() => { wrapTabs(); inject(); }, 900);
-    console.log('[supplier-invoices] module v2 loaded');
+    console.log('[supplier-invoices] module v3 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
