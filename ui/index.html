@@ -6556,6 +6556,25 @@ window.__openPrebookModal = function(){
   }
 
   // ── Fallback computed insights if Claude call fails ──
+  // Fetched directly so the ticker does not depend on the Week Hub module having rendered
+  // first — it runs on idle after load and usually gets there before the hub has its data.
+  var _ehpSummaryCache = null;
+  async function _loadEhpSummary() {
+    if (window.__EHP_SUMMARY__) return window.__EHP_SUMMARY__;
+    if (_ehpSummaryCache) return _ehpSummaryCache;
+    try {
+      var base = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/, '');
+      var tk = null;
+      if (window.Clerk?.session) { try { tk = await window.Clerk.session.getToken(); } catch (_) {} }
+      var r = await fetch(base + '/ehp/summary', { headers: Object.assign(
+        tk ? { 'Authorization': 'Bearer ' + tk } : {},
+        { 'x-pinpoint-client': String(window.pinpointClient || 'EHP') }) });
+      if (!r.ok) return null;
+      _ehpSummaryCache = await r.json();
+      return _ehpSummaryCache;
+    } catch (e) { return null; }
+  }
+
   function _computeFallback(ws) {
     var ins = [];
 
@@ -6563,7 +6582,7 @@ window.__openPrebookModal = function(){
     // fallback read them regardless, found nothing, and fell through to "loading
     // operational data…", which is what EHP saw whenever the AI call failed.
     if (/^EHP/i.test(String(window.pinpointClient || ''))) {
-      var fw = window.__EHP_SUMMARY__ || null;
+      var fw = window.__EHP_SUMMARY__ || _ehpSummaryCache || null;
       if (fw) {
         var at = fw.all_time || {}, op = fw.open || {};
         if (at.orders_received != null) ins.push({ icon: 'box',
@@ -6578,6 +6597,12 @@ window.__openPrebookModal = function(){
         if (op.waiting_envelopes) ins.push({ icon: 'warning',
           text: Number(op.waiting_envelopes).toLocaleString() + ' envelope(s) queued for a batch',
           pulse_question: 'What is in the assembly queue right now?' });
+        if (fw.orders_received != null) ins.push({ icon: 'box',
+          text: Number(fw.orders_received).toLocaleString() + ' order(s) received this week',
+          pulse_question: 'How many orders came in this week for EHP Labs?' });
+        if (fw.envelopes_dispatched != null) ins.push({ icon: 'check',
+          text: Number(fw.envelopes_dispatched).toLocaleString() + ' envelopes lodged this week',
+          pulse_question: 'What was dispatched this week for EHP Labs?' });
       }
       return ins.length ? ins : [{ icon: 'clock', text: 'EHP Labs · envelope fulfilment',
         pulse_question: 'Give me a summary of EHP Labs fulfilment operations.' }];
@@ -6698,6 +6723,7 @@ window.__openPrebookModal = function(){
 
     } catch(e) {
       console.warn('[Flipper] Claude call failed, using fallback:', e.message);
+      if (/^EHP/i.test(String(window.pinpointClient || ''))) { try { await _loadEhpSummary(); } catch (_) {} }
       _flipperInsights = _computeFallback(ws);
       _flipperIdx = 0;
       var textEl = document.getElementById('wh-flipper-text');
