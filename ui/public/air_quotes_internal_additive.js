@@ -83,6 +83,9 @@
       .aqi-btn.g{background:#fff;color:${DARK};border:.5px solid rgba(0,0,0,.16);}
       .aqi-btn:disabled{opacity:.55;cursor:default;}
       .aqi-none{font-size:11px;color:${LIGHT};padding:16px 2px;}
+      .aqi-tabs{display:inline-flex;border:.5px solid rgba(0,0,0,.14);border-radius:8px;overflow:hidden;}
+      .aqi-tabs button{border:0;background:#fff;color:${MID};font:600 11px inherit;padding:6px 14px;cursor:pointer;}
+      .aqi-tabs button.on{background:${DARK};color:#fff;}
       .aqi-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;}
       @media (max-width:1100px){ .aqi-tiles{grid-template-columns:repeat(2,minmax(0,1fr));} }
       @media (max-width:620px){ .aqi-tiles{grid-template-columns:1fr;} }
@@ -664,6 +667,8 @@
     document.body.classList.remove('aqi-open');
   }
 
+  let _qtab = 'air', _sea = null;
+
   function open() {
     if (!entitled()) return;
     styles();
@@ -671,19 +676,126 @@
     const o = document.createElement('div'); o.className = 'aqi-ov';
     o.innerHTML = `<div class="aqi-panel">
       <div class="aqi-head">
-        <div><div class="aqi-t">Air quote review</div>
-          <div class="aqi-s">Partner cost, margin and release &middot; internal only</div></div>
-        <button class="aqi-x" id="aqi-close">&times;</button>
+        <div><div class="aqi-t">Quote review</div>
+          <div class="aqi-s">Partner cost and margin &middot; internal only</div></div>
+        <div style="display:flex;gap:10px;align-items:center;">
+          <div class="aqi-tabs">
+            <button data-qtab="air" class="on">Air</button>
+            <button data-qtab="sea">Sea</button>
+          </div>
+          <button class="aqi-x" id="aqi-close">&times;</button>
+        </div>
       </div>
       <div class="aqi-body" id="aqi-body">Loading…</div>
     </div>`;
     document.body.appendChild(o);
     document.body.classList.add('aqi-open');
     el('aqi-close').addEventListener('click', close);
+    o.querySelectorAll('[data-qtab]').forEach(b => b.addEventListener('click', () => {
+      const v = b.getAttribute('data-qtab');
+      if (v === _qtab) return;
+      _qtab = v;
+      o.querySelectorAll('[data-qtab]').forEach(x => x.classList.toggle('on', x.getAttribute('data-qtab') === v));
+      // Air is a priced quote with a client decision behind it; sea is weekly cost capture
+      // with no client in it at all. Same screen, different question.
+      if (v === 'sea') loadSea(); else load();
+    }));
     document.addEventListener('keydown', function k(ev) {
       if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', k); }
     });
     load();
+  }
+
+  // ── Sea: weekly container costs ──
+  // Deliberately plainer than the air view. There is no margin, no release and no client
+  // decision — this is cost capture, and dressing it up as a quote screen would imply a
+  // workflow that does not exist.
+  async function loadSea() {
+    const body = el('aqi-body'); if (!body) return;
+    if (!_sea) body.innerHTML = '<div class="aqi-none">Loading…</div>';
+    try { _sea = await req('/sea-quotes'); } catch (e) {
+      body.innerHTML = `<div class="aqi-none" style="color:${RED}">Could not load: ${esc(e.message || e)}</div>`;
+      return;
+    }
+    paintSea();
+  }
+
+  function paintSea() {
+    const body = el('aqi-body'); if (!body || !_sea) return;
+    const s = _sea.summary || {}, rows = _sea.quotes || [];
+    const wk = (ws) => { // ISO week, so a row ties to the week everyone quotes
+      const d = new Date(ws + 'T00:00:00Z'); const day = (d.getUTCDay() + 6) % 7;
+      d.setUTCDate(d.getUTCDate() - day + 3);
+      const f = new Date(Date.UTC(d.getUTCFullYear(), 0, 4)); const fd = (f.getUTCDay() + 6) % 7;
+      f.setUTCDate(f.getUTCDate() - fd + 3);
+      return 'W' + (1 + Math.round((d - f) / (7 * 86400000)));
+    };
+    const usd = (n) => n == null ? '—' : 'USD ' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    body.innerHTML = `
+      <div class="aqi-tiles" style="grid-template-columns:repeat(4,minmax(0,1fr));">
+        <div class="aqi-tile"><div class="aqi-tl">Weeks received</div>
+          <div class="aqi-tv">${s.weeks_received || 0}</div>
+          <div class="aqi-ts">${s.outstanding ? `<b style="color:${AMBER}">${s.outstanding} awaiting</b>` : 'none outstanding'}</div></div>
+        <div class="aqi-tile"><div class="aqi-tl">Containers</div>
+          <div class="aqi-tv">${nf(s.containers)}</div>
+          <div class="aqi-ts">across all weeks</div></div>
+        <div class="aqi-tile"><div class="aqi-tl">Average per container</div>
+          <div class="aqi-tv">${s.avg_per_container == null ? '—' : usd(s.avg_per_container)}</div>
+          <div class="aqi-ts">container cost only</div></div>
+        <div class="aqi-tile"><div class="aqi-tl">Average transit</div>
+          <div class="aqi-tv">${s.avg_transit_days == null ? '—' : s.avg_transit_days + 'd'}</div>
+          <div class="aqi-ts">port to port</div></div>
+      </div>
+
+      ${rows.length ? `<table class="aqi"><thead><tr>
+          <th>Week</th><th>Supplier</th><th class="n">Containers</th><th>Sizes</th>
+          <th>Carrier</th><th class="n">Transit</th><th class="n">Cost</th><th>Status</th>
+        </tr></thead><tbody>${rows.map(q => {
+          const sizes = Object.entries(q.by_size || {}).map(([k, v]) => `${v.containers}×${k}`).join(' ');
+          return `<tr data-sea="${esc(q.id)}" style="cursor:pointer;">
+            <td><b>${wk(q.week_start)}</b> <span style="color:${LIGHT};font-size:10px;">${esc(q.week_start)}</span></td>
+            <td style="color:${MID}">${esc(q.supplier)}</td>
+            <td class="n">${q.container_count || 0}</td>
+            <td style="color:${MID};font-size:10px;">${esc(sizes || '—')}</td>
+            <td style="color:${MID}">${esc((q.carriers || []).join(', ') || '—')}</td>
+            <td class="n">${q.transit_days_avg == null ? '—' : q.transit_days_avg + 'd'}</td>
+            <td class="n">${usd(q.total_cost)}</td>
+            <td>${q.state === 'received'
+              ? `<span class="aqi-pill" style="color:${GREEN};background:rgba(27,127,59,.12)">Received</span>`
+              : `<span class="aqi-pill" style="color:${MID};background:rgba(0,0,0,.05)">Awaiting</span>`}</td>
+          </tr>`; }).join('')}</tbody></table>`
+        : `<div class="aqi-none">No container costs requested yet. The weekly request goes out on Tuesday evening.</div>`}
+
+      <div style="font-size:10px;color:${LIGHT};margin-top:10px;line-height:1.6;">
+        Container cost only &mdash; other charges arrive on the monthly invoice, where this figure is
+        shown alongside for reference. Transit is port to port. Internal only: never shown to the client.
+      </div>
+      <div id="aqi-seadetail"></div>`;
+
+    body.querySelectorAll('[data-sea]').forEach(r => r.addEventListener('click', () => {
+      const q = rows.find(x => x.id === r.getAttribute('data-sea'));
+      if (!q) return;
+      const box = el('aqi-seadetail');
+      box.innerHTML = `<div class="aqi-card" style="margin-top:14px;">
+        <div class="aqi-sec">${wk(q.week_start)} &middot; ${esc(q.week_start)} &rarr; ${esc(q.supplier)}</div>
+        ${(q.lines || []).length ? `<table class="aqi"><thead><tr>
+            <th>Container</th><th>Size</th><th>Carrier</th><th class="n">Transit</th><th class="n">Cost</th>
+          </tr></thead><tbody>${q.lines.map(l => `<tr>
+            <td>${esc(l.container_ref || '—')}</td>
+            <td style="color:${MID}">${esc(l.size || '—')}</td>
+            <td style="color:${MID}">${esc(l.carrier || '—')}</td>
+            <td class="n">${l.transit_days == null ? '—' : l.transit_days + 'd'}</td>
+            <td class="n">${usd(l.cost_amount)}</td>
+          </tr>`).join('')}</tbody></table>`
+          : `<div class="aqi-none">Nothing submitted for this week yet.</div>`}
+        ${q.partner_note ? `<div style="font-size:11px;color:${MID};margin-top:9px;">
+          <b>Partner note:</b> ${esc(q.partner_note)}</div>` : ''}
+        ${q.submitted_by ? `<div style="font-size:10px;color:${LIGHT};margin-top:6px;">
+          Submitted by ${esc(q.submitted_by)} on ${esc(String(q.submitted_at || '').slice(0, 16))}</div>` : ''}
+      </div>`;
+      box.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }));
   }
 
   function init() {
@@ -710,7 +822,7 @@
       load();
     }, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v17 loaded');
+    console.log('[air-quote-review] module v18 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
