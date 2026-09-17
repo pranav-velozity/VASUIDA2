@@ -17736,8 +17736,16 @@ app.get('/ehp/batch/:id/labels.xlsx', authenticateRequest, auditLog('ehp_labels_
     const ws = wb.addWorksheet('Table 1');
     ws.getColumn(1).width = XL_LABEL_COL_WIDTH;
     ws.pageSetup = { orientation: 'portrait', horizontalDpi: 600, verticalDpi: 600 };
-    // The 9-inch bottom margin is what forces one row per page.
-    ws.pageSetup.margins = { left: 0.7, right: 0.7, top: 1.25, bottom: 9.0, header: 0.3, footer: 0.3 };
+    // ONE LABEL PER PAGE VIA EXPLICIT PAGE BREAKS, not a giant bottom margin.
+    //
+    // The source file forced pagination with a 9-inch bottom margin, which leaves a 54pt
+    // printable band. A 66pt row does not fit that band, and Excel does not push an
+    // over-tall row to the next page — it CLIPS it. That is why the third line was cut
+    // through the middle in print preview.
+    //
+    // A page break after every row does the same job deterministically: the row gets a full
+    // printable page, so nothing can be cut off however tall it is.
+    ws.pageSetup.margins = { left: 0.7, right: 0.7, top: 0.5, bottom: 0.5, header: 0.3, footer: 0.3 };
 
     labels.forEach((l, i) => {
       const row = ws.getRow(i + 1);
@@ -17747,6 +17755,8 @@ app.get('/ehp/batch/:id/labels.xlsx', authenticateRequest, auditLog('ehp_labels_
       cell.font = { name: XL_LABEL_FONT, size: l.fit.pt };
       cell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
       row.commit();
+      // Not after the final row, or the file ends with a blank page.
+      if (i < labels.length - 1) row.addPageBreak();
     });
 
     // Generated from the actual count. A fixed range would clip a larger batch and emit
@@ -17754,8 +17764,10 @@ app.get('/ehp/batch/:id/labels.xlsx', authenticateRequest, auditLog('ehp_labels_
     ws.pageSetup.printArea = `A1:A${labels.length}`;
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    const bat = db.prepare('SELECT batch_ref FROM ehp_assembly_batch WHERE id=?').get(req.params.id);
+    const name = String((bat && bat.batch_ref) || req.params.id).replace(/[^A-Za-z0-9\-_]/g, '_');
     res.setHeader('Content-Disposition',
-      `attachment; filename="labels-${String(req.params.id).replace(/[^A-Za-z0-9\-_]/g, '')}-${labels.length}.xlsx"`);
+      `attachment; filename="${name} - ${labels.length} labels.xlsx"`);
     await wb.xlsx.write(res);
     return res.end();
   } catch (e) {
