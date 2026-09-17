@@ -719,6 +719,7 @@
       + '.bar{position:sticky;top:0;background:#fff;padding:10px 0;border-bottom:1px solid #eee;display:flex;gap:10px;align-items:center;z-index:5;}'
       + 'button{border:none;border-radius:8px;padding:9px 15px;font:600 12px inherit;cursor:pointer;}'
       + '.primary{background:#990033;color:#fff;} .ghost{background:#F5F5F7;color:#6E6E73;}'
+      + '.primary.xl{background:#217346;}'
       + 'button:disabled{opacity:.45;cursor:default;}'
       + 'table{width:100%;border-collapse:collapse;margin-top:14px;}'
       + 'th,td{border:1px solid #ddd;padding:6px 8px;vertical-align:top;text-align:left;font-size:12px;word-break:break-word;}'
@@ -764,7 +765,8 @@
       + '<div class="bar">'
       +   '<button class="ghost" id="all">Select all</button>'
       +   '<button class="ghost" id="none">Clear</button>'
-      +   '<button class="primary" id="print">Print labels</button>'
+      +   '<button class="primary" id="print">PDF</button>'
+      +   '<button class="primary xl" id="printxl">Excel</button>'
       +   '<span class="hint" id="count"></span>'
       + '</div>'
       + '<table><thead><tr><th class="c">Print</th><th>Order</th><th class="n">Env</th><th>Name</th>'
@@ -786,10 +788,21 @@
       + 'function refresh(){var t=sel(),e=0;t.forEach(function(tr){e+=parseInt(tr.getAttribute("data-qty"),10)||1;});'
       + '  document.getElementById("count").textContent=t.length+" order(s) selected \\u00b7 "+e+" label(s) to print";'
       + '  document.getElementById("print").disabled=!t.length;'
-      + '  document.getElementById("print").textContent="Print "+e+" label"+(e===1?"":"s");}'
+      + '  document.getElementById("printxl").disabled=!t.length;'
+      + '  document.getElementById("print").textContent="PDF · "+e+" label"+(e===1?"":"s");'
+      + '  document.getElementById("printxl").textContent="Excel · "+e+" label"+(e===1?"":"s");}'
       + 'document.addEventListener("change",function(ev){if(ev.target.classList.contains("sel"))refresh();});'
       + 'document.getElementById("all").onclick=function(){document.querySelectorAll(".sel").forEach(function(c){c.checked=true;});refresh();};'
       + 'document.getElementById("none").onclick=function(){document.querySelectorAll(".sel").forEach(function(c){c.checked=false;});refresh();};'
+      + 'document.getElementById("printxl").onclick=function(){'
+      + '  try{'
+      + '  var ids=sel().map(function(tr){return tr.getAttribute("data-id");});'
+      + '  if(!ids.length){document.getElementById("count").textContent="Select at least one order.";return;}'
+      + '  if(!window.opener||typeof window.opener.__ehpLabelXlsx!=="function"){document.getElementById("count").textContent="Lost the connection to Pinpoint - close this tab and open the pick list again.";return;}'
+      + '  window.opener.__ehpLabelXlsx(BATCH, ids);'
+      + '  document.getElementById("count").textContent="Excel generated \u2014 check your downloads";'
+      + '  }catch(err){document.getElementById("count").textContent="Could not export: "+(err&&err.message?err.message:err);}'
+      + '};'
       + 'document.getElementById("print").onclick=function(){'
       + '  try{'
       + '  var ids=sel().map(function(tr){return tr.getAttribute("data-id");});'
@@ -1219,6 +1232,37 @@
 
   // Fetch the generated label PDF and hand it to the browser as a download. Server-side
   // generation means the page size is exact regardless of the browser's print settings.
+  // Excel is the format the warehouse actually prints from — they cannot print the PDF —
+  // so a 422 here means a label would have lost a line and nothing was written. Report the
+  // orders rather than handing over a file with a missing address.
+  window.__ehpLabelXlsx = async function (batchId, orderIds) {
+    try {
+      const qs = (orderIds && orderIds.length) ? '?order_ids=' + encodeURIComponent(orderIds.join(',')) : '';
+      const t = await tok();
+      const headers = {}; if (t) headers.Authorization = 'Bearer ' + t;
+      headers['x-pinpoint-client'] = window.pinpointClient || 'EHP';
+      const r = await fetch(apiBase() + '/ehp/batch/' + encodeURIComponent(batchId) + '/labels.xlsx' + qs, { headers });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        if (r.status === 422) {
+          alert((j.message || 'Some labels will not fit.') + '\n\n' + (j.orders || []).join(', '));
+          return;
+        }
+        throw new Error(j.error || ('HTTP ' + r.status));
+      }
+      const blob = await r.blob(), a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'labels-' + batchId + '.xlsx';
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+      window.dispatchEvent(new CustomEvent('ehp:changed'));
+    } catch (e) {
+      const m = el('ehp-batchmsg');
+      if (m) m.innerHTML = msg('e', 'Excel export failed: ' + (e.message || e));
+      else alert('Excel export failed: ' + (e.message || e));
+    }
+  };
+
   window.__ehpLabelPdf = async function (batchId, orderIds) {
     try {
       const t = await tok();
@@ -1283,7 +1327,7 @@
     refreshEnabled();
     window.addEventListener('state:ready', refreshEnabled);
     setInterval(() => { if (document.visibilityState === 'visible') refreshEnabled(); }, 15000);
-    console.log('[ehp-ops] module v21 loaded');
+    console.log('[ehp-ops] module v22 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
