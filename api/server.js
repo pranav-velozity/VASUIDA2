@@ -19379,7 +19379,7 @@ const Q_LIST_WEBHOOKS = `
   query listWebhooks($cursor: String) {
     webhookSubscriptions(first: 100, after: $cursor) {
       pageInfo { hasNextPage endCursor }
-      edges { node { id topic filter uri } }
+      edges { node { id topic filter uri createdAt } }
     }
   }`;
 const M_CREATE_WEBHOOK = `
@@ -19502,14 +19502,76 @@ app.post('/shopify/webhook/orders', (req, res) => {
     const shop = shopifyNormaliseShop(req.get('X-Shopify-Shop-Domain'));
     if (!req.rawBody) return res.status(400).send('no body');
     const digest = crypto.createHmac('sha256', SHOPIFY_API_SECRET).update(req.rawBody).digest('base64');
-    if (!safeEq(digest, hmac)) { console.warn('[shopify/webhook] bad HMAC from', shop); return res.status(401).send('bad hmac'); }
+    if (!safeEq(digest, hmac)) {
+      shopifyLogAttempt(req, 'bad_hmac');
+      console.warn('[shopify/webhook] bad HMAC from', shop); return res.status(401).send('bad hmac');
+    }
     const it = db.prepare(`SELECT * FROM client_integration WHERE provider='shopify' AND shop_domain=?`).get(shop || '');
-    if (!it) return res.status(202).send('unknown shop');           // 2xx so Shopify stops retrying
+    if (!it) {
+      // Was a silent 2xx: Shopify stops retrying and nothing anywhere records that it tried.
+      const known = db.prepare(`SELECT shop_domain FROM client_integration WHERE provider='shopify'`).all()
+                      .map(r => r.shop_domain).join(', ');
+      shopifyLogAttempt(req, 'unknown_shop', { detail: `known: ${known}` });
+      console.warn(`[shopify/webhook] UNKNOWN SHOP "${req.get('X-Shopify-Shop-Domain')}" -> "${shop}" · known: ${known}`);
+      return res.status(202).send('unknown shop');
+    }
+    shopifyLogAttempt(req, 'accepted', { client: it.client_id });
     const r = shopifyUpsertOrder(it.client_id, req.body, it.shop_domain);
     db.prepare(`UPDATE client_integration SET last_webhook_at=datetime('now'), updated_at=datetime('now')
                 WHERE client_id=? AND provider='shopify'`).run(it.client_id);
     res.status(200).json({ ok: true, ...r });
   } catch (e) { console.error('[shopify/webhook]', e); res.status(200).send('ok'); }  // never make Shopify retry on our bug
+});
+
+// ── Inbound webhook attempt log ──
+// Two failure paths were completely silent: an unrecognised shop returned 202 and logged
+// nothing, and a 429 from the global rate limiter returns before any handler runs. Both look
+// identical to a webhook that was never sent, which is how thirteen days passed with
+// subscriptions intact, no errors anywhere, and orders arriving only by polling.
+//
+// Recorded BEFORE validation, so a rejected call leaves a trace. If rows appear, Shopify is
+// calling and this says where it dies; if none appear over a busy day, the requests are not
+// reaching our code at all.
+db.exec(`
+CREATE TABLE IF NOT EXISTS shopify_webhook_log (
+  id          TEXT PRIMARY KEY,
+  shop_header TEXT,                    -- exactly as received, before normalising
+  shop_norm   TEXT,
+  topic       TEXT,
+  has_hmac    INTEGER NOT NULL DEFAULT 0,
+  matched_client TEXT,
+  outcome     TEXT NOT NULL,           -- accepted | bad_hmac | unknown_shop | no_body | error
+  detail      TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_swl ON shopify_webhook_log(created_at);
+`);
+
+function shopifyLogAttempt(req, outcome, extra) {
+  try {
+    const shopHeader = req.get('X-Shopify-Shop-Domain') || '';
+    db.prepare(`INSERT INTO shopify_webhook_log
+                (id, shop_header, shop_norm, topic, has_hmac, matched_client, outcome, detail)
+                VALUES (?,?,?,?,?,?,?,?)`)
+      .run(crypto.randomBytes(8).toString('hex'), shopHeader,
+           shopifyNormaliseShop(shopHeader) || null,
+           req.get('X-Shopify-Topic') || null,
+           req.get('X-Shopify-Hmac-Sha256') ? 1 : 0,
+           (extra && extra.client) || null, outcome, (extra && extra.detail) || null);
+    // Keep it bounded — this is a diagnostic, not an archive.
+    db.prepare(`DELETE FROM shopify_webhook_log WHERE created_at < datetime('now','-30 days')`).run();
+  } catch (e) { /* logging must never break delivery */ }
+}
+
+app.get('/shopify/webhook-log', authenticateRequest, requireRole(['admin']), (req, res) => {
+  try {
+    const rows = db.prepare(`SELECT * FROM shopify_webhook_log ORDER BY created_at DESC LIMIT 200`).all();
+    const by = db.prepare(`SELECT outcome, COUNT(*) n, MAX(created_at) last
+                           FROM shopify_webhook_log GROUP BY outcome`).all();
+    res.json({ total: db.prepare('SELECT COUNT(*) n FROM shopify_webhook_log').get().n,
+      by_outcome: by, recent: rows,
+      note: 'Empty over a busy day means Shopify is not reaching this server at all.' });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
 // ── Webhook receivers ──
@@ -19519,11 +19581,22 @@ function shopifyWebhookAuth(req, res) {
   const hmac = req.get('X-Shopify-Hmac-Sha256') || '';
   const shop = shopifyNormaliseShop(req.get('X-Shopify-Shop-Domain'));
   const topic = req.get('X-Shopify-Topic') || '';
-  if (!req.rawBody) { res.status(400).send('no body'); return null; }
+  if (!req.rawBody) { shopifyLogAttempt(req, 'no_body'); res.status(400).send('no body'); return null; }
   const digest = crypto.createHmac('sha256', SHOPIFY_API_SECRET).update(req.rawBody).digest('base64');
-  if (!safeEq(digest, hmac)) { console.warn('[shopify:webhook] bad HMAC', topic, shop); res.status(401).send('bad hmac'); return null; }
+  if (!safeEq(digest, hmac)) {
+    shopifyLogAttempt(req, 'bad_hmac');
+    console.warn('[shopify:webhook] bad HMAC', topic, shop); res.status(401).send('bad hmac'); return null;
+  }
   const it = db.prepare(`SELECT * FROM client_integration WHERE provider='shopify' AND shop_domain=?`).get(shop || '');
-  if (!it) { res.status(202).send('unknown shop'); return null; }
+  if (!it) {
+    // Previously silent: a 2xx with no log, so Shopify never retried and nothing recorded it.
+    const known = db.prepare(`SELECT shop_domain FROM client_integration WHERE provider='shopify'`).all()
+                    .map(r => r.shop_domain).join(', ');
+    shopifyLogAttempt(req, 'unknown_shop', { detail: `known: ${known}` });
+    console.warn(`[shopify:webhook] UNKNOWN SHOP "${req.get('X-Shopify-Shop-Domain')}" -> normalised "${shop}" · known: ${known}`);
+    res.status(202).send('unknown shop'); return null;
+  }
+  shopifyLogAttempt(req, 'accepted', { client: it.client_id });
   db.prepare(`UPDATE client_integration SET last_webhook_at=datetime('now'), updated_at=datetime('now')
               WHERE client_id=? AND provider='shopify'`).run(it.client_id);
   return { it, shop, topic };
@@ -19667,8 +19740,10 @@ app.get('/shopify/webhook-diagnosis', authenticateRequest, requireRole(['admin']
     // webhooks endpoint does not return GraphQL-created subscriptions reliably.
     let registered = null, regError = null;
     try {
+      // createdAt matters: five consecutive subscription ids created today would mean these
+      // are not the ones that were failing, and the originals were deleted by Shopify.
       registered = (await shopifyListWebhooks(clientId)).map(x => ({
-        id: x.id, topic: x.topic, filter: x.filter, uri: x.uri }));
+        id: x.id, topic: x.topic, filter: x.filter, uri: x.uri, created_at: x.createdAt }));
     } catch (e) { regError = String(e.message || e); }
 
     // How orders have arrived, by day. A run of days with orders but no webhook timestamp
