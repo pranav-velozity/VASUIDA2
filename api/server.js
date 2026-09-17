@@ -19653,6 +19653,66 @@ app.post('/shopify/register-webhooks', authenticateRequest, requireRole(['admin'
 });
 
 // ── Reconciliation poll: webhooks do get missed ──
+// Read-only. Answers why webhooks stopped without changing anything: what Shopify thinks is
+// subscribed, what we last accepted, and how orders have actually been arriving.
+app.get('/shopify/webhook-diagnosis', authenticateRequest, requireRole(['admin']), async (req, res) => {
+  try {
+    const clientId = String(req.query.client_id || curClient());
+    const it = db.prepare(`SELECT * FROM client_integration WHERE client_id=? AND provider='shopify'`).get(clientId);
+    if (!it) return res.status(404).json({ error: 'no_shopify_integration', client_id: clientId });
+
+    // What Shopify currently has registered. If this is empty, the subscriptions are gone —
+    // which is what happens after repeated delivery failures or an app reinstall.
+    // Subscriptions are created over GraphQL, so they are read the same way — the REST
+    // webhooks endpoint does not return GraphQL-created subscriptions reliably.
+    let registered = null, regError = null;
+    try {
+      registered = (await shopifyListWebhooks(clientId)).map(x => ({
+        id: x.id, topic: x.topic, filter: x.filter, uri: x.uri }));
+    } catch (e) { regError = String(e.message || e); }
+
+    // How orders have arrived, by day. A run of days with orders but no webhook timestamp
+    // means they came in by polling.
+    const byDay = db.prepare(`SELECT date(COALESCE(placed_at, created_at)) d, COUNT(*) n
+                              FROM ehp_order WHERE client_id=?
+                                AND date(COALESCE(placed_at, created_at)) >= date('now','-21 days')
+                              GROUP BY d ORDER BY d DESC`).all(clientId);
+    const ingested = db.prepare(`SELECT date(created_at) d, COUNT(*) n
+                                 FROM ehp_order WHERE client_id=?
+                                   AND date(created_at) >= date('now','-21 days')
+                                 GROUP BY d ORDER BY d DESC`).all(clientId);
+
+    res.json({
+      client_id: clientId,
+      integration: {
+        shop_domain: it.shop_domain,
+        connected: !!it.access_token,
+        last_webhook_at: it.last_webhook_at,
+        days_since_webhook: it.last_webhook_at
+          ? Math.floor((Date.now() - Date.parse(String(it.last_webhook_at).replace(' ', 'T') + 'Z')) / 86400000)
+          : null,
+        updated_at: it.updated_at,
+      },
+      // The endpoint Shopify should be calling. A mismatch against `address` above is a
+      // common cause after a domain change.
+      // What we would register today. A mismatch against the URIs above means Shopify is
+      // calling an address that no longer exists — the usual result of a domain change.
+      expected: shopifyWebhookSpec().map(w => ({ topic: w.topic, filter: w.filter,
+        uri: `${String(process.env.PUBLIC_API_URL || '').replace(/\/+$/, '')}${w.path}` })),
+      order_tag_filter: (typeof SHOPIFY_ORDER_TAG !== 'undefined') ? SHOPIFY_ORDER_TAG : null,
+      registered_webhooks: registered,
+      registered_count: registered ? registered.length : null,
+      registration_error: regError,
+      orders_by_placed_date: byDay,
+      orders_by_ingest_date: ingested,
+      note: 'Read only. Nothing has been changed.',
+    });
+  } catch (e) {
+    console.error('[GET /shopify/webhook-diagnosis]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 app.post('/shopify/poll', authenticateRequest, requireRole(['admin']), writeOpLimiter, auditLog('shopify_poll'), async (req, res) => {
   try {
     const clientId = String((req.body || {}).client_id || curClient());
