@@ -17610,6 +17610,160 @@ app.get('/ehp/batch/:id/picklist', authenticateRequest, auditLog('view_ehp_pickl
 // operator setting paper size to None/custom in the dialog; if they left it at Letter or
 // A4 the labels came out one per full page. A generated PDF removes that variable: the
 // page IS the label, whatever the print settings.
+// ── Labels as Excel ──
+// The warehouse cannot print from PDF, so this is the operational format rather than a
+// convenience — which means a clipped line is a parcel that does not arrive, and the fitting
+// has to be guaranteed rather than hoped for.
+//
+// Geometry reproduces what they print today: one label per ROW, column A at 31.78 characters
+// (~60mm), rows at 66pt (~23mm), and a 9-inch bottom margin. That margin leaves a 54pt
+// printable band, so a 66pt row cannot fit and every row is forced onto its own page. Odd,
+// but it is what makes one row print as one label.
+const XL_LABEL_COL_WIDTH = 31.78;
+const XL_LABEL_ROW_HEIGHT = 66;
+const XL_LABEL_FONT = 'Arial';          // Times New Roman renders poorly small and is wider
+// Down to 7pt before refusing. Refusing blocks the whole batch, so it is worth stepping
+// smaller for the rare very long address — 7pt Arial is still readable on a label, and the
+// alternative is the warehouse unable to print anything.
+const XL_LABEL_SIZES = [10, 9.5, 9, 8.5, 8, 7.5, 7];
+
+// Arial advance widths as a fraction of point size, averaged by character class. Counting
+// characters would be wrong — a name of capitals occupies far more room than lowercase at
+// the same length.
+function xlTextWidth(str, pt) {
+  let w = 0;
+  for (const ch of String(str)) {
+    if (ch === ' ') w += 0.278;
+    else if (/[ilj|!.,;:'`]/.test(ch)) w += 0.24;
+    else if (/[A-Z]/.test(ch)) w += 0.68;
+    else if (/[mwMW]/.test(ch)) w += 0.86;
+    else if (/[0-9]/.test(ch)) w += 0.556;
+    else w += 0.53;
+  }
+  return w * pt;
+}
+
+// How many display lines the text needs once Excel wraps it at the column width.
+function xlWrappedLines(text, pt, usableWidthPt) {
+  let lines = 0;
+  for (const para of String(text).split('\n')) {
+    if (!para.trim()) { lines += 1; continue; }
+    let cur = '';
+    let n = 1;
+    for (const word of para.split(/\s+/)) {
+      const trial = cur ? cur + ' ' + word : word;
+      if (xlTextWidth(trial, pt) <= usableWidthPt) { cur = trial; }
+      else if (!cur) {
+        // A single word wider than the column: Excel breaks it mid-word.
+        n += Math.max(0, Math.ceil(xlTextWidth(word, pt) / usableWidthPt) - 1);
+        cur = '';
+      } else { n += 1; cur = word; }
+    }
+    lines += n;
+  }
+  return lines;
+}
+
+// The largest size at which every line fits the row, or null if even the smallest will not.
+function xlFitSize(text) {
+  // Column width in points, less the padding Excel applies either side, then 5% off.
+  // The widths below are averages for a proportional face, so the estimate can run slightly
+  // optimistic — and an optimistic estimate means one extra wrapped line that gets clipped.
+  // Dropping half a point is free; losing a city line is a parcel that does not arrive.
+  const usable = ((XL_LABEL_COL_WIDTH * 7 + 5) * 0.75 - 6) * 0.95;
+  const band = XL_LABEL_ROW_HEIGHT - 8;
+  for (const pt of XL_LABEL_SIZES) {
+    const lines = xlWrappedLines(text, pt, usable);
+    if (lines * (pt * 1.25) <= band) return { pt, lines };
+  }
+  return null;
+}
+
+// One line per element, spaces collapsed. The sample file ran names and streets together
+// with long runs of spaces, which wastes width and wraps unpredictably.
+function xlLabelText(o) {
+  const clean = (v) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+  return [
+    clean(o.order_number),
+    clean(o.recipient_name).toUpperCase(),
+    clean(o.recipient_address).toUpperCase(),
+    clean(o.recipient_address2).toUpperCase(),
+    [clean(o.recipient_city), clean(o.recipient_state), clean(o.recipient_postcode)]
+      .filter(Boolean).join(' ').toUpperCase(),
+  ].filter(Boolean).join('\n');
+}
+
+app.get('/ehp/batch/:id/labels.xlsx', authenticateRequest, auditLog('ehp_labels_xlsx'), async (req, res) => {
+  try {
+    const c = ehpGuard(req, res); if (!c) return;
+    const only = String(req.query.order_ids || '').split(',').map(x => x.trim()).filter(Boolean);
+
+    // Same exclusions as the PDF: a cancelled or held order must not get a label in either
+    // format, or blocking one route simply moves the problem to the other.
+    let sql = `SELECT id, order_number, envelope_qty, recipient_name, recipient_address, recipient_address2,
+                      recipient_city, recipient_state, recipient_postcode, recipient_country
+               FROM ehp_order WHERE batch_id=? AND client_id=?
+                 AND state <> 'cancelled'
+                 AND (hold_reason IS NULL OR hold_resolved_at IS NOT NULL)`;
+    const params = [req.params.id, c];
+    if (only.length) { sql += ` AND id IN (${only.map(() => '?').join(',')})`; params.push(...only); }
+    sql += ' ORDER BY order_number';
+    const orders = db.prepare(sql).all(...params);
+    if (!orders.length) return res.status(404).json({ error: 'no_orders_for_labels' });
+
+    // One row per ENVELOPE, not per order — an order for three envelopes needs three labels,
+    // exactly as the PDF prints three pages.
+    const labels = [];
+    for (const o of orders) {
+      const qty = Math.max(1, o.envelope_qty || 1);
+      for (let i = 0; i < qty; i++) labels.push({ order: o, text: xlLabelText(o) });
+    }
+
+    // Fit every label BEFORE writing anything. A file with a missing line is worse than no
+    // file, because nobody would see it happen.
+    const tooLong = [];
+    for (const l of labels) {
+      const fit = xlFitSize(l.text);
+      if (!fit) tooLong.push(l.order.order_number);
+      else l.fit = fit;
+    }
+    if (tooLong.length) return res.status(422).json({ error: 'label_too_long',
+      orders: [...new Set(tooLong)].slice(0, 20),
+      message: `${tooLong.length} label(s) will not fit without losing a line. Shorten the address or print these separately.` });
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'VelOzity Pinpoint';
+    const ws = wb.addWorksheet('Table 1');
+    ws.getColumn(1).width = XL_LABEL_COL_WIDTH;
+    ws.pageSetup = { orientation: 'portrait', horizontalDpi: 600, verticalDpi: 600 };
+    // The 9-inch bottom margin is what forces one row per page.
+    ws.pageSetup.margins = { left: 0.7, right: 0.7, top: 1.25, bottom: 9.0, header: 0.3, footer: 0.3 };
+
+    labels.forEach((l, i) => {
+      const row = ws.getRow(i + 1);
+      row.height = XL_LABEL_ROW_HEIGHT;
+      const cell = row.getCell(1);
+      cell.value = l.text;
+      cell.font = { name: XL_LABEL_FONT, size: l.fit.pt };
+      cell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
+      row.commit();
+    });
+
+    // Generated from the actual count. A fixed range would clip a larger batch and emit
+    // blank pages for a smaller one.
+    ws.pageSetup.printArea = `A1:A${labels.length}`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition',
+      `attachment; filename="labels-${String(req.params.id).replace(/[^A-Za-z0-9\-_]/g, '')}-${labels.length}.xlsx"`);
+    await wb.xlsx.write(res);
+    return res.end();
+  } catch (e) {
+    console.error('[GET /ehp/batch/:id/labels.xlsx]', e);
+    if (!res.headersSent) res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 app.get('/ehp/batch/:id/labels.pdf', authenticateRequest, auditLog('ehp_labels_pdf'), (req, res) => {
   try {
     const c = ehpGuard(req, res); if (!c) return;
