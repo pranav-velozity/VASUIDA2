@@ -50,18 +50,42 @@
          top hairline    a 1px white highlight, the lit edge
          bottom hairline a barely-there dark line, the shaded edge
          inner glow      a wide soft white bloom so the centre reads as slightly domed */
+    /* Three layers, outermost first:
+         1. SPECULAR SHEEN — an angled band of light across the upper left. This is the layer
+            that reads as glass; a vertical fade alone never will. Sized at 220% so there is
+            room for it to travel on hover.
+         2. AMBIENT — a soft radial bloom from the top-left corner, the light source.
+         3. BODY — the base gradient. The first attempt ran white to #f7f8fa, a 3% value
+            range, which is below the threshold of visibility. This spans roughly 8% and
+            cools slightly toward the bottom, the way a polished surface picks up sky. */
     background-image:
-      linear-gradient(180deg, rgba(255,255,255,.9) 0%, rgba(255,255,255,0) 42%),
-      linear-gradient(180deg, #ffffff 0%, #fcfcfd 55%, #f7f8fa 100%);
+      linear-gradient(115deg,
+        rgba(255,255,255,0) 28%,
+        rgba(255,255,255,.75) 42%,
+        rgba(255,255,255,.95) 48%,
+        rgba(255,255,255,.75) 54%,
+        rgba(255,255,255,0) 68%),
+      radial-gradient(120% 90% at 8% 0%, rgba(255,255,255,.95) 0%, rgba(255,255,255,0) 60%),
+      linear-gradient(168deg, #ffffff 0%, #f8f9fb 52%, #eef1f6 100%);
+    background-size: 220% 220%, 100% 100%, 100% 100%;
+    background-position: 100% 0%, 0% 0%, 0% 0%;
+    background-repeat: no-repeat;
     box-shadow:
-      inset 0 1px 0 rgba(255,255,255,.95),
-      inset 0 -1px 0 rgba(16,18,27,.035),
-      inset 0 12px 24px -14px rgba(255,255,255,.9),
+      /* Rim light: brightest along the top where the light lands, carried faintly down the
+         sides, with a shaded lip beneath. This is the edge of the glass. */
+      inset 0 1px 0 rgba(255,255,255,1),
+      inset 1px 0 0 rgba(255,255,255,.65),
+      inset -1px 0 0 rgba(255,255,255,.5),
+      inset 0 -1px 0 rgba(16,18,27,.055),
+      inset 0 18px 30px -20px rgba(255,255,255,1),
       var(--pp-shadow-rest);
-    border-color: rgba(16,18,27,.07);
+    border-color: rgba(16,18,27,.08);
     transition: box-shadow .28s var(--pp-ease),
                 transform .28s var(--pp-ease),
-                border-color .28s var(--pp-ease);
+                border-color .28s var(--pp-ease),
+                /* Slower than the lift so the highlight trails the movement — light does
+                   not snap to a new position, and that lag is most of the effect. */
+                background-position .55s var(--pp-ease);
     /* Deliberately NO will-change. It promotes every element to its own compositor layer,
        and with twenty-odd tiles on the Week Hub that costs more memory than the hint saves.
        The browser handles a transform transition on a handful of hovered cards perfectly
@@ -77,15 +101,18 @@
   body .ehp-kpi:hover, body .ehp-card:hover,
   body .aq-tile:hover, body .fin-card:hover{
     transform: translateY(-6px);
-    /* The highlight strengthens as the card rises, as though it has moved closer to the
-       light. Keeping the insets identical on hover is what makes a lift look like a sprite
-       being moved rather than an object catching light. */
+    /* The sheen SWEEPS across as the card rises — the surface turning in the light. A static
+       highlight under a moving card reads as a picture of glass; a travelling one reads as
+       the thing itself. */
+    background-position: 0% 0%, 0% 0%, 0% 0%;
     box-shadow:
       inset 0 1px 0 rgba(255,255,255,1),
-      inset 0 -1px 0 rgba(16,18,27,.04),
-      inset 0 14px 28px -14px rgba(255,255,255,.95),
+      inset 1px 0 0 rgba(255,255,255,.8),
+      inset -1px 0 0 rgba(255,255,255,.65),
+      inset 0 -1px 0 rgba(16,18,27,.06),
+      inset 0 22px 36px -20px rgba(255,255,255,1),
       var(--pp-shadow-hover);
-    border-color: rgba(16,18,27,.13);
+    border-color: rgba(16,18,27,.14);
   }
 
   /* A pressed card should return most of the way, not all of it — otherwise the click feels
@@ -135,7 +162,12 @@
     body .fwh-kpi:hover, body .fwh-card:hover,
     body .eg-tile:hover, body .eg-card:hover, body .aqi-tile:hover, body .aqi-card:hover,
     body .si-tile:hover, body .si-card:hover, body .ehp-kpi:hover, body .ehp-card:hover,
-    body .aq-tile:hover, body .fin-card:hover{ transform: none; }
+    body .aq-tile:hover, body .fin-card:hover{
+      transform: none;
+      /* The sheen has to be pinned too. With the transition removed it would jump to the
+         new position instantly, which is more jarring than the animation it replaced. */
+      background-position: 100% 0%, 0% 0%, 0% 0%;
+    }
   }
 
   /* Touch devices have no hover state, and a sticky :hover left behind after a tap looks
@@ -144,7 +176,12 @@
     body .fwh-kpi:hover, body .fwh-card:hover,
     body .eg-tile:hover, body .eg-card:hover, body .aqi-tile:hover, body .aqi-card:hover,
     body .si-tile:hover, body .si-card:hover, body .ehp-kpi:hover, body .ehp-card:hover,
-    body .aq-tile:hover, body .fin-card:hover{ transform: none; box-shadow: var(--pp-shadow-rest); }
+    body .aq-tile:hover, body .fin-card:hover{
+      transform: none;
+      /* A tap leaves :hover stuck on touch devices. Without pinning the sheen, the tile
+         keeps a displaced highlight until something else is tapped. */
+      background-position: 100% 0%, 0% 0%, 0% 0%;
+    }
   }
   `;
 
