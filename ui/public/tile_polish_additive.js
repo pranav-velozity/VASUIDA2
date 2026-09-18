@@ -34,13 +34,30 @@
     --pp-ease: cubic-bezier(.22,1,.36,1);
   }
 
-  body .fwh-kpi, body .fwh-card, body .fwh-gauge,
+  body .fwh-kpi, body .fwh-card,
   body .eg-tile, body .eg-card,
   body .aqi-tile, body .aqi-card,
   body .si-tile, body .si-card,
   body .ehp-kpi, body .ehp-card,
   body .aq-tile, body .fin-card{
-    box-shadow: var(--pp-shadow-rest);
+    /* THE SURFACE ITSELF, not what shows through it.
+       The back of an iPhone is not transparent — it is a material: a faint vertical gradient,
+       a bright highlight along the top edge where light catches, a darker lip at the bottom,
+       and a hairline rim. All of that is drawn on the element and needs nothing behind it,
+       which is why backdrop-filter was the wrong tool for this.
+
+       Layered inset shadows, outermost first:
+         top hairline    a 1px white highlight, the lit edge
+         bottom hairline a barely-there dark line, the shaded edge
+         inner glow      a wide soft white bloom so the centre reads as slightly domed */
+    background-image:
+      linear-gradient(180deg, rgba(255,255,255,.9) 0%, rgba(255,255,255,0) 42%),
+      linear-gradient(180deg, #ffffff 0%, #fcfcfd 55%, #f7f8fa 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.95),
+      inset 0 -1px 0 rgba(16,18,27,.035),
+      inset 0 12px 24px -14px rgba(255,255,255,.9),
+      var(--pp-shadow-rest);
     border-color: rgba(16,18,27,.07);
     transition: box-shadow .28s var(--pp-ease),
                 transform .28s var(--pp-ease),
@@ -53,14 +70,21 @@
 
   /* The lift and the shadow grow together. Moving the card without growing the shadow is
      what makes a hover feel like a glitch rather than a gesture. */
-  body .fwh-kpi:hover, body .fwh-card:hover, body .fwh-gauge:hover,
+  body .fwh-kpi:hover, body .fwh-card:hover,
   body .eg-tile:hover, body .eg-card:hover,
   body .aqi-tile:hover, body .aqi-card:hover,
   body .si-tile:hover, body .si-card:hover,
   body .ehp-kpi:hover, body .ehp-card:hover,
   body .aq-tile:hover, body .fin-card:hover{
     transform: translateY(-6px);
-    box-shadow: var(--pp-shadow-hover);
+    /* The highlight strengthens as the card rises, as though it has moved closer to the
+       light. Keeping the insets identical on hover is what makes a lift look like a sprite
+       being moved rather than an object catching light. */
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,1),
+      inset 0 -1px 0 rgba(16,18,27,.04),
+      inset 0 14px 28px -14px rgba(255,255,255,.95),
+      var(--pp-shadow-hover);
     border-color: rgba(16,18,27,.13);
   }
 
@@ -104,11 +128,11 @@
   /* Reduced motion: keep the depth, drop the movement. The shadow still communicates the
      hover, so nothing is lost but the travel. */
   @media (prefers-reduced-motion: reduce){
-    body .fwh-kpi, body .fwh-card, body .fwh-gauge,
+    body .fwh-kpi, body .fwh-card,
     body .eg-tile, body .eg-card, body .aqi-tile, body .aqi-card,
     body .si-tile, body .si-card, body .ehp-kpi, body .ehp-card,
     body .aq-tile, body .fin-card{ transition: box-shadow .2s ease, border-color .2s ease; }
-    body .fwh-kpi:hover, body .fwh-card:hover, body .fwh-gauge:hover,
+    body .fwh-kpi:hover, body .fwh-card:hover,
     body .eg-tile:hover, body .eg-card:hover, body .aqi-tile:hover, body .aqi-card:hover,
     body .si-tile:hover, body .si-card:hover, body .ehp-kpi:hover, body .ehp-card:hover,
     body .aq-tile:hover, body .fin-card:hover{ transform: none; }
@@ -117,7 +141,7 @@
   /* Touch devices have no hover state, and a sticky :hover left behind after a tap looks
      broken. */
   @media (hover: none){
-    body .fwh-kpi:hover, body .fwh-card:hover, body .fwh-gauge:hover,
+    body .fwh-kpi:hover, body .fwh-card:hover,
     body .eg-tile:hover, body .eg-card:hover, body .aqi-tile:hover, body .aqi-card:hover,
     body .si-tile:hover, body .si-card:hover, body .ehp-kpi:hover, body .ehp-card:hover,
     body .aq-tile:hover, body .fin-card:hover{ transform: none; box-shadow: var(--pp-shadow-rest); }
