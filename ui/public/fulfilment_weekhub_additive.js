@@ -365,7 +365,25 @@
           <b>${liveOk ? 'Shopify connected' : 'Shopify not connected'}</b>
           <span style="color:${LIGHT}"> &middot; ${esc(conn.shop_domain || 'no store linked')}</span></div>
         <div style="color:${MID}">
-          ${conn.last_webhook_at ? 'Last order received ' + esc(shortTs(conn.last_webhook_at)) : 'No orders received yet'}
+          ${(() => {
+            // Webhooks are the live path; polling is the fallback. Showing both tells you
+            // WHICH is actually bringing orders in — the thirteen-day silence looked like
+            // "no orders" because only the webhook time was on screen.
+            const wh = conn.last_webhook_at;
+            const age = wh ? (Date.now() - Date.parse(String(wh).replace(' ', 'T') + 'Z')) / 3600000 : null;
+            const live = age != null && age < 2;
+            return wh
+              ? `<span style="color:${live ? MID : AMBER_TXT};${live ? '' : 'font-weight:600;'}">`
+                + `Last webhook ${esc(shortTs(wh))}${live ? '' : ' &middot; not delivering'}</span>`
+              : `<span style="color:${AMBER_TXT};font-weight:600;">No webhooks received</span>`;
+          })()}
+          ${conn.last_poll_at ? (() => {
+            const r = conn.last_poll_result || {};
+            const got = r.created != null
+              ? `${nf(r.created)} new` + (r.already_present ? `, ${nf(r.already_present)} already had` : '')
+              : 'no detail';
+            return ` &middot; Last pull ${esc(shortTs(conn.last_poll_at))} &middot; ${got}`;
+          })() : ''}
           ${conn.unfulfilled_dispatched ? ` &middot; <span style="color:${AMBER_TXT};font-weight:600;">${nf(conn.unfulfilled_dispatched)} unfulfilled</span>` : ''}
         </div>
       </div>
@@ -779,7 +797,7 @@
     // meant a needless pass fifteen times a minute.
     setInterval(() => { if (document.visibilityState === 'visible') check(); }, 15000);
     window.refreshFulfilmentWeekHub = () => render(true);
-    console.log('[fulfilment-weekhub] module v15 loaded');
+    console.log('[fulfilment-weekhub] module v16 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
