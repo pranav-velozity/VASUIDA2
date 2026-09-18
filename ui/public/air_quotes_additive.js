@@ -227,7 +227,9 @@
   let _view = null;
 
   function tilesHtml() {
-    const t = (_data && _data.tiles) || {}, cur = t.currency || 'USD';
+    // USD is the only currency air quotes use; the row amounts below are already hardcoded
+    // to it, so the tiles must not diverge.
+    const t = (_data && _data.tiles) || {}, cur = 'USD';
     if (!t.approved_count) return '';
     const tile = (label, value, sub) => `<div class="aq-tile">
       <div class="aq-tl">${esc(label)}</div><div class="aq-tv">${value}</div>
