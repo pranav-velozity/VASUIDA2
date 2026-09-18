@@ -12,10 +12,11 @@
    with `body ` raises specificity by one element, so these rules win regardless of when
    anything loads.
 
-   ON GLASS: backdrop-filter only shows anything when there is content behind it to refract.
-   Over a flat near-white page it reads as washed-out rather than glassy, so it is applied
-   only to surfaces that genuinely sit over content — the modal overlays and the sticky
-   header — and never to the tiles on the page background. */
+   ON GLASS: nothing here is transparent. The look comes from drawing the material on the
+   surface — an angled specular sheen, a rim light along the lit edges, a soft body gradient
+   — the way the back of a phone reads as glass without being see-through. backdrop-filter
+   was tried and removed: over a dimmed overlay it tinted the panel grey, which is the
+   opposite of the clean surface intended. */
 ;(function () {
   'use strict';
 
@@ -66,7 +67,7 @@
         rgba(255,255,255,.75) 54%,
         rgba(255,255,255,0) 68%),
       radial-gradient(120% 90% at 8% 0%, rgba(255,255,255,.95) 0%, rgba(255,255,255,0) 60%),
-      linear-gradient(168deg, #ffffff 0%, #f8f9fb 52%, #eef1f6 100%);
+      linear-gradient(168deg, #ffffff 0%, #ffffff 46%, #f7f9fc 100%);
     background-size: 220% 220%, 100% 100%, 100% 100%;
     background-position: 100% 0%, 0% 0%, 0% 0%;
     background-repeat: no-repeat;
@@ -134,23 +135,13 @@
        .fin-panel  a fixed slide-out drawer over the page background   -> nothing behind, and
                    its open/close animation is a transform this must not disturb
      Blurring a surface with nothing behind it produces washed-out translucency, not glass. */
-  body .ehp-panel{
+  /* Panels are WHITE. A translucent panel over a dimmed overlay reads as grey wash — the
+     dim behind it tints the whole surface, which is the opposite of the clean look intended.
+     Depth comes from the shadow; the surface stays white. */
+  body .ehp-panel, body .aqi-panel, body .eg-panel{
     box-shadow: var(--pp-shadow-overlay);
-    background: rgba(255,255,255,.82);
-    -webkit-backdrop-filter: saturate(180%) blur(24px);
-    backdrop-filter: saturate(180%) blur(24px);
-    border: .5px solid rgba(255,255,255,.6);
+    background: #ffffff;
   }
-
-  /* Without backdrop-filter an 82% panel over a dimmed page is unreadable. Solid, not
-     translucent, is the correct fallback. */
-  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))){
-    body .ehp-panel{ background:#fff; }
-  }
-
-  /* The full-screen panels get the depth without the blur — there is nothing behind them to
-     refract, so glass would only cost contrast. */
-  body .aqi-panel, body .eg-panel{ box-shadow: var(--pp-shadow-overlay); }
 
   /* Reduced motion: keep the depth, drop the movement. The shadow still communicates the
      hover, so nothing is lost but the travel. */
