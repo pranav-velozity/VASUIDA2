@@ -78,6 +78,11 @@
       .aqi-in{width:100%;padding:9px 11px;border:.5px solid rgba(0,0,0,.14);border-radius:9px;
               font:inherit;font-size:13px;color:${DARK};background:#fff;}
       .aqi-in:focus{outline:2px solid rgba(153,0,51,.22);outline-offset:1px;}
+      /* Dimmed and struck through, so a replaced quote reads as history at a glance rather
+         than needing its pill read first. The status cell keeps its pills legible. */
+      table.aqi tr.superseded td{opacity:.5;text-decoration:line-through;}
+      table.aqi tr.superseded td:last-child{text-decoration:none;opacity:.8;}
+      table.aqi tr.superseded td:first-child{text-decoration:none;}
       .aqi-btn{border:0;border-radius:9px;background:${BRAND};color:#fff;font:600 12px inherit;
                padding:10px 16px;cursor:pointer;}
       .aqi-btn.g{background:#fff;color:${DARK};border:.5px solid rgba(0,0,0,.16);}
@@ -118,10 +123,22 @@
 
   // Distinguishes priced-but-not-sent from untouched. Without it a reviewer cannot tell
   // whether a quote is waiting on them or already handled and simply not released.
-  const reviewPill = x => x.review_state === 'draft'
-    ? `<span class="aqi-pill" style="color:${AMBER};background:rgba(183,121,31,.12);margin-left:4px;">Draft</span>`
-    : (x.review_state === 'sent'
-      ? `<span class="aqi-pill" style="color:${GREEN};background:rgba(27,127,59,.12);margin-left:4px;">Sent</span>` : '');
+  // Only meaningful BEFORE a decision. review_state is 'draft' whenever pricing was ever
+  // saved, and that stays true after approval — so an approved quote was showing "Approved"
+  // and "Draft" side by side, which reads as a contradiction.
+  const reviewPill = (x) => {
+    if (['approved', 'declined', 'expired'].includes(x.state)) return '';
+    if (x.review_state === 'draft')
+      return `<span class="aqi-pill" style="color:${AMBER};background:rgba(183,121,31,.12);margin-left:4px;">Draft</span>`;
+    if (x.review_state === 'sent')
+      return `<span class="aqi-pill" style="color:${GREEN};background:rgba(27,127,59,.12);margin-left:4px;">Sent</span>`;
+    return '';
+  };
+
+  // A quote that has been revised is history, not work in progress.
+  const supersededPill = (x) => x.superseded_by
+    ? `<span class="aqi-pill" style="color:${LIGHT};background:rgba(0,0,0,.05);margin-left:4px;"
+             title="Replaced by ${esc(x.superseded_by)}">Superseded</span>` : '';
 
   const n2 = v => v == null ? '—' : Number(v).toFixed(2);
 
@@ -306,7 +323,7 @@
             <th style="width:22px;"></th>
             <th>Ref</th><th>Week</th><th>Sent to partner</th><th>Vendor</th><th class="n">Chargeable kg</th>
             <th class="n">Cost</th><th class="n">Sell</th><th class="n">/kg</th><th class="n">/unit</th><th>Status</th>
-          </tr></thead><tbody>${list.map(x => `<tr data-q="${esc(x.id)}" class="${x.id === _sel ? 'sel' : ''}">
+          </tr></thead><tbody>${list.map(x => `<tr data-q="${esc(x.id)}" class="${x.id === _sel ? 'sel' : ''}${x.superseded_by ? ' superseded' : ''}">
             <td style="text-align:center;color:${LIGHT};" data-exp="${esc(x.id)}"
                 title="Show the cost lines">${_expanded.has(x.id) ? '&#9662;' : '&#9656;'}</td>
             <td><b>${esc(x.ref || '')}</b></td>
@@ -319,7 +336,7 @@
             <td class="n">${x.sell_per_kg == null ? '—' : x.sell_per_kg.toFixed(2)}</td>
             <td class="n">${x.sell_per_unit == null
               ? `<span style="color:${LIGHT}">NA</span>` : x.sell_per_unit.toFixed(2)}</td>
-            <td>${pill(x.state)}${reviewPill(x)}</td></tr>
+            <td>${pill(x.state)}${reviewPill(x)}${supersededPill(x)}</td></tr>
             ${_expanded.has(x.id) ? `<tr class="aqi-exp"><td></td><td colspan="10">${linesHtml(x)}</td></tr>` : ''}`).join('')}</tbody></table>`
           : `<div class="aqi-none">No quote requests yet.</div>`}
       </div>

@@ -115,6 +115,11 @@
       table.aq col.c-tr{width:7%;}   table.aq col.c-amt{width:10%;}
       table.aq col.c-st{width:9%;}   table.aq col.c-act{width:14%;}
       table.aq col.c-del{width:3%;}
+      /* A replaced request is history. Struck through so it cannot be mistaken for the live
+         one sitting beside it, with the reference and actions left readable. */
+      table.aq tr.superseded td{opacity:.5;text-decoration:line-through;}
+      table.aq tr.superseded td:first-child,
+      table.aq tr.superseded td.act{text-decoration:none;}
       table.aq td.ven{word-break:break-word;line-height:1.35;}
       table.aq th{text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.05em;
                   color:${LIGHT};font-weight:600;padding:6px;border-bottom:.5px solid rgba(0,0,0,.08);}
@@ -240,8 +245,9 @@
   }
 
   function rowsHtml(list, showAction) {
-    return list.map(q => `<tr>
-      <td><b>${esc(q.ref || '')}</b><div style="color:${LIGHT};font-size:10px;">${esc(q.week_label || q.week_start)}</div></td>
+    return list.map(q => `<tr class="${q.superseded_by ? 'superseded' : ''}">
+      <td><b>${esc(q.ref || '')}</b><div style="color:${LIGHT};font-size:10px;">${esc(q.week_label || q.week_start)}</div>
+        ${q.superseded_by ? `<div style="color:${AMBER};font-size:9px;font-weight:600;">Replaced by ${esc(q.superseded_by)}</div>` : ''}</td>
       <td class="po" title="${esc(q.po_numbers || '')}">${esc(q.po_numbers || '—')}</td>
       <td class="ven">${esc(q.vendor)}</td>
       <td class="n">${nf(q.cartons)}</td>
