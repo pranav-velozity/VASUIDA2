@@ -19850,26 +19850,81 @@ app.get('/shopify/webhook-diagnosis', authenticateRequest, requireRole(['admin']
   }
 });
 
+// Scheduled poll — the stand-in while webhooks are silent.
+//
+// Polling is idempotent: ehp_order has a unique index on (client_id, shopify_order_id), so
+// an order already ingested is skipped rather than duplicated. That makes it safe to run on
+// a short interval, and safe to keep running once webhooks resume.
+//
+// It reports how much it had to catch, which is the signal worth watching: while webhooks
+// are dead this number tracks real order volume, and when they come back it should fall to
+// zero on its own.
+app.post('/ops/shopify-poll/run', (req, res, next) => {
+  const cronSecret = process.env.LANE_CRON_SECRET;
+  if (cronSecret && req.headers['x-lane-cron-secret'] === cronSecret) return next();
+  return authenticateRequest(req, res, next);
+}, auditLog('run_shopify_poll'), async (req, res) => {
+  try {
+    const clientId = String(req.query.client_id || 'EHP');
+    const it = db.prepare(`SELECT * FROM client_integration WHERE client_id=? AND provider='shopify'`).get(clientId);
+    if (!it || !it.access_token)
+      return res.status(409).json({ error: 'not_connected', client_id: clientId });
+
+    // A 6-hour lookback by default: wide enough that a missed run, a restart or a slow
+    // Shopify response cannot leave a gap, and narrow enough to stay one API page.
+    const hours = Math.min(72, Math.max(1, Number(req.query.hours) || 6));
+    const lookback = new Date(Date.now() - hours * 3600000).toISOString();
+    const r = await shopifyPollOrders(clientId, lookback);
+
+    // How long since a webhook actually landed. While this keeps climbing the poll is the
+    // only thing bringing orders in, and that is worth seeing in the cron output rather
+    // than having to go looking for it.
+    const since = it.last_webhook_at
+      ? Math.floor((Date.now() - Date.parse(String(it.last_webhook_at).replace(' ', 'T') + 'Z')) / 3600000)
+      : null;
+
+    if (r && r.created > 0)
+      console.log(`[shopify-poll] ${clientId}: ${r.created} order(s) recovered by polling `
+        + `(no webhook for ${since == null ? 'ever' : since + 'h'})`);
+
+    res.json({ client_id: clientId, ...r,
+      hours_since_last_webhook: since,
+      webhooks_healthy: since != null && since < 2,
+      note: since != null && since < 2
+        ? 'Webhooks appear to be delivering again — this poll is now a safety net only.'
+        : 'Webhooks are not delivering. Polling is currently the only ingest path.' });
+  } catch (e) {
+    console.error('[POST /ops/shopify-poll/run]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+async function shopifyPollOrders(clientId, since) {
+  const q = since ? `?status=any&created_at_min=${encodeURIComponent(since)}&limit=250` : '?status=any&limit=250';
+  const data = await shopifyApi(clientId, '/orders.json' + q);
+  let created = 0, dupes = 0, skipped = 0;
+  const _it = shopifyIntegration(clientId);
+  for (const o of (data.orders || [])) {
+    // Webhook filters are applied by Shopify; the poll fetches everything, so the same
+    // routing rule has to be enforced here or the whole store lands in the queue.
+    if (!shopifyOrderIsRouted(o).routed) { skipped++; continue; }
+    // Idempotent: ehp_order is uniquely indexed on (client_id, shopify_order_id), so an
+    // order already ingested counts as a duplicate rather than being created twice. That is
+    // what makes a short polling interval safe.
+    const r = shopifyUpsertOrder(clientId, o, _it && _it.shop_domain);
+    r.duplicate ? dupes++ : created++;
+  }
+  db.prepare(`UPDATE client_integration SET last_poll_at=datetime('now'), updated_at=datetime('now')
+              WHERE client_id=? AND provider='shopify'`).run(clientId);
+  return { fetched: (data.orders || []).length, created, already_present: dupes,
+           skipped_not_tagged: skipped, routing_tag: SHOPIFY_ORDER_TAG };
+}
+
 app.post('/shopify/poll', authenticateRequest, requireRole(['admin']), writeOpLimiter, auditLog('shopify_poll'), async (req, res) => {
   try {
     const clientId = String((req.body || {}).client_id || curClient());
     const since = String((req.body || {}).since || '').trim();
-    const q = since ? `?status=any&created_at_min=${encodeURIComponent(since)}&limit=250` : '?status=any&limit=250';
-    const data = await shopifyApi(clientId, '/orders.json' + q);
-    let created = 0, dupes = 0;
-    const _it = shopifyIntegration(clientId);
-    let skipped = 0;
-    for (const o of (data.orders || [])) {
-      // Webhook filters are applied by Shopify; the poll fetches everything, so the same
-      // routing rule has to be enforced here or the whole store lands in the queue.
-      if (!shopifyOrderIsRouted(o).routed) { skipped++; continue; }
-      const r = shopifyUpsertOrder(clientId, o, _it && _it.shop_domain);
-      r.duplicate ? dupes++ : created++;
-    }
-    db.prepare(`UPDATE client_integration SET last_poll_at=datetime('now'), updated_at=datetime('now')
-                WHERE client_id=? AND provider='shopify'`).run(clientId);
-    res.json({ fetched: (data.orders || []).length, created, already_present: dupes,
-               skipped_not_tagged: skipped, routing_tag: SHOPIFY_ORDER_TAG });
+    res.json(await shopifyPollOrders(clientId, since));
   } catch (e) { res.status(500).json({ error: String(e.message || e), body: e.body }); }
 });
 
