@@ -125,8 +125,35 @@ app.use((req, _res, next) => {
 
 app.use(express.json({ limit: '100mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
+// Webhook arrival log, mounted ABOVE the rate limiter.
+//
+// The first attempt at this logged from inside the route handlers, which run after
+// app.use(apiLimiter) — so a rate-limited request produced no row, and "no rows" could not
+// be told apart from "Shopify never called". Recording on response finish captures every
+// request whatever rejects it, including a 429 that never reaches a handler.
+//
+// One row per request: the handler records its own verdict on req, and this writes it. If no
+// handler ran, the HTTP status is the verdict.
+app.use('/shopify/webhooks', (req, res, next) => {
+  res.on('finish', () => {
+    try {
+      shopifyWriteWebhookLog(req, req._whOutcome || ('http_' + res.statusCode),
+        { client: req._whClient, detail: req._whDetail, status: res.statusCode });
+    } catch (e) { /* never break delivery */ }
+  });
+  next();
+});
+
 // 🔐 Rate Limiting
-app.use(apiLimiter);
+//
+// Webhooks are EXEMPT. Shopify delivers in bursts and retries hard; a limiter in front of a
+// webhook endpoint eventually drops legitimate traffic, and a 429 is invisible to us — the
+// request never reaches our code. The HMAC check is the real gate and it is not rate
+// sensitive, so the limiter adds nothing here but a silent failure mode.
+app.use((req, res, next) => {
+  if (String(req.path || '').startsWith('/shopify/webhooks/')) return next();
+  return apiLimiter(req, res, next);
+});
 
 /* ===== BEGIN: /api alias -> root endpoints =====
    This lets /api/plan, /api/records, /api/bins, /api/flow/... hit the same handlers as
@@ -19547,9 +19574,22 @@ CREATE TABLE IF NOT EXISTS shopify_webhook_log (
 CREATE INDEX IF NOT EXISTS idx_swl ON shopify_webhook_log(created_at);
 `);
 
+// Records the handler's verdict on the request. The row itself is written once, on response
+// finish, by the middleware above — writing here as well would double-log every delivery.
 function shopifyLogAttempt(req, outcome, extra) {
   try {
+    req._whOutcome = outcome;
+    if (extra && extra.client) req._whClient = extra.client;
+    if (extra && extra.detail) req._whDetail = extra.detail;
+  } catch (e) { /* never break delivery */ }
+}
+
+function shopifyWriteWebhookLog(req, outcome, extra) {
+  try {
     const shopHeader = req.get('X-Shopify-Shop-Domain') || '';
+    const detail = [(extra && extra.detail) || null,
+                    (extra && extra.status) ? ('status ' + extra.status) : null]
+                   .filter(Boolean).join(' · ') || null;
     db.prepare(`INSERT INTO shopify_webhook_log
                 (id, shop_header, shop_norm, topic, has_hmac, matched_client, outcome, detail)
                 VALUES (?,?,?,?,?,?,?,?)`)
@@ -19557,8 +19597,8 @@ function shopifyLogAttempt(req, outcome, extra) {
            shopifyNormaliseShop(shopHeader) || null,
            req.get('X-Shopify-Topic') || null,
            req.get('X-Shopify-Hmac-Sha256') ? 1 : 0,
-           (extra && extra.client) || null, outcome, (extra && extra.detail) || null);
-    // Keep it bounded — this is a diagnostic, not an archive.
+           (extra && extra.client) || null, outcome, detail);
+    // Bounded: a diagnostic, not an archive.
     db.prepare(`DELETE FROM shopify_webhook_log WHERE created_at < datetime('now','-30 days')`).run();
   } catch (e) { /* logging must never break delivery */ }
 }
