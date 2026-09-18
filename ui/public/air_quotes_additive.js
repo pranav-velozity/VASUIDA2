@@ -25,7 +25,7 @@
   const AMBER = '#B7791F', GREEN = '#1B7F3B', RED = '#B33F40';
   const LIFT = '0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.06)';
 
-  let _on = false, _capClient = null, _data = null, _vendors = [];
+  let _on = false, _capClient = null, _data = null, _vendors = [], _q = '';
 
   const el = id => document.getElementById(id);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
@@ -106,11 +106,14 @@
       /* Fixed layout with declared widths. Auto layout let Vendor claim whatever a long
          company name needed and squeezed Quoted and the actions into wrapping. */
       table.aq{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px;table-layout:fixed;}
-      table.aq col.c-ref{width:8%;}  table.aq col.c-po{width:12%;}
-      table.aq col.c-ven{width:15%;} table.aq col.c-ctn{width:6%;}
-      table.aq col.c-unt{width:6%;}  table.aq col.c-kg{width:8%;}
+      /* CBM takes 6%, found by trimming PO, vendor and actions — the three with slack.
+         Fixed layout, so these must total 100 or the browser reflows them itself. */
+      table.aq col.c-ref{width:8%;}  table.aq col.c-po{width:10%;}
+      table.aq col.c-ven{width:13%;} table.aq col.c-ctn{width:6%;}
+      table.aq col.c-unt{width:6%;}  table.aq col.c-cbm{width:6%;}
+      table.aq col.c-kg{width:8%;}
       table.aq col.c-tr{width:7%;}   table.aq col.c-amt{width:10%;}
-      table.aq col.c-st{width:9%;}   table.aq col.c-act{width:16%;}
+      table.aq col.c-st{width:9%;}   table.aq col.c-act{width:14%;}
       table.aq col.c-del{width:3%;}
       table.aq td.ven{word-break:break-word;line-height:1.35;}
       table.aq th{text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.05em;
@@ -243,6 +246,7 @@
       <td class="ven">${esc(q.vendor)}</td>
       <td class="n">${nf(q.cartons)}</td>
       <td class="n">${q.units ? nf(q.units) : '—'}</td>
+      <td class="n">${q.cbm ? Number(q.cbm).toFixed(2) : '—'}</td>
       <td class="n">${nf(q.chargeable_kg)}</td>
       <td>${q.transit_mode
         ? `<span class="aq-pill" style="color:${q.transit_mode === 'VOZAIR' ? BRAND : MID};background:${q.transit_mode === 'VOZAIR' ? 'rgba(153,0,51,.10)' : 'rgba(0,0,0,.05)'}">${esc(q.transit_mode)}</span>`
@@ -264,18 +268,50 @@
 
   const TH = `<colgroup>
       <col class="c-ref"><col class="c-po"><col class="c-ven"><col class="c-ctn"><col class="c-unt">
-      <col class="c-kg"><col class="c-tr"><col class="c-amt"><col class="c-st"><col class="c-act"><col class="c-del">
+      <col class="c-cbm"><col class="c-kg"><col class="c-tr"><col class="c-amt"><col class="c-st"><col class="c-act"><col class="c-del">
     </colgroup>
     <thead><tr><th>Reference</th><th>PO number(s)</th><th>Vendor</th><th class="n">Cartons</th>
-      <th class="n">Units</th><th class="n">Chargeable kg</th><th>Transit</th>
+      <th class="n">Units</th><th class="n">CBM</th><th class="n">Chargeable kg</th><th>Transit</th>
       <th class="n">Quoted</th><th>Status</th><th></th><th></th></tr></thead>`;
 
+  // Every field someone might have to hand: a Zendesk number from an email, a PO from a
+  // packing list, a vendor name, a reference, an amount. Both lists arrive fully loaded —
+  // all weeks in one payload — so filtering here is instant and complete. That is not true
+  // of the EHP orders list, which pages and therefore searches server-side.
+  function aqMatches(q, needle) {
+    if (!needle) return true;
+    const hay = [q.ref, q.zendesk_ticket, q.po_numbers, q.vendor, q.week_label, q.week_start,
+                 q.state, q.transit_mode, q.origin, q.destination, q.client_note,
+                 q.cartons, q.units, q.chargeable_kg, q.cbm, q.quoted_amount]
+      .filter(v => v != null).join(' ').toLowerCase();
+    // Every term must match, so "d&j 81317" narrows rather than widens.
+    return needle.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.indexOf(t) >= 0);
+  }
+
+  function searchBar(count, total) {
+    return `<div style="display:flex;gap:10px;align-items:center;margin:0 0 10px;">
+      <input id="aq-search" placeholder="Search reference, Zendesk, PO, vendor, amount…"
+             value="${esc(_q)}" autocomplete="off"
+             style="flex:1;min-width:220px;padding:8px 11px;border:.5px solid rgba(0,0,0,.14);
+                    border-radius:9px;font:inherit;font-size:12px;">
+      ${_q ? `<span style="font-size:11px;color:${LIGHT};white-space:nowrap;">${count} of ${total}</span>
+              <button class="aq-btn g" id="aq-clear" style="padding:6px 11px;">Clear</button>` : ''}
+    </div>`;
+  }
+
   function quotesHtml() {
-    const open = (_data && _data.open) || [], hist = (_data && _data.history) || [];
-    if (!open.length && !hist.length)
+    const allOpen = (_data && _data.open) || [], allHist = (_data && _data.history) || [];
+    if (!allOpen.length && !allHist.length)
       return `<div class="aq-none">No quotes yet. Use <b>New request</b> above &mdash; you can raise one for any upcoming week without waiting for the plan.</div>`;
+    const open = allOpen.filter(q => aqMatches(q, _q));
+    const hist = allHist.filter(q => aqMatches(q, _q));
+    const total = allOpen.length + allHist.length;
+    if (_q && !open.length && !hist.length)
+      return `${tilesHtml()}${searchBar(0, total)}
+        <div class="aq-none">Nothing matches &ldquo;${esc(_q)}&rdquo;.</div>`;
     return `
       ${tilesHtml()}
+      ${searchBar(open.length + hist.length, total)}
       <div class="aq-s" style="margin:0 0 8px;">All quoted prices are <b>door-to-door all-inclusive air freight</b> and exclude GST and customs clearance charges.</div>
       ${open.length ? `<div class="aq-sec">Open</div>
         <table class="aq">${TH}<tbody>${rowsHtml(open, true)}</tbody></table>` : ''}
@@ -432,6 +468,21 @@
       el('aq-cancel').addEventListener('click', closeModal);
       el('aq-submit').addEventListener('click', submitRequest);
     } else {
+      const si = el('aq-search');
+      if (si) {
+        let t = null;
+        si.addEventListener('input', () => {
+          clearTimeout(t);
+          // Debounced: redrawing the table on every keystroke is wasted work on a long list.
+          t = setTimeout(() => { _q = si.value.trim(); paintModal(); }, 200);
+        });
+        // paintModal rebuilds the panel, so focus and caret have to be restored or the box
+        // becomes unusable after the first character.
+        si.focus();
+        si.setSelectionRange(si.value.length, si.value.length);
+      }
+      el('aq-clear')?.addEventListener('click', () => { _q = ''; paintModal(); });
+
       b.querySelectorAll('[data-ok]').forEach(x => x.addEventListener('click', () => decide(x.getAttribute('data-ok'), 'approve')));
       b.querySelectorAll('[data-no]').forEach(x => x.addEventListener('click', () => decide(x.getAttribute('data-no'), 'decline')));
       b.querySelectorAll('[data-del]').forEach(x => x.addEventListener('click', () => withdraw(x.getAttribute('data-del'))));

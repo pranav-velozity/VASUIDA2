@@ -15,7 +15,7 @@
   const BRAND = '#990033', DARK = '#1C1C1E', MID = '#6E6E73', LIGHT = '#AEAEB2';
   const AMBER = '#B7791F', GREEN = '#1B7F3B', RED = '#B33F40';
 
-  let _on = false, _data = null, _sel = null, _busy = false;
+  let _on = false, _data = null, _sel = null, _busy = false, _q = '';
   const _expanded = new Set();
 
   const el = id => document.getElementById(id);
@@ -256,10 +256,24 @@
   }
 
   // ── render ──
+  // Same field set as the client screen, plus the internal figures — someone chasing a
+  // margin query has a cost or a sell price to hand as often as a reference.
+  function aqiMatches(x, needle) {
+    if (!needle) return true;
+    const hay = [x.ref, x.zendesk_ticket, x.po_numbers, x.vendor, x.week_label, x.week_start,
+                 x.state, x.transit_mode, x.partner_name, x.priced_by, x.client_note,
+                 x.chargeable_kg, x.cost, x.sell, x.per_kg, x.per_unit]
+      .filter(v => v != null).join(' ').toLowerCase();
+    return needle.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.indexOf(t) >= 0);
+  }
+
   function render() {
     const body = el('aqi-body'); if (!body || !_data) return;
-    const list = _data.quotes || [];
+    const all = _data.quotes || [];
+    const list = _q ? all.filter(x => aqiMatches(x, _q)) : all;
     const q = list.find(x => x.id === _sel) || list.find(x => x.state === 'pending_review' || x.state === 'costed') || list[0] || null;
+    // Falls back to the first match when the selected quote is filtered out, rather than
+    // leaving the panel describing a row nobody can see.
     _sel = q ? q.id : null;
 
     const ins = _data.insights || [], bands = _data.win_bands || [];
@@ -280,7 +294,14 @@
     </div>` : ''}
     <div class="aqi-grid">
       <div class="aqi-card">
-        <div class="aqi-sec">Queue &middot; ${list.length} quote(s)</div>
+        <div class="aqi-sec">Queue &middot; ${_q ? `${list.length} of ${all.length}` : list.length} quote(s)</div>
+        <div style="display:flex;gap:9px;align-items:center;margin:0 0 9px;">
+          <input id="aqi-search" placeholder="Search ref, Zendesk, PO, vendor, cost, sell…"
+                 value="${esc(_q)}" autocomplete="off"
+                 style="flex:1;min-width:200px;padding:7px 10px;border:.5px solid rgba(0,0,0,.14);
+                        border-radius:8px;font:inherit;font-size:12px;">
+          ${_q ? `<button class="aqi-btn g" id="aqi-clear" style="padding:6px 11px;">Clear</button>` : ''}
+        </div>
         ${list.length ? `<table class="aqi"><thead><tr>
             <th style="width:22px;"></th>
             <th>Ref</th><th>Week</th><th>Sent to partner</th><th>Vendor</th><th class="n">Chargeable kg</th>
@@ -311,6 +332,20 @@
       if (_expanded.has(id)) _expanded.delete(id); else _expanded.add(id);
       render();
     }));
+    const si = el('aqi-search');
+    if (si) {
+      let t = null;
+      si.addEventListener('input', () => {
+        clearTimeout(t);
+        t = setTimeout(() => { _q = si.value.trim(); render(); }, 200);
+      });
+      // render() rebuilds the panel, so focus and caret must be restored or the box is
+      // unusable after one character.
+      si.focus();
+      si.setSelectionRange(si.value.length, si.value.length);
+    }
+    el('aqi-clear')?.addEventListener('click', () => { _q = ''; render(); });
+
     body.querySelectorAll('[data-q]').forEach(r => r.addEventListener('click', () => {
       _sel = r.getAttribute('data-q'); render();
     }));
@@ -822,7 +857,7 @@
       load();
     }, 30000);
     if (location.hash === '#air-quote-review') setTimeout(open, 700);
-    console.log('[air-quote-review] module v18 loaded');
+    console.log('[air-quote-review] module v19 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
