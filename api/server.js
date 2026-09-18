@@ -14019,6 +14019,12 @@ function aqPublic(q) {
   return {
     id: q.id, ref: q.ref, zendesk_ticket: q.zendesk_ticket, po_numbers: q.po_numbers,
     revision_of: q.revision_of || null,
+    superseded_by: (() => {
+      try {
+        const r = db.prepare(`SELECT ref FROM air_quote WHERE revision_of=? ORDER BY created_at DESC LIMIT 1`).get(q.id);
+        return r ? r.ref : null;
+      } catch (e) { return null; }
+    })(),
     week_start: q.week_start, week_label: q.week_label,
     vendor: q.vendor_raw, cartons: q.cartons, units: q.units,
     gross_weight_kg: q.gross_weight_kg, cbm: q.cbm, chargeable_kg: q.chargeable_kg,
@@ -14324,6 +14330,14 @@ app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), req
             sell_per_kg: per(l.sell_amount, q.chargeable_kg),
             sell_per_unit: per(l.sell_amount, q.units),
           })),
+          revision_of: q.revision_of || null,
+          // A revision points back at what it replaced, so a quote is superseded when
+          // another one points at it. Without this the original sits in the queue looking
+          // live beside its replacement.
+          superseded_by: (() => {
+            const r = db.prepare(`SELECT ref FROM air_quote WHERE revision_of=? ORDER BY created_at DESC LIMIT 1`).get(q.id);
+            return r ? r.ref : null;
+          })(),
           sell_mismatch: sellMismatch,
           price_history: db.prepare(`SELECT sell_amount, cost_amount, markup_pct, reason, created_at
                                      FROM air_quote_price_history WHERE quote_id=? ORDER BY created_at`).all(q.id),
