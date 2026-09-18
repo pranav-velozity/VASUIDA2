@@ -14172,7 +14172,15 @@ app.get('/air-quotes', authenticateRequest, requireClientOrInternal, (req, res) 
         per_unit_basis: withUnits.length,          // how many quotes carried a unit count
         approval_rate_pct: decided.length ? Math.round(appr.length / decided.length * 100) : null,
         avg_turnaround_hours: turn.length ? r2(turn.reduce((a, h) => a + h, 0) / turn.length) : null,
-        currency: rows.length ? rows[0].currency : 'AUD',
+        // Air freight quotes are USD throughout — the partner form's currency selector was
+        // removed for exactly that reason. Taking the label from rows[0] meant the tiles
+        // followed whatever the most recently created quote happened to carry, so one row
+        // with a stray value relabelled every figure on the panel. The amounts were USD
+        // regardless, which made it a mislabel rather than a conversion.
+        currency: 'USD',
+        // Surfaced rather than hidden: if a quote really is stored as something else, the
+        // figure it contributes to the totals is in a different unit and that matters.
+        mixed_currency: [...new Set(rows.map(r => r.currency).filter(x => x && x !== 'USD'))],
       },
       // Trend beside the average, so "above average" can be read against the season.
       trend: (() => {
