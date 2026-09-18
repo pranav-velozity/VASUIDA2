@@ -19224,6 +19224,7 @@ CREATE TABLE IF NOT EXISTS client_integration (
   installed_at TEXT,
   last_webhook_at TEXT,
   last_poll_at TEXT,
+  last_poll_result TEXT,
   last_error   TEXT,
   updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (client_id, provider)
@@ -19286,6 +19287,12 @@ function shopifyNormaliseShop(d) {
   if (x && !x.includes('.')) x += '.myshopify.com';
   return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(x) ? x : null;
 }
+try {
+  const c = db.prepare("PRAGMA table_info(client_integration)").all().map(x => x.name);
+  if (!c.includes('last_poll_result'))
+    db.exec("ALTER TABLE client_integration ADD COLUMN last_poll_result TEXT");
+} catch (e) { console.error('[client_integration:poll-result-migration]', e.message); }
+
 function shopifyIntegration(clientId) {
   return db.prepare(`SELECT * FROM client_integration WHERE client_id=? AND provider='shopify'`).get(clientId);
 }
@@ -19914,10 +19921,14 @@ async function shopifyPollOrders(clientId, since) {
     const r = shopifyUpsertOrder(clientId, o, _it && _it.shop_domain);
     r.duplicate ? dupes++ : created++;
   }
-  db.prepare(`UPDATE client_integration SET last_poll_at=datetime('now'), updated_at=datetime('now')
-              WHERE client_id=? AND provider='shopify'`).run(clientId);
-  return { fetched: (data.orders || []).length, created, already_present: dupes,
-           skipped_not_tagged: skipped, routing_tag: SHOPIFY_ORDER_TAG };
+  const result = { fetched: (data.orders || []).length, created, already_present: dupes,
+                   skipped_not_tagged: skipped, routing_tag: SHOPIFY_ORDER_TAG };
+  db.prepare(`UPDATE client_integration SET last_poll_at=datetime('now'),
+              last_poll_result=?, updated_at=datetime('now')
+              WHERE client_id=? AND provider='shopify'`)
+    .run(JSON.stringify({ created, already_present: dupes, skipped_not_tagged: skipped,
+                          fetched: result.fetched }), clientId);
+  return result;
 }
 
 app.post('/shopify/poll', authenticateRequest, requireRole(['admin']), writeOpLimiter, auditLog('shopify_poll'), async (req, res) => {
@@ -20244,6 +20255,10 @@ app.get('/shopify/status', authenticateRequest, (req, res) => {
       installed_at: it ? it.installed_at : null,
       last_webhook_at: it ? it.last_webhook_at : null,
       last_poll_at: it ? it.last_poll_at : null,
+      last_poll_result: (() => {
+        try { return it && it.last_poll_result ? JSON.parse(it.last_poll_result) : null; }
+        catch (e) { return null; }
+      })(),
       last_error: it ? it.last_error : null,
       queued_orders: q,
       api_version: SHOPIFY_API_VERSION,
