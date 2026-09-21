@@ -7361,6 +7361,307 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
 // A direct browser download carries its token in the query string, so it is promoted to a
 // header BEFORE authenticateRequest rather than inside the handler — the route previously
 // checked only that a token existed and never verified it, so req.auth was never populated.
+// ── Financial export ──
+//
+// DECISIONS WORTH KNOWING, because each one changes a number:
+//
+// Revenue is the invoice SUBTOTAL, excluding GST — consistent with the P&L tab. GST is a
+//   liability collected for the ATO, not income. Customs lines are GST-free and stored
+//   separately; they are shown in their own column rather than folded into revenue, because
+//   whether they are VelOzity's revenue or a disbursement passed through is an accounting
+//   decision, not one this export should make.
+//
+// Direct costs come from SUPPLIER INVOICES, by service month, once accepted. They are NOT
+//   read from fin_expenses: paying a supplier invoice writes an expense row too, so reading
+//   both would count every paid Kerry invoice twice. Accepted-but-unpaid invoices are
+//   included, because revenue is recognised on invoice rather than on receipt and the costs
+//   have to be on the same basis or the margin is wrong in any month with unpaid bills.
+//
+// Overheads are fin_expenses rows NOT linked to a supplier invoice.
+//
+// Currency is never mixed. Margin is computed in USD; any amount in another currency is
+//   listed and flagged but kept out of the USD totals, since adding AUD to USD produces a
+//   number that means nothing.
+//
+// Drafts are listed but not counted as revenue — nothing has been issued.
+
+function finPeriodKeys(ymd, basis) {
+  const d = new Date(String(ymd).slice(0, 10) + 'T00:00:00Z');
+  if (isNaN(d)) return null;
+  const y = d.getUTCFullYear(), m = d.getUTCMonth() + 1;
+  const month = `${y}-${String(m).padStart(2, '0')}`;
+  if (basis === 'calendar') {
+    const q = Math.ceil(m / 3);
+    return { month, quarter: `${y} Q${q}`, year: String(y) };
+  }
+  // Australian financial year, named by the year it ENDS in: July 2026 to June 2027 is FY2027.
+  const fyEnd = m >= 7 ? y + 1 : y;
+  const fyMonth = m >= 7 ? m - 6 : m + 6;          // July = 1
+  const q = Math.ceil(fyMonth / 3);
+  return { month, quarter: `FY${fyEnd} Q${q}`, year: `FY${fyEnd}` };
+}
+
+app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), requireInternalOrg,
+  auditLog('finance_export'), async (req, res) => {
+  try {
+    const basis = String(req.query.basis || 'au_fy') === 'calendar' ? 'calendar' : 'au_fy';
+    const ymd = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : null;
+
+    // Default: the current Australian financial year to date.
+    const today = new Date().toISOString().slice(0, 10);
+    const defFrom = (() => {
+      const y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
+      return basis === 'calendar' ? `${y}-01-01` : `${m >= 7 ? y : y - 1}-07-01`;
+    })();
+    const from = ymd(req.query.from) || defFrom;
+    const to = ymd(req.query.to) || today;
+    if (from > to) return res.status(400).json({ error: 'from must be on or before to' });
+    const monthFrom = from.slice(0, 7), monthTo = to.slice(0, 7);
+
+    const clientName = (id) => {
+      try { const b = clientBilling(id); return (b && b.legal_name) || id || 'Unassigned'; }
+      catch (e) { return id || 'Unassigned'; }
+    };
+
+    // ── Revenue ──
+    const invoices = db.prepare(`SELECT * FROM fin_invoices
+                                 WHERE COALESCE(invoice_date, week_start) BETWEEN ? AND ?
+                                 ORDER BY COALESCE(invoice_date, week_start), ref_number`).all(from, to);
+
+    // ── Direct costs: supplier invoices, accrual basis ──
+    const supInv = db.prepare(`SELECT * FROM supplier_invoice
+                               WHERE month_key BETWEEN ? AND ?
+                               ORDER BY month_key, supplier`).all(monthFrom, monthTo);
+    const COUNTED_SUPPLIER = ['accepted', 'paid'];
+
+    // ── Overheads: expenses NOT created by paying a supplier invoice ──
+    const overheads = db.prepare(`SELECT * FROM fin_expenses
+                                  WHERE supplier_invoice_id IS NULL
+                                    AND expense_date BETWEEN ? AND ?
+                                  ORDER BY expense_date`).all(from, to);
+
+    // ── Aggregate by period ──
+    const blank = () => ({ revenue: 0, gst: 0, customs: 0, invoices: 0, direct: 0, overheads: 0 });
+    const agg = { month: {}, quarter: {}, year: {} };
+    const byClient = {};
+    const nonUsd = [];
+
+    const add = (dateKey, field, amt, cur, client) => {
+      if (String(cur || 'USD').toUpperCase() !== 'USD') return false;
+      const k = finPeriodKeys(dateKey, basis); if (!k) return false;
+      for (const lvl of ['month', 'quarter', 'year']) {
+        const b = (agg[lvl][k[lvl]] = agg[lvl][k[lvl]] || blank());
+        b[field] += amt;
+      }
+      if (client !== undefined) {
+        const c = (byClient[client || 'Unassigned'] = byClient[client || 'Unassigned'] || blank());
+        c[field] += amt;
+      }
+      return true;
+    };
+
+    for (const inv of invoices) {
+      if (inv.status === 'draft') continue;
+      const d = inv.invoice_date || inv.week_start;
+      const cur = inv.currency || 'USD';
+      if (String(cur).toUpperCase() !== 'USD') { nonUsd.push({ kind: 'Invoice', ref: inv.ref_number, currency: cur, amount: inv.subtotal }); continue; }
+      add(d, 'revenue', Number(inv.subtotal) || 0, cur, inv.client_id);
+      add(d, 'gst', Number(inv.gst) || 0, cur, inv.client_id);
+      add(d, 'customs', Number(inv.customs) || 0, cur, inv.client_id);
+      add(d, 'invoices', 1, cur, inv.client_id);
+    }
+
+    for (const si of supInv) {
+      if (!COUNTED_SUPPLIER.includes(si.status)) continue;
+      const cur = si.currency || 'USD';
+      if (String(cur).toUpperCase() !== 'USD') { nonUsd.push({ kind: 'Supplier invoice', ref: si.invoice_number || si.id, currency: cur, amount: si.total_amount }); continue; }
+      const client = (() => { try { return siClientForFacility((SI_TYPES[si.invoice_type] || {}).facility); } catch (e) { return null; } })();
+      add(`${si.month_key}-01`, 'direct', Number(si.total_amount) || 0, cur, client);
+    }
+
+    for (const e of overheads) {
+      const cur = e.currency || 'USD';
+      if (String(cur).toUpperCase() !== 'USD') { nonUsd.push({ kind: 'Overhead', ref: e.description, currency: cur, amount: e.amount }); continue; }
+      add(e.expense_date, 'overheads', Number(e.amount) || 0, cur, e.client_id);
+    }
+
+    const finish = (b) => {
+      const gross = b.revenue - b.direct, net = gross - b.overheads;
+      return { ...b, gross, gross_pct: b.revenue ? gross / b.revenue : null,
+               net, net_pct: b.revenue ? net / b.revenue : null };
+    };
+
+    // ── Workbook ──
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'VelOzity Pinpoint';
+    wb.created = new Date();
+    const BRAND = 'FF990033', HEAD = 'FF1C1C1E', RULE = 'FFE5E5EA';
+    const MONEY = '#,##0.00;[Red]-#,##0.00', PCT = '0.0%;[Red]-0.0%', INT = '#,##0';
+
+    const sheet = (name, cols) => {
+      const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 1 }] });
+      ws.columns = cols.map(c => ({ header: c.h, key: c.k, width: c.w || 14 }));
+      const hr = ws.getRow(1);
+      hr.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10 };
+      hr.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: HEAD } };
+      hr.alignment = { vertical: 'middle' };
+      hr.height = 20;
+      cols.forEach((c, i) => {
+        if (c.f) ws.getColumn(i + 1).numFmt = c.f;
+        if (c.f) ws.getColumn(i + 1).alignment = { horizontal: 'right' };
+      });
+      return ws;
+    };
+
+    const periodCols = (label) => [
+      { h: label, k: 'period', w: 14 },
+      { h: 'Invoices', k: 'invoices', f: INT, w: 10 },
+      { h: 'Revenue (ex GST)', k: 'revenue', f: MONEY, w: 17 },
+      { h: 'GST collected', k: 'gst', f: MONEY },
+      { h: 'Customs (GST-free)', k: 'customs', f: MONEY, w: 17 },
+      { h: 'Direct costs', k: 'direct', f: MONEY },
+      { h: 'Gross margin', k: 'gross', f: MONEY },
+      { h: 'Gross %', k: 'gross_pct', f: PCT, w: 10 },
+      { h: 'Overheads', k: 'overheads', f: MONEY },
+      { h: 'Net margin', k: 'net', f: MONEY },
+      { h: 'Net %', k: 'net_pct', f: PCT, w: 10 },
+    ];
+
+    const writePeriods = (ws, map) => {
+      const keys = Object.keys(map).sort();
+      const tot = blank();
+      for (const k of keys) {
+        const r = finish(map[k]);
+        ws.addRow({ period: k, ...r });
+        for (const f of Object.keys(tot)) tot[f] += map[k][f];
+      }
+      const t = finish(tot);
+      const tr = ws.addRow({ period: 'Total', ...t });
+      tr.font = { bold: true };
+      tr.border = { top: { style: 'thin', color: { argb: HEAD } } };
+      return t;
+    };
+
+    // Summary
+    const basisLabel = basis === 'calendar' ? 'Calendar year (Jan–Dec)' : 'Australian financial year (Jul–Jun)';
+    const ws0 = wb.addWorksheet('Summary');
+    ws0.getColumn(1).width = 30; ws0.getColumn(2).width = 22;
+    ws0.addRow(['VelOzity — financial export']).font = { bold: true, size: 14, color: { argb: BRAND } };
+    ws0.addRow([]);
+    [['Period', `${from} to ${to}`], ['Basis', basisLabel], ['Currency', 'USD'],
+     ['Generated', new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC']]
+      .forEach(r => { const x = ws0.addRow(r); x.getCell(1).font = { color: { argb: 'FF6E6E73' } }; });
+    ws0.addRow([]);
+
+    const grand = blank();
+    for (const k of Object.keys(agg.month)) for (const f of Object.keys(grand)) grand[f] += agg.month[k][f];
+    const g = finish(grand);
+    const sumRows = [
+      ['Revenue (ex GST)', g.revenue, MONEY], ['GST collected', g.gst, MONEY],
+      ['Customs (GST-free, shown separately)', g.customs, MONEY], ['Direct costs', g.direct, MONEY],
+      ['Gross margin', g.gross, MONEY], ['Gross margin %', g.gross_pct, PCT],
+      ['Overheads', g.overheads, MONEY], ['Net margin', g.net, MONEY], ['Net margin %', g.net_pct, PCT],
+    ];
+    for (const [label, val, fmt] of sumRows) {
+      const r = ws0.addRow([label, val]);
+      r.getCell(2).numFmt = fmt; r.getCell(2).alignment = { horizontal: 'right' };
+      if (/margin$/i.test(label)) r.font = { bold: true };
+    }
+    ws0.addRow([]);
+    ws0.addRow(['By client']).font = { bold: true, size: 11 };
+    const ch = ws0.addRow(['Client', 'Revenue', 'Direct costs', 'Gross margin', 'Gross %', 'Overheads', 'Net margin']);
+    ch.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    ch.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: HEAD } };
+    [3, 4, 5, 6, 7].forEach(i => ws0.getColumn(i).width = 16);
+    for (const [cid, b] of Object.entries(byClient).sort()) {
+      const r = finish(b);
+      const row = ws0.addRow([clientName(cid), r.revenue, r.direct, r.gross, r.gross_pct, r.overheads, r.net]);
+      [2, 3, 4, 6, 7].forEach(i => row.getCell(i).numFmt = MONEY);
+      row.getCell(5).numFmt = PCT;
+    }
+
+    writePeriods(sheet('By Month', periodCols('Month')), agg.month);
+    writePeriods(sheet('By Quarter', periodCols('Quarter')), agg.quarter);
+    writePeriods(sheet('By Year', periodCols(basis === 'calendar' ? 'Year' : 'Financial year')), agg.year);
+
+    // Invoices, every one including drafts
+    const wsI = sheet('Invoices', [
+      { h: 'Invoice', k: 'ref', w: 26 }, { h: 'Client', k: 'client', w: 18 }, { h: 'Type', k: 'type', w: 8 },
+      { h: 'Invoice date', k: 'date', w: 12 }, { h: 'Week', k: 'week', w: 12 },
+      { h: 'Month', k: 'month', w: 10 }, { h: 'Quarter', k: 'quarter', w: 12 },
+      { h: 'Status', k: 'status', w: 9 }, { h: 'Subtotal (ex GST)', k: 'subtotal', f: MONEY, w: 16 },
+      { h: 'GST', k: 'gst', f: MONEY, w: 12 }, { h: 'Customs', k: 'customs', f: MONEY, w: 12 },
+      { h: 'Total', k: 'total', f: MONEY }, { h: 'Currency', k: 'cur', w: 9 },
+      { h: 'Counted in revenue', k: 'counted', w: 12 },
+    ]);
+    for (const inv of invoices) {
+      const k = finPeriodKeys(inv.invoice_date || inv.week_start, basis) || {};
+      wsI.addRow({ ref: inv.ref_number, client: clientName(inv.client_id), type: inv.type,
+        date: inv.invoice_date || '', week: inv.week_start, month: k.month, quarter: k.quarter,
+        status: inv.status, subtotal: Number(inv.subtotal) || 0, gst: Number(inv.gst) || 0,
+        customs: Number(inv.customs) || 0, total: Number(inv.total) || 0, cur: inv.currency || 'USD',
+        counted: inv.status === 'draft' ? 'No — draft' : ((inv.currency || 'USD') === 'USD' ? 'Yes' : 'No — currency') });
+    }
+
+    // Supplier costs, every one including those not yet accepted
+    const wsS = sheet('Supplier Costs', [
+      { h: 'Supplier', k: 'sup', w: 26 }, { h: 'Type', k: 'type', w: 8 }, { h: 'Service month', k: 'month', w: 12 },
+      { h: 'Invoice no', k: 'no', w: 18 }, { h: 'Status', k: 'status', w: 10 },
+      { h: 'Amount', k: 'amt', f: MONEY }, { h: 'Currency', k: 'cur', w: 9 },
+      { h: 'Counted as cost', k: 'counted', w: 14 },
+    ]);
+    for (const si of supInv) {
+      wsS.addRow({ sup: si.supplier, type: si.invoice_type, month: si.month_key,
+        no: si.invoice_number || '', status: si.status, amt: Number(si.total_amount) || 0,
+        cur: si.currency || 'USD',
+        counted: !COUNTED_SUPPLIER.includes(si.status) ? `No — ${si.status}`
+               : ((si.currency || 'USD') === 'USD' ? 'Yes' : 'No — currency') });
+    }
+
+    // Overheads
+    const wsO = sheet('Overheads', [
+      { h: 'Date', k: 'date', w: 12 }, { h: 'Month', k: 'month', w: 10 }, { h: 'Category', k: 'cat', w: 16 },
+      { h: 'Description', k: 'desc', w: 40 }, { h: 'Client', k: 'client', w: 16 },
+      { h: 'Amount', k: 'amt', f: MONEY }, { h: 'Currency', k: 'cur', w: 9 },
+    ]);
+    for (const e of overheads) {
+      const k = finPeriodKeys(e.expense_date, basis) || {};
+      wsO.addRow({ date: e.expense_date, month: k.month, cat: e.category, desc: e.description,
+        client: e.client_id ? clientName(e.client_id) : '', amt: Number(e.amount) || 0, cur: e.currency || 'USD' });
+    }
+
+    // How the numbers were built — so an accountant does not have to reverse-engineer them.
+    const wsN = wb.addWorksheet('Notes');
+    wsN.getColumn(1).width = 110;
+    [
+      'How these figures are built',
+      '',
+      'Revenue is the invoice subtotal, excluding GST. GST is a liability collected for the ATO, not income.',
+      'Customs lines are GST-free and shown separately. They are not included in revenue or margin — whether they are revenue or a pass-through disbursement is for your accountant to decide.',
+      'Draft invoices are listed on the Invoices sheet but not counted — nothing has been issued.',
+      'Direct costs are supplier invoices accepted or paid, by the month the service was provided. Accepted-but-unpaid invoices are included so costs sit on the same basis as revenue.',
+      'Overheads are expenses not linked to a supplier invoice. Paid supplier invoices also create an expense row; those are excluded here to avoid counting them twice.',
+      'All margins are in USD. Any amount in another currency is listed below and excluded from the totals rather than added to USD.',
+      `Periods follow the ${basisLabel.toLowerCase()}.` + (basis === 'au_fy' ? ' Financial years are named by the year they end in: July 2026 to June 2027 is FY2027.' : ''),
+    ].forEach((t, i) => { const r = wsN.addRow([t]); r.alignment = { wrapText: true, vertical: 'top' };
+                          if (i === 0) r.font = { bold: true, size: 12, color: { argb: BRAND } }; });
+    if (nonUsd.length) {
+      wsN.addRow([]);
+      wsN.addRow(['Excluded — not in USD']).font = { bold: true };
+      nonUsd.forEach(x => wsN.addRow([`${x.kind}: ${x.ref} — ${x.currency} ${Number(x.amount || 0).toFixed(2)}`]));
+    }
+
+    const fname = `VelOzity financials ${from} to ${to} (${basis === 'calendar' ? 'calendar' : 'AU FY'}).xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (e) {
+    console.error('[GET /finance/export.xlsx]', e);
+    if (!res.headersSent) res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 app.get('/finance/invoice/:id/pdf', (req, _res, next) => {
   if (req.query._token) req.headers['authorization'] = 'Bearer ' + req.query._token;
   next();
