@@ -7393,25 +7393,51 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
 //
 // Classification is by category. Anything not listed is an overhead, which is the safe
 // default: an unrecognised cost lowers net margin rather than silently inflating gross.
+// The chart of accounts. Every expense category maps to exactly one place on the P&L:
+//   direct       cost of sales, matched to a service line
+//   overhead     operating expense, grouped (Staff, Technology, Travel, ...)
+//   da/interest/tax   below EBITDA — present now so the statement is ready when the
+//                     accountant books them, even though today only tax is used
+//   drawings/intercompany   not the P&L at all
 const FIN_COST_CLASS = {
   'Air Freight Cost':   { kind: 'direct', line: 'AIR' },
   'Sea Freight Cost':   { kind: 'direct', line: 'SEA' },
   'VAS Cost':           { kind: 'direct', line: 'VAS' },
-  'Duties & Customs':   { kind: 'direct', line: 'CUSTOMS' },
   // The Finance UI groups Direct Labour under Operations alongside VAS, sea and air. Treating
   // it as overhead here would have the export and the UI disagree about the same row.
   'Direct Labour':      { kind: 'direct', line: 'VAS' },
+  'Duties & Customs':   { kind: 'direct', line: 'CUSTOMS' },
+
+  'Internal Overhead – Salaries': { kind: 'overhead', group: 'Staff' },
+  'Labour':                       { kind: 'overhead', group: 'Staff' },
+  'Internal Overhead – Software': { kind: 'overhead', group: 'Technology' },
+  'Software':                     { kind: 'overhead', group: 'Technology' },
+  'Travel':                       { kind: 'overhead', group: 'Travel' },
+  'Insurance':                    { kind: 'overhead', group: 'Insurance' },
+  'Internal Overhead – Office':   { kind: 'overhead', group: 'Office' },
+  'Storage':                      { kind: 'overhead', group: 'Storage' },
+  'Marketing':                    { kind: 'overhead', group: 'Marketing' },
+  'Internal Overhead – Other':    { kind: 'overhead', group: 'Other' },
+  'Other':                        { kind: 'overhead', group: 'Other' },
+
+  'Depreciation & Amortisation':  { kind: 'da' },
+  'Interest':                     { kind: 'interest' },
+  'Income Tax':                   { kind: 'tax' },
+
   // Owners taking money out is not an operating cost. Neither founder draws a salary, so any
   // withdrawal is a drawing, and it is kept out of the P&L entirely.
-  'Drawings':           { kind: 'drawings', line: null },
+  'Drawings':              { kind: 'drawings' },
   // Money moved to the LLC is a related-party transfer — a loan or an investment, which is
   // for the accountant — but in no case an expense of this company.
-  'Intercompany Transfer': { kind: 'intercompany', line: null },
+  'Intercompany Transfer': { kind: 'intercompany' },
 };
 
+// Unknown categories are an OVERHEAD in the "Other" group: a cost nobody has classified
+// lowers EBITDA rather than silently inflating gross profit.
 function finCostClass(category) {
-  return FIN_COST_CLASS[String(category || '').trim()] || { kind: 'overhead', line: null };
+  return FIN_COST_CLASS[String(category || '').trim()] || { kind: 'overhead', group: 'Other' };
 }
+const FIN_OPEX_ORDER = ['Staff', 'Technology', 'Travel', 'Insurance', 'Office', 'Storage', 'Marketing', 'Other'];
 
 // Supplier invoice types to service lines, so a Kerry invoice lands on the same line as the
 // revenue it supports.
@@ -7433,6 +7459,12 @@ const FIN_RECAT_RULES = [
   { date: '2026-06-01', amount: 1000,  desc: 'Pinpoint Infrastructure', to: 'Software', from: 'VAS Cost' },
   { date: '2026-07-01', amount: 1000,  desc: 'Pinpoint Infrastructure', to: 'Software', from: 'VAS Cost' },
   { date: '2026-04-01', amount: 2000,  desc: 'Ops Manager Salary', to: 'Labour', from: 'VAS Cost' },
+  // Second pass: specific operating costs that were sitting in "Other".
+  { date: '2026-04-29', amount: 7380,  desc: 'Public Liability Insurance putchase for TIC', to: 'Insurance', from: 'Other' },
+  { date: '2026-04-29', amount: 3400,  desc: 'SHUCH US TICKET FOR MAY', to: 'Travel', from: 'Other' },
+  { date: '2026-05-10', amount: 4000,  desc: 'SHUCH US TRAVEL - HOTEL ACCOMODATION and FOOD', to: 'Travel', from: 'Other' },
+  { date: '2026-07-22', amount: 2000,  desc: "Expenses on Pranav's Sydney tour in July", to: 'Travel', from: 'Other' },
+  { date: '2026-08-28', amount: 2175,  desc: 'Shuch US Travel Ticket in September 2026', to: 'Travel', from: 'Other' },
 ];
 
 function finRecatMatch(r) {
@@ -7493,6 +7525,196 @@ function finPeriodKeys(ymd, basis) {
   return { month, quarter: `FY${fyEnd} Q${q}`, year: `FY${fyEnd}` };
 }
 
+// ── P&L statement ──
+// Management-accounts format: revenue by line, cost of sales matched to it, gross profit,
+// operating expenses by group, EBITDA, then D&A, interest and tax down to net profit.
+// Drawings, intercompany transfers and GST sit BELOW THE LINE — shown, never counted.
+//
+// The rows are built here in presentation order so the page only renders them; the rules for
+// what goes where live in one place (FIN_COST_CLASS) and cannot drift between the export,
+// the statement and the UI.
+//
+// Accrual basis, matching the export: revenue by invoice date (drafts excluded), direct costs
+// by service month including accepted-but-unpaid supplier invoices.
+function finCollect(from, to) {
+  const out = [];              // { month, section, key, amount }
+  const incomplete = new Set(), nonUsd = [];
+  const usd = (c) => String(c || 'USD').toUpperCase() === 'USD';
+  const LINE_OF = { AIR: 'AIR', SEA: 'SEA', VAS: 'VAS' };
+
+  for (const inv of db.prepare(`SELECT * FROM fin_invoices WHERE status <> 'draft'
+                                AND COALESCE(invoice_date, week_start) BETWEEN ? AND ?`).all(from, to)) {
+    if (!usd(inv.currency)) { nonUsd.push({ kind: 'Invoice', ref: inv.ref_number, currency: inv.currency }); continue; }
+    const month = String(inv.invoice_date || inv.week_start).slice(0, 7);
+    out.push({ month, section: 'revenue', key: LINE_OF[String(inv.type || '').toUpperCase()] || 'OTHER',
+               amount: Number(inv.subtotal) || 0 });
+    if (Number(inv.customs)) out.push({ month, section: 'revenue', key: 'CUSTOMS', amount: Number(inv.customs) });
+    if (Number(inv.gst)) out.push({ month, section: 'gst', key: 'GST', amount: Number(inv.gst) });
+  }
+
+  for (const si of db.prepare(`SELECT * FROM supplier_invoice WHERE month_key BETWEEN ? AND ?`)
+                     .all(from.slice(0, 7), to.slice(0, 7))) {
+    if (['requested', 'received', 'queried'].includes(si.status)) incomplete.add(si.month_key);
+    if (!['accepted', 'paid'].includes(si.status)) continue;
+    if (!usd(si.currency)) { nonUsd.push({ kind: 'Supplier invoice', ref: si.invoice_number || si.id, currency: si.currency }); continue; }
+    out.push({ month: si.month_key, section: 'cogs', key: SI_LINE[si.invoice_type] || 'OTHER',
+               amount: Number(si.total_amount) || 0 });
+  }
+
+  // supplier_invoice_id IS NULL: paying a supplier invoice writes an expense row too, and it
+  // is already counted above.
+  for (const e of db.prepare(`SELECT * FROM fin_expenses WHERE supplier_invoice_id IS NULL
+                              AND expense_date BETWEEN ? AND ?`).all(from, to)) {
+    if (!usd(e.currency)) { nonUsd.push({ kind: 'Expense', ref: e.description, currency: e.currency }); continue; }
+    const c = finCostClass(e.category);
+    const month = String(e.expense_date).slice(0, 7), amount = Number(e.amount) || 0;
+    if (c.kind === 'direct')        out.push({ month, section: 'cogs', key: c.line, amount });
+    else if (c.kind === 'overhead') out.push({ month, section: 'opex', key: c.group || 'Other', amount });
+    else                            out.push({ month, section: c.kind, key: c.kind, amount });
+  }
+  return { entries: out, incomplete, nonUsd };
+}
+
+function finStatementRows(entries, colKeyOf) {
+  const cols = new Set(['__total']);
+  const sum = {};               // sum[section|key][col]
+  const put = (id, col, amt) => { (sum[id] = sum[id] || {}); sum[id][col] = (sum[id][col] || 0) + amt; };
+  for (const e of entries) {
+    const col = colKeyOf(e.month); if (!col) continue;
+    cols.add(col);
+    put(e.section + '|' + e.key, col, e.amount);
+    put(e.section + '|__all', col, e.amount);
+    put(e.section + '|__all', '__total', e.amount);
+    put(e.section + '|' + e.key, '__total', e.amount);
+  }
+  const keys = [...cols];
+  const v = (id) => keys.reduce((a, c) => (a[c] = (sum[id] && sum[id][c]) || 0, a), {});
+  const calc = (fn) => keys.reduce((a, c) => (a[c] = fn(c), a), {});
+  const get = (id, c) => (sum[id] && sum[id][c]) || 0;
+
+  const rev = (c) => get('revenue|__all', c);
+  const gross = (c) => rev(c) - get('cogs|__all', c);
+  const ebitda = (c) => gross(c) - get('opex|__all', c);
+  const ebit = (c) => ebitda(c) - get('da|__all', c);
+  const pbt = (c) => ebit(c) - get('interest|__all', c);
+  const net = (c) => pbt(c) - get('tax|__all', c);
+  const pct = (fn) => calc(c => rev(c) ? fn(c) / rev(c) : null);
+  const has = (id) => keys.some(c => get(id, c));
+
+  const REV = [['AIR', 'Air freight'], ['SEA', 'Sea freight'], ['VAS', 'Value-added services'],
+               ['CUSTOMS', 'Customs recoveries'], ['OTHER', 'Other revenue']];
+  const COGS = [['AIR', 'Air freight'], ['SEA', 'Sea freight'], ['VAS', 'Value-added services'],
+                ['CUSTOMS', 'Duties & customs'], ['OTHER', 'Other direct costs']];
+  // Every row carries an id. "Air freight" appears under both Revenue and Cost of sales, so
+  // matching the comparison by label would hand the cost line the revenue figure.
+  const rows = [];
+  const H = (id, label) => rows.push({ id, type: 'header', label });
+  const L = (id, label, values, always) => { if (always || Object.values(values).some(x => x)) rows.push({ id, type: 'line', label, values }); };
+  const S = (id, label, values) => rows.push({ id, type: 'subtotal', label, values });
+  const T = (id, label, values) => rows.push({ id, type: 'total', label, values });
+  const P = (id, label, values) => rows.push({ id, type: 'pct', label, values });
+
+  H('h:rev', 'Revenue');
+  for (const [k, lab] of REV) L('rev:' + k, lab, v('revenue|' + k));
+  S('s:rev', 'Total revenue', calc(rev));
+  H('h:cogs', 'Cost of sales');
+  for (const [k, lab] of COGS) L('cogs:' + k, lab, v('cogs|' + k));
+  S('s:cogs', 'Total cost of sales', v('cogs|__all'));
+  T('t:gross', 'Gross profit', calc(gross));
+  P('p:gross', 'Gross margin', pct(gross));
+  H('h:opex', 'Operating expenses');
+  for (const g of FIN_OPEX_ORDER) L('opex:' + g, g, v('opex|' + g));
+  S('s:opex', 'Total operating expenses', v('opex|__all'));
+  T('t:ebitda', 'EBITDA', calc(ebitda));
+  P('p:ebitda', 'EBITDA margin', pct(ebitda));
+  // Always shown, even at zero, so the statement is complete the day these start being booked.
+  L('l:da', 'Depreciation & amortisation', v('da|__all'), true);
+  T('t:ebit', 'EBIT', calc(ebit));
+  L('l:int', 'Interest', v('interest|__all'), true);
+  T('t:pbt', 'Profit before tax', calc(pbt));
+  L('l:tax', 'Income tax', v('tax|__all'), true);
+  T('t:net', 'Net profit', calc(net));
+  P('p:net', 'Net margin', pct(net));
+
+  const below = [
+    { label: 'Founder drawings', values: v('drawings|__all') },
+    { label: 'Intercompany transfers', values: v('intercompany|__all') },
+    { label: 'GST collected (owed to the ATO)', values: v('gst|__all') },
+  ];
+  return { rows, below, cols: keys };
+}
+
+app.get('/finance/statement', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+  try {
+    const basis = String(req.query.basis || 'au_fy') === 'calendar' ? 'calendar' : 'au_fy';
+    const gran = ['month', 'quarter', 'year'].includes(String(req.query.granularity)) ? String(req.query.granularity) : 'month';
+    const compare = ['prior', 'yoy'].includes(String(req.query.compare)) ? String(req.query.compare) : 'none';
+    const ymd = (x) => /^\d{4}-\d{2}-\d{2}$/.test(String(x || '')) ? String(x) : null;
+    const today = new Date().toISOString().slice(0, 10);
+    const y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
+    const from = ymd(req.query.from) || (basis === 'calendar' ? `${y}-01-01` : `${m >= 7 ? y : y - 1}-07-01`);
+    const to = ymd(req.query.to) || today;
+    if (from > to) return res.status(400).json({ error: 'from must be on or before to' });
+
+    const cur = finCollect(from, to);
+    const colOf = (month) => { const k = finPeriodKeys(month + '-01', basis); return k ? k[gran] : null; };
+    const st = finStatementRows(cur.entries, colOf);
+
+    const periods = st.cols.filter(c => c !== '__total').sort();
+    const provisional = new Set();
+    for (const mk of cur.incomplete) { const k = colOf(mk); if (k) provisional.add(k); }
+
+    // Comparison: the equivalent range before this one — the immediately preceding stretch of
+    // the same length, or the same dates a year earlier.
+    let cmp = null, cmpRange = null;
+    if (compare !== 'none') {
+      const d0 = new Date(from + 'T00:00:00Z'), d1 = new Date(to + 'T00:00:00Z');
+      let a, b;
+      if (compare === 'yoy') {
+        a = new Date(d0); a.setUTCFullYear(a.getUTCFullYear() - 1);
+        b = new Date(d1); b.setUTCFullYear(b.getUTCFullYear() - 1);
+      } else {
+        const span = d1 - d0;
+        b = new Date(d0.getTime() - 86400000); a = new Date(b.getTime() - span);
+      }
+      cmpRange = { from: a.toISOString().slice(0, 10), to: b.toISOString().slice(0, 10) };
+      const c = finCollect(cmpRange.from, cmpRange.to);
+      // One column only — the comparison is a single total, not a second grid.
+      cmp = finStatementRows(c.entries, () => '__cmp');
+    }
+
+    const pick = (values) => {
+      const o = {}; for (const p of periods) o[p] = values[p] ?? 0;
+      o.__total = values.__total ?? 0; return o;
+    };
+    const rows = st.rows.map((r, i) => {
+      if (r.type === 'header') return r;
+      const out = { ...r, values: r.type === 'pct'
+        ? Object.fromEntries([...periods, '__total'].map(p => [p, r.values[p] ?? null]))
+        : pick(r.values) };
+      if (cmp) {
+        const twin = cmp.rows.find(x => x.id === r.id);
+        const cv = twin ? (twin.values.__cmp ?? (r.type === 'pct' ? null : 0)) : (r.type === 'pct' ? null : 0);
+        out.compare = cv;
+        if (r.type !== 'pct') out.variance = (out.values.__total || 0) - (cv || 0);
+      }
+      return out;
+    });
+
+    res.json({
+      from, to, basis, granularity: gran, compare, compare_range: cmpRange,
+      columns: periods.map(p => ({ key: p, label: p, provisional: provisional.has(p) })),
+      rows, below: st.below.map(b => ({ label: b.label, values: pick(b.values),
+        compare: cmp ? ((cmp.below.find(x => x.label === b.label) || {}).values || {}).__cmp || 0 : undefined })),
+      excluded_currency: cur.nonUsd,
+      currency: 'USD',
+    });
+  } catch (e) {
+    console.error('[GET /finance/statement]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), requireInternalOrg,
   auditLog('finance_export'), async (req, res) => {
   try {
@@ -7533,7 +7755,7 @@ app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), req
                                   ORDER BY expense_date`).all(from, to);
 
     // ── Aggregate by period ──
-    const blank = () => ({ revenue: 0, gst: 0, customs: 0, invoices: 0, direct: 0, overheads: 0 });
+    const blank = () => ({ revenue: 0, gst: 0, customs: 0, invoices: 0, direct: 0, overheads: 0, below: 0 });
     const agg = { month: {}, quarter: {}, year: {} };
     const byClient = {};
     const nonUsd = [];
@@ -7602,15 +7824,24 @@ app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), req
       if (cls.kind === 'direct') {
         add(e.expense_date, 'direct', Number(e.amount) || 0, cur, e.client_id);
         lineAdd(String(e.expense_date).slice(0, 7), cls.line, 'manual_cost', Number(e.amount) || 0);
+      } else if (cls.kind === 'da' || cls.kind === 'interest' || cls.kind === 'tax') {
+        // Below EBITDA. Filing tax as an overhead would drag it into EBITDA, which is the one
+        // figure specifically defined to exclude it.
+        add(e.expense_date, 'below', Number(e.amount) || 0, cur, e.client_id);
       } else {
         add(e.expense_date, 'overheads', Number(e.amount) || 0, cur, e.client_id);
       }
     }
 
+    // Customs recovered sits in revenue and customs paid sits in cost of sales. Previously the
+    // cost was counted and the recovery was not, which understated gross margin by roughly
+    // the whole customs figure.
     const finish = (b) => {
-      const gross = b.revenue - b.direct, net = gross - b.overheads;
-      return { ...b, gross, gross_pct: b.revenue ? gross / b.revenue : null,
-               net, net_pct: b.revenue ? net / b.revenue : null };
+      const rev = b.revenue + b.customs;
+      const gross = rev - b.direct, ebitda = gross - b.overheads, net = ebitda - b.below;
+      return { ...b, gross, gross_pct: rev ? gross / rev : null,
+               ebitda, ebitda_pct: rev ? ebitda / rev : null,
+               net, net_pct: rev ? net / rev : null };
     };
 
     // ── Workbook ──
@@ -7644,8 +7875,11 @@ app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), req
       { h: 'Direct costs', k: 'direct', f: MONEY },
       { h: 'Gross margin', k: 'gross', f: MONEY },
       { h: 'Gross %', k: 'gross_pct', f: PCT, w: 10 },
-      { h: 'Overheads', k: 'overheads', f: MONEY },
-      { h: 'Net margin', k: 'net', f: MONEY },
+      { h: 'Operating expenses', k: 'overheads', f: MONEY, w: 17 },
+      { h: 'EBITDA', k: 'ebitda', f: MONEY },
+      { h: 'EBITDA %', k: 'ebitda_pct', f: PCT, w: 10 },
+      { h: 'D&A, interest, tax', k: 'below', f: MONEY, w: 17 },
+      { h: 'Net profit', k: 'net', f: MONEY },
       { h: 'Net %', k: 'net_pct', f: PCT, w: 10 },
     ];
 
@@ -7697,22 +7931,25 @@ app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), req
       ['Revenue (ex GST)', g.revenue, MONEY], ['GST collected', g.gst, MONEY],
       ['Customs (GST-free, shown separately)', g.customs, MONEY], ['Direct costs', g.direct, MONEY],
       ['Gross margin', g.gross, MONEY], ['Gross margin %', g.gross_pct, PCT],
-      ['Overheads', g.overheads, MONEY], ['Net margin', g.net, MONEY], ['Net margin %', g.net_pct, PCT],
+      ['Operating expenses', g.overheads, MONEY], ['EBITDA', g.ebitda, MONEY], ['EBITDA %', g.ebitda_pct, PCT],
+      ['D&A, interest, tax', g.below, MONEY], ['Net profit', g.net, MONEY], ['Net margin %', g.net_pct, PCT],
     ];
     for (const [label, val, fmt] of sumRows) {
       const r = ws0.addRow([label, val]);
       r.getCell(2).numFmt = fmt; r.getCell(2).alignment = { horizontal: 'right' };
-      if (/margin$/i.test(label)) r.font = { bold: true };
+      if (/(margin|EBITDA|profit)$/i.test(label)) r.font = { bold: true };
     }
     ws0.addRow([]);
     ws0.addRow(['By client']).font = { bold: true, size: 11 };
-    const ch = ws0.addRow(['Client', 'Revenue', 'Direct costs', 'Gross margin', 'Gross %', 'Overheads', 'Net margin']);
+    const ch = ws0.addRow(['Client', 'Revenue incl. customs', 'Direct costs', 'Gross margin', 'Gross %', 'Operating expenses', 'EBITDA']);
     ch.font = { bold: true, color: { argb: 'FFFFFFFF' } };
     ch.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: HEAD } };
     [3, 4, 5, 6, 7].forEach(i => ws0.getColumn(i).width = 16);
     for (const [cid, b] of Object.entries(byClient).sort()) {
       const r = finish(b);
-      const row = ws0.addRow([clientName(cid), r.revenue, r.direct, r.gross, r.gross_pct, r.overheads, r.net]);
+      // Revenue here includes customs so that revenue less direct costs equals the gross margin
+      // printed beside it — otherwise the row would not reconcile across its own columns.
+      const row = ws0.addRow([clientName(cid), r.revenue + r.customs, r.direct, r.gross, r.gross_pct, r.overheads, r.ebitda]);
       [2, 3, 4, 6, 7].forEach(i => row.getCell(i).numFmt = MONEY);
       row.getCell(5).numFmt = PCT;
     }
@@ -7828,7 +8065,7 @@ app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), req
       'How these figures are built',
       '',
       'Revenue is the invoice subtotal, excluding GST. GST is a liability collected for the ATO, not income.',
-      'Customs lines are GST-free and shown separately. They are not included in revenue or margin — whether they are revenue or a pass-through disbursement is for your accountant to decide.',
+      'Customs recovered from clients is treated as revenue, and duties & customs paid as cost of sales, so the two net against each other in gross margin. Customs lines are GST-free and shown in their own column.',
       'Draft invoices are listed on the Invoices sheet but not counted — nothing has been issued.',
       'Direct costs are classified by category: Air Freight Cost, Sea Freight Cost, VAS Cost and Duties & Customs. Supplier invoices accepted or paid are also direct costs, by the month the service was provided.',
       'Paying a supplier invoice also writes an expense row. Those rows are excluded, so a paid Kerry invoice is counted once.',
@@ -8208,7 +8445,7 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), requireInter
     const expRows = db.prepare(`
       SELECT * FROM fin_expenses WHERE month_key >= ? AND month_key <= ? ORDER BY expense_date
     `).all(`${y}-01`, `${y}-12`)
-      .filter(e => { const k = finCostClass(e.category).kind; return k !== 'drawings' && k !== 'intercompany'; });
+      .filter(e => { const k = finCostClass(e.category).kind; return k === 'direct' || k === 'overhead'; });
 
     // ── 3. VAS applied units by month from records ──
     const vasUnitRows = db.prepare(`
