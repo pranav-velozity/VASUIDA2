@@ -7385,6 +7385,95 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
 //
 // Drafts are listed but not counted as revenue — nothing has been issued.
 
+// ── Cost classification ──
+// ONE place that decides what an expense is. The export used to decide by whether a row was
+// linked to a supplier invoice — but that system is weeks old, and every cost before it was
+// entered by hand. So $400k of air, sea and VAS cost was classed as overhead, gross margin
+// ignored it, and the export reported 97.5%.
+//
+// Classification is by category. Anything not listed is an overhead, which is the safe
+// default: an unrecognised cost lowers net margin rather than silently inflating gross.
+const FIN_COST_CLASS = {
+  'Air Freight Cost':   { kind: 'direct', line: 'AIR' },
+  'Sea Freight Cost':   { kind: 'direct', line: 'SEA' },
+  'VAS Cost':           { kind: 'direct', line: 'VAS' },
+  'Duties & Customs':   { kind: 'direct', line: 'CUSTOMS' },
+  // Owners taking money out is not an operating cost. Neither founder draws a salary, so any
+  // withdrawal is a drawing, and it is kept out of the P&L entirely.
+  'Drawings':           { kind: 'drawings', line: null },
+  // Money moved to the LLC is a related-party transfer — a loan or an investment, which is
+  // for the accountant — but in no case an expense of this company.
+  'Intercompany Transfer': { kind: 'intercompany', line: null },
+};
+
+function finCostClass(category) {
+  return FIN_COST_CLASS[String(category || '').trim()] || { kind: 'overhead', line: null };
+}
+
+// Supplier invoice types to service lines, so a Kerry invoice lands on the same line as the
+// revenue it supports.
+const SI_LINE = { VAS_KY: 'VAS', VAS_TX: 'VAS', SEA: 'SEA', AIR: 'AIR' };
+
+// ── One-off recategorisation, approved row by row ──
+// Each rule names a row by date, amount AND description together, so it can only ever touch
+// the exact entry that was reviewed. A rule matching nothing, or more than one row, is
+// reported and not applied.
+const FIN_RECAT_RULES = [
+  { date: '2026-06-09', amount: 15000, desc: 'PRANAV THAKKAR - WITHDRAWAL - 17000 AUD PLUS 2000 AUD', to: 'Drawings' },
+  { date: '2026-06-21', amount: 5000,  desc: 'Shuch Das Withdrawal - USD 5000 - Credit Card Payment', to: 'Drawings' },
+  { date: '2026-07-30', amount: 5000,  desc: 'Shuch Das - Director Salary withdrawal', to: 'Drawings' },
+  { date: '2026-08-27', amount: 2500,  desc: 'PRANAV THAKKAR WITHDRAWAL - AUGUST 2026 2500 USD', to: 'Drawings' },
+  { date: '2026-07-29', amount: 5000,  desc: 'Transferred to velOzity LLC -5000 USD', to: 'Intercompany Transfer' },
+  // Not costs of delivering VAS, so they do not belong in the VAS line's margin.
+  { date: '2026-04-01', amount: 1000,  desc: 'Pinpoint Infrastructure', to: 'Software', from: 'VAS Cost' },
+  { date: '2026-05-01', amount: 1000,  desc: 'Pinpoint Infrastructure', to: 'Software', from: 'VAS Cost' },
+  { date: '2026-06-01', amount: 1000,  desc: 'Pinpoint Infrastructure', to: 'Software', from: 'VAS Cost' },
+  { date: '2026-07-01', amount: 1000,  desc: 'Pinpoint Infrastructure', to: 'Software', from: 'VAS Cost' },
+  { date: '2026-04-01', amount: 2000,  desc: 'Ops Manager Salary', to: 'Labour', from: 'VAS Cost' },
+];
+
+function finRecatMatch(r) {
+  let sql = `SELECT * FROM fin_expenses WHERE expense_date=? AND ABS(amount - ?) < 0.005 AND description=?`;
+  const p = [r.date, r.amount, r.desc];
+  if (r.from) { sql += ' AND category=?'; p.push(r.from); }
+  return db.prepare(sql).all(...p);
+}
+
+app.get('/finance/recategorise/preview', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+  try {
+    const out = FIN_RECAT_RULES.map(r => {
+      const m = finRecatMatch(r);
+      return { date: r.date, amount: r.amount, description: r.desc,
+        current: m.length === 1 ? m[0].category : null, proposed: r.to,
+        matches: m.length,
+        status: m.length === 1 ? (m[0].category === r.to ? 'already done' : 'will change')
+              : m.length === 0 ? 'NOT FOUND — skipped' : 'AMBIGUOUS — skipped' };
+    });
+    res.json({ rules: out, will_change: out.filter(x => x.status === 'will change').length,
+               note: 'Read only. Nothing has been changed.' });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/finance/recategorise/apply', authenticateRequest, requireRole(['admin']), requireInternalOrg,
+  writeOpLimiter, auditLog('finance_recategorise'), (req, res) => {
+  try {
+    if (String((req.body || {}).confirm || '') !== '1')
+      return res.status(400).json({ error: 'confirm_required', message: 'Run the preview first, then pass confirm=1.' });
+    const done = [], skipped = [];
+    db.transaction(() => {
+      for (const r of FIN_RECAT_RULES) {
+        const m = finRecatMatch(r);
+        if (m.length !== 1) { skipped.push({ ...r, matches: m.length }); continue; }
+        if (m[0].category === r.to) continue;
+        db.prepare(`UPDATE fin_expenses SET category=?, updated_at=datetime('now') WHERE id=?`).run(r.to, m[0].id);
+        done.push({ date: r.date, amount: r.amount, description: r.desc, from: m[0].category, to: r.to });
+      }
+    })();
+    console.warn('[finance:recategorise]', done.length, 'changed,', skipped.length, 'skipped');
+    res.json({ ok: true, changed: done.length, skipped: skipped.length, done, skipped_rules: skipped });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 function finPeriodKeys(ymd, basis) {
   const d = new Date(String(ymd).slice(0, 10) + 'T00:00:00Z');
   if (isNaN(d)) return null;
@@ -7460,8 +7549,27 @@ app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), req
       return true;
     };
 
+    // Month x service line: revenue against the direct cost of delivering it. This is the
+    // table that answers "which line actually makes money", which a single gross figure
+    // across everything cannot.
+    const lines = {};
+    const lineAdd = (month, line, field, amt) => {
+      const k = month + '|' + line;
+      const b = (lines[k] = lines[k] || { month, line, revenue: 0, cost: 0, manual_cost: 0, supplier_cost: 0 });
+      b[field] += amt;
+    };
+    // Months whose supplier costs have not all arrived. Their margins are not final, and
+    // presenting them as final is how August showed 75% net on a $150k VAS month.
+    const incomplete = new Set();
+    const drawings = [];
+
     for (const inv of invoices) {
       if (inv.status === 'draft') continue;
+      if (String(inv.currency || 'USD').toUpperCase() === 'USD') {
+        const mk = String(inv.invoice_date || inv.week_start).slice(0, 7);
+        lineAdd(mk, String(inv.type || 'OTHER').toUpperCase(), 'revenue', Number(inv.subtotal) || 0);
+        if (Number(inv.customs)) lineAdd(mk, 'CUSTOMS', 'revenue', Number(inv.customs) || 0);
+      }
       const d = inv.invoice_date || inv.week_start;
       const cur = inv.currency || 'USD';
       if (String(cur).toUpperCase() !== 'USD') { nonUsd.push({ kind: 'Invoice', ref: inv.ref_number, currency: cur, amount: inv.subtotal }); continue; }
@@ -7472,7 +7580,10 @@ app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), req
     }
 
     for (const si of supInv) {
+      if (['requested', 'received', 'queried'].includes(si.status)) incomplete.add(si.month_key);
       if (!COUNTED_SUPPLIER.includes(si.status)) continue;
+      if (String(si.currency || 'USD').toUpperCase() === 'USD')
+        lineAdd(si.month_key, SI_LINE[si.invoice_type] || si.invoice_type, 'supplier_cost', Number(si.total_amount) || 0);
       const cur = si.currency || 'USD';
       if (String(cur).toUpperCase() !== 'USD') { nonUsd.push({ kind: 'Supplier invoice', ref: si.invoice_number || si.id, currency: cur, amount: si.total_amount }); continue; }
       const client = (() => { try { return siClientForFacility((SI_TYPES[si.invoice_type] || {}).facility); } catch (e) { return null; } })();
@@ -7480,9 +7591,17 @@ app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), req
     }
 
     for (const e of overheads) {
+      const cls = finCostClass(e.category);
+      // Drawings and intercompany transfers leave the P&L entirely — shown on their own sheet.
+      if (cls.kind === 'drawings' || cls.kind === 'intercompany') { drawings.push({ ...e, cls }); continue; }
       const cur = e.currency || 'USD';
-      if (String(cur).toUpperCase() !== 'USD') { nonUsd.push({ kind: 'Overhead', ref: e.description, currency: cur, amount: e.amount }); continue; }
-      add(e.expense_date, 'overheads', Number(e.amount) || 0, cur, e.client_id);
+      if (String(cur).toUpperCase() !== 'USD') { nonUsd.push({ kind: 'Expense', ref: e.description, currency: cur, amount: e.amount }); continue; }
+      if (cls.kind === 'direct') {
+        add(e.expense_date, 'direct', Number(e.amount) || 0, cur, e.client_id);
+        lineAdd(String(e.expense_date).slice(0, 7), cls.line, 'manual_cost', Number(e.amount) || 0);
+      } else {
+        add(e.expense_date, 'overheads', Number(e.amount) || 0, cur, e.client_id);
+      }
     }
 
     const finish = (b) => {
@@ -7527,12 +7646,27 @@ app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), req
       { h: 'Net %', k: 'net_pct', f: PCT, w: 10 },
     ];
 
-    const writePeriods = (ws, map) => {
+    // A period is provisional if any month inside it still has supplier costs outstanding.
+    const periodIncomplete = (lvl, key) => [...incomplete].some(mk => {
+      const k = finPeriodKeys(mk + '-01', basis); return k && k[lvl] === key;
+    });
+    const writePeriods = (ws, map, lvl) => {
       const keys = Object.keys(map).sort();
       const tot = blank();
+      const sc = ws.columnCount + 1;
+      ws.getColumn(sc).width = 34;
+      const hc = ws.getRow(1).getCell(sc);
+      hc.value = 'Status';
+      hc.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10 };
+      hc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: HEAD } };
       for (const k of keys) {
         const r = finish(map[k]);
-        ws.addRow({ period: k, ...r });
+        const row = ws.addRow({ period: k, ...r });
+        if (periodIncomplete(lvl, k)) {
+          row.getCell(sc).value = 'PROVISIONAL — supplier costs outstanding';
+          row.getCell(sc).font = { color: { argb: 'FFB7791F' }, bold: true };
+          row.font = { color: { argb: 'FF6E6E73' }, italic: true };
+        }
         for (const f of Object.keys(tot)) tot[f] += map[k][f];
       }
       const t = finish(tot);
@@ -7580,9 +7714,59 @@ app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), req
       row.getCell(5).numFmt = PCT;
     }
 
-    writePeriods(sheet('By Month', periodCols('Month')), agg.month);
-    writePeriods(sheet('By Quarter', periodCols('Quarter')), agg.quarter);
-    writePeriods(sheet('By Year', periodCols(basis === 'calendar' ? 'Year' : 'Financial year')), agg.year);
+    writePeriods(sheet('By Month', periodCols('Month')), agg.month, 'month');
+    writePeriods(sheet('By Quarter', periodCols('Quarter')), agg.quarter, 'quarter');
+    writePeriods(sheet('By Year', periodCols(basis === 'calendar' ? 'Year' : 'Financial year')), agg.year, 'year');
+
+    // Service lines — revenue against the cost of delivering it, month by month.
+    const wsL = sheet('Service Lines', [
+      { h: 'Month', k: 'month', w: 10 }, { h: 'Line', k: 'line', w: 10 },
+      { h: 'Revenue', k: 'revenue', f: MONEY }, { h: 'Direct cost', k: 'cost', f: MONEY },
+      { h: 'Margin', k: 'margin', f: MONEY }, { h: 'Margin %', k: 'pct', f: PCT, w: 10 },
+      { h: 'from manual entries', k: 'manual', f: MONEY, w: 16 },
+      { h: 'from supplier invoices', k: 'supplier', f: MONEY, w: 18 },
+      { h: 'Check', k: 'check', w: 44 },
+    ]);
+    const lineTot = {};
+    for (const k of Object.keys(lines).sort()) {
+      const b = lines[k];
+      const cost = b.manual_cost + b.supplier_cost;
+      const margin = b.revenue - cost;
+      // Both sources for the same line and month is the pattern of a double count: a cost
+      // entered by hand AND the supplier's invoice for it. Flagged rather than silently
+      // dropped, because only you can tell which one is the real record.
+      const checks = [];
+      if (b.manual_cost && b.supplier_cost) checks.push('Possible double count — both a manual entry and a supplier invoice');
+      if (incomplete.has(b.month) && b.line !== 'CUSTOMS') checks.push('Provisional — supplier costs outstanding');
+      if (b.revenue && !cost && b.line !== 'CUSTOMS') checks.push('No cost recorded');
+      if (cost && !b.revenue) checks.push('Cost with no revenue this month — timing?');
+      const row = wsL.addRow({ month: b.month, line: b.line, revenue: b.revenue, cost, margin,
+        pct: b.revenue ? margin / b.revenue : null, manual: b.manual_cost, supplier: b.supplier_cost,
+        check: checks.join(' · ') });
+      if (checks.length) row.getCell(9).font = { color: { argb: 'FFB7791F' } };
+      const t = (lineTot[b.line] = lineTot[b.line] || { revenue: 0, cost: 0 });
+      t.revenue += b.revenue; t.cost += cost;
+    }
+    wsL.addRow({});
+    const lh = wsL.addRow({ month: 'By line', line: '' }); lh.font = { bold: true };
+    for (const [ln, t] of Object.entries(lineTot).sort()) {
+      const r = wsL.addRow({ month: '', line: ln, revenue: t.revenue, cost: t.cost,
+        margin: t.revenue - t.cost, pct: t.revenue ? (t.revenue - t.cost) / t.revenue : null });
+      r.font = { bold: true };
+    }
+
+    // Drawings and intercompany transfers — money that left, but not operating cost.
+    const wsD = sheet('Drawings & Transfers', [
+      { h: 'Date', k: 'date', w: 12 }, { h: 'Type', k: 'type', w: 22 },
+      { h: 'Description', k: 'desc', w: 56 }, { h: 'Amount', k: 'amt', f: MONEY }, { h: 'Currency', k: 'cur', w: 9 },
+    ]);
+    for (const d of drawings) wsD.addRow({ date: d.expense_date,
+      type: d.cls.kind === 'drawings' ? 'Founder drawing' : 'Intercompany transfer',
+      desc: d.description, amt: Number(d.amount) || 0, cur: d.currency || 'USD' });
+    if (drawings.length) {
+      const dt = wsD.addRow({ date: 'Total', amt: drawings.reduce((a, d) => a + (Number(d.amount) || 0), 0) });
+      dt.font = { bold: true };
+    }
 
     // Invoices, every one including drafts
     const wsI = sheet('Invoices', [
@@ -7619,14 +7803,18 @@ app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), req
     }
 
     // Overheads
-    const wsO = sheet('Overheads', [
-      { h: 'Date', k: 'date', w: 12 }, { h: 'Month', k: 'month', w: 10 }, { h: 'Category', k: 'cat', w: 16 },
-      { h: 'Description', k: 'desc', w: 40 }, { h: 'Client', k: 'client', w: 16 },
+    const wsO = sheet('Expenses', [
+      { h: 'Date', k: 'date', w: 12 }, { h: 'Month', k: 'month', w: 10 }, { h: 'Category', k: 'cat', w: 22 },
+      { h: 'Treated as', k: 'cls', w: 14 }, { h: 'Line', k: 'line', w: 9 },
+      { h: 'Description', k: 'desc', w: 44 }, { h: 'Client', k: 'client', w: 16 },
       { h: 'Amount', k: 'amt', f: MONEY }, { h: 'Currency', k: 'cur', w: 9 },
     ]);
+    const CLS_LABEL = { direct: 'Direct cost', overhead: 'Overhead', drawings: 'Drawing', intercompany: 'Intercompany' };
     for (const e of overheads) {
       const k = finPeriodKeys(e.expense_date, basis) || {};
-      wsO.addRow({ date: e.expense_date, month: k.month, cat: e.category, desc: e.description,
+      const cls = finCostClass(e.category);
+      wsO.addRow({ date: e.expense_date, month: k.month, cat: e.category, cls: CLS_LABEL[cls.kind],
+        line: cls.line || '', desc: e.description,
         client: e.client_id ? clientName(e.client_id) : '', amt: Number(e.amount) || 0, cur: e.currency || 'USD' });
     }
 
@@ -7639,8 +7827,12 @@ app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), req
       'Revenue is the invoice subtotal, excluding GST. GST is a liability collected for the ATO, not income.',
       'Customs lines are GST-free and shown separately. They are not included in revenue or margin — whether they are revenue or a pass-through disbursement is for your accountant to decide.',
       'Draft invoices are listed on the Invoices sheet but not counted — nothing has been issued.',
-      'Direct costs are supplier invoices accepted or paid, by the month the service was provided. Accepted-but-unpaid invoices are included so costs sit on the same basis as revenue.',
-      'Overheads are expenses not linked to a supplier invoice. Paid supplier invoices also create an expense row; those are excluded here to avoid counting them twice.',
+      'Direct costs are classified by category: Air Freight Cost, Sea Freight Cost, VAS Cost and Duties & Customs. Supplier invoices accepted or paid are also direct costs, by the month the service was provided.',
+      'Paying a supplier invoice also writes an expense row. Those rows are excluded, so a paid Kerry invoice is counted once.',
+      'Overheads are every other expense category. An unrecognised category is treated as overhead, never as a direct cost.',
+      'Drawings and intercompany transfers are NOT costs and are excluded from every margin. They are listed on their own sheet.',
+      'The Service Lines sheet flags any month where a line has both a manually entered cost and a supplier invoice — that is the pattern of a double count, and only you can say which is the real record.',
+      'Months with supplier invoices still outstanding are marked PROVISIONAL. Their margins will fall once those costs are recorded.',
       'All margins are in USD. Any amount in another currency is listed below and excluded from the totals rather than added to USD.',
       `Periods follow the ${basisLabel.toLowerCase()}.` + (basis === 'au_fy' ? ' Financial years are named by the year they end in: July 2026 to June 2027 is FY2027.' : ''),
     ].forEach((t, i) => { const r = wsN.addRow([t]); r.alignment = { wrapText: true, vertical: 'top' };
@@ -8007,9 +8199,13 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), requireInter
     `).all(curClient(), `${y}-01-01`, `${y}-12-31`);
 
     // ── 2. Expenses by month and category ──
+    // Drawings and intercompany transfers are money leaving the business, not the cost of
+    // running it. Counting them as expenses understated margin by every dollar the founders
+    // took out — about $27.5k — plus the LLC transfer.
     const expRows = db.prepare(`
       SELECT * FROM fin_expenses WHERE month_key >= ? AND month_key <= ? ORDER BY expense_date
-    `).all(`${y}-01`, `${y}-12`);
+    `).all(`${y}-01`, `${y}-12`)
+      .filter(e => { const k = finCostClass(e.category).kind; return k !== 'drawings' && k !== 'intercompany'; });
 
     // ── 3. VAS applied units by month from records ──
     const vasUnitRows = db.prepare(`
