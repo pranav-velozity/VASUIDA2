@@ -7,8 +7,13 @@ const RED='#B33F40';
 // Shared input styling for the billing card, so the fields match the rate rows.
 const INP='width:100%;padding:7px 9px;border:0.5px solid rgba(0,0,0,0.14);border-radius:7px;font:inherit;font-size:12px;color:'+DARK+';background:#fff;box-sizing:border-box;';
 const BG='#F5F5F7',GREEN='#34C759',AMBER='#C8860A',BLUE='#3B82F6';
-const EXPENSE_CATS=['VAS Cost','Sea Freight Cost','Air Freight Cost','Internal Overhead – Salaries','Internal Overhead – Software','Internal Overhead – Office','Internal Overhead – Other','Direct Labour','Duties & Customs','Storage','Marketing','Other'];
-const EXPENSE_CAT_GROUPS={'Operations':['VAS Cost','Sea Freight Cost','Air Freight Cost','Direct Labour'],'Internal Overhead':['Internal Overhead – Salaries','Internal Overhead – Software','Internal Overhead – Office','Internal Overhead – Other'],'Other':['Duties & Customs','Storage','Marketing','Other']};
+// Drawings and Intercompany Transfer have to be selectable here, or the next withdrawal is
+// entered as "Other" and becomes an operating cost again — silently undoing the correction.
+const EXPENSE_CATS=['VAS Cost','Sea Freight Cost','Air Freight Cost','Internal Overhead – Salaries','Internal Overhead – Software','Internal Overhead – Office','Internal Overhead – Other','Direct Labour','Duties & Customs','Storage','Marketing','Other','Drawings','Intercompany Transfer'];
+const EXPENSE_CAT_GROUPS={'Operations':['VAS Cost','Sea Freight Cost','Air Freight Cost','Direct Labour'],'Internal Overhead':['Internal Overhead – Salaries','Internal Overhead – Software','Internal Overhead – Office','Internal Overhead – Other'],'Other':['Duties & Customs','Storage','Marketing','Other'],'Not an expense':['Drawings','Intercompany Transfer']};
+// Money leaving to owners or to the LLC. Recorded here so there is one ledger, but never
+// counted as the cost of running the business.
+const NOT_EXPENSE_CATS=['Drawings','Intercompany Transfer'];
 
 let _apiBase='',_finState={tab:'invoices',week:'',invoices:[],expenses:[],pl:null,fxRates:{USD:1},fxLabel:'',currency:'USD'};
 
@@ -1548,6 +1553,11 @@ window._finExpFilter=async function(){
 
 function renderExpSummary(exps){
   const root=el('exp-summary-row');if(!root)return;
+  // Drawings and transfers are listed in the table but kept out of every total — the card
+  // previously counted $32.5k of founder withdrawals as operating expense.
+  const notExp=exps.filter(e=>NOT_EXPENSE_CATS.includes(e.category));
+  const drawn=notExp.reduce((s,e)=>s+parseFloat(e.amount||0),0);
+  exps=exps.filter(e=>!NOT_EXPENSE_CATS.includes(e.category));
   const total=exps.reduce((s,e)=>s+parseFloat(e.amount||0),0);
   // Group by top-level category type
   const vas=exps.filter(e=>e.category==='VAS Cost').reduce((s,e)=>s+parseFloat(e.amount||0),0);
@@ -1561,7 +1571,7 @@ function renderExpSummary(exps){
       ${sub?`<div style="font-size:10px;color:${MID};margin-top:3px;">${sub}</div>`:''}
     </div>`;
   root.innerHTML=
-    card('Total Expenses',total,DARK,`${exps.length} entries`)+
+    card('Total Expenses',total,DARK,`${exps.length} entries`+(drawn?` · excl. ${fmtUSD(drawn)} drawings & transfers`:''))+
     card('VAS Cost',vas,'#7c3aed','Direct processing')+
     card('Freight Cost',freight,BLUE,'Sea + Air')+
     card('Internal Overhead',overhead,AMBER,'All sub-categories');
