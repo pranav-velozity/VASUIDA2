@@ -7398,6 +7398,9 @@ const FIN_COST_CLASS = {
   'Sea Freight Cost':   { kind: 'direct', line: 'SEA' },
   'VAS Cost':           { kind: 'direct', line: 'VAS' },
   'Duties & Customs':   { kind: 'direct', line: 'CUSTOMS' },
+  // The Finance UI groups Direct Labour under Operations alongside VAS, sea and air. Treating
+  // it as overhead here would have the export and the UI disagree about the same row.
+  'Direct Labour':      { kind: 'direct', line: 'VAS' },
   // Owners taking money out is not an operating cost. Neither founder draws a salary, so any
   // withdrawal is a drawing, and it is kept out of the P&L entirely.
   'Drawings':           { kind: 'drawings', line: null },
