@@ -9,8 +9,8 @@ const INP='width:100%;padding:7px 9px;border:0.5px solid rgba(0,0,0,0.14);border
 const BG='#F5F5F7',GREEN='#34C759',AMBER='#C8860A',BLUE='#3B82F6';
 // Drawings and Intercompany Transfer have to be selectable here, or the next withdrawal is
 // entered as "Other" and becomes an operating cost again — silently undoing the correction.
-const EXPENSE_CATS=['VAS Cost','Sea Freight Cost','Air Freight Cost','Internal Overhead – Salaries','Internal Overhead – Software','Internal Overhead – Office','Internal Overhead – Other','Direct Labour','Duties & Customs','Storage','Marketing','Other','Drawings','Intercompany Transfer'];
-const EXPENSE_CAT_GROUPS={'Operations':['VAS Cost','Sea Freight Cost','Air Freight Cost','Direct Labour'],'Internal Overhead':['Internal Overhead – Salaries','Internal Overhead – Software','Internal Overhead – Office','Internal Overhead – Other'],'Other':['Duties & Customs','Storage','Marketing','Other'],'Not an expense':['Drawings','Intercompany Transfer']};
+const EXPENSE_CATS=['VAS Cost','Sea Freight Cost','Air Freight Cost','Internal Overhead – Salaries','Internal Overhead – Software','Internal Overhead – Office','Internal Overhead – Other','Direct Labour','Duties & Customs','Storage','Marketing','Travel','Insurance','Other','Depreciation & Amortisation','Interest','Income Tax','Drawings','Intercompany Transfer'];
+const EXPENSE_CAT_GROUPS={'Operations':['VAS Cost','Sea Freight Cost','Air Freight Cost','Direct Labour'],'Internal Overhead':['Internal Overhead – Salaries','Internal Overhead – Software','Internal Overhead – Office','Internal Overhead – Other'],'Other':['Duties & Customs','Storage','Marketing','Travel','Insurance','Other'],'Below EBITDA':['Depreciation & Amortisation','Interest','Income Tax'],'Not an expense':['Drawings','Intercompany Transfer']};
 // Money leaving to owners or to the LLC. Recorded here so there is one ledger, but never
 // counted as the cost of running the business.
 const NOT_EXPENSE_CATS=['Drawings','Intercompany Transfer'];
@@ -252,8 +252,11 @@ function injectSkeleton(host){
         <button class="fin-nav-item active" id="fin-nav-invoices" onclick="window._finTab('invoices')">
           <span class="nav-icon">${icons.invoices}</span>Invoices
         </button>
-        <button class="fin-nav-item" id="fin-nav-pl" onclick="window._finTab('pl')">
+        <button class="fin-nav-item" id="fin-nav-statement" onclick="window._finTab('statement')">
           <span class="nav-icon">${icons.pl}</span>P&amp;L
+        </button>
+        <button class="fin-nav-item" id="fin-nav-pl" onclick="window._finTab('pl')">
+          <span class="nav-icon">${icons.pl}</span>Unit Economics
         </button>
         <button class="fin-nav-item" id="fin-nav-expenses" onclick="window._finTab('expenses')">
           <span class="nav-icon">${icons.expenses}</span>Expenses
@@ -295,6 +298,7 @@ function injectSkeleton(host){
     <div class="fin-content">
       <div class="fin-kpi-grid" id="fin-kpis"></div>
       <div id="fin-tab-invoices"></div>
+      <div id="fin-tab-statement" style="display:none;"></div>
       <div id="fin-tab-pl" style="display:none;"></div>
       <div id="fin-tab-expenses" style="display:none;"></div>
       <div id="fin-tab-rates" style="display:none;"></div>
@@ -382,16 +386,155 @@ function injectSkeleton(host){
     };
   };
 
+// ── P&L statement ──
+// Renders rows the server has already classified and ordered. Nothing here decides what a
+// cost is — that lives in one place on the server, so this page cannot disagree with the
+// export about the same number.
+const _stmt={from:null,to:null,basis:'au_fy',gran:'month',compare:'none',data:null};
+
+function _stmtDefaults(){
+  const t=new Date().toISOString().slice(0,10), y=+t.slice(0,4), m=+t.slice(5,7);
+  if(!_stmt.from){ _stmt.from=(m>=7?y:y-1)+'-07-01'; _stmt.to=t; }
+}
+
+async function renderStatementTab(){
+  const root=el('fin-tab-statement'); if(!root) return;
+  _stmtDefaults();
+  if(!_stmt.data) root.innerHTML=`<div style="padding:40px;text-align:center;color:${MID};font-size:12px;">Loading…</div>`;
+  try{
+    const q=`from=${_stmt.from}&to=${_stmt.to}&basis=${_stmt.basis}&granularity=${_stmt.gran}&compare=${_stmt.compare}`;
+    _stmt.data=await api('/finance/statement?'+q);
+  }catch(e){
+    root.innerHTML=`<div style="padding:30px;color:${RED};font-size:12px;">Could not load the P&amp;L: ${esc(e.message||e)}</div>`;
+    return;
+  }
+  paintStatement();
+}
+
+function paintStatement(){
+  const root=el('fin-tab-statement'); if(!root||!_stmt.data) return;
+  const d=_stmt.data, cols=d.columns, cmp=d.compare!=='none';
+  const t=new Date().toISOString().slice(0,10), y=+t.slice(0,4), m=+t.slice(5,7), fy=m>=7?y:y-1;
+  const PRE=[['This FY',fy+'-07-01',t,'au_fy'],['Last FY',(fy-1)+'-07-01',fy+'-06-30','au_fy'],
+             ['This year',y+'-01-01',t,'calendar'],['Last year',(y-1)+'-01-01',(y-1)+'-12-31','calendar']];
+
+  // Accounting convention: negatives in brackets. A cost line is shown positive within its
+  // section; only a genuinely negative result (a loss) is bracketed.
+  const n=(v,type)=>{
+    if(v==null) return '<span style="color:'+LIGHT+'">—</span>';
+    if(type==='pct') return (v*100).toFixed(1)+'%';
+    if(Math.abs(v)<0.005) return '<span style="color:'+LIGHT+'">–</span>';
+    const s=Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:0,maximumFractionDigits:0});
+    return v<0?`<span style="color:${RED}">(${s})</span>`:s;
+  };
+  const vpct=(r)=>{ if(!cmp||r.type==='pct'||!r.compare) return '';
+    const p=(r.variance||0)/Math.abs(r.compare); return (p>=0?'+':'')+(p*100).toFixed(1)+'%'; };
+
+  const pill=(on)=>`border:.5px solid ${on?DARK:'rgba(0,0,0,.14)'};background:${on?DARK:'#fff'};color:${on?'#fff':DARK};`
+    +`border-radius:8px;padding:6px 11px;font:600 11px inherit;cursor:pointer;`;
+  const sel='border:.5px solid rgba(0,0,0,.14);border-radius:8px;padding:6px 9px;font:inherit;font-size:11px;background:#fff;';
+
+  const head=cols.map(c=>`<th class="st-n" style="${c.provisional?'background:rgba(183,121,31,.07);':''}">
+      ${esc(c.label)}${c.provisional?`<div style="font-size:8px;color:${AMBER};font-weight:700;letter-spacing:.04em;">PROVISIONAL</div>`:''}</th>`).join('')
+    +`<th class="st-n st-tot">Total</th>`
+    +(cmp?`<th class="st-n st-cmp">${d.compare==='yoy'?'Last year':'Prior period'}</th><th class="st-n st-cmp">Change</th>`:'');
+
+  const body=d.rows.map(r=>{
+    if(r.type==='header') return `<tr class="st-h"><td colspan="${cols.length+2+(cmp?2:0)}">${esc(r.label)}</td></tr>`;
+    const cells=cols.map(c=>`<td class="st-n" style="${c.provisional?'background:rgba(183,121,31,.05);':''}">${n(r.values[c.key],r.type)}</td>`).join('');
+    const extra=cmp?`<td class="st-n st-cmp">${n(r.compare,r.type)}</td><td class="st-n st-cmp">${r.type==='pct'?'':n(r.variance,r.type)}${vpct(r)?`<div style="font-size:9px;color:${(r.variance||0)>=0?GREEN:RED}">${vpct(r)}</div>`:''}</td>`:'';
+    return `<tr class="st-${r.type}"><td class="st-l">${esc(r.label)}</td>${cells}<td class="st-n st-tot">${n(r.values.__total,r.type)}</td>${extra}</tr>`;
+  }).join('');
+
+  const below=d.below.map(b=>`<tr class="st-line"><td class="st-l">${esc(b.label)}</td>
+      ${cols.map(c=>`<td class="st-n">${n(b.values[c.key])}</td>`).join('')}
+      <td class="st-n st-tot">${n(b.values.__total)}</td>${cmp?`<td class="st-n st-cmp">${n(b.compare)}</td><td class="st-cmp"></td>`:''}</tr>`).join('');
+
+  const provN=cols.filter(c=>c.provisional).length;
+  root.innerHTML=`
+  <style>
+    .st-wrap{overflow-x:auto;border:.5px solid rgba(0,0,0,.08);border-radius:12px;background:#fff;}
+    table.st{border-collapse:collapse;width:100%;font-size:12px;font-variant-numeric:tabular-nums;}
+    table.st th{font-size:9.5px;font-weight:700;color:${MID};text-transform:uppercase;letter-spacing:.05em;
+      padding:10px 12px;border-bottom:.5px solid rgba(0,0,0,.1);white-space:nowrap;position:sticky;top:0;background:#fff;}
+    table.st td{padding:6px 12px;white-space:nowrap;}
+    .st-n{text-align:right;}
+    .st-l{position:sticky;left:0;background:#fff;min-width:230px;z-index:1;}
+    table.st th:first-child{position:sticky;left:0;z-index:2;text-align:left;}
+    .st-tot{background:#fafafb;font-weight:600;}
+    table.st th.st-tot{background:#f5f5f7;}
+    .st-cmp{color:${MID};border-left:.5px solid rgba(0,0,0,.06);}
+    tr.st-h td{padding:16px 12px 5px;font-size:9.5px;font-weight:700;color:${MID};text-transform:uppercase;letter-spacing:.06em;}
+    tr.st-line td.st-l{padding-left:26px;color:${DARK};}
+    tr.st-subtotal td{font-weight:600;border-top:.5px solid rgba(0,0,0,.12);}
+    tr.st-total td{font-weight:700;font-size:13px;border-top:1px solid ${DARK};padding-top:9px;padding-bottom:9px;}
+    tr.st-total td.st-l{color:${DARK};}
+    tr.st-pct td{font-size:11px;color:${MID};font-style:italic;padding-top:2px;padding-bottom:10px;}
+    tr.st-line:hover td,tr.st-line:hover td.st-l{background:#f9f9fb;}
+  </style>
+
+  <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:14px;flex-wrap:wrap;margin-bottom:14px;">
+    <div>
+      <div style="font-size:18px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Profit &amp; loss</div>
+      <div style="font-size:11px;color:${MID};margin-top:3px;">${esc(d.from)} to ${esc(d.to)} &middot; accrual basis &middot; USD &middot; draft invoices excluded</div>
+    </div>
+    <button onclick="window._finExportDialog()" style="border:0;background:#217346;color:#fff;border-radius:9px;padding:8px 14px;font:600 12px inherit;cursor:pointer;">Export to Excel</button>
+  </div>
+
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+    ${PRE.map(([l,f,tt,b])=>`<button style="${pill(_stmt.from===f&&_stmt.to===tt)}" data-pre="${f}|${tt}|${b}">${l}</button>`).join('')}
+    <input type="date" id="st-from" value="${esc(_stmt.from)}" style="${sel}">
+    <span style="color:${LIGHT};font-size:11px;">to</span>
+    <input type="date" id="st-to" value="${esc(_stmt.to)}" style="${sel}">
+    <select id="st-gran" style="${sel}">
+      ${[['month','Monthly'],['quarter','Quarterly'],['year','Yearly']].map(([v,l])=>`<option value="${v}"${_stmt.gran===v?' selected':''}>${l}</option>`).join('')}
+    </select>
+    <select id="st-basis" style="${sel}">
+      <option value="au_fy"${_stmt.basis==='au_fy'?' selected':''}>AU financial year</option>
+      <option value="calendar"${_stmt.basis==='calendar'?' selected':''}>Calendar year</option>
+    </select>
+    <select id="st-cmp" style="${sel}">
+      ${[['none','No comparison'],['prior','vs prior period'],['yoy','vs same period last year']].map(([v,l])=>`<option value="${v}"${_stmt.compare===v?' selected':''}>${l}</option>`).join('')}
+    </select>
+  </div>
+
+  ${provN?`<div style="font-size:11px;color:${AMBER};background:rgba(183,121,31,.08);border-radius:9px;padding:9px 12px;margin-bottom:12px;">
+    <b>${provN} period${provN===1?'':'s'} provisional</b> — supplier invoices are still outstanding, so cost of sales is understated and profit will fall once they are recorded.</div>`:''}
+
+  <div class="st-wrap"><table class="st">
+    <thead><tr><th>USD</th>${head}</tr></thead>
+    <tbody>${body}</tbody>
+  </table></div>
+
+  <div style="font-size:9.5px;font-weight:700;color:${MID};text-transform:uppercase;letter-spacing:.06em;margin:22px 0 8px;">Below the line &mdash; not part of profit</div>
+  <div class="st-wrap"><table class="st"><tbody>${below}</tbody></table></div>
+  <div style="font-size:10px;color:${LIGHT};margin-top:8px;line-height:1.6;">
+    Drawings and transfers are money leaving the business, not the cost of running it. GST is collected on the ATO's behalf and owed back, so it is neither revenue nor cost.
+    ${d.compare_range?` Comparison covers ${esc(d.compare_range.from)} to ${esc(d.compare_range.to)}.`:''}
+    ${(d.excluded_currency||[]).length?` <span style="color:${AMBER}">${d.excluded_currency.length} non-USD item(s) excluded.</span>`:''}
+  </div>`;
+
+  const reload=()=>{ _stmt.data=null; renderStatementTab(); };
+  root.querySelectorAll('[data-pre]').forEach(b=>b.onclick=()=>{
+    const [f,tt,bs]=b.getAttribute('data-pre').split('|'); _stmt.from=f; _stmt.to=tt; _stmt.basis=bs; reload(); });
+  el('st-from').onchange=e=>{ _stmt.from=e.target.value; reload(); };
+  el('st-to').onchange=e=>{ _stmt.to=e.target.value; reload(); };
+  el('st-gran').onchange=e=>{ _stmt.gran=e.target.value; reload(); };
+  el('st-basis').onchange=e=>{ _stmt.basis=e.target.value; reload(); };
+  el('st-cmp').onchange=e=>{ _stmt.compare=e.target.value; reload(); };
+}
+
 window._finTab=function(tab){
   _finState.tab=tab;
-  ['invoices','pl','expenses','rates'].forEach(t=>{
+  ['invoices','statement','pl','expenses','rates'].forEach(t=>{
     const btn=el('fin-nav-'+t),content=el('fin-tab-'+t);
     if(btn)btn.classList.toggle('active',t===tab);
     if(content)content.style.display=t===tab?'':'none';
   });
   const wk=el('fin-sidebar-week');if(wk)wk.style.display=tab==='invoices'?'':'none';
   // P&L renders its own KPI row — hide the shared top tiles to avoid duplication
-  const kpiGrid=el('fin-kpis');if(kpiGrid)kpiGrid.style.display=tab==='pl'?'none':'';
+  const kpiGrid=el('fin-kpis');if(kpiGrid)kpiGrid.style.display=(tab==='pl'||tab==='statement')?'none':'';
+  if(tab==='statement')renderStatementTab();
   if(tab==='invoices')renderInvoicesTab();
   if(tab==='pl')renderPLTab();
   if(tab==='expenses')renderExpensesTab();

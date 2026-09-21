@@ -152,10 +152,10 @@
     window._finTab = function (tab) {
       const mine = el('fin-tab-supplier');
       if (tab === 'supplier') {
-        ['invoices', 'pl', 'expenses', 'rates'].forEach(t => {
-          const c = el('fin-tab-' + t); if (c) c.style.display = 'none';
-          const b = el('fin-nav-' + t); if (b) b.classList.remove('active');
-        });
+        // Every Finance pane and nav button, found rather than listed. A hardcoded list meant
+        // any tab added later stayed visible underneath this one — the P&L would have.
+        document.querySelectorAll('[id^="fin-tab-"]').forEach(c => { if (c.id !== 'fin-tab-supplier') c.style.display = 'none'; });
+        document.querySelectorAll('[id^="fin-nav-"]').forEach(b => { if (b.id !== 'fin-nav-supplier') b.classList.remove('active'); });
         const b = el('fin-nav-supplier'); if (b) b.classList.add('active');
         const wk = el('fin-sidebar-week'); if (wk) wk.style.display = 'none';
         const k = el('fin-kpis'); if (k) k.style.display = 'none';
@@ -431,7 +431,7 @@
     }, 1200);
     window.addEventListener('tenancy:ready', () => { wrapTabs(); inject(); });
     setTimeout(() => { wrapTabs(); inject(); }, 900);
-    console.log('[supplier-invoices] module v3 loaded');
+    console.log('[supplier-invoices] module v4 loaded');
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
