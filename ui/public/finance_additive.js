@@ -273,6 +273,17 @@ function injectSkeleton(host){
         </select>
         <div id="fin-fx-label" style="font-size:9px;color:rgba(255,255,255,0.30);margin-top:5px;padding:0 4px;"></div>
       </div>
+
+      <div style="margin:14px 16px 0;height:1px;background:rgba(255,255,255,0.07);"></div>
+      <div class="fin-sidebar-controls" style="margin-top:12px;">
+        <button onclick="window._finExportDialog()"
+          style="width:100%;border:0;border-radius:9px;padding:9px 10px;background:#217346;color:#fff;
+                 font:600 12px inherit;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7">
+            <path d="M8 2v8M4.5 6.5 8 10l3.5-3.5M2.5 13.5h11"/></svg>
+          Export financials
+        </button>
+      </div>
     </div>
 
     <!-- Main content -->
@@ -288,6 +299,83 @@ function injectSkeleton(host){
   <div class="fin-overlay" id="fin-overlay" onclick="window._finClosePanel()"></div>
   `;
 }
+
+  window._finExportDialog = function () {
+    if (document.getElementById('fin-exp-ov')) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
+    const fyStart = (m >= 7 ? y : y - 1) + '-07-01';
+    const presets = {
+      fy:   { label: 'This financial year', from: fyStart, to: today, basis: 'au_fy' },
+      lfy:  { label: 'Last financial year', from: (Number(fyStart.slice(0,4)) - 1) + '-07-01',
+              to: fyStart.slice(0,4) + '-06-30', basis: 'au_fy' },
+      cy:   { label: 'This calendar year', from: y + '-01-01', to: today, basis: 'calendar' },
+      lcy:  { label: 'Last calendar year', from: (y - 1) + '-01-01', to: (y - 1) + '-12-31', basis: 'calendar' },
+    };
+    const ov = document.createElement('div');
+    ov.id = 'fin-exp-ov';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;padding:18px;';
+    const inp = 'width:100%;padding:8px 10px;border:.5px solid rgba(0,0,0,.16);border-radius:8px;font:inherit;font-size:12px;box-sizing:border-box;';
+    ov.innerHTML = `<div style="background:#fff;border-radius:14px;width:min(440px,96vw);box-shadow:0 24px 64px rgba(0,0,0,.28);padding:22px 24px;font-family:inherit;">
+      <div style="font-size:16px;font-weight:700;color:#1C1C1E;">Export financials</div>
+      <div style="font-size:11px;color:#6E6E73;margin-top:3px;">Revenue, costs and margin by month, quarter and year.</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:16px;">
+        ${Object.entries(presets).map(([k, p]) =>
+          `<button data-pre="${k}" style="border:.5px solid rgba(0,0,0,.14);background:#fff;border-radius:8px;padding:8px;font:500 11px inherit;cursor:pointer;color:#1C1C1E;">${p.label}</button>`).join('')}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px;">
+        <div><div style="font-size:10px;font-weight:600;color:#6E6E73;margin-bottom:4px;">From</div>
+          <input id="fin-exp-from" type="date" value="${fyStart}" style="${inp}"></div>
+        <div><div style="font-size:10px;font-weight:600;color:#6E6E73;margin-bottom:4px;">To</div>
+          <input id="fin-exp-to" type="date" value="${today}" style="${inp}"></div>
+      </div>
+      <div style="margin-top:12px;">
+        <div style="font-size:10px;font-weight:600;color:#6E6E73;margin-bottom:4px;">Quarters and years follow</div>
+        <select id="fin-exp-basis" style="${inp}">
+          <option value="au_fy">Australian financial year (Jul–Jun)</option>
+          <option value="calendar">Calendar year (Jan–Dec)</option>
+        </select>
+      </div>
+      <div id="fin-exp-msg" style="font-size:11px;color:#B33F40;margin-top:10px;min-height:14px;"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px;">
+        <button id="fin-exp-cancel" style="border:.5px solid rgba(0,0,0,.16);background:#fff;border-radius:9px;padding:8px 14px;font:600 12px inherit;cursor:pointer;">Cancel</button>
+        <button id="fin-exp-go" style="border:0;background:#217346;color:#fff;border-radius:9px;padding:8px 16px;font:600 12px inherit;cursor:pointer;">Download Excel</button>
+      </div>
+    </div>`;
+    document.body.appendChild(ov);
+    const $ = id => document.getElementById(id);
+    const close = () => ov.remove();
+    ov.addEventListener('click', e => { if (e.target === ov) close(); });
+    $('fin-exp-cancel').onclick = close;
+    ov.querySelectorAll('[data-pre]').forEach(b => b.onclick = () => {
+      const p = presets[b.getAttribute('data-pre')];
+      $('fin-exp-from').value = p.from; $('fin-exp-to').value = p.to; $('fin-exp-basis').value = p.basis;
+      ov.querySelectorAll('[data-pre]').forEach(x => x.style.borderColor = x === b ? '#217346' : 'rgba(0,0,0,.14)');
+    });
+    $('fin-exp-go').onclick = async function () {
+      const from = $('fin-exp-from').value, to = $('fin-exp-to').value, basis = $('fin-exp-basis').value;
+      if (!from || !to) { $('fin-exp-msg').textContent = 'Choose both dates.'; return; }
+      if (from > to) { $('fin-exp-msg').textContent = 'The start date must be on or before the end date.'; return; }
+      this.disabled = true; this.textContent = 'Preparing…';
+      try {
+        const t = window.Clerk && window.Clerk.session ? await window.Clerk.session.getToken() : null;
+        const base = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/, '');
+        const r = await fetch(base + '/finance/export.xlsx?from=' + from + '&to=' + to + '&basis=' + basis, {
+          headers: Object.assign(t ? { Authorization: 'Bearer ' + t } : {},
+                                 { 'x-pinpoint-client': window.pinpointClient || 'ICONIC' }) });
+        if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
+        const blob = await r.blob(), a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'VelOzity financials ' + from + ' to ' + to + '.xlsx';
+        document.body.appendChild(a); a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+        close();
+      } catch (e) {
+        $('fin-exp-msg').textContent = 'Export failed: ' + (e.message || e);
+        this.disabled = false; this.textContent = 'Download Excel';
+      }
+    };
+  };
 
 window._finTab=function(tab){
   _finState.tab=tab;
