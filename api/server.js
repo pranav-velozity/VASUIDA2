@@ -76,7 +76,11 @@ function authenticateRequest(req, res, next) {
     try {
       if (TENANCY_OPEN_PATHS.has(String(req.path || ''))) return next();
       const t = tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole);
-      if (t && t.denied_reason) {
+      // ONLY organisation-identity failures are refused here. 'role_not_mapped' is a different
+      // problem: those users work today, and refusing on it would lock out anyone whose Clerk
+      // role is missing from role_alias. Roles stay the job of the existing requireRole checks.
+      const IDENTITY_FAILURES = new Set(['no_active_org', 'org_not_mapped']);
+      if (t && t.denied_reason && IDENTITY_FAILURES.has(t.denied_reason)) {
         console.warn(`[tenancy] refused ${req.method} ${req.path} — org ${req.auth && req.auth.orgId} (${t.denied_reason})`);
         return res.status(403).json({
           error: 'org_not_provisioned', reason: t.denied_reason,
@@ -17242,7 +17246,10 @@ app.get('/ops/tenancy-audit', authenticateRequest, requireRole(['admin']), requi
   try {
     const orgs = db.prepare('SELECT * FROM org_map ORDER BY org_type, org_name').all();
     const out = orgs.map(o => {
+      // Roles are listed separately below; passing null here would report every org as
+      // role_not_mapped and bury the finding that matters.
       const t = tenancyResolve(o.clerk_org_id, null);
+      if (t.denied_reason === 'role_not_mapped') t.denied_reason = null;
       // What curClient() would return for a request from this org carrying no client header:
       // a single client_id resolves to itself, which is how a partner linked to a client's
       // facility ends up reading that client's data.
@@ -17261,8 +17268,11 @@ app.get('/ops/tenancy-audit', authenticateRequest, requireRole(['admin']), requi
                             || !!(o.org_type === 'partner' && resolved),
       };
     });
+    // Every Clerk role in use must appear here, or those users hit the existing role checks.
+    const roles = db.prepare('SELECT clerk_role, role FROM role_alias').all();
     res.json({
       orgs: out,
+      role_aliases: roles,
       concerns: out.filter(x => x.reads_other_client).map(x => `${x.org_name} (${x.org_type}) resolves to ${x.resolves_to}`),
       note: 'Read only. resolves_to is the client_id that request-scoped queries would use.',
     });
