@@ -56,7 +56,41 @@ function curClient() {
 }
 
 // 🔐 Security Middleware
-const { authenticateRequest, requireRole, autoFilterResponse, optionalAuth, authenticateApiKey } = require('./middleware/auth');
+const { authenticateRequest: _authRaw, requireRole, autoFilterResponse, optionalAuth, authenticateApiKey } = require('./middleware/auth');
+
+// ── Tenancy fails closed ──
+// curClient() falls back to 'ICONIC' when it cannot work out the client. That was safe with a
+// single tenant and is not safe with three: an organisation that is not mapped — a brand new
+// Clerk org, or one whose role is not aliased — would silently read ICONIC's data.
+//
+// Rather than change 89 call sites, every authenticated request is checked once here: if
+// tenancy cannot resolve the organisation, the request is refused before any handler runs, so
+// the fallback can no longer be reached by an unknown org.
+//
+// /tenancy/whoami stays open on purpose: the app calls it first, and it is what lets an
+// unprovisioned organisation see "your organisation is not set up" instead of a blank screen.
+const TENANCY_OPEN_PATHS = new Set(['/tenancy/whoami']);
+function authenticateRequest(req, res, next) {
+  return _authRaw(req, res, (err) => {
+    if (err) return next(err);
+    try {
+      if (TENANCY_OPEN_PATHS.has(String(req.path || ''))) return next();
+      const t = tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole);
+      if (t && t.denied_reason) {
+        console.warn(`[tenancy] refused ${req.method} ${req.path} — org ${req.auth && req.auth.orgId} (${t.denied_reason})`);
+        return res.status(403).json({
+          error: 'org_not_provisioned', reason: t.denied_reason,
+          message: 'This organisation is not set up in Pinpoint yet. Contact VelOzity to have it configured.',
+        });
+      }
+    } catch (e) {
+      // A failure to evaluate tenancy is refused, not waved through.
+      console.error('[tenancy] gate error', e);
+      return res.status(403).json({ error: 'tenancy_unavailable' });
+    }
+    return next();
+  });
+}
 const { apiLimiter, writeOpLimiter, uploadLimiter, aiLimiter } = require('./middleware/rateLimiter');
 const { validateRecordInput, validateBulkInput } = require('./middleware/validation');
 const { auditLog } = require('./middleware/auditLog');
@@ -17198,6 +17232,43 @@ app.post('/records/dedupe', authenticateRequest, requireRole(['admin']), writeOp
 });
 
 // ── Tenancy diagnostics (READ-ONLY — Step 1). Verifies resolution before Step 3 enforces it. ──
+// ── Tenancy audit ──
+// Answers "what would each organisation actually see?" without needing anyone's login. For
+// every mapped org it reports the client curClient() would resolve to, which is the value 89
+// routes use to scope their queries.
+//
+// Read-only. Nothing is changed and no data belonging to any client is returned.
+app.get('/ops/tenancy-audit', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+  try {
+    const orgs = db.prepare('SELECT * FROM org_map ORDER BY org_type, org_name').all();
+    const out = orgs.map(o => {
+      const t = tenancyResolve(o.clerk_org_id, null);
+      // What curClient() would return for a request from this org carrying no client header:
+      // a single client_id resolves to itself, which is how a partner linked to a client's
+      // facility ends up reading that client's data.
+      const resolved = t.denied_reason ? null
+        : (t.client_ids.length === 1 ? t.client_ids[0] : (t.client_ids.length ? '(depends on header)' : null));
+      return {
+        org_name: o.org_name, org_type: o.org_type, active: !!o.active,
+        mapped_client: o.client_id || null,
+        facilities: t.facility_codes,
+        client_ids: t.client_ids,
+        resolves_to: resolved,
+        denied_reason: t.denied_reason,
+        capabilities: t.capabilities,
+        // The flag that matters: an org reading a client it is not itself.
+        reads_other_client: !!(o.org_type !== 'internal' && resolved && o.client_id && resolved !== o.client_id)
+                            || !!(o.org_type === 'partner' && resolved),
+      };
+    });
+    res.json({
+      orgs: out,
+      concerns: out.filter(x => x.reads_other_client).map(x => `${x.org_name} (${x.org_type}) resolves to ${x.resolves_to}`),
+      note: 'Read only. resolves_to is the client_id that request-scoped queries would use.',
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 app.get('/tenancy/whoami', authenticateRequest, (req, res) => {
   try {
     const r = tenancyResolve(req.auth?.orgId, req.auth?.orgRole);
