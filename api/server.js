@@ -1323,6 +1323,22 @@ app.get('/pulse/context',
       });
     }
 
+    // ── Default deny ──
+    // Below this point Pulse reads records, receiving, bins and flow_week. Those tables have
+    // NO client_id column — they are single-tenant and in practice hold ICONIC's data only.
+    // Any client that is not a fulfilment client would fall through to them, so a new client
+    // would be handed ICONIC's operations as its own context. Only clients that actually use
+    // the plan-upload model may read them.
+    const _legacy = db.prepare(`SELECT 1 x FROM client_capability
+      WHERE client_id=? AND capability='plan_upload' AND enabled=1`).get(curClient());
+    if (!_legacy) {
+      return res.json({
+        client: curClient(), model: 'none', weeks: [],
+        note: 'No Pulse context is configured for this client yet.',
+        generated_at: new Date().toISOString(),
+      });
+    }
+
     const facilityHint = normFacility(req.query.facility || '');
 
     // ── Resolve facility + find last 4 week-starts ──
@@ -8858,17 +8874,27 @@ function collabUserFromReq(req) {
 
 async function pulseReplyToThread(threadId, contextSnippet, question) {
   if (String(process.env.PULSE_DISABLED || '') === '1') throw new Error('pulse_disabled');
+  // The ops context below reads plans, records and receiving. Threads are client-scoped but
+  // this reply was not: another client's thread would have been answered with ICONIC's
+  // operations, and the plans query here carries no client filter at all. Only clients on the
+  // plan-upload model get ops context; everyone else is answered from the thread alone.
+  let _pulseOps = true;
+  try {
+    _pulseOps = !!db.prepare(`SELECT 1 x FROM client_capability
+      WHERE client_id=? AND capability='plan_upload' AND enabled=1`).get(curClient());
+  } catch (e) { _pulseOps = false; }
   try {
     // ── Build real ops context from DB (same as /pulse/chat) ──
     const opsLines = [];
     opsLines.push('You are Pulse, the AI operations assistant for VelOzity Pinpoint.');
     opsLines.push('You are participating in a collaboration thread. Be concise, helpful and specific.');
-    opsLines.push('You have access to the last 4 weeks of live operations data below — use it to answer questions accurately with real numbers.');
+    if (_pulseOps) opsLines.push('You have access to the last 4 weeks of live operations data below — use it to answer questions accurately with real numbers.');
+    else opsLines.push('You have NO operations data for this client. Answer only from the thread itself, and say so if asked for figures.');
     opsLines.push('');
 
-    try {
+    if (_pulseOps) try {
       // Fetch last 4 weeks of plan data
-      const allPlans = db.prepare('SELECT week_start, data FROM plans ORDER BY week_start DESC LIMIT 4').all();
+      const allPlans = db.prepare('SELECT week_start, data FROM plans WHERE client_id=? ORDER BY week_start DESC LIMIT 4').all(curClient());
       if (allPlans.length > 0) {
         opsLines.push('## Live Operations Data');
         for (const pw of allPlans) {
