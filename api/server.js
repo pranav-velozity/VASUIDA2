@@ -70,6 +70,16 @@ const { authenticateRequest: _authRaw, requireRole, autoFilterResponse, optional
 // /tenancy/whoami stays open on purpose: the app calls it first, and it is what lets an
 // unprovisioned organisation see "your organisation is not set up" instead of a blank screen.
 const TENANCY_OPEN_PATHS = new Set(['/tenancy/whoami']);
+
+// What a signed-in partner may reach. Deliberately short: anything not listed is refused, so a
+// route added later is safe by default rather than exposed by omission.
+const PARTNER_ALLOW_EXACT = new Set([
+  '/tenancy/whoami',        // needed for the app to load and show who they are
+  '/health', '/healthz',
+]);
+const PARTNER_ALLOW_PREFIX = [
+  '/partner/',              // anything built specifically for partners
+];
 function authenticateRequest(req, res, next) {
   return _authRaw(req, res, (err) => {
     if (err) return next(err);
@@ -80,6 +90,26 @@ function authenticateRequest(req, res, next) {
       // problem: those users work today, and refusing on it would lock out anyone whose Clerk
       // role is missing from role_alias. Roles stay the job of the existing requireRole checks.
       const IDENTITY_FAILURES = new Set(['no_active_org', 'org_not_mapped']);
+      // ── Partner organisations: denied by default ──
+      // A partner inherits client_ids from the facilities it is linked to, so Kerry Shenzhen
+      // resolves to ICONIC and Kerry US to EHP. 138 of 205 authenticated routes carry no
+      // org-type guard, and autoFilterResponse returns data unfiltered, so those routes would
+      // serve a client's data to a partner. Guarding them one by one is protection by
+      // enumeration; this denies everything and allows only what partners actually need.
+      //
+      // Partner workflows that matter — air quote costing, sea container costs, supplier
+      // invoices — run through magic links with no login, so they are unaffected.
+      //
+      // PARTNER_GATE=off disables this without a redeploy if it blocks something unforeseen.
+      if (t && t.org_type === 'partner' && String(process.env.PARTNER_GATE || '').toLowerCase() !== 'off') {
+        const path = String(req.path || '');
+        const allowed = PARTNER_ALLOW_EXACT.has(path) || PARTNER_ALLOW_PREFIX.some(p => path.startsWith(p));
+        if (!allowed) {
+          console.warn(`[tenancy] partner blocked ${req.method} ${path} — ${t.org_name || req.auth.orgId} (would have read ${t.client_ids.join(',') || 'nothing'})`);
+          return res.status(403).json({ error: 'not_available_to_partner',
+            message: 'This organisation does not have access to that information.' });
+        }
+      }
       if (t && t.denied_reason && IDENTITY_FAILURES.has(t.denied_reason)) {
         console.warn(`[tenancy] refused ${req.method} ${req.path} — org ${req.auth && req.auth.orgId} (${t.denied_reason})`);
         return res.status(403).json({
