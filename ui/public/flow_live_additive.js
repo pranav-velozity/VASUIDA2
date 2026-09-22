@@ -2745,8 +2745,93 @@ function computeManualNodeStatuses(ws, tz) {
   }
 
 
-function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
-    const root = document.getElementById('flow-journey');
+// ── Node completion ──
+// Returns, per node, { complete, late } or { na }. Read-only: it derives everything from the
+// statuses the dashboard has already computed plus the stored lane and last-mile records.
+//
+//   Receiving / VAS   the week sign-off ticks.
+//   Transit           every lane has departed, arrived AND destination cleared. Checked per
+//                     lane directly — the missing* counts are an else-if chain that records only
+//                     a lane's FIRST gap, so a lane with no dates at all reads zero on all three
+//                     and would have passed as complete.
+//   Last mile         every container and air pallet delivered. A week with an air lane but no
+//                     air pallet recorded stays open, or nobody would ever confirm that delivery.
+//
+// "late" is measured against the plan for that step. Transit deliberately does NOT use
+// intl.originMax: that is the origin-ready deadline, roughly two weeks before clearance, and
+// comparing against it would mark every week late.
+//
+// "na" only for a node whose date has passed with nothing in it. A week still in progress with
+// nothing yet recorded stays Upcoming — nothing should look finished, or empty, prematurely.
+function flowNodeCompletion(ws, receiving, vas, intl, manual) {
+  const out = {};
+  try {
+    const now = Date.now();
+    const ms = (d) => { if (!d) return null; const x = (d instanceof Date) ? d : new Date(d); const v = x.getTime(); return isNaN(v) ? null : v; };
+    const passed = (d) => { const v = ms(d); return v != null && now > v; };
+    const DAY = 86400000;
+
+    const so = (receiving && receiving.signoff) || (vas && vas.signoff) || {};
+    const plannedPOs = Number(receiving && receiving.plannedPOs) || 0;
+
+    if (so.receivingComplete) {
+      const a = ms(so.receivingAt), p = ms(receiving && receiving.due);
+      out.receiving = { complete: true, late: a != null && p != null && a > p };
+    } else if (!plannedPOs && passed(receiving && receiving.due)) out.receiving = { na: true };
+
+    if (so.vasComplete) {
+      const a = ms(so.vasAt), p = ms(vas && vas.due);
+      out.vas = { complete: true, late: a != null && p != null && a > p };
+    } else if (!plannedPOs && passed(vas && vas.due)) out.vas = { na: true };
+
+    const lanes = Array.isArray(intl && intl.lanes) ? intl.lanes : [];
+    const has = (m, k) => ms(m && m[k]) != null;
+    if (lanes.length) {
+      const done = lanes.every(l => has(l.manual, 'departed_at') && has(l.manual, 'arrived_at') && has(l.manual, 'dest_customs_cleared_at'));
+      if (done) {
+        const base = ms(intl && intl.originMax);
+        const late = base != null && lanes.some(l => {
+          const transit = (l.freight === 'Air') ? BASELINE.transit_days_air : BASELINE.transit_days_sea;
+          return ms(l.manual.dest_customs_cleared_at) > base + (transit + 2) * DAY;
+        });
+        out.intl = { complete: true, late };
+      }
+    } else if (passed(intl && intl.originMax)) out.intl = { na: true };
+
+    const wc = loadIntlWeekContainers(ws);
+    const containers = Array.isArray(wc && wc.containers) ? wc.containers : [];
+    const rc = loadLastMileReceipts(ws) || {};
+    const receipts = Object.values((rc && rc.receipts) || rc || {}).filter(Boolean);
+    // Same test the Last Mile panel uses, so the node and the panel's "Open x / y" agree.
+    const isDelivered = (x) => !!(x && (x.status === 'Delivered' || x.status === 'Complete' || x.delivered_local || x.delivered_at));
+    const delivered = receipts.filter(isDelivered);
+    const airLanes = Number(intl && intl.airCount) || 0;
+    const airRecorded = containers.some(c => /\bair\b/i.test(String((c && (c.vessel || c.mode || c.type)) || '')));
+    if (containers.length) {
+      if (delivered.length >= containers.length && !(airLanes && !airRecorded)) {
+        const last = Math.max(0, ...delivered.map(x => ms(x.delivered_at || x.delivered_local) || 0));
+        const p = ms(manual && manual.baselines && manual.baselines.lastMileMax);
+        out.lastmile = { complete: true, late: !!(last && p != null && last > p) };
+      } else if (airLanes && !airRecorded) out.lastmile = { open: 'air lane without a delivery record' };
+    } else if (lanes.length) {
+      // Lanes moved but no container was ever recorded: that is missing data, not an empty week.
+      // Marking it N/A would hide precisely the gap this node exists to show.
+      out.lastmile = { open: 'no containers recorded' };
+    } else {
+      // No lanes and no containers. It is N/A once its date has passed — and if the baseline
+      // could not be computed (no data at all), fall back to the transit window, or an empty
+      // past week would never read as N/A.
+      const due = (manual && manual.baselines && manual.baselines.lastMileMax) || (intl && intl.originMax);
+      if (passed(due)) out.lastmile = { na: true };
+    }
+  } catch (e) { /* completion is advisory; never let it break the dashboard */ }
+  return out;
+}
+
+function renderJourneyTop(ws, tz, receiving, vas, intl, manual, rootEl) {
+    // rootEl lets the 10-week history draw the SAME graphic into its own rows. The dashboard's
+    // call passes six arguments, so it draws into #flow-journey exactly as before.
+    const root = rootEl || document.getElementById('flow-journey');
     if (!root) return;
 
     const now = new Date();
@@ -2772,6 +2857,13 @@ function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
       { id:'intl', label:'Transit & Clearing', short:'T&C', level: intl.level, upcoming: now < intl.originMax },
       { id:'lastmile', label:'Last Mile', short:'LM', level: manual.levels.lastMile, upcoming: now < (manual?.baselines?.lastMileMin ? new Date(manual.baselines.lastMileMin) : new Date(intl.originMax && intl.originMax instanceof Date ? intl.originMax.getTime() + 3*24*60*60*1000 : now.getTime() + 1)) },
     ];
+    // Complete overrides the live status; N/A replaces it only once the node's date has passed.
+    const _done = flowNodeCompletion(ws, receiving, vas, intl, manual);
+    for (const n of nodes) {
+      const c = _done[n.id]; if (!c) continue;
+      if (c.complete) { n.complete = true; n.late = !!c.late; n.level = 'green'; n.upcoming = false; }
+      else if (c.na) { n.na = true; }
+    }
 
     // Planned vs Actual (display only; never persisted)
     const plannedActual = (() => {
@@ -2820,6 +2912,8 @@ function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
     const statusText = (n) => {
       if (!n) return '—';
       if (n.disabled) return 'Future';
+      if (n.complete) return n.late ? 'Complete · late' : 'Complete';
+      if (n.na) return 'N/A';
       if (n.upcoming) return 'Upcoming';
       if (n.level === 'green') return 'On Track';
       if (n.level === 'red') return 'Delayed';
@@ -2828,6 +2922,8 @@ function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
     const statusLevel = (n) => {
       if (!n) return 'gray';
       if (n.disabled) return 'future';
+      if (n.complete) return 'green';
+      if (n.na) return 'gray';
       if (n.upcoming) return 'upcoming';
       return n.level || 'gray';
     };
@@ -2971,11 +3067,7 @@ function renderJourneyTop(ws, tz, receiving, vas, intl, manual) {
 
       const pa = plannedActual(id);
       const paText = pa ? `<text x="${labelX}" y="${nameY - 16}" text-anchor="middle" font-size="12" font-weight="700" fill="rgba(17,24,39,0.55)">${pa}</text>` : '';
-const done = (id === 'receiving')
-  ? !!(receiving?.signoff?.receivingComplete)
-  : (id === 'vas')
-    ? !!(vas?.signoff?.vasComplete)
-    : false;
+const done = !!(n && n.complete);
 const nameLabel = done ? `${n.label} ✓` : n.label;
 
 
@@ -6802,6 +6894,46 @@ if (signoff.vasComplete) {
   // Make sure the section/nav exist even before first state:ready.
   ensureFlowPageExists();
   showHideByHash();
+
+  // ── Read-only API for the 10-week history (Reports & Downloads) ──
+  async function flowComputeWeekForHistory(ws, tz) {
+    tz = tz || getBizTZ();
+    // Pull this week's stored sign-offs, lane dates and deliveries from the server. Without this
+    // a week never opened on this device would read empty browser storage and look untouched.
+    try { await primeFlowWeekFromBackend(ws); } catch (e) {}
+    let planRows = [], receivingRows = [], records = [];
+    try {
+      [planRows, receivingRows, records] = await Promise.all([loadPlan(ws), loadReceiving(ws), loadRecords(ws, tz)]);
+      planRows = asArray(planRows); receivingRows = asArray(receivingRows); records = asArray(records);
+    } catch (e) {}
+    const receiving = computeReceivingStatus(ws, tz, planRows, receivingRows, records);
+    const vas = computeVASStatus(ws, tz, planRows, records);
+    const intl = computeInternationalTransit(ws, tz, planRows, records, vas.due);
+    const manual = computeManualNodeStatuses(ws, tz);
+    // Same sign-off handling as the dashboard's preparation step.
+    const signoff = loadWeekSignoff(ws);
+    receiving.signoff = signoff; vas.signoff = signoff;
+    receiving.planMet = (receiving.plannedPOs || 0) > 0 ? (receiving.receivedPOs || 0) >= (receiving.plannedPOs || 0) : true;
+    vas.planMet = (vas.plannedUnits || 0) > 0 ? (vas.appliedUnits || 0) >= ((vas.plannedUnits || 0) * 0.98) : true;
+    if (signoff.receivingComplete) receiving.level = receiving.planMet ? 'green' : (receiving.level === 'red' ? 'red' : 'yellow');
+    if (signoff.vasComplete) vas.level = vas.planMet ? 'green' : (vas.level === 'red' ? 'red' : 'yellow');
+    const wc = loadIntlWeekContainers(ws);
+    const containers = Array.isArray(wc && wc.containers) ? wc.containers : [];
+    const rc = loadLastMileReceipts(ws) || {};
+    const receipts = Object.values((rc && rc.receipts) || rc || {}).filter(Boolean);
+    return { ws, tz, receiving, vas, intl, manual, containers, receipts,
+             completion: flowNodeCompletion(ws, receiving, vas, intl, manual) };
+  }
+  window.__FLOW_API__ = {
+    computeWeek: flowComputeWeekForHistory,
+    renderJourney: renderJourneyTop,
+    completion: flowNodeCompletion,
+    shiftWeek: shiftWeekStart,
+    toMonday: normalizeWeekStartToMonday,
+    tz: getBizTZ,
+  };
+  try { window.dispatchEvent(new CustomEvent('flow:api-ready')); } catch (e) {}
+
 })();
 
 
