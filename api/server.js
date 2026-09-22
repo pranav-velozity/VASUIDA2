@@ -17320,10 +17320,15 @@ app.get('/ops/route-access-audit', authenticateRequest, requireRole(['admin']), 
       ['reports',      /^\/report\/|^\/reports/],
     ];
     const rows = [];
-    // Express 5 exposes app.router; Express 4 used app._router. Both are checked, and an
-    // empty stack is reported as an error rather than as "nothing to worry about".
+    // Express 4 uses app._router; Express 5 renamed it to app.router. _router is tried FIRST
+    // because in Express 4 `app.router` is a deprecated getter that THROWS rather than
+    // returning undefined — reading it first made this endpoint fail outright.
+    // Each access is guarded, so neither version can break the audit.
     const _app = req.app || app;
-    const stack = (_app.router && _app.router.stack) || (_app._router && _app._router.stack) || [];
+    const pick = (fn) => { try { const v = fn(); return Array.isArray(v) ? v : null; } catch (e) { return null; } };
+    const stack = pick(() => _app._router && _app._router.stack)
+               || pick(() => _app.router && _app.router.stack)
+               || [];
     if (!stack.length) return res.status(500).json({
       error: 'router_stack_unavailable',
       message: 'Could not read the route table, so this audit cannot confirm anything.' });
