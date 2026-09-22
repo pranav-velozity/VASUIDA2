@@ -1998,6 +1998,9 @@ app.post('/ai/pulse',
 // Joins: plans + records + receiving + bins + flow_week
 app.get('/exec/summary',
   authenticateRequest,
+  // Clients see their own executive summary; partners do not. A partner resolves to the
+  // client whose facility it operates, so without this Kerry would read ICONIC's summary.
+  requireClientOrInternal,
   auditLog('view_exec_summary'),
   (req, res) => {
   const facility = normFacility(req.query.facility);
@@ -5261,6 +5264,7 @@ app.post('/ops/exception-email/run', (req, res, next) => {
 // GET /ops/exception-email/preview — HTML preview in browser (Clerk-authed).
 app.get('/ops/exception-email/preview',
   authenticateRequest,
+  requireInternalOrg,          // supplier discrepancies and department ownership — internal
   auditLog('preview_exception_email'),
   async (req, res) => {
     try {
@@ -5285,6 +5289,7 @@ app.get('/ops/exception-email/preview',
 // GET /ops/exception-email/log — recent send log entries for debugging.
 app.get('/ops/exception-email/log',
   authenticateRequest,
+  requireInternalOrg,
   auditLog('view_exception_email_log'),
   (req, res) => {
     try {
@@ -6003,6 +6008,7 @@ app.get('/summary/shipment_summary',
 // Supports single week (week_start) or range (from + to as week_start values).
 app.get('/report/stock-status',
   authenticateRequest,
+  requireClientOrInternal,     // the client's own stock; not the warehouse operator's business
   autoFilterResponse,
   auditLog('view_stock_status'),
   (req, res) => {
@@ -8181,8 +8187,11 @@ app.get('/finance/export.xlsx', authenticateRequest, requireRole(['admin']), req
 app.get('/finance/invoice/:id/pdf', (req, _res, next) => {
   if (req.query._token) req.headers['authorization'] = 'Bearer ' + req.query._token;
   next();
-}, authenticateRequest, async (req, res) => {
+}, authenticateRequest, requireInternalOrg, async (req, res) => {
   try {
+    // Internal only. A partner org resolves to the client whose facility it operates, so
+    // without this a Kerry login could fetch ICONIC's invoice PDFs — VelOzity's sell prices.
+    // Clients are sent their invoice by email and never need to fetch one by id.
     // Scoped to the invoice's own client, resolved from the request. curClient() reads the
     // tenancy context, which needs req.auth — without the middleware above it fell back to
     // ICONIC, and every EHP invoice PDF returned "Not found".
@@ -16630,7 +16639,7 @@ async function buildVasAllocationWorkbook(c, ws) {
   }
 }
 
-app.get('/report/vas-supplier-allocation', authenticateRequest, requireRole(['admin']),
+app.get('/report/vas-supplier-allocation', authenticateRequest, requireRole(['admin']), requireInternalOrg,
   auditLog('download_vas_allocation'), async (req, res) => {
   try {
     _cleanAllocTokens();
@@ -16670,7 +16679,7 @@ function _apDays(baseIso, actIso) {
 }
 const _apDate = (v) => String(v || '').slice(0, 10) || '';
 
-app.get('/report/air-pos', authenticateRequest, auditLog('download_air_po_report'), async (req, res) => {
+app.get('/report/air-pos', authenticateRequest, requireInternalOrg, auditLog('download_air_po_report'), async (req, res) => {
   try {
     const ws = String(req.query.week || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) return res.status(400).json({ error: 'week required as YYYY-MM-DD (Monday)' });
