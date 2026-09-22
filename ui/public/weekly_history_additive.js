@@ -96,7 +96,7 @@
       .wh-tl{font-size:10px;font-weight:600;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;}
       .wh-tv{font-size:24px;font-weight:700;color:${DARK};margin-top:4px;letter-spacing:-.02em;}
       .wh-ts{font-size:11px;color:${MID};margin-top:2px;}
-      .wh-row{display:grid;grid-template-columns:minmax(220px,28%) 1fr;gap:18px;align-items:center;padding:12px 18px;margin-bottom:12px;cursor:pointer;}
+      .wh-row{display:grid;grid-template-columns:1fr minmax(260px,32%);gap:22px;align-items:center;padding:12px 18px;margin-bottom:12px;cursor:pointer;}
       .wh-row:hover{transform:translateY(-4px);background-position:0% 0%,0% 0%;box-shadow:inset 0 1px 0 #fff,0 2px 4px rgba(16,18,27,.06),0 18px 38px rgba(16,18,27,.13);}
       @media (prefers-reduced-motion:reduce){.wh-row:hover{transform:none;}}
       .wh-wk{font-size:17px;font-weight:700;color:${DARK};letter-spacing:-.01em;}
@@ -107,8 +107,8 @@
       /* The dashboard's own graphic, drawn smaller and inert. pointer-events:none stops its node
          handler from changing the dashboard's selection from a historical week. */
       .wh-journey{pointer-events:none;}
-      .wh-journey svg{height:150px !important;}
-      .wh-skel{height:150px;border-radius:10px;background:linear-gradient(90deg,#f2f2f5,#fafafb,#f2f2f5);background-size:200% 100%;animation:whsk 1.2s linear infinite;}
+      .wh-journey svg{height:190px !important;}
+      .wh-skel{height:190px;border-radius:10px;background:linear-gradient(90deg,#f2f2f5,#fafafb,#f2f2f5);background-size:200% 100%;animation:whsk 1.2s linear infinite;}
       @keyframes whsk{to{background-position:-200% 0;}}
       @media (max-width:900px){.wh-tiles{grid-template-columns:repeat(2,1fr);}.wh-row{grid-template-columns:1fr;}}
     `;
@@ -144,9 +144,9 @@
         <div class="wh-tiles" id="wh-tiles">${tilesHtml(null)}</div>
         <div id="wh-rows">${weeks.map(ws => `
           <div class="wh-row" data-ws="${esc(ws)}">
+            <div class="wh-skel"></div>
             <div><div class="wh-wk">W${isoWeek(ws)} <span class="wh-dt">${esc(fmtDay(ws))}</span></div>
               <div class="wh-st" style="color:${LIGHT}">Loading&hellip;</div></div>
-            <div class="wh-skel"></div>
           </div>`).join('')}</div>
       </div>`;
     document.body.appendChild(ov);
@@ -208,11 +208,11 @@
                : d.closed ? 'Every stage complete.' : esc(d.open[0]);
     const rest = (!d.closed && d.open.length > 1) ? d.open.slice(1).map(esc).join(' &middot; ') : '';
     row.innerHTML = `
+      <div class="wh-journey"></div>
       <div><div class="wh-wk">W${isoWeek(ws)} <span class="wh-dt">${esc(fmtDay(ws))}</span></div>
         ${badge}
         <div class="wh-st">${lead}</div>
-        ${rest ? `<div class="wh-op">Also open: ${rest}</div>` : ''}</div>
-      <div class="wh-journey"></div>`;
+        ${rest ? `<div class="wh-op">Also open: ${rest}</div>` : ''}</div>`;
     try {
       api().renderJourney(r.ws, r.tz, r.receiving, r.vas, r.intl, r.manual, row.querySelector('.wh-journey'));
     } catch (e) {
@@ -242,5 +242,5 @@
   if (document.body) startObserving(); else document.addEventListener('DOMContentLoaded', startObserving);
 
   window.__openWeeklyHistory = open;
-  console.log('[weekly-history] v1 loaded');
+  console.log('[weekly-history] v2 loaded');
 })();
