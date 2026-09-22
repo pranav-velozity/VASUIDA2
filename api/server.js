@@ -9245,6 +9245,7 @@ function _cleanReportTokens() {
 // POST /report/cost-utilisation/auth — validate password, return token
 app.post('/report/cost-utilisation/auth',
   authenticateRequest,
+  requireInternalOrg,   // internal analysis; a shared password is not a tenant boundary
   (req, res) => {
   const { password } = req.body || {};
   const expected = process.env.COST_REPORT_PASSWORD || 'velozity2026';
@@ -10788,6 +10789,7 @@ function _printWhenReady() {
 // POST /report/monthly-client/auth — validate password, return token
 app.post('/report/monthly-client/auth',
   authenticateRequest,
+  requireClientOrInternal,   // the client's own report; partners have no part in it
   (req, res) => {
   const { password } = req.body || {};
   const expected = process.env.COST_REPORT_PASSWORD || 'velozity2026';
@@ -12921,7 +12923,7 @@ function _ncFmtWeek(ws){ try { const d = new Date(ws + 'T00:00:00Z'); return 'We
 function _ncMoney(v){ return 'US$' + (Number(v) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
 // Base report is open to any authed user; the password is only required to INCLUDE cost columns.
-app.post('/report/supplier-discrepancy/auth', authenticateRequest, (req, res) => {
+app.post('/report/supplier-discrepancy/auth', authenticateRequest, requireClientOrInternal, (req, res) => {
   const b = req.body || {}; let cost = false;
   if (b.includeCost) {
     const expected = process.env.COST_REPORT_PASSWORD || 'velozity2026';
@@ -16433,7 +16435,7 @@ function _cleanAllocTokens() {
   for (const [k, v] of _allocTokens) if (v.ts < cutoff) _allocTokens.delete(k);
 }
 
-app.post('/report/supplier-allocation/auth', authenticateRequest, requireRole(['admin']), (req, res) => {
+app.post('/report/supplier-allocation/auth', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   const b = req.body || {};
   const expected = process.env.COST_REPORT_PASSWORD || 'velozity2026';
   const given = Buffer.from(String(b.password || ''));
