@@ -6921,7 +6921,10 @@ if (signoff.vasComplete) {
     const containers = Array.isArray(wc && wc.containers) ? wc.containers : [];
     const rc = loadLastMileReceipts(ws) || {};
     const receipts = Object.values((rc && rc.receipts) || rc || {}).filter(Boolean);
-    return { ws, tz, receiving, vas, intl, manual, containers, receipts,
+    // receiptMap keeps the container keys, so the history can name WHICH containers are still
+    // out rather than only how many.
+    const receiptMap = ((rc && rc.receipts) || rc || {});
+    return { ws, tz, receiving, vas, intl, manual, containers, receipts, receiptMap,
              completion: flowNodeCompletion(ws, receiving, vas, intl, manual) };
   }
   window.__FLOW_API__ = {

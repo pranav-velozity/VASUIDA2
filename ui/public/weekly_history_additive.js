@@ -33,47 +33,117 @@
   }
   const fmtDay = (ymd) => { try { return new Date(ymd + 'T00:00:00Z').toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' }); } catch (e) { return ymd; } };
 
-  // ── Plain-language status, derived by rule rather than AI so it is instant and exact ──
+  // ── Path to green, derived by rule rather than AI so it is instant and exact ──
+  // For each stage that is not finished: where it stands, what is missing, and the specific
+  // action that turns it green — naming the POs, suppliers, lanes and containers involved.
+  const LEVEL = { red: ['Delayed', RED, 'rgba(179,63,64,.10)'], yellow: ['At risk', AMBER, 'rgba(183,121,31,.11)'],
+                  green: ['On track', GREEN, 'rgba(27,127,59,.10)'], gray: ['Upcoming', MID, '#F2F2F5'] };
+  const nf = (n) => Number(n || 0).toLocaleString();
+  const topN = (arr, n) => arr.slice(0, n).join(', ') + (arr.length > n ? ` +${arr.length - n} more` : '');
+
   function describe(r) {
     const c = r.completion || {};
-    const open = [];
-    const plannedPOs = Number(r.receiving && r.receiving.plannedPOs) || 0;
-    const receivedPOs = Number(r.receiving && r.receiving.receivedPOs) || 0;
-    const plannedUnits = Number(r.vas && r.vas.plannedUnits) || 0;
-    const appliedUnits = Number(r.vas && r.vas.appliedUnits) || 0;
-    const lanes = Array.isArray(r.intl && r.intl.lanes) ? r.intl.lanes : [];
-    const has = (m, k) => !!(m && m[k] && !isNaN(new Date(m[k]).getTime()));
+    const now = Date.now();
+    const due = (d) => { const t = d ? new Date(d).getTime() : NaN; return isNaN(t) ? null : t; };
     const isDelivered = (x) => !!(x && (x.status === 'Delivered' || x.status === 'Complete' || x.delivered_local || x.delivered_at));
+    const has = (m, k) => !!(m && m[k] && !isNaN(new Date(m[k]).getTime()));
+    const stages = [];
+    const late = [];
+    const add = (key, name, level, facts, path, upcoming) => stages.push({ key, name, level, facts, path, upcoming });
+    const live = (k) => c[k] && (c[k].complete || c[k].na);
+    const lvl = (obj) => (obj && obj.level) || 'gray';
 
-    if (!c.receiving || (!c.receiving.complete && !c.receiving.na)) {
-      if (plannedPOs) open.push(`${Math.max(0, plannedPOs - receivedPOs)} of ${plannedPOs} POs still to receive`);
-      else open.push('Receiving not signed off');
+    // Receiving
+    if (c.receiving && c.receiving.complete && c.receiving.late) late.push('Receiving');
+    if (!live('receiving')) {
+      const R = r.receiving || {};
+      const missing = Array.isArray(R.missingPOList) ? R.missingPOList : [];
+      const lateN = Array.isArray(R.latePOList) ? R.latePOList.length : (R.latePOs || 0);
+      const bySup = (R.suppliers || []).map(x => ({ s: x.supplier, n: (x.poCount || 0) - (x.receivedPOs || 0) }))
+                                       .filter(x => x.n > 0).sort((a, b) => b.n - a.n).map(x => `${x.s} (${x.n} PO${x.n === 1 ? '' : 's'})`);
+      const upcoming = due(R.due) != null && now < due(R.due) && !(R.receivedPOs > 0);
+      if (!missing.length && (R.plannedPOs || 0) > 0) {
+        add('receiving', 'Receiving', 'green', `All ${nf(R.plannedPOs)} POs received${lateN ? ` · ${nf(lateN)} late` : ''}`,
+            'Tick Receiving complete to close it');
+      } else if ((R.plannedPOs || 0) > 0) {
+        add('receiving', 'Receiving', lvl(R), `${nf(missing.length)} of ${nf(R.plannedPOs)} POs not received${lateN ? ` · ${nf(lateN)} late` : ''}`,
+            bySup.length ? `Chase ${topN(bySup, 2)}` : `Receive ${topN(missing, 3)}`, upcoming);
+      } else add('receiving', 'Receiving', 'gray', 'No plan uploaded', 'Upload the week plan', upcoming);
     }
-    if (!c.vas || (!c.vas.complete && !c.vas.na)) {
-      if (plannedUnits) open.push(`${Math.min(100, Math.round(appliedUnits / plannedUnits * 100))}% of units applied`);
-      else open.push('VAS not signed off');
-    }
-    if (!c.intl || (!c.intl.complete && !c.intl.na)) {
-      if (lanes.length) {
-        const notDone = lanes.filter(l => !(has(l.manual, 'departed_at') && has(l.manual, 'arrived_at') && has(l.manual, 'dest_customs_cleared_at'))).length;
-        open.push(`${notDone} of ${lanes.length} lane${lanes.length === 1 ? '' : 's'} not yet cleared`);
+
+    // VAS
+    if (c.vas && c.vas.complete && c.vas.late) late.push('VAS');
+    if (!live('vas')) {
+      const V = r.vas || {};
+      const planned = V.plannedUnits || 0, applied = V.appliedUnits || 0;
+      const pct = planned ? Math.min(100, Math.round(applied / planned * 100)) : 0;
+      const bySup = (V.supplierRows || []).filter(x => x.remaining > 0).sort((a, b) => b.remaining - a.remaining)
+                                         .map(x => `${x.supplier} (${nf(x.remaining)} units)`);
+      const upcoming = !(applied > 0) && due(V.due) != null && now < due(V.due);
+      if (planned && pct >= 98) {
+        add('vas', 'VAS', 'green', `${pct}% of ${nf(planned)} units applied`, 'Tick VAS complete to close it');
+      } else if (planned) {
+        add('vas', 'VAS', lvl(V), `${pct}% applied · ${nf(Math.max(0, planned - applied))} units to go`,
+            bySup.length ? `Apply units for ${topN(bySup, 2)}` : 'Apply remaining units', upcoming);
       }
     }
-    if (!c.lastmile || (!c.lastmile.complete && !c.lastmile.na)) {
-      if (c.lastmile && c.lastmile.open) open.push(c.lastmile.open.charAt(0).toUpperCase() + c.lastmile.open.slice(1));
-      else if ((r.containers || []).length) {
-        const d = (r.receipts || []).filter(isDelivered).length;
-        open.push(`${Math.max(0, r.containers.length - d)} of ${r.containers.length} containers undelivered`);
+
+    // Transit & Clearing — each lane counted at the first of the three steps it still needs.
+    if (c.intl && c.intl.complete && c.intl.late) late.push('Transit');
+    if (!live('intl')) {
+      const I = r.intl || {};
+      const lanes = Array.isArray(I.lanes) ? I.lanes : [];
+      if (lanes.length) {
+        let dep = 0, arr = 0, clr = 0; const stuck = new Map();
+        for (const l of lanes) {
+          const m = l.manual || {};
+          const step = !has(m, 'departed_at') ? 'dep' : !has(m, 'arrived_at') ? 'arr' : !has(m, 'dest_customs_cleared_at') ? 'clr' : null;
+          if (!step) continue;
+          if (step === 'dep') dep++; else if (step === 'arr') arr++; else clr++;
+          const sup = l.supplier || 'Unknown'; stuck.set(sup, (stuck.get(sup) || 0) + 1);
+        }
+        const open = dep + arr + clr;
+        const parts = [dep && `${dep} to depart`, arr && `${arr} to arrive`, clr && `${clr} to clear`].filter(Boolean);
+        const holds = Number(I.holds || 0);
+        const who = [...stuck.entries()].sort((a, b) => b[1] - a[1]).map(([s2, n]) => `${s2} (${n} lane${n === 1 ? '' : 's'})`);
+        const upcoming = due(I.originMin) != null && now < due(I.originMin);
+        add('intl', 'Transit & Clearing', lvl(I),
+            `${nf(open)} of ${nf(lanes.length)} lanes open${holds ? ` · ${holds} customs hold${holds === 1 ? '' : 's'}` : ''}`,
+            open ? `${parts.join(' · ')}${who.length ? ` — ${topN(who, 2)}` : ''}` : 'Record the remaining dates', upcoming);
+      }
+    }
+
+    // Last Mile — names the containers still out, not just a count.
+    if (c.lastmile && c.lastmile.complete && c.lastmile.late) late.push('Last mile');
+    if (!live('lastmile')) {
+      const M = r.manual || {};
+      const containers = Array.isArray(r.containers) ? r.containers : [];
+      const map = r.receiptMap || {};
+      const idOf = (x) => x && (x.container_uid || x.uid || x.container_id);
+      const labelOf = (x) => (x && (x.container_id || x.container_uid || x.uid)) || (x && x.vessel) || 'container';
+      const out = containers.filter(x => {
+        const k = idOf(x); const rc = (k && map[k]) || (x && x.container_id && map[x.container_id]) || null;
+        return !isDelivered(rc);
+      });
+      const lm = (M.levels && M.levels.lastMile) || 'gray';
+      const upcoming = due(M.baselines && M.baselines.lastMileMin) != null && now < due(M.baselines.lastMileMin);
+      if (c.lastmile && c.lastmile.open === 'no containers recorded') {
+        add('lastmile', 'Last Mile', lm, 'No containers recorded yet', 'Add this week\'s containers in Transit & Clearing', upcoming);
+      } else if (c.lastmile && c.lastmile.open) {
+        add('lastmile', 'Last Mile', lm, 'Air lane without a delivery record', 'Record the air pallet and its delivery', upcoming);
+      } else if (containers.length) {
+        add('lastmile', 'Last Mile', lm, `${nf(out.length)} of ${nf(containers.length)} undelivered`,
+            out.length ? `Deliver ${topN(out.map(labelOf), 3)}` : 'Record the remaining deliveries', upcoming);
       }
     }
 
     const keys = ['receiving', 'vas', 'intl', 'lastmile'];
     const closed = keys.every(k => c[k] && (c[k].complete || c[k].na));
     const empty = keys.every(k => c[k] && c[k].na);
-    const late = keys.filter(k => c[k] && c[k].complete && c[k].late).length;
-    // Not closed and nothing specific outstanding: the remaining stages simply have not started.
-    const upcoming = !closed && open.length === 0;
-    return { open, closed, empty, late, upcoming };
+    const active = stages.filter(x => !x.upcoming);
+    const upcoming = !closed && active.length === 0;
+    // "open" drives the Open items tile: stages that need something done, not ones not yet due.
+    return { stages, active, open: active, closed, empty, late, upcoming, lateCount: late.length };
   }
 
   // ── Shell ──
@@ -96,7 +166,15 @@
       .wh-tl{font-size:10px;font-weight:600;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;}
       .wh-tv{font-size:24px;font-weight:700;color:${DARK};margin-top:4px;letter-spacing:-.02em;}
       .wh-ts{font-size:11px;color:${MID};margin-top:2px;}
-      .wh-row{display:grid;grid-template-columns:1fr minmax(260px,32%);gap:22px;align-items:center;padding:12px 18px;margin-bottom:12px;cursor:pointer;}
+      .wh-row{display:grid;grid-template-columns:96px minmax(0,1fr) minmax(300px,34%);gap:20px;align-items:center;padding:12px 18px;margin-bottom:12px;cursor:pointer;}
+      .wh-left{border-right:.5px solid rgba(0,0,0,.06);padding-right:12px;align-self:stretch;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;}
+      .wh-stg{display:grid;grid-template-columns:auto 1fr;gap:2px 9px;align-items:baseline;padding:6px 0;border-top:.5px solid rgba(0,0,0,.05);}
+      .wh-stg:first-of-type{border-top:0;}
+      .wh-chip{font-size:9.5px;font-weight:700;border-radius:5px;padding:2px 6px;white-space:nowrap;}
+      .wh-sn{font-size:12px;font-weight:600;color:${DARK};}
+      .wh-sf{grid-column:2;font-size:11.5px;color:${DARK};line-height:1.4;}
+      .wh-sp{grid-column:2;font-size:11px;color:${MID};line-height:1.4;}
+      .wh-sp b{color:${DARK};font-weight:600;}
       .wh-row:hover{transform:translateY(-4px);background-position:0% 0%,0% 0%;box-shadow:inset 0 1px 0 #fff,0 2px 4px rgba(16,18,27,.06),0 18px 38px rgba(16,18,27,.13);}
       @media (prefers-reduced-motion:reduce){.wh-row:hover{transform:none;}}
       .wh-wk{font-size:17px;font-weight:700;color:${DARK};letter-spacing:-.01em;}
@@ -110,7 +188,8 @@
       .wh-journey svg{height:190px !important;}
       .wh-skel{height:190px;border-radius:10px;background:linear-gradient(90deg,#f2f2f5,#fafafb,#f2f2f5);background-size:200% 100%;animation:whsk 1.2s linear infinite;}
       @keyframes whsk{to{background-position:-200% 0;}}
-      @media (max-width:900px){.wh-tiles{grid-template-columns:repeat(2,1fr);}.wh-row{grid-template-columns:1fr;}}
+      @media (max-width:1100px){.wh-row{grid-template-columns:80px minmax(0,1fr);}.wh-row>.wh-right{grid-column:1 / -1;}}
+      @media (max-width:700px){.wh-tiles{grid-template-columns:repeat(2,1fr);}.wh-row{grid-template-columns:1fr;}.wh-left{border-right:0;}}
     `;
     document.head.appendChild(st);
   }
@@ -144,9 +223,9 @@
         <div class="wh-tiles" id="wh-tiles">${tilesHtml(null)}</div>
         <div id="wh-rows">${weeks.map(ws => `
           <div class="wh-row" data-ws="${esc(ws)}">
+            <div class="wh-left"><div class="wh-wk">W${isoWeek(ws)}</div><div class="wh-dt" style="margin:2px 0 0;">${esc(fmtDay(ws))}</div></div>
             <div class="wh-skel"></div>
-            <div><div class="wh-wk">W${isoWeek(ws)} <span class="wh-dt">${esc(fmtDay(ws))}</span></div>
-              <div class="wh-st" style="color:${LIGHT}">Loading&hellip;</div></div>
+            <div class="wh-right"><div class="wh-st" style="color:${LIGHT}">Loading&hellip;</div></div>
           </div>`).join('')}</div>
       </div>`;
     document.body.appendChild(ov);
@@ -183,7 +262,7 @@
     const loaded = rs.length;
     const d = rs.map(describe);
     const closed = d.filter(x => x.closed && !x.empty).length;
-    const late = d.reduce((s, x) => s + x.late, 0);
+    const late = d.reduce((s, x) => s + x.lateCount, 0);
     const openItems = d.reduce((s, x) => s + x.open.length, 0);
     const v = (n) => loaded ? n : '&ndash;';
     return `
@@ -198,21 +277,33 @@
     const d = describe(r);
     const badge = d.empty
       ? `<span class="wh-badge" style="background:#F2F2F5;color:${MID};">No activity</span>`
-      : d.upcoming
-        ? `<span class="wh-badge" style="background:#F2F2F5;color:${MID};">In progress</span>`
-      : d.closed
-        ? `<span class="wh-badge" style="background:rgba(27,127,59,.12);color:${GREEN};">Closed${d.late ? ` &middot; ${d.late} late` : ''}</span>`
-        : `<span class="wh-badge" style="background:rgba(183,121,31,.12);color:${AMBER};">${d.open.length} open</span>`;
-    const lead = d.empty ? 'Nothing planned or shipped this week.'
-               : d.upcoming ? 'Remaining stages have not started yet.'
-               : d.closed ? 'Every stage complete.' : esc(d.open[0]);
-    const rest = (!d.closed && d.open.length > 1) ? d.open.slice(1).map(esc).join(' &middot; ') : '';
+      : d.upcoming ? `<span class="wh-badge" style="background:#F2F2F5;color:${MID};">In progress</span>`
+      : d.closed ? `<span class="wh-badge" style="background:rgba(27,127,59,.12);color:${GREEN};">Closed</span>`
+      : `<span class="wh-badge" style="background:rgba(183,121,31,.12);color:${AMBER};">${d.active.length} open</span>`;
+
+    let right;
+    if (d.empty) right = `<div class="wh-st">Nothing planned or shipped this week.</div>`;
+    else if (d.closed) right = `<div class="wh-st">Every stage complete.</div>`;
+    else {
+      // Active stages first (the ones needing action), then anything simply not due yet.
+      const order = [...d.stages].sort((a, b) => (a.upcoming ? 1 : 0) - (b.upcoming ? 1 : 0));
+      right = order.map(x => {
+        const [label, fg, bg] = x.upcoming ? LEVEL.gray : (LEVEL[x.level] || LEVEL.gray);
+        return `<div class="wh-stg">
+          <span class="wh-chip" style="color:${fg};background:${bg};">${label}</span>
+          <span class="wh-sn">${esc(x.name)}</span>
+          <div class="wh-sf">${esc(x.facts)}</div>
+          ${x.upcoming ? '' : `<div class="wh-sp"><b>Path to green:</b> ${esc(x.path)}</div>`}
+        </div>`;
+      }).join('');
+    }
+    if (d.late.length) right += `<div class="wh-op" style="margin-top:6px;">Completed late: ${esc(d.late.join(', '))}</div>`;
+
     row.innerHTML = `
+      <div class="wh-left"><div class="wh-wk">W${isoWeek(ws)}</div>
+        <div class="wh-dt" style="margin:2px 0 0;">${esc(fmtDay(ws))}</div>${badge}</div>
       <div class="wh-journey"></div>
-      <div><div class="wh-wk">W${isoWeek(ws)} <span class="wh-dt">${esc(fmtDay(ws))}</span></div>
-        ${badge}
-        <div class="wh-st">${lead}</div>
-        ${rest ? `<div class="wh-op">Also open: ${rest}</div>` : ''}</div>`;
+      <div class="wh-right">${right}</div>`;
     try {
       api().renderJourney(r.ws, r.tz, r.receiving, r.vas, r.intl, r.manual, row.querySelector('.wh-journey'));
     } catch (e) {
@@ -242,5 +333,5 @@
   if (document.body) startObserving(); else document.addEventListener('DOMContentLoaded', startObserving);
 
   window.__openWeeklyHistory = open;
-  console.log('[weekly-history] v2 loaded');
+  console.log('[weekly-history] v3 loaded');
 })();
