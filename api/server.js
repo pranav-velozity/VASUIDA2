@@ -17298,6 +17298,66 @@ app.post('/records/dedupe', authenticateRequest, requireRole(['admin']), writeOp
 // routes use to scope their queries.
 //
 // Read-only. Nothing is changed and no data belonging to any client is returned.
+// ── Route access audit ──
+// Walks Express's OWN router stack, so it reports how the running server is actually wired
+// rather than what the source appears to say. Named guards (requireInternalOrg,
+// requireClientOrInternal, authenticateRequest) are visible by function name.
+//
+// requireRole(...) returns an anonymous closure, so it cannot be identified this way — but
+// that check is about ROLE, not organisation, and a Kerry user holding org:admin_auth passes
+// every role check anyway. Organisation guards are what actually separate tenants.
+app.get('/ops/route-access-audit', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+  try {
+    // Anything commercial or cross-client. These should be internal-only.
+    const SENSITIVE = [
+      ['finance',      /^\/finance\//],
+      ['invoices',     /^\/finance\/invoice/],
+      ['quote review', /^\/air-quotes\/internal|^\/air-quotes\/divergence|^\/sea-quotes/],
+      ['air quotes',   /^\/air-quotes/],
+      ['executive',    /^\/exec\//],
+      ['supplier invoices', /^\/supplier-invoices|^\/finance\/supplier/],
+      ['ops + cron',   /^\/ops\//],
+      ['reports',      /^\/report\/|^\/reports/],
+    ];
+    const rows = [];
+    // Express 5 exposes app.router; Express 4 used app._router. Both are checked, and an
+    // empty stack is reported as an error rather than as "nothing to worry about".
+    const _app = req.app || app;
+    const stack = (_app.router && _app.router.stack) || (_app._router && _app._router.stack) || [];
+    if (!stack.length) return res.status(500).json({
+      error: 'router_stack_unavailable',
+      message: 'Could not read the route table, so this audit cannot confirm anything.' });
+    for (const layer of stack) {
+      if (!layer.route) continue;
+      const path = layer.route.path;
+      const methods = Object.keys(layer.route.methods || {}).map(m => m.toUpperCase());
+      const names = (layer.route.stack || []).map(h => h.name || '(anonymous)');
+      const authed = names.includes('authenticateRequest');
+      const internalOnly = names.includes('requireInternalOrg');
+      const clientOrInternal = names.includes('requireClientOrInternal');
+      const cat = (SENSITIVE.find(([, rx]) => rx.test(path)) || [null])[0];
+      rows.push({ path, methods, authed, internalOnly, clientOrInternal, category: cat,
+        open_to: !authed ? 'anyone (no login)'
+               : internalOnly ? 'VelOzity only'
+               : clientOrInternal ? 'clients + VelOzity (partners blocked)'
+               : 'any signed-in org, including partners' });
+    }
+    const sensitive = rows.filter(r => r.category);
+    const exposedToPartner = sensitive.filter(r => r.authed && !r.internalOnly && !r.clientOrInternal);
+    const exposedToClient = sensitive.filter(r => r.authed && !r.internalOnly);
+    res.json({
+      totals: { routes: rows.length, authenticated: rows.filter(r => r.authed).length,
+                internal_only: rows.filter(r => r.internalOnly).length,
+                client_or_internal: rows.filter(r => r.clientOrInternal).length },
+      partner_gate: String(process.env.PARTNER_GATE || '').toLowerCase() === 'off' ? 'OFF' : 'on',
+      sensitive_reachable_by_partners: exposedToPartner.map(r => `${r.methods.join('/')} ${r.path} [${r.category}]`),
+      sensitive_reachable_by_clients: exposedToClient.map(r => `${r.methods.join('/')} ${r.path} [${r.category}]`),
+      unauthenticated: rows.filter(r => !r.authed).map(r => `${r.methods.join('/')} ${r.path}`),
+      note: 'Read only. Reflects the running server, not the source.',
+    });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 app.get('/ops/tenancy-audit', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const orgs = db.prepare('SELECT * FROM org_map ORDER BY org_type, org_name').all();
