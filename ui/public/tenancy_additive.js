@@ -198,16 +198,20 @@
       </select></div>`;
     }
 
-    // Client switcher — internal users only; others have exactly one client, shown read-only
+    // Client switcher — shown to ANY org serving more than one client, not just internal.
+    // A partner's scope comes from the facilities it works at, so Kerry Shenzhen covers both
+    // ICONIC and GRBA at Kerry Yantian. With two clients the server can no longer derive
+    // which one is meant, and guessing would mean updating the wrong client's dates.
     const pickable = (r.client_ids || []).filter(c => c !== 'VOZ');   // VOZ = internal placeholder, not an operating tenant
-    if (r.org_type === 'internal' && pickable.length > 1) {
+    if (pickable.length > 1) {
       const active = window.pinpointClient || '';
       html += `<div class="tn-box"><span class="tn-lbl">Client</span><select class="tn-sel" id="tn-client">
         ${!active ? '<option value="">Select…</option>' : ''}
         ${pickable.map(c => `<option value="${c}" ${c === active ? 'selected' : ''}>${c}</option>`).join('')}
       </select></div>`;
     }
-    // Client/partner users have exactly one client, derived server-side — show them nothing.
+    // A client or partner org with exactly one client still has it derived server-side and
+    // sees nothing — unchanged for EHP, ICONIC and Kerry US.
 
     wrap.innerHTML = html;
 
@@ -239,13 +243,19 @@
       if (r.org_type === 'internal') {
         // Default to ICONIC on first load — the only client with data today, so behaviour is unchanged.
         if (!window.pinpointClient && (r.client_ids || []).includes('ICONIC')) setActiveClient('ICONIC');
+      } else if ((r.client_ids || []).filter(c => c !== 'VOZ').length > 1) {
+        // More than one client: the server cannot derive it, so a stored choice is kept and
+        // anything stale is dropped. No default is applied on purpose — picking one for the
+        // user is how somebody updates the wrong client's shipment without noticing.
+        const ok = (r.client_ids || []).includes(window.pinpointClient);
+        if (!ok) setActiveClient(null);
       } else {
-        // client/partner orgs: the server derives the client; don't send a header that could conflict.
+        // Exactly one client: the server derives it; don't send a header that could conflict.
         setActiveClient(null);
       }
       render();
       applyCapabilityNav();
-      console.log('[tenancy v5] org:', r.org_type, '| clients:', (r.client_ids || []).join(','), '| active:', window.pinpointClient || '(server-derived)');
+      console.log('[tenancy v6] org:', r.org_type, '| clients:', (r.client_ids || []).join(','), '| active:', window.pinpointClient || '(server-derived)');
     } catch (e) { /* diagnostics only — never block the app */ }
   }
 
