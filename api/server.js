@@ -80,6 +80,13 @@ const PARTNER_ALLOW_EXACT = new Set([
 const PARTNER_ALLOW_PREFIX = [
   '/partner/',              // anything built specifically for partners
 ];
+
+// Endpoints over the single-tenant operational tables. Everything here reads plans, records,
+// receiving, bins, lanes or flow_week, none of which carry a client_id.
+const LEGACY_OPS_PREFIXES = [
+  '/plan', '/records', '/receiving', '/flow', '/lanes', '/bins', '/intake',
+  '/noncompliance', '/apo', '/exec/',
+];
 function authenticateRequest(req, res, next) {
   return _authRaw(req, res, (err) => {
     if (err) return next(err);
@@ -120,6 +127,29 @@ function authenticateRequest(req, res, next) {
           return res.status(409).json({ error: 'client_not_selected',
             clients: (t && t.client_ids) || [],
             message: 'Choose which client you are working on.' });
+        }
+      }
+      // ── The legacy operational tables belong to one client ──
+      // plans, records and flow_week carry NO client_id: they are single-tenant and hold
+      // ICONIC's data. The endpoints over them cannot filter by client, so with another client
+      // selected they serve ICONIC's week regardless. Harmless-looking for an internal user
+      // and a straight cross-client leak for a client user.
+      //
+      // Only clients that actually own that model may reach them. week_hub is the marker:
+      // ICONIC, EHP and VelOzity have it; a door-to-door client does not.
+      if (!TENANCY_OPEN_PATHS.has(String(req.path || ''))) {
+        const path = String(req.path || '');
+        if (LEGACY_OPS_PREFIXES.some(p => path.startsWith(p))) {
+          const w = tenancyWriteClient(req);
+          const cid = w && w.client_id;
+          if (cid) {
+            const owns = db.prepare(`SELECT 1 x FROM client_capability
+              WHERE client_id=? AND capability='week_hub' AND enabled=1`).get(cid);
+            if (!owns) {
+              return res.status(403).json({ error: 'not_for_this_client', client_id: cid,
+                message: 'This screen belongs to the weekly VAS model. The selected client does not use it.' });
+            }
+          }
         }
       }
       if (t && t.denied_reason && IDENTITY_FAILURES.has(t.denied_reason)) {
