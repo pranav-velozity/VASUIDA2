@@ -485,12 +485,24 @@ module.exports = function mountD2D(deps) {
 
   // One milestone. Re-recording the same stage updates it rather than adding a second row, so
   // a corrected date replaces the wrong one instead of both being true at once.
-  function writeEvent(sdb, { shipment_id, stage, actual_at, source, note, who }) {
+  function writeEvent(sdb, { shipment_id, stage, actual_at, source, note, who, clear }) {
     if (!STAGES.includes(stage)) return { error: 'unknown stage: ' + stage };
     if (actual_at && !isYmd(actual_at)) return { error: 'actual_at must be YYYY-MM-DD' };
     const ship = sdb.get(`SELECT id FROM d2d_shipment WHERE client_id = @client AND id = @id`, { id: shipment_id });
     if (!ship) return { error: 'shipment not found: ' + shipment_id };
     const now = new Date().toISOString();
+
+    // Removing a wrongly entered date deletes the row. Storing a null would leave a stage
+    // looking recorded-but-blank, which reads as fact on the strip.
+    if (clear || (!actual_at && actual_at !== 0)) {
+      sdb.run(`DELETE FROM d2d_event WHERE client_id = @client AND shipment_id = @sid AND stage = @stage`,
+        { sid: shipment_id, stage });
+      const left = sdb.get(`SELECT COUNT(*) n FROM d2d_event WHERE client_id = @client AND shipment_id = @sid AND actual_at IS NOT NULL`,
+        { sid: shipment_id });
+      sdb.run(`UPDATE d2d_shipment SET status = @st WHERE client_id = @client AND id = @id`,
+        { st: left && left.n ? 'in_transit' : 'booked', id: shipment_id });
+      return { ok: true, stage, actual_at: null, cleared: true };
+    }
     sdb.run(`INSERT INTO d2d_event (id, client_id, shipment_id, stage, actual_at, source, note, recorded_by, recorded_at)
              VALUES (@id, @client, @shipment_id, @stage, @actual_at, @source, @note, @who, @now)
              ON CONFLICT(client_id, shipment_id, stage) DO UPDATE SET
@@ -570,6 +582,30 @@ module.exports = function mountD2D(deps) {
     } catch (e) { console.error('[d2d] partner events', e); res.status(500).json({ error: String(e.message || e) }); }
   });
 
+  router.post('/partner/shipments/:id/reference', authenticateRequest, requireD2D,
+    auditLog('partner_d2d_reference'), (req, res) => {
+    try {
+      if (req.d2dOrgType !== 'partner' && !isInternal(req)) {
+        return res.status(403).json({ error: 'partner_or_internal_only' });
+      }
+      const ref = String((req.body || {}).reference || '').trim().toUpperCase();
+      if (!/^[A-Z]{4}[0-9]{6,7}$/.test(ref)) {
+        return res.status(400).json({ error: 'bad_reference',
+          message: 'A container number looks like ABCD1234567.' });
+      }
+      const row = req.d2d.get(`SELECT id, reference FROM d2d_shipment WHERE client_id = @client AND id = @id`,
+        { id: req.params.id });
+      if (!row) return res.status(404).json({ error: 'not_found' });
+      // Advising is once. Correcting one already in use is VelOzity's call, not the partner's.
+      if (row.reference) return res.status(409).json({ error: 'already_advised', reference: row.reference });
+
+      req.d2d.run(`UPDATE d2d_shipment SET reference = @ref, vessel = COALESCE(@vessel, vessel)
+                   WHERE client_id = @client AND id = @id`,
+        { ref, vessel: (req.body || {}).vessel || null, id: req.params.id });
+      res.json({ ok: true, reference: ref });
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
   // What the partner needs to see to do that: the shipments, and nothing about money.
   router.get('/partner/shipments', authenticateRequest, requireD2D, (req, res) => {
     try {
@@ -577,10 +613,20 @@ module.exports = function mountD2D(deps) {
         return res.status(403).json({ error: 'partner_or_internal_only' });
       }
       const rows = req.d2d.all(`SELECT id, week_start, mode, reference, container_type, carrier, vessel,
-                                       origin, destination, status
+                                       origin, destination, status,
+                                       plan_pickup, plan_origin_cleared, plan_departed, plan_arrived,
+                                       plan_dest_cleared, plan_out_for_delivery, plan_delivered
                                 FROM d2d_shipment WHERE client_id = @client
-                                ORDER BY week_start DESC, reference LIMIT 200`);
-      res.json({ shipments: rows, stages: STAGES });
+                                ORDER BY week_start DESC, id LIMIT 200`);
+      const ids = rows.map(r => r.id);
+      const idp = {}; ids.forEach((id, i) => { idp['id' + i] = id; });
+      const events = ids.length
+        ? req.d2d.all(`SELECT shipment_id, stage, actual_at, source FROM d2d_event
+                       WHERE client_id = @client AND shipment_id IN (${ids.map((_, i) => '@id' + i).join(',')})`, idp)
+        : [];
+      const by = {};
+      for (const e of events) (by[e.shipment_id] = by[e.shipment_id] || []).push(e);
+      res.json({ shipments: rows.map(r => ({ ...r, events: by[r.id] || [] })), stages: STAGES });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
 
