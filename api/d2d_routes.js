@@ -225,11 +225,18 @@ module.exports = function mountD2D(deps) {
 
   router.get('/weeks', authenticateRequest, requireD2D, auditLog('view_d2d_weeks'), (req, res) => {
     try {
-      const rows = req.d2d.all(`SELECT week_start,
-          COUNT(*) AS shipments,
-          SUM(CASE WHEN status='delivered' THEN 1 ELSE 0 END) AS delivered
-        FROM d2d_shipment WHERE client_id = @client
-        GROUP BY week_start ORDER BY week_start DESC LIMIT 26`);
+      // Weeks come from bookings AND shipments. Listing only weeks that have shipments meant a
+      // week could not be opened until it was approved — and approval happens on that screen,
+      // so a newly quoted week was unreachable.
+      const rows = req.d2d.all(`
+        SELECT w.week_start,
+          (SELECT COUNT(*) FROM d2d_shipment s WHERE s.client_id = @client AND s.week_start = w.week_start) AS shipments,
+          (SELECT COUNT(*) FROM d2d_shipment s WHERE s.client_id = @client AND s.week_start = w.week_start AND s.status='delivered') AS delivered,
+          (SELECT COUNT(*) FROM d2d_booking b WHERE b.client_id = @client AND b.week_start = w.week_start AND b.status='draft') AS drafts,
+          (SELECT COUNT(*) FROM d2d_booking b WHERE b.client_id = @client AND b.week_start = w.week_start AND b.status='released') AS awaiting
+        FROM (SELECT week_start FROM d2d_shipment WHERE client_id = @client
+              UNION SELECT week_start FROM d2d_booking WHERE client_id = @client) w
+        ORDER BY w.week_start DESC LIMIT 26`);
       res.json({ weeks: rows });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
