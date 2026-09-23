@@ -29,7 +29,7 @@
     return Math.round((y - x) / 86400000);
   };
 
-  let _enabled = null, _capClient = null, _week = null;
+  let _enabled = null, _capClient = null, _week = null, _autoOpened = false;
 
   async function api(path, opts) {
     const base = (document.querySelector('meta[name="api-base"]') || {}).content || '';
@@ -60,6 +60,14 @@
   }
   function paintNav() {
     const n = el('nav-d2d'); if (n) n.style.display = _enabled ? '' : 'none';
+    // A door-to-door client has no Week Hub to land on — the legacy screens belong to the
+    // weekly VAS model and the server now refuses them. Without this the app opens on a page
+    // that cannot load, so open the hub instead, once.
+    if (_enabled && !_autoOpened) {
+      const wh = el('nav-weekhub');
+      const noWeekHub = !wh || wh.style.display === 'none';
+      if (noWeekHub) { _autoOpened = true; setTimeout(() => { open().catch(() => {}); }, 80); }
+    }
   }
 
   function injectNav() {
