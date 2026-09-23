@@ -38,7 +38,14 @@
     if (t) headers.Authorization = 'Bearer ' + t;
     if (window.pinpointClient) headers['x-pinpoint-client'] = window.pinpointClient;
     const r = await fetch(String(base).replace(/\/+$/, '') + path, { ...(opts || {}), headers });
-    if (!r.ok) { const e = new Error('http ' + r.status); e.status = r.status; throw e; }
+    if (!r.ok) {
+      // The server explains its refusals — a margin floor, a stage out of order. Showing
+      // "http 400" instead would throw that away.
+      let detail = '';
+      try { const j = await r.json(); detail = j.message || j.error || ''; } catch (e) {}
+      const err = new Error(detail || ('http ' + r.status));
+      err.status = r.status; throw err;
+    }
     return r.json();
   }
 
@@ -297,7 +304,8 @@
     const d = _data; if (!d) return;
     const scope = el('d2d-scope'); if (scope) scope.textContent = (window.pinpointClient || '') + (_internal ? ' · VelOzity view' : '');
 
-    const tabs = [['shipments', 'Shipments'], ['bookings', 'Bookings']].concat(_internal ? [['pricing', 'Pricing']] : []);
+    const tabs = [['shipments', 'Shipments'], ['bookings', 'Bookings']]
+      .concat(_internal ? [['pricing', 'Pricing'], ['baselines', 'Transit rules']] : []);
     const tw = el('d2d-tabs');
     if (tw) {
       tw.innerHTML = tabs.map(([k, l]) => `<button class="d2d-tab ${_tab === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('');
@@ -322,7 +330,10 @@
         <span style="opacity:.6;font-weight:500;">&middot; ${esc(note)}</span></button>`;
     }).join('')}</div>`;
 
-    body.innerHTML = weekBar + (_tab === 'shipments' ? paintShipments(d) : _tab === 'bookings' ? paintBookings(d) : paintPricing(d));
+    // Transit rules are not a property of a week, so the week bar is left off that tab.
+    body.innerHTML = _tab === 'baselines' ? paintBaselines()
+      : weekBar + (_tab === 'shipments' ? paintShipments(d) : _tab === 'bookings' ? paintBookings(d) : paintPricing(d));
+    if (_tab === 'baselines') loadBaselines();
     body.querySelectorAll('[data-w]').forEach(b => b.onclick = () => { _week = b.getAttribute('data-w'); load(); });
     wireActions(body);
   }
@@ -504,6 +515,77 @@
       </div>` : `<div style="font-size:11px;color:${MID};">Everything for this week has been released.</div>`}`;
   }
 
+  // ── Transit rules ──
+  // What turns an approved option into a plan. Editable because the numbers started as
+  // plausible guesses, and a wrong baseline shows up as slip that never happened.
+  const BL_FIELDS = [
+    ['origin_cleared', 'Origin cleared', 'days after cargo ready'],
+    ['departed', 'Departed', 'days after cargo ready'],
+    ['dest_cleared', 'Destination cleared', 'days after arrival'],
+    ['out_for_delivery', 'Out for delivery', 'days after arrival'],
+    ['delivered', 'Delivered', 'days after arrival'],
+  ];
+
+  function paintBaselines() {
+    return `
+      <div style="max-width:880px;">
+        <div style="font-size:13px;font-weight:600;color:${DARK};">How a plan is built</div>
+        <div style="font-size:11.5px;color:${MID};margin:3px 0 14px;line-height:1.5;">
+          Pickup is the cargo-ready date. Arrival is departure plus the transit time quoted on the option that was approved.
+          Everything else comes from the rules below.
+          <b style="color:${DARK};">Changing them affects bookings approved from now on — plans already frozen never move.</b>
+        </div>
+        <div id="d2d-bl">${`<div class="d2d-empty">Loading&hellip;</div>`}</div>
+      </div>`;
+  }
+
+  async function loadBaselines() {
+    const host = el('d2d-bl'); if (!host) return;
+    let rows = [];
+    try { rows = (await api('/d2d/baselines')).baselines || []; }
+    catch (e) { host.innerHTML = `<div class="d2d-empty" style="color:${BRAND}">Could not load (${esc(e.message)}).</div>`; return; }
+
+    host.innerHTML = rows.map(b => `
+      <div class="d2d-card" style="padding:15px 18px;margin-bottom:12px;">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px;">
+          <span style="font-size:14px;font-weight:700;color:${DARK};text-transform:capitalize;">${esc(b.mode)} freight</span>
+          <span style="font-size:11px;color:${LIGHT};">${b.updated_by === 'default' ? 'never edited — starting values' : 'updated by ' + esc(b.updated_by || '')}</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;">
+          ${BL_FIELDS.map(([f, label, hint]) => `
+            <div>
+              <label for="bl-${esc(b.mode)}-${f}" style="display:block;font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">${label}</label>
+              <input id="bl-${esc(b.mode)}-${f}" type="number" min="0" max="60" step="1" value="${esc(b[f])}"
+                     data-bl="${esc(b.mode)}" data-f="${f}"
+                     style="width:100%;box-sizing:border-box;font:inherit;font-size:14px;text-align:right;border:.5px solid rgba(0,0,0,.18);
+                            border-radius:8px;padding:9px;min-height:44px;margin-top:4px;">
+              <span style="display:block;font-size:10px;color:${MID};margin-top:3px;">${hint}</span>
+            </div>`).join('')}
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:13px;">
+          <button class="d2d-btn dark" data-blsave="${esc(b.mode)}">Save ${esc(b.mode)} rules</button>
+          <span style="font-size:11px;color:${MID};" id="bl-msg-${esc(b.mode)}"></span>
+        </div>
+      </div>`).join('');
+
+    host.querySelectorAll('[data-blsave]').forEach(btn => btn.onclick = async () => {
+      const mode = btn.getAttribute('data-blsave');
+      const body = {};
+      host.querySelectorAll(`[data-bl="${mode}"]`).forEach(i => { body[i.getAttribute('data-f')] = Number(i.value); });
+      const msg = el('bl-msg-' + mode);
+      btn.disabled = true; btn.style.opacity = '.6';
+      try {
+        const out = await api('/d2d/baselines/' + mode, { method: 'PUT', body: JSON.stringify(body) });
+        msg.style.color = LINK;
+        msg.textContent = `Saved. Applies from the next approval; ${out.unchanged_plans} existing plan${out.unchanged_plans === 1 ? '' : 's'} unchanged.`;
+      } catch (e) {
+        msg.style.color = BRAND;
+        msg.textContent = 'Not saved: ' + e.message;
+      }
+      btn.disabled = false; btn.style.opacity = '';
+    });
+  }
+
   function money(v, cur) {
     if (v == null || v === '') return '&ndash;';
     const n = Number(v); if (!isFinite(n)) return '&ndash;';
@@ -646,5 +728,5 @@
   window.addEventListener('focus', () => { refreshEnabled().catch(() => {}); }, { passive: true });
 
   window.__openD2D = open;
-  console.log('[d2d-hub] v3 loaded');
+  console.log('[d2d-hub] v4 loaded');
 })();
