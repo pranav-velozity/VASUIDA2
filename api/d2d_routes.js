@@ -219,7 +219,7 @@ module.exports = function mountD2D(deps) {
         WHERE client_id=? AND capability='freight_d2d' AND enabled=1`).get(client);
       if (!on) return res.status(404).json({ error: 'not_found' });
 
-      // A partner org resolves to the client whose facility it works at, so Kerry lands inside
+      // A partner org resolves to the client whose facility it works at, so a forwarder lands inside
       // GRBA's scope. That is correct for recording what happened at the warehouse and wrong
       // for everything else, so partners reach ONLY /partner/* — bookings, costs and orders
       // stay out of reach whatever the capability says.
@@ -625,7 +625,7 @@ module.exports = function mountD2D(deps) {
   });
 
   // ── The partner's door ──
-  // Kerry knows when a box was picked up, cleared and sailed. This is the ONLY thing they can
+  // The partner knows when a box was picked up, cleared and sailed. This is the ONLY thing they can
   // write, and they can write nothing else: no bookings, no costs, no orders, no plan.
   router.post('/partner/events', authenticateRequest, requireD2D,
     auditLog('partner_d2d_event'), (req, res) => {
