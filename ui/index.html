@@ -603,6 +603,7 @@ window.__clerkOnLoad = function() {
       </span>
       <a class="pn-nav-item" href="#exec" id="nav-exec" onclick="event.preventDefault();window.show('#exec')">Executive</a>
       <a class="pn-nav-item" href="#map" id="nav-map" onclick="event.preventDefault();window.show('#map')">Live Map</a>
+      <a class="pn-nav-item" href="#d2d" id="nav-d2d" style="display:none;" onclick="event.preventDefault();window.show('#d2d')">Shipments</a>
       <a class="pn-nav-item" href="#reports" id="nav-reports" onclick="event.preventDefault();window.show('#reports')">Reports &amp; Downloads</a>
       <a class="pn-nav-item" href="#finance" id="nav-finance" onclick="event.preventDefault();window.show('#finance')" style="display:none;">Finance</a>
     </nav>
@@ -866,6 +867,10 @@ window.__clerkOnLoad = function() {
 
 <!-- ================= UID Intake ================= -->
 </section>
+<!-- Door-to-door freight. Rendered by d2d_hub_additive.js; shown only for clients with the
+     freight_d2d capability, exactly like every other capability-gated page. -->
+<section id="page-d2d" class="hidden"></section>
+
 <section id="page-intake" class="hidden">
   <div class="flex items-center justify-between">
     <div class="flex items-center gap-5">
@@ -6478,7 +6483,7 @@ window.__openPrebookModal = function(){
   <script src="/public/dept_owners_additive.js?v=1" defer></script>
   <script src="/public/tile_polish_additive.js?v=3" defer></script>
   <script src="/public/weekly_history_additive.js?v=3" defer></script>
-  <script src="/public/d2d_hub_additive.js?v=9" defer></script>
+  <script src="/public/d2d_hub_additive.js?v=10" defer></script>
   <script src="/public/fulfilment_weekhub_additive.js?v=19" defer></script>
 
 
@@ -7043,7 +7048,7 @@ document.addEventListener('DOMContentLoaded', function(){
   // Helper: hide all pages
   function _pnHideAll(){
     // page-flow lives inside page-dashboard — hiding page-dashboard hides page-flow too
-    ['page-dashboard','page-intake','page-exec','page-receiving','page-reports','page-map','page-finance'].forEach(id=>{
+    ['page-dashboard','page-intake','page-exec','page-receiving','page-reports','page-map','page-finance','page-d2d'].forEach(id=>{
       const el=document.getElementById(id);
       if(el){el.classList.add('hidden');el.style.display='none';}
     });
@@ -7108,6 +7113,15 @@ document.addEventListener('DOMContentLoaded', function(){
     }
 
     // ── Live Map ──
+    if(h==='#d2d'){
+      _pnHideAll();
+      _pnSetHash('#d2d');
+      const sec=document.getElementById('page-d2d');
+      if(sec){sec.classList.remove('hidden');sec.style.display='block';}
+      if(typeof window.renderD2D==='function') window.renderD2D();
+      syncPinpointNav('#d2d');
+      return;
+    }
     if(h==='#map'){
       _pnHideAll();
       _pnSetHash('#map');
@@ -7229,6 +7243,7 @@ function syncPinpointNav(hash){
   if(hash==='#exec'){ const e=document.getElementById('nav-exec'); if(e) e.classList.add('active'); }
   if(hash==='#finance'){ const e=document.getElementById('nav-finance'); if(e) e.classList.add('active'); }
   else if(hash==='#map'){ const m=document.getElementById('nav-map'); if(m) m.classList.add('active'); }
+  else if(hash==='#d2d'){ const m=document.getElementById('nav-d2d'); if(m) m.classList.add('active'); }
   else if(hash==='#reports'){ const r=document.getElementById('nav-reports'); if(r) r.classList.add('active'); }
   else if(hash==='#receiving'){ const rec=document.getElementById('nav-receiving'); if(rec) rec.classList.add('active'); }
   else if(hash==='#intake'){ const vas=document.getElementById('nav-intake-pn'); if(vas) vas.classList.add('active'); }
