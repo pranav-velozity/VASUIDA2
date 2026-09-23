@@ -6907,6 +6907,14 @@ binsRouter.get('/weeks/:ws',
 
 app.use('/bins', binsRouter);
 
+// ── Door-to-door module (GRBA) ──
+// One line. Everything for this client lives in its own file: its tables, its scoped data
+// layer and its routes. Every route inside requires the freight_d2d capability, so the module
+// is invisible until that is granted, and switching the capability off turns it all off.
+app.use('/d2d', require('./d2d_routes')({
+  express, db, authenticateRequest, requireRole, curClient, tenancyResolve, auditLog,
+}));
+
 const receivingRouter = express.Router();
 
 function normalizeReceivingArray(body, ws) {
