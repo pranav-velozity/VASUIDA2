@@ -143,6 +143,24 @@ module.exports = function mountD2D(deps) {
       cbm         REAL
     );
     CREATE UNIQUE INDEX IF NOT EXISTS ux_d2d_assignment ON d2d_assignment(client_id, po_id, shipment_id);
+
+    -- How long each stage is expected to take, per client and per mode. These were constants
+    -- in this file: plausible guesses that nobody had validated, applied to every plan. Held
+    -- here so they can be corrected as real lead times become known.
+    --
+    -- Changing them affects FUTURE approvals only. A frozen plan is never recomputed.
+    CREATE TABLE IF NOT EXISTS d2d_baseline (
+      client_id        TEXT NOT NULL,
+      mode             TEXT NOT NULL,                  -- 'sea' | 'air'
+      origin_cleared   INTEGER NOT NULL,               -- days after cargo ready
+      departed         INTEGER NOT NULL,               -- days after cargo ready
+      dest_cleared     INTEGER NOT NULL,               -- days after arrival
+      out_for_delivery INTEGER NOT NULL,               -- days after arrival
+      delivered        INTEGER NOT NULL,               -- days after arrival
+      updated_at       TEXT,
+      updated_by       TEXT,
+      PRIMARY KEY (client_id, mode)
+    );
   `);
 
   // ── The scoped data layer ──
@@ -280,13 +298,22 @@ module.exports = function mountD2D(deps) {
   // Sell price is ALWAYS computed here from cost and margin. It is never accepted from a
   // request, or a client could post their own price.
   const MARGIN_FLOOR = 15;           // percent; below this needs an explicit override
-  const PLAN = {                      // days from cargo ready, per stage
-    origin_cleared: 3,
-    departed: 5,
-    dest_cleared: 2,                  // after arrival
-    out_for_delivery: 3,
-    delivered: 4,
+  // Starting values only, used the first time a client and mode are seen. Air is deliberately
+  // shorter than sea: it shared sea's numbers before, which was plainly wrong.
+  const PLAN_DEFAULTS = {
+    sea: { origin_cleared: 3, departed: 5, dest_cleared: 2, out_for_delivery: 3, delivered: 4 },
+    air: { origin_cleared: 2, departed: 3, dest_cleared: 1, out_for_delivery: 2, delivered: 2 },
   };
+  const PLAN_FIELDS = ['origin_cleared', 'departed', 'dest_cleared', 'out_for_delivery', 'delivered'];
+
+  function baselineFor(sdb, mode) {
+    const m = mode === 'air' ? 'air' : 'sea';
+    const row = sdb.get(`SELECT * FROM d2d_baseline WHERE client_id = @client AND mode = @mode`, { mode: m });
+    if (row) return row;
+    const d = PLAN_DEFAULTS[m];
+    sdb.insert('d2d_baseline', { mode: m, ...d, updated_at: new Date().toISOString(), updated_by: 'default' });
+    return { mode: m, ...d, updated_by: 'default' };
+  }
   const addDays = (ymd, n) => {
     const d = new Date(String(ymd) + 'T00:00:00Z');
     if (isNaN(d.getTime())) return null;
@@ -431,18 +458,21 @@ module.exports = function mountD2D(deps) {
       }
 
       // Cargo ready anchors the plan; the option's transit time sets arrival.
+      // The baseline in force RIGHT NOW is copied into the plan. Editing it later moves no
+      // existing plan: variance would become meaningless if the yardstick moved with it.
+      const bl = baselineFor(req.d2d, row.mode);
       const ready = row.week_start;
       const transit = Number(row.transit_days) || 0;
-      const departed = addDays(ready, PLAN.departed);
+      const departed = addDays(ready, bl.departed);
       const arrived = addDays(departed, transit);
       const plan = {
         plan_pickup: ready,
-        plan_origin_cleared: addDays(ready, PLAN.origin_cleared),
+        plan_origin_cleared: addDays(ready, bl.origin_cleared),
         plan_departed: departed,
         plan_arrived: arrived,
-        plan_dest_cleared: addDays(arrived, PLAN.dest_cleared),
-        plan_out_for_delivery: addDays(arrived, PLAN.out_for_delivery),
-        plan_delivered: addDays(arrived, PLAN.delivered),
+        plan_dest_cleared: addDays(arrived, bl.dest_cleared),
+        plan_out_for_delivery: addDays(arrived, bl.out_for_delivery),
+        plan_delivered: addDays(arrived, bl.delivered),
         plan_frozen_at: now,
       };
 
@@ -474,6 +504,50 @@ module.exports = function mountD2D(deps) {
       console.warn(`[d2d] ${req.d2d.client} approved ${row.id} — ${made.length} shipment(s), plan frozen`);
       res.json({ ok: true, status: 'approved', shipments: made.length, plan: plan });
     } catch (e) { console.error('[d2d] decision', e); res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  // ── Transit baselines ──
+  router.get('/baselines', authenticateRequest, requireD2D, (req, res) => {
+    try {
+      if (internalOnly(req, res)) return;
+      res.json({ baselines: ['sea', 'air'].map(m => baselineFor(req.d2d, m)), fields: PLAN_FIELDS,
+        note: 'Applied when a booking is approved. Existing plans are never recomputed.' });
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  router.put('/baselines/:mode', authenticateRequest, requireRole(['admin']), requireD2D,
+    auditLog('update_d2d_baseline'), (req, res) => {
+    try {
+      if (internalOnly(req, res)) return;
+      const mode = req.params.mode === 'air' ? 'air' : 'sea';
+      const b = req.body || {};
+      const vals = {};
+      for (const f of PLAN_FIELDS) {
+        const v = Number(b[f]);
+        if (!Number.isInteger(v) || v < 0 || v > 60) {
+          return res.status(400).json({ error: 'invalid', field: f, message: 'Each stage must be a whole number of days, 0 to 60.' });
+        }
+        vals[f] = v;
+      }
+      if (vals.departed < vals.origin_cleared) {
+        return res.status(400).json({ error: 'out_of_order',
+          message: 'Departure cannot be planned before origin clearance.' });
+      }
+      if (vals.delivered < vals.out_for_delivery || vals.out_for_delivery < vals.dest_cleared) {
+        return res.status(400).json({ error: 'out_of_order',
+          message: 'After arrival the order is: cleared, then out for delivery, then delivered.' });
+      }
+      baselineFor(req.d2d, mode);        // make sure the row exists before updating it
+      req.d2d.run(`UPDATE d2d_baseline SET origin_cleared=@origin_cleared, departed=@departed,
+                     dest_cleared=@dest_cleared, out_for_delivery=@out_for_delivery, delivered=@delivered,
+                     updated_at=@now, updated_by=@who
+                   WHERE client_id = @client AND mode = @mode`,
+        { ...vals, mode, now: new Date().toISOString(), who: (req.auth && req.auth.userId) || 'velozity' });
+      const frozen = req.d2d.get(`SELECT COUNT(*) n FROM d2d_shipment WHERE client_id = @client AND plan_frozen_at IS NOT NULL`);
+      res.json({ ok: true, mode, ...vals,
+        applies_to: 'bookings approved from now on',
+        unchanged_plans: (frozen && frozen.n) || 0 });
+    } catch (e) { console.error('[d2d] baseline', e); res.status(500).json({ error: String(e.message || e) }); }
   });
 
   // ── Actuals ──
