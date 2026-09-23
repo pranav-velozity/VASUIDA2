@@ -152,10 +152,16 @@ module.exports = function mountD2D(deps) {
   // to be the first placeholder, which silently corrupted any UPDATE — SET comes before WHERE,
   // so the values shifted and the statement matched nothing while still reporting success.
   const SCOPED = /client_id\s*=\s*@client\b/i;
+  // An INSERT cannot say "client_id = @client"; it names the column and binds @client in its
+  // VALUES. That shape is accepted, and only that shape — reads, updates and deletes must
+  // still carry the WHERE, which is where a missing filter actually leaks rows.
+  const SCOPED_INSERT = /^\s*INSERT\s+INTO/i;
   function scopedDb(client) {
     if (!client) throw new Error('d2d: no client in scope');
     const guard = (sql) => {
-      if (!SCOPED.test(sql)) throw new Error('d2d: query is not scoped to a client — ' + sql.slice(0, 80));
+      const ok = SCOPED.test(sql)
+        || (SCOPED_INSERT.test(sql) && /\bclient_id\b/i.test(sql) && /@client\b/.test(sql));
+      if (!ok) throw new Error('d2d: query is not scoped to a client — ' + sql.slice(0, 80));
       return sql;
     };
     const bind = (p) => ({ ...(p || {}), client });
@@ -194,7 +200,18 @@ module.exports = function mountD2D(deps) {
       const on = db.prepare(`SELECT 1 x FROM client_capability
         WHERE client_id=? AND capability='freight_d2d' AND enabled=1`).get(client);
       if (!on) return res.status(404).json({ error: 'not_found' });
+
+      // A partner org resolves to the client whose facility it works at, so Kerry lands inside
+      // GRBA's scope. That is correct for recording what happened at the warehouse and wrong
+      // for everything else, so partners reach ONLY /partner/* — bookings, costs and orders
+      // stay out of reach whatever the capability says.
+      let orgType = null;
+      try { orgType = tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole).org_type; } catch (e) {}
+      if (orgType === 'partner' && !String(req.path || '').startsWith('/partner/')) {
+        return res.status(403).json({ error: 'not_available_to_partner' });
+      }
       req.d2d = scopedDb(client);
+      req.d2dOrgType = orgType;
       return next();
     } catch (e) {
       console.error('[d2d] scope error', e);
@@ -452,6 +469,114 @@ module.exports = function mountD2D(deps) {
     } catch (e) { console.error('[d2d] decision', e); res.status(500).json({ error: String(e.message || e) }); }
   });
 
+  // ── Actuals ──
+  // The plan is frozen; this is what actually happened. Every row records WHERE it came from,
+  // because a date somebody typed and a date a carrier reported deserve different trust.
+  const STAGES = ['pickup', 'origin_cleared', 'departed', 'arrived', 'dest_cleared', 'out_for_delivery', 'delivered'];
+  const SOURCES = ['carrier', 'partner', 'import', 'manual'];
+  const isYmd = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+
+  // One milestone. Re-recording the same stage updates it rather than adding a second row, so
+  // a corrected date replaces the wrong one instead of both being true at once.
+  function writeEvent(sdb, { shipment_id, stage, actual_at, source, note, who }) {
+    if (!STAGES.includes(stage)) return { error: 'unknown stage: ' + stage };
+    if (actual_at && !isYmd(actual_at)) return { error: 'actual_at must be YYYY-MM-DD' };
+    const ship = sdb.get(`SELECT id FROM d2d_shipment WHERE client_id = @client AND id = @id`, { id: shipment_id });
+    if (!ship) return { error: 'shipment not found: ' + shipment_id };
+    const now = new Date().toISOString();
+    sdb.run(`INSERT INTO d2d_event (id, client_id, shipment_id, stage, actual_at, source, note, recorded_by, recorded_at)
+             VALUES (@id, @client, @shipment_id, @stage, @actual_at, @source, @note, @who, @now)
+             ON CONFLICT(client_id, shipment_id, stage) DO UPDATE SET
+               actual_at = excluded.actual_at, source = excluded.source, note = excluded.note,
+               recorded_by = excluded.recorded_by, recorded_at = excluded.recorded_at`,
+      { id: 'ev_' + crypto.randomUUID().slice(0, 12), shipment_id, stage,
+        actual_at: actual_at || null, source: SOURCES.includes(source) ? source : 'manual',
+        note: note || null, who: who || 'unknown', now });
+    // Delivered closes the shipment; anything else means it is moving.
+    sdb.run(`UPDATE d2d_shipment SET status = @st WHERE client_id = @client AND id = @id`,
+      { st: stage === 'delivered' ? 'delivered' : 'in_transit', id: shipment_id });
+    return { ok: true, stage, actual_at: actual_at || null };
+  }
+
+  // VelOzity records milestones and fills in the container number the partner gives us.
+  router.post('/shipments/:id/events', authenticateRequest, requireRole(['admin']), requireD2D,
+    auditLog('record_d2d_event'), (req, res) => {
+    if (internalOnly(req, res)) return;
+    try {
+      const b = req.body || {};
+      const out = writeEvent(req.d2d, {
+        shipment_id: req.params.id, stage: String(b.stage || ''), actual_at: b.actual_at,
+        source: b.source || 'manual', note: b.note,
+        who: (req.auth && req.auth.userId) || 'velozity',
+      });
+      if (out.error) return res.status(400).json(out);
+      res.json(out);
+    } catch (e) { console.error('[d2d] event', e); res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  router.patch('/shipments/:id', authenticateRequest, requireRole(['admin']), requireD2D,
+    auditLog('update_d2d_shipment'), (req, res) => {
+    if (internalOnly(req, res)) return;
+    try {
+      const b = req.body || {};
+      // Deliberately short: the plan columns are NOT here. Once frozen they stay frozen.
+      const allowed = ['reference', 'vessel', 'voyage', 'origin', 'destination', 'capacity_cbm', 'container_type'];
+      const sets = [], params = { id: req.params.id };
+      for (const f of allowed) if (b[f] !== undefined) { sets.push(`${f} = @${f}`); params[f] = b[f]; }
+      if (!sets.length) return res.status(400).json({ error: 'nothing to update', allowed });
+      const done = req.d2d.run(`UPDATE d2d_shipment SET ${sets.join(', ')}
+                                WHERE client_id = @client AND id = @id`, params);
+      if (!done.changes) return res.status(404).json({ error: 'not_found' });
+      res.json({ ok: true, updated: sets.length });
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  // ── The partner's door ──
+  // Kerry knows when a box was picked up, cleared and sailed. This is the ONLY thing they can
+  // write, and they can write nothing else: no bookings, no costs, no orders, no plan.
+  router.post('/partner/events', authenticateRequest, requireD2D,
+    auditLog('partner_d2d_event'), (req, res) => {
+    try {
+      if (req.d2dOrgType !== 'partner' && !isInternal(req)) {
+        return res.status(403).json({ error: 'partner_or_internal_only' });
+      }
+      const rows = Array.isArray((req.body || {}).events) ? req.body.events : [];
+      if (!rows.length) return res.status(400).json({ error: 'events required' });
+      if (rows.length > 500) return res.status(400).json({ error: 'too many events in one call' });
+
+      const who = (req.auth && req.auth.userId) || 'partner';
+      const results = [];
+      const tx = db.transaction(() => {
+        for (const r of rows) {
+          results.push({
+            shipment_id: r.shipment_id, stage: r.stage,
+            // source is forced: a partner cannot claim a date came from the carrier feed.
+            ...writeEvent(req.d2d, { shipment_id: String(r.shipment_id || ''), stage: String(r.stage || ''),
+              actual_at: r.actual_at, source: 'partner', note: r.note, who }),
+          });
+        }
+      });
+      tx();
+      const failed = results.filter(r => r.error);
+      console.warn(`[d2d] partner wrote ${results.length - failed.length}/${results.length} event(s) for ${req.d2d.client}`);
+      res.json({ ok: failed.length === 0, written: results.length - failed.length, failed: failed.length, results });
+    } catch (e) { console.error('[d2d] partner events', e); res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  // What the partner needs to see to do that: the shipments, and nothing about money.
+  router.get('/partner/shipments', authenticateRequest, requireD2D, (req, res) => {
+    try {
+      if (req.d2dOrgType !== 'partner' && !isInternal(req)) {
+        return res.status(403).json({ error: 'partner_or_internal_only' });
+      }
+      const rows = req.d2d.all(`SELECT id, week_start, mode, reference, container_type, carrier, vessel,
+                                       origin, destination, status
+                                FROM d2d_shipment WHERE client_id = @client
+                                ORDER BY week_start DESC, reference LIMIT 200`);
+      res.json({ shipments: rows, stages: STAGES });
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
   // ── Self-check ──
   // Proves the three rules hold on the running server rather than in a comment.
   router.get('/_selftest', authenticateRequest, requireRole(['admin']), (req, res) => {
@@ -472,6 +597,12 @@ module.exports = function mountD2D(deps) {
       scopedDb('TEST').all('SELECT * FROM d2d_shipment WHERE client_id = ?');
       out.checks.unscoped_query_refused = false;
     } catch (e) { out.checks.unscoped_query_refused = /not scoped/.test(e.message); }
+
+    // An INSERT that does not carry the client must still be refused.
+    try {
+      scopedDb('TEST').run(`INSERT INTO d2d_event (id, shipment_id, stage) VALUES (@id, @s, @st)`, { id: 'x', s: 'y', st: 'pickup' });
+      out.checks.unscoped_insert_refused = false;
+    } catch (e) { out.checks.unscoped_insert_refused = /not scoped/.test(e.message); }
 
     // forClient must strip every cost field.
     const stripped = forClient({ id: 'x', sell_amount: 100, cost_amount: 80, accessorial_amount: 5, margin_pct: 18 });
