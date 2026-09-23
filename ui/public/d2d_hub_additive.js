@@ -140,7 +140,10 @@
       .d2d-btn.dark{background:${DARK};color:#fff;border-color:${DARK};}
       .d2d-sh{padding:15px 18px;margin-bottom:12px;}
       .d2d-strip{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));margin-top:14px;}
-      .d2d-st{display:flex;flex-direction:column;align-items:center;gap:5px;position:relative;}
+      .d2d-st{display:flex;flex-direction:column;align-items:center;gap:5px;position:relative;
+        background:none;border:0;padding:0;font:inherit;color:inherit;text-align:center;}
+      button.d2d-st{cursor:pointer;border-radius:10px;transition:background .18s ease;}
+      button.d2d-st:hover{background:rgba(16,18,27,.035);}
       .d2d-line{position:absolute;top:30px;height:3px;}
       .d2d-dot{width:34px;height:34px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;
         border:2px solid;box-sizing:border-box;position:relative;z-index:1;}
@@ -377,7 +380,13 @@
       const live = overdue || i === liveIdx;
       const leftFill = i === 0 ? 'transparent' : (i <= liveIdx ? LIME : '#E4E4E9');
       const rightFill = i === STAGES.length - 1 ? 'transparent' : (i < liveIdx ? LIME : '#E4E4E9');
-      return `<div class="d2d-st">
+      const clickable = _internal;
+      const tag = clickable ? 'button' : 'div';
+      const attrs = clickable
+        ? ` type="button" class="d2d-st d2d-edit" data-ship="${esc(s.id)}" data-stage="${k}" data-label="${esc(label)}"
+            aria-label="Record ${esc(label)} for ${esc(s.reference || 'this shipment')}"`
+        : ' class="d2d-st"';
+      return `<${tag}${attrs}>
         <span class="d2d-line" style="left:0;right:50%;background:${leftFill};"></span>
         <span class="d2d-line" style="left:50%;right:0;background:${rightFill};"></span>
         <span style="font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;text-align:center;min-height:22px;">${label}</span>
@@ -391,7 +400,7 @@
         <span class="d2d-num" style="font-size:11.5px;font-weight:600;color:${ink};">${actual ? day(actual) : (overdue ? 'overdue' : '&middot;')}</span>
         ${actual ? `<span style="font-size:9px;text-transform:uppercase;letter-spacing:.03em;color:${e.source === 'manual' ? YINK : MID};">${esc(e.source)}</span>` : ''}
         ${late ? `<span style="font-size:10px;font-weight:700;color:${BRAND};">+${slip}d</span>` : ''}
-      </div>`;
+      </${tag}>`;
     }).join('');
 
     const slip = slipOf(s);
@@ -403,7 +412,12 @@
     return `<div class="d2d-card d2d-sh d2d-rise">
       <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;">
         <div style="display:flex;align-items:baseline;gap:11px;">
-          <span class="d2d-num" style="font-size:14px;color:${DARK};">${esc(s.reference || 'container not yet advised')}</span>
+          ${_internal
+            ? `<button type="button" class="d2d-ref" data-ref="${esc(s.id)}" data-cur="${esc(s.reference || '')}"
+                 style="font-family:ui-monospace,SFMono-Regular,monospace;font-size:14px;color:${s.reference ? DARK : YINK};
+                        background:none;border:0;border-bottom:1px dashed rgba(0,0,0,.25);padding:0 0 1px;cursor:pointer;">
+                 ${esc(s.reference || 'advise container number')}</button>`
+            : `<span class="d2d-num" style="font-size:14px;color:${DARK};">${esc(s.reference || 'container not yet advised')}</span>`}
           <span style="font-size:11px;color:${MID};">${esc([s.container_type, s.carrier, s.vessel].filter(Boolean).join(' · '))}</span>
         </div>
         <span style="font-size:10.5px;font-weight:700;border-radius:6px;padding:3px 9px;color:${badge[1]};background:${badge[2]};">${esc(badge[0])}</span>
@@ -496,8 +510,108 @@
     return (cur && cur !== 'USD' ? cur + ' ' : '$') + n.toLocaleString(undefined, { maximumFractionDigits: 0 });
   }
 
+  // ── Recording a milestone ──
+  // A small popover anchored to the stage. Deliberately not a modal: the strip behind it is
+  // the context, and hiding it to ask for one date would be a worse trade.
+  function closeEditor() { const e = el('d2d-pop'); if (e) e.remove(); }
+
+  function openEditor(btn) {
+    closeEditor();
+    const ship = btn.getAttribute('data-ship'), stage = btn.getAttribute('data-stage'), label = btn.getAttribute('data-label');
+    const card = _data.shipments.find(x => x.id === ship) || {};
+    const existing = (card.events || []).find(e => e.stage === stage);
+    const plan = card['plan_' + stage] || '';
+    const r = btn.getBoundingClientRect();
+
+    const pop = document.createElement('div');
+    pop.id = 'd2d-pop';
+    pop.style.cssText = `position:fixed;z-index:9600;background:#fff;border:.5px solid rgba(0,0,0,.14);border-radius:12px;
+      box-shadow:0 18px 40px rgba(16,18,27,.18);padding:14px;width:250px;font-family:inherit;`;
+    pop.innerHTML = `
+      <div style="font-size:12.5px;font-weight:600;color:${DARK};">${esc(label)}</div>
+      <div style="font-size:11px;color:${MID};margin:2px 0 10px;">${plan ? 'Planned ' + day(plan) : 'No planned date'}</div>
+      <label for="d2d-date" style="display:block;font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Actual date</label>
+      <input id="d2d-date" type="date" value="${esc(existing && existing.actual_at ? existing.actual_at : '')}"
+             style="width:100%;box-sizing:border-box;font:inherit;font-size:12.5px;border:.5px solid rgba(0,0,0,.18);border-radius:8px;padding:9px;min-height:44px;">
+      <div id="d2d-var" style="font-size:11px;margin-top:6px;min-height:15px;"></div>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <button class="d2d-btn dark" id="d2d-save" style="flex:1;">Save</button>
+        ${existing ? `<button class="d2d-btn" id="d2d-clear">Clear</button>` : ''}
+      </div>
+      ${existing ? `<div style="font-size:10.5px;color:${MID};margin-top:8px;">Recorded by ${esc(existing.source)}</div>` : ''}`;
+    document.body.appendChild(pop);
+    const top = Math.min(r.bottom + 8, window.innerHeight - pop.offsetHeight - 12);
+    pop.style.top = Math.max(12, top) + 'px';
+    pop.style.left = Math.max(12, Math.min(r.left + r.width / 2 - 125, window.innerWidth - 262)) + 'px';
+
+    const dateEl = el('d2d-date'), varEl = el('d2d-var');
+    // Show the variance while typing, so a slip is visible before it is saved.
+    const showVar = () => {
+      const v = dateEl.value;
+      if (!v || !plan) { varEl.textContent = ''; return; }
+      const d = daysBetween(plan, v);
+      varEl.style.color = d > 0 ? BRAND : LINK;
+      varEl.textContent = d > 0 ? `${d} day${d === 1 ? '' : 's'} behind plan` : (d === 0 ? 'On plan' : `${-d} day${d === -1 ? '' : 's'} early`);
+    };
+    dateEl.oninput = showVar; showVar();
+
+    const send = async (body, b) => {
+      if (b) { b.disabled = true; b.style.opacity = '.6'; }
+      try { await api('/d2d/shipments/' + ship + '/events', { method: 'POST', body: JSON.stringify(body) }); closeEditor(); await load(); }
+      catch (e) { if (b) { b.disabled = false; b.style.opacity = ''; } alert('Could not save: ' + e.message); }
+    };
+    el('d2d-save').onclick = () => {
+      if (!dateEl.value) { alert('Pick a date, or use Clear to remove it.'); return; }
+      send({ stage, actual_at: dateEl.value, source: 'manual' }, el('d2d-save'));
+    };
+    const clr = el('d2d-clear');
+    if (clr) clr.onclick = () => send({ stage, clear: true }, clr);
+    setTimeout(() => dateEl.focus(), 30);
+  }
+
+  function openRefEditor(btn) {
+    closeEditor();
+    const ship = btn.getAttribute('data-ref'), cur = btn.getAttribute('data-cur') || '';
+    const r = btn.getBoundingClientRect();
+    const pop = document.createElement('div');
+    pop.id = 'd2d-pop';
+    pop.style.cssText = `position:fixed;z-index:9600;background:#fff;border:.5px solid rgba(0,0,0,.14);border-radius:12px;
+      box-shadow:0 18px 40px rgba(16,18,27,.18);padding:14px;width:262px;font-family:inherit;`;
+    pop.innerHTML = `
+      <div style="font-size:12.5px;font-weight:600;color:${DARK};">Container and vessel</div>
+      <div style="font-size:11px;color:${MID};margin:2px 0 10px;">Kerry can advise this themselves</div>
+      <label for="d2d-refin" style="display:block;font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Container number</label>
+      <input id="d2d-refin" type="text" value="${esc(cur)}" placeholder="ABCD1234567"
+             style="width:100%;box-sizing:border-box;font:inherit;font-size:12.5px;border:.5px solid rgba(0,0,0,.18);border-radius:8px;padding:9px;min-height:44px;text-transform:uppercase;">
+      <label for="d2d-vesin" style="display:block;font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;margin:9px 0 4px;">Vessel</label>
+      <input id="d2d-vesin" type="text" placeholder="ONE Olympus 041E"
+             style="width:100%;box-sizing:border-box;font:inherit;font-size:12.5px;border:.5px solid rgba(0,0,0,.18);border-radius:8px;padding:9px;min-height:44px;">
+      <button class="d2d-btn dark" id="d2d-refsave" style="width:100%;margin-top:10px;">Save</button>`;
+    document.body.appendChild(pop);
+    pop.style.top = Math.max(12, Math.min(r.bottom + 8, window.innerHeight - pop.offsetHeight - 12)) + 'px';
+    pop.style.left = Math.max(12, Math.min(r.left, window.innerWidth - 274)) + 'px';
+    el('d2d-refsave').onclick = async () => {
+      const b = el('d2d-refsave'); b.disabled = true; b.style.opacity = '.6';
+      try {
+        await api('/d2d/shipments/' + ship, { method: 'PATCH', body: JSON.stringify({
+          reference: el('d2d-refin').value.trim().toUpperCase(),
+          vessel: el('d2d-vesin').value.trim() || undefined }) });
+        closeEditor(); await load();
+      } catch (e) { b.disabled = false; b.style.opacity = ''; alert('Could not save: ' + e.message); }
+    };
+    setTimeout(() => el('d2d-refin').focus(), 30);
+  }
+
+  document.addEventListener('click', (e) => {
+    const pop = el('d2d-pop');
+    if (pop && !pop.contains(e.target) && !e.target.closest('.d2d-edit') && !e.target.closest('.d2d-ref')) closeEditor();
+  }, true);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeEditor(); });
+
   // ── Actions ──
   function wireActions(root) {
+    root.querySelectorAll('.d2d-edit').forEach(b => b.onclick = () => openEditor(b));
+    root.querySelectorAll('.d2d-ref').forEach(b => b.onclick = () => openRefEditor(b));
     const busy = (b, on) => { if (b) { b.disabled = on; b.style.opacity = on ? '.6' : ''; } };
     root.querySelectorAll('[data-approve]').forEach(b => b.onclick = async () => {
       busy(b, true);
@@ -532,5 +646,5 @@
   window.addEventListener('focus', () => { refreshEnabled().catch(() => {}); }, { passive: true });
 
   window.__openD2D = open;
-  console.log('[d2d-hub] v2 loaded');
+  console.log('[d2d-hub] v3 loaded');
 })();
