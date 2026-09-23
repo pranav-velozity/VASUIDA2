@@ -110,6 +110,18 @@ function authenticateRequest(req, res, next) {
             message: 'This organisation does not have access to that information.' });
         }
       }
+      // ── Two or more clients and none chosen ──
+      // curClient() would fall back to ICONIC. Reading the wrong client is bad; WRITING to it
+      // is worse — a Kerry user updating lane dates would silently update ICONIC's. Once an
+      // organisation serves more than one client, it has to say which.
+      if (!TENANCY_OPEN_PATHS.has(String(req.path || ''))) {
+        const w = tenancyWriteClient(req);
+        if (w && w.reason === 'ambiguous_client') {
+          return res.status(409).json({ error: 'client_not_selected',
+            clients: (t && t.client_ids) || [],
+            message: 'Choose which client you are working on.' });
+        }
+      }
       if (t && t.denied_reason && IDENTITY_FAILURES.has(t.denied_reason)) {
         console.warn(`[tenancy] refused ${req.method} ${req.path} — org ${req.auth && req.auth.orgId} (${t.denied_reason})`);
         return res.status(403).json({
@@ -17317,6 +17329,84 @@ app.post('/records/dedupe', authenticateRequest, requireRole(['admin']), writeOp
 // requireRole(...) returns an anonymous closure, so it cannot be identified this way — but
 // that check is about ROLE, not organisation, and a Kerry user holding org:admin_auth passes
 // every role check anyway. Organisation guards are what actually separate tenants.
+// ── Client provisioning ──
+// Adding a client used to mean editing seed arrays and deploying. This does the same four
+// inserts from a request, with a preview first, so onboarding is a reviewed action rather
+// than a code change.
+//
+// Linking a client to a facility has a consequence worth stating: PARTNER orgs derive their
+// client scope from shared facilities. Putting GRBA on VOZ_KY gives Kerry Shenzhen access to
+// GRBA as well — intended here, since it is the same people, but never accidental.
+function provisionPlan(b) {
+  const client_id = String(b.client_id || '').trim().toUpperCase();
+  const name = String(b.name || '').trim();
+  const org = String(b.clerk_org_id || '').trim();
+  const facilities = (Array.isArray(b.facilities) ? b.facilities : []).map(x => String(x).trim()).filter(Boolean);
+  const caps = (Array.isArray(b.capabilities) ? b.capabilities : []).map(x => String(x).trim()).filter(Boolean);
+  const errs = [];
+  if (!/^[A-Z0-9_]{2,12}$/.test(client_id)) errs.push('client_id must be 2-12 characters, A-Z 0-9 _');
+  if (!name) errs.push('name is required');
+  if (!/^org_[A-Za-z0-9]+$/.test(org)) errs.push('clerk_org_id must look like org_...');
+  if (!facilities.length) errs.push('at least one facility is required');
+  if (!caps.length) errs.push('at least one capability is required');
+
+  const existingClient = db.prepare('SELECT * FROM client WHERE id=?').get(client_id);
+  const existingOrg = db.prepare('SELECT * FROM org_map WHERE clerk_org_id=?').get(org);
+  const orgTaken = db.prepare('SELECT * FROM org_map WHERE client_id=?').get(client_id);
+  const unknownFac = facilities.filter(f => !db.prepare('SELECT 1 x FROM facility WHERE code=?').get(f));
+  if (unknownFac.length) errs.push('unknown facility: ' + unknownFac.join(', '));
+  if (existingOrg && existingOrg.client_id && existingOrg.client_id !== client_id)
+    errs.push(`that Clerk org is already mapped to ${existingOrg.client_id}`);
+
+  // Who else gains access because they share a facility.
+  const partnersAffected = facilities.flatMap(f =>
+    db.prepare(`SELECT o.org_name FROM org_facility f JOIN org_map o ON o.clerk_org_id=f.clerk_org_id
+                WHERE f.facility_code=? AND o.org_type='partner' AND o.active=1`).all(f).map(r => r.org_name));
+
+  return { client_id, name, org, facilities, caps, errs,
+           already: { client: !!existingClient, org: !!existingOrg, client_mapped_to_another_org: !!(orgTaken && orgTaken.clerk_org_id !== org) },
+           partners_gaining_access: [...new Set(partnersAffected)] };
+}
+
+app.post('/ops/provision-client/preview', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+  try {
+    const p = provisionPlan(req.body || {});
+    res.json({ ...p, ok: p.errs.length === 0, note: 'Read only. Nothing has been changed.' });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.post('/ops/provision-client', authenticateRequest, requireRole(['admin']), requireInternalOrg,
+  writeOpLimiter, auditLog('provision_client'), (req, res) => {
+  try {
+    const b = req.body || {};
+    if (String(b.confirm || '') !== '1')
+      return res.status(400).json({ error: 'confirm_required', message: 'Run the preview first, then pass confirm=1.' });
+    const p = provisionPlan(b);
+    if (p.errs.length) return res.status(400).json({ error: 'invalid', details: p.errs });
+
+    db.transaction(() => {
+      db.prepare(`INSERT OR IGNORE INTO client (id,name,kind,sort_order) VALUES (?,?,?,?)`)
+        .run(p.client_id, p.name, 'client', Number(b.sort_order) || 90);
+      db.prepare(`INSERT OR IGNORE INTO org_map (clerk_org_id,org_name,org_type,client_id) VALUES (?,?,?,?)`)
+        .run(p.org, p.name, 'client', p.client_id);
+      for (const f of p.facilities)
+        db.prepare(`INSERT OR IGNORE INTO client_facility (client_id,facility_code) VALUES (?,?)`).run(p.client_id, f);
+      for (const c of p.caps)
+        db.prepare(`INSERT OR IGNORE INTO client_capability (client_id,capability,enabled) VALUES (?,?,1)`).run(p.client_id, c);
+    })();
+
+    console.warn(`[provision] ${p.client_id} (${p.name}) -> org ${p.org}, facilities ${p.facilities.join(',')}, caps ${p.caps.join(',')}`);
+    const t = tenancyResolve(p.org, null);
+    res.json({ ok: true, client_id: p.client_id,
+      resolves_to: t.client_ids, capabilities: t.capabilities,
+      partners_gaining_access: p.partners_gaining_access,
+      next: 'Users in that Clerk org can sign in now. Re-run /ops/tenancy-audit to confirm.' });
+  } catch (e) {
+    console.error('[POST /ops/provision-client]', e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 app.get('/ops/route-access-audit', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     // Anything commercial or cross-client. These should be internal-only.
