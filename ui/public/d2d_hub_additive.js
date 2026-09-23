@@ -309,9 +309,15 @@
       body.innerHTML = `<div class="d2d-empty">No weeks booked yet.<br><span style="font-size:11.5px;">A week appears once an option has been approved.</span></div>`;
       return;
     }
-    const weekBar = `<div class="d2d-wk">${d.weeks.map(w =>
-      `<button class="d2d-wkb ${w.week_start === _week ? 'on' : ''}" data-w="${esc(w.week_start)}">${esc(day(w.week_start))}
-        <span style="opacity:.6;font-weight:500;">&middot; ${w.shipments}</span></button>`).join('')}</div>`;
+    // The pill says what the week needs, not just how many shipments it has — a quoted week
+    // with nothing approved has no shipments at all and would otherwise read "· 0".
+    const weekBar = `<div class="d2d-wk">${d.weeks.map(w => {
+      const note = w.shipments ? String(w.shipments)
+        : w.awaiting ? w.awaiting + ' to decide'
+        : w.drafts ? w.drafts + ' to price' : '0';
+      return `<button class="d2d-wkb ${w.week_start === _week ? 'on' : ''}" data-w="${esc(w.week_start)}">${esc(day(w.week_start))}
+        <span style="opacity:.6;font-weight:500;">&middot; ${esc(note)}</span></button>`;
+    }).join('')}</div>`;
 
     body.innerHTML = weekBar + (_tab === 'shipments' ? paintShipments(d) : _tab === 'bookings' ? paintBookings(d) : paintPricing(d));
     body.querySelectorAll('[data-w]').forEach(b => b.onclick = () => { _week = b.getAttribute('data-w'); load(); });
