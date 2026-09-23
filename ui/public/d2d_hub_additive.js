@@ -83,7 +83,9 @@
 
     // Nothing to land on, so open the hub once.
     if (_enabled && noWeekHub && !_autoOpened) {
-      _autoOpened = true; setTimeout(() => { open().catch(() => {}); }, 80);
+      // Navigate through the router, the same way every other page is opened.
+      _autoOpened = true;
+      setTimeout(() => { try { if (typeof window.show === 'function') window.show('#d2d'); } catch (e) {} }, 80);
     }
   }
 
@@ -91,53 +93,30 @@
   // the tenancy module follows, so it cannot reverse another module's decision to hide.
   function hideLegacyPages(on) {
     document.querySelectorAll('section[id^="page-"]').forEach(secn => {
+      // Not this page. It is a real page now, and the router has just shown it — hiding every
+      // section without exception would hide the one we are trying to display.
+      if (secn.id === 'page-d2d') return;
       if (on) { secn.dataset.d2dHidden = '1'; secn.style.display = 'none'; }
       else if (secn.dataset.d2dHidden === '1') { delete secn.dataset.d2dHidden; secn.style.display = ''; }
     });
-    let back = el('d2d-backdrop');
-    if (on && !back) {
-      back = document.createElement('div');
-      back.id = 'd2d-backdrop';
-      back.style.cssText = 'padding:80px 26px;text-align:center;font-family:inherit;';
-      back.innerHTML = `<div style="font-size:15px;font-weight:600;color:${DARK};">Shipments</div>
-        <div style="font-size:12px;color:${MID};margin:6px 0 16px;">Door to door &middot; plan against actual</div>
-        <button id="d2d-reopen" style="border:.5px solid rgba(0,0,0,.16);background:#fff;color:${DARK};
-          border-radius:9px;padding:10px 16px;font:600 12px inherit;cursor:pointer;min-height:44px;">Open shipments &rarr;</button>`;
-      const host = document.querySelector('main') || document.body;
-      host.appendChild(back);
-      const btn = el('d2d-reopen'); if (btn) btn.onclick = () => open().catch(() => {});
-    } else if (!on && back) back.remove();
   }
 
-  function injectNav() {
-    if (el('nav-d2d')) { paintNav(); return; }
-    const nav = el('pn-nav-items'); if (!nav) return;
-    const a = document.createElement('a');
-    a.className = 'pn-nav-item'; a.id = 'nav-d2d'; a.href = '#d2d';
-    a.textContent = 'Shipments';
-    a.style.display = 'none';
-    a.addEventListener('click', (e) => { e.preventDefault(); open(); });
-    const after = el('nav-weekhub');
-    if (after && after.parentNode === nav) nav.insertBefore(a, after.nextSibling); else nav.appendChild(a);
-    paintNav();
-  }
+  // The nav entry is declared in index.html alongside the others; this only decides whether
+  // this client should see it. Building nav from a module is what made it look bolted on.
+  function injectNav() { paintNav(); }
 
   // ── Styles ──
   function styles() {
     if (el('d2d-css')) return;
     const st = document.createElement('style'); st.id = 'd2d-css';
     st.textContent = `
-      .d2d-ov{position:fixed;inset:0;background:#F7F8FA;z-index:9500;display:flex;flex-direction:column;font-family:inherit;}
-      /* Same container width and gutters as the rest of Pinpoint, so cards do not stretch to
-         the full monitor and the milestone strip stays readable. */
-      .d2d-wrap{width:min(96vw,1920px);margin:0 auto;padding:0 24px;}
-      .d2d-top{display:flex;justify-content:space-between;align-items:center;height:52px;background:#fff;border-bottom:.5px solid rgba(0,0,0,.08);}
-      .d2d-tabs{display:flex;gap:16px;}
-      .d2d-tab{border:0;background:none;font:600 13px inherit;color:${MID};cursor:pointer;padding:18px 0 15px;border-bottom:2px solid transparent;}
-      .d2d-tab.on{color:${DARK};border-bottom-color:${BRAND};}
-      .d2d-tick{height:34px;background:${DARK};display:flex;align-items:center;gap:10px;overflow:hidden;}
+      /* The page sits inside the app's own container, so it needs no width of its own. */
+      .d2d-head{margin-bottom:14px;}
+      .d2d-tick{height:34px;background:${DARK};border-radius:10px;padding:0 14px;align-items:center;gap:10px;overflow:hidden;display:flex;margin-bottom:12px;}
+      .d2d-tabs{display:flex;gap:18px;}
       .d2d-tickt{font-size:12px;color:#EDEDF0;white-space:nowrap;}
-      .d2d-body{flex:1;overflow-y:auto;padding:16px 0 40px;}
+      .d2d-tab{border:0;background:none;font:600 13px inherit;color:${MID};cursor:pointer;padding:6px 0;border-bottom:2px solid transparent;}
+      .d2d-tab.on{color:${DARK};border-bottom-color:${BRAND};}
       /* Week chips, matching the Week Hub's date circles rather than generic pills. */
       .d2d-chip{width:64px;height:64px;border-radius:50%;border:1.5px solid rgba(0,0,0,.10);background:#fff;
         display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;cursor:pointer;
@@ -150,7 +129,6 @@
       .d2d-chip .n{font-size:8.5px;color:${MID};}
       /* The strip is capped so stages sit a sensible distance apart on a wide monitor. */
       .d2d-striphold{max-width:1080px;}
-      .d2d-x{border:0;background:#F2F2F5;width:34px;height:34px;border-radius:9px;cursor:pointer;font-size:18px;color:${MID};}
       .d2d-card{border:.5px solid rgba(16,18,27,.08);border-radius:14px;background:#fff;
         box-shadow:0 1px 2px rgba(16,18,27,.04),0 4px 12px rgba(16,18,27,.05);}
       .d2d-grid4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;}
@@ -204,33 +182,39 @@
     'M5 20V5h10v15 M15 11h4v9 M11 12h.01',
   ];
 
-  function close() { const o = document.querySelector('.d2d-ov'); if (o) o.remove(); document.body.style.overflow = ''; }
+  // ── Page shell ──
+  // Same structure as Live Map and Reports: a header card with the title and controls, then
+  // the content. No overlay, no close button — it is a page.
+  function shell() {
+    const host = el('page-d2d'); if (!host) return null;
+    if (el('d2d-body')) return el('d2d-body');
+    host.innerHTML = `
+      <div class="d2d-head">
+        <div class="rounded-2xl border bg-white shadow-sm" style="padding:14px 18px;display:flex;align-items:center;
+             justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:12px;">
+          <div style="display:flex;align-items:center;gap:22px;">
+            <div>
+              <div style="font-size:16px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Door to door</div>
+              <div style="font-size:11px;color:${MID};margin-top:1px;" id="d2d-sub">Plan against actual</div>
+            </div>
+            <div class="d2d-tabs" id="d2d-tabs"></div>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span class="d2d-num" style="font-size:11px;color:${MID};" id="d2d-scope"></span>
+          </div>
+        </div>
+        <div id="d2d-tickbar" class="d2d-tick" style="display:none;">
+          <span style="width:6px;height:6px;border-radius:50%;background:${LIME};flex-shrink:0;"></span>
+          <div style="position:relative;height:34px;flex:1;" id="d2d-ticker"></div>
+        </div>
+      </div>
+      <div id="d2d-body"><div class="d2d-empty">Loading&hellip;</div></div>`;
+    return el('d2d-body');
+  }
 
   async function open() {
     styles();
-    if (document.querySelector('.d2d-ov')) return;
-    const ov = document.createElement('div');
-    ov.className = 'd2d-ov';
-    ov.innerHTML = `
-      <div class="d2d-top"><div class="d2d-wrap" style="display:flex;justify-content:space-between;align-items:center;">
-        <div style="display:flex;align-items:center;gap:26px;">
-          <span style="font-size:15px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Door to door</span>
-          <div class="d2d-tabs" id="d2d-tabs"></div>
-        </div>
-        <div style="display:flex;align-items:center;gap:12px;">
-          <span class="d2d-num" style="font-size:11px;color:${MID};" id="d2d-scope"></span>
-          <button class="d2d-x" id="d2d-close" aria-label="Close">&times;</button>
-        </div>
-      </div></div>
-      <div class="d2d-tick" id="d2d-tickbar"><div class="d2d-wrap" style="display:flex;align-items:center;gap:10px;">
-        <span style="width:6px;height:6px;border-radius:50%;background:${LIME};flex-shrink:0;"></span>
-        <div style="position:relative;height:34px;flex:1;" id="d2d-ticker"></div></div></div>
-      <div class="d2d-body"><div class="d2d-wrap" id="d2d-body"><div class="d2d-empty">Loading&hellip;</div></div></div>`;
-    document.body.appendChild(ov);
-    document.body.style.overflow = 'hidden';
-    el('d2d-close').onclick = close;
-    const onKey = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
-    document.addEventListener('keydown', onKey);
+    if (!shell()) return;
     await load();
   }
 
@@ -336,7 +320,7 @@
     const tick = el('d2d-ticker');
     const lines = tickerLines(d);
     const bar = el('d2d-tickbar');
-    if (bar) bar.style.display = lines.length ? '' : 'none';
+    if (bar) bar.style.display = lines.length ? 'flex' : 'none';
     if (tick) tick.innerHTML = lines.map((t, i) =>
       `<span class="d2d-tickt" style="position:absolute;left:0;top:0;height:34px;display:flex;align-items:center;${
         lines.length > 1 ? `animation:d2d-tick ${lines.length * 4}s ${i * 4}s infinite;` : ''}">${esc(t)}</span>`).join('');
@@ -785,6 +769,8 @@
   if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
   window.addEventListener('focus', () => { refreshEnabled().catch(() => {}); }, { passive: true });
 
+  // The router calls this when #d2d is opened.
+  window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v5 loaded');
+  console.log('[d2d-hub] v6 loaded');
 })();
