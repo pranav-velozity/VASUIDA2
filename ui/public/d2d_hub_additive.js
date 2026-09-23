@@ -60,14 +60,42 @@
   }
   function paintNav() {
     const n = el('nav-d2d'); if (n) n.style.display = _enabled ? '' : 'none';
-    // A door-to-door client has no Week Hub to land on — the legacy screens belong to the
-    // weekly VAS model and the server now refuses them. Without this the app opens on a page
-    // that cannot load, so open the hub instead, once.
-    if (_enabled && !_autoOpened) {
-      const wh = el('nav-weekhub');
-      const noWeekHub = !wh || wh.style.display === 'none';
-      if (noWeekHub) { _autoOpened = true; setTimeout(() => { open().catch(() => {}); }, 80); }
+    const wh = el('nav-weekhub');
+    const noWeekHub = !wh || wh.style.display === 'none';
+
+    // The legacy screens cache their data in localStorage keyed on the WEEK only, never the
+    // client. The server refuses their endpoints for a door-to-door client, but the page still
+    // paints from whatever another client left in this browser — which is how ICONIC's week
+    // appeared under a GRBA session. Hiding the pages is what actually stops that being seen.
+    if (_enabled && noWeekHub) hideLegacyPages(true);
+    else if (_enabled === false) hideLegacyPages(false);
+
+    // Nothing to land on, so open the hub once.
+    if (_enabled && noWeekHub && !_autoOpened) {
+      _autoOpened = true; setTimeout(() => { open().catch(() => {}); }, 80);
     }
+  }
+
+  // Only ever un-hides what this function hid, marked with a data attribute — the same rule
+  // the tenancy module follows, so it cannot reverse another module's decision to hide.
+  function hideLegacyPages(on) {
+    document.querySelectorAll('section[id^="page-"]').forEach(secn => {
+      if (on) { secn.dataset.d2dHidden = '1'; secn.style.display = 'none'; }
+      else if (secn.dataset.d2dHidden === '1') { delete secn.dataset.d2dHidden; secn.style.display = ''; }
+    });
+    let back = el('d2d-backdrop');
+    if (on && !back) {
+      back = document.createElement('div');
+      back.id = 'd2d-backdrop';
+      back.style.cssText = 'padding:80px 26px;text-align:center;font-family:inherit;';
+      back.innerHTML = `<div style="font-size:15px;font-weight:600;color:${DARK};">Shipments</div>
+        <div style="font-size:12px;color:${MID};margin:6px 0 16px;">Door to door &middot; plan against actual</div>
+        <button id="d2d-reopen" style="border:.5px solid rgba(0,0,0,.16);background:#fff;color:${DARK};
+          border-radius:9px;padding:10px 16px;font:600 12px inherit;cursor:pointer;min-height:44px;">Open shipments &rarr;</button>`;
+      const host = document.querySelector('main') || document.body;
+      host.appendChild(back);
+      const btn = el('d2d-reopen'); if (btn) btn.onclick = () => open().catch(() => {});
+    } else if (!on && back) back.remove();
   }
 
   function injectNav() {

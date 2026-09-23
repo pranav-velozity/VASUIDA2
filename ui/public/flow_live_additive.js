@@ -85,6 +85,14 @@
   // ------------------------- Config (editable) -------------------------
   // Baseline is relative to the business week (Asia/Shanghai by default).
   // All cutoffs are soft: we only go "red" when we are meaningfully past the expected window.
+  // Which client this browser's cached week data belongs to. Keys carried the week only, so
+  // switching client painted the previous client's plan, containers and sign-offs straight
+  // from localStorage even when the server refused the request.
+  function _cacheClient() {
+    try { return String(window.pinpointClient || 'unknown').replace(/[^A-Za-z0-9_-]/g, ''); }
+    catch (e) { return 'unknown'; }
+  }
+
   const BASELINE = {
     // Anchor: Monday 12:00 (week start in business TZ)
     receiving_due: { dayOffset: 0, time: '12:00' },
@@ -993,12 +1001,12 @@ function computeCartonStatsFromRecords(records) {
   }
 
   function intlStorageKey(ws, key) {
-    return `flow:intl:${ws}:${key}`;
+    return `flow:${_cacheClient()}:intl:${ws}:${key}`;
   }
 
   // Week-level containers store (independent of selected lane)
   function intlWeekContainersKey(ws) {
-    return `flow:intl_weekcontainers:${ws}`;
+    return `flow:${_cacheClient()}:intl_weekcontainers:${ws}`;
   }
 
   // Safe conversion for <input type="datetime-local"> values.
@@ -1061,8 +1069,8 @@ function computeCartonStatsFromRecords(records) {
         const seen = new Map(); // uid -> container
         for (let i = 0; i < localStorage.length; i++) {
           const lk = localStorage.key(i);
-          if (!lk || !lk.startsWith(`flow:intl:${ws}:`)) continue;
-          let laneKeyStr = lk.slice(`flow:intl:${ws}:`.length);
+          if (!lk || !lk.startsWith(`flow:${_cacheClient()}:intl:${ws}:`)) continue;
+          let laneKeyStr = lk.slice(`flow:${_cacheClient()}:intl:${ws}:`.length);
           let laneObj = {};
           try { laneObj = JSON.parse(localStorage.getItem(lk) || '{}') || {}; } catch { laneObj = {}; }
           const arr = Array.isArray(laneObj.containers) ? laneObj.containers : [];
@@ -1156,7 +1164,7 @@ function computeCartonStatsFromRecords(records) {
 
   // ------------------------- Pre-booked containers (week-scoped) -------------------------
   // UI-only plan inputs for each week (do NOT affect status logic).
-  function prebookKey(ws) { return `flow:prebook:${ws}`; }
+  function prebookKey(ws) { return `flow:${_cacheClient()}:prebook:${ws}`; }
 
   function loadPrebook(ws) {
     const k = prebookKey(ws);
@@ -1183,7 +1191,7 @@ function computeCartonStatsFromRecords(records) {
 // ------------------------- Week sign-off (Receiving / VAS) -------------------------
 // UI-only "master tick" per week. This is a deliberate sign-off signal and must NEVER
 // auto-write actual timestamps. It can influence node status only when checked.
-function weekSignoffKey(ws) { return `flow:weekSignoff:${ws}`; }
+function weekSignoffKey(ws) { return `flow:${_cacheClient()}:weekSignoff:${ws}`; }
 
 function loadWeekSignoff(ws) {
   const k = weekSignoffKey(ws);
@@ -1229,7 +1237,7 @@ function saveWeekSignoff(ws, next) {
   // This avoids any accidental overwrite/derivation issues and keeps Last Mile updates
   // deterministic.
   function lastMileReceiptsKey(ws) {
-    return `flow:lastmile_receipts:${ws}`;
+    return `flow:${_cacheClient()}:lastmile_receipts:${ws}`;
   }
 
   function loadLastMileReceipts(ws) {
@@ -1354,7 +1362,7 @@ function saveWeekSignoff(ws, next) {
     // (no plan row backs them). Scan localStorage for keys under this ws and
     // add any lane with is_non_vas=true that isn't already in the Map.
     try {
-      const prefix = `flow:intl:${ws}:`;
+      const prefix = `flow:${_cacheClient()}:intl:${ws}:`;
       for (let i = 0; i < localStorage.length; i++) {
         const storageKey = localStorage.key(i);
         if (!storageKey || !storageKey.startsWith(prefix)) continue;
@@ -5433,7 +5441,7 @@ detail.innerHTML = [
           } else {
             // Cross-lane overlap check: same freight + shared PO with another non-VAS lane
             try {
-              const prefix = `flow:intl:${ws}:`;
+              const prefix = `flow:${_cacheClient()}:intl:${ws}:`;
               const incomingPOs = new Set(poList.split(',').map(s => s.trim().toUpperCase()).filter(Boolean));
               let overlapKey = null;
               for (let i = 0; i < localStorage.length; i++) {
@@ -6708,9 +6716,12 @@ async function refresh() {
         // Flow-only reset (do not broadcast global events that can break other pages)
         UI.selection = { node: 'receiving', sub: null };
         try {
-          // clear lightweight per-week manual inputs
+          // Clear lightweight per-week manual inputs. Both the legacy shapes (kept so an old
+          // browser is still tidied) and the client-scoped ones actually in use.
           localStorage.removeItem(`flow:intl:${UI.currentWs}`);
           localStorage.removeItem(`flow:lastmile:${UI.currentWs}`);
+          localStorage.removeItem(`flow:${_cacheClient()}:intl:${UI.currentWs}`);
+          localStorage.removeItem(`flow:${_cacheClient()}:lastmile:${UI.currentWs}`);
         } catch {}
         // Re-render just this page
         refresh();
