@@ -68,7 +68,11 @@
   function paintNav() {
     const n = el('nav-d2d'); if (n) n.style.display = _enabled ? '' : 'none';
     const wh = el('nav-weekhub');
-    const noWeekHub = !wh || wh.style.display === 'none';
+    // getComputedStyle, not the inline style: the link may be hidden by a class rather than
+    // an inline rule, and reading only .style would miss it.
+    const hidden = !wh || wh.style.display === 'none'
+      || (wh.ownerDocument.defaultView.getComputedStyle(wh).display === 'none');
+    const noWeekHub = hidden;
 
     // The legacy screens cache their data in localStorage keyed on the WEEK only, never the
     // client. The server refuses their endpoints for a door-to-door client, but the page still
@@ -763,13 +767,24 @@
   }
 
   // ── Wiring ──
-  const boot = () => { injectNav(); refreshEnabled().catch(() => {}); };
+  // Whether this client has a Week Hub is read from the nav, and the tenancy module hides that
+  // link with style.display AFTER its whoami resolves — later than this module boots. A
+  // childList observer never sees that: hiding an element is an ATTRIBUTE change. The result
+  // was a client with no Week Hub still showing the Week Hub, because the one check ran too
+  // early and nothing looked again.
+  const boot = () => { injectNav(); refreshEnabled().catch(e => console.warn('[d2d-hub] enable check failed', e)); };
   if (document.body) boot(); else document.addEventListener('DOMContentLoaded', boot);
-  const mo = new MutationObserver(() => injectNav());
-  const start = () => mo.observe(document.body, { childList: true, subtree: true });
+
+  const mo = new MutationObserver(() => { try { injectNav(); } catch (e) { console.error('[d2d-hub] nav update failed', e); } });
+  const start = () => {
+    mo.observe(document.body, { childList: true, subtree: true });
+    // Attribute changes on the nav itself — this is what catches the link being hidden.
+    const nav = el('pn-nav-items');
+    if (nav) mo.observe(nav, { attributes: true, subtree: true, attributeFilter: ['style', 'class'] });
+  };
   if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
   window.addEventListener('focus', () => { refreshEnabled().catch(() => {}); }, { passive: true });
 
   window.__openD2D = open;
-  console.log('[d2d-hub] v4 loaded');
+  console.log('[d2d-hub] v5 loaded');
 })();
