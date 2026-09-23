@@ -124,13 +124,28 @@
     const st = document.createElement('style'); st.id = 'd2d-css';
     st.textContent = `
       .d2d-ov{position:fixed;inset:0;background:#F7F8FA;z-index:9500;display:flex;flex-direction:column;font-family:inherit;}
-      .d2d-top{display:flex;justify-content:space-between;align-items:center;padding:0 26px;height:56px;background:#fff;border-bottom:.5px solid rgba(0,0,0,.08);}
+      /* Same container width and gutters as the rest of Pinpoint, so cards do not stretch to
+         the full monitor and the milestone strip stays readable. */
+      .d2d-wrap{width:min(96vw,1920px);margin:0 auto;padding:0 24px;}
+      .d2d-top{display:flex;justify-content:space-between;align-items:center;height:52px;background:#fff;border-bottom:.5px solid rgba(0,0,0,.08);}
       .d2d-tabs{display:flex;gap:16px;}
       .d2d-tab{border:0;background:none;font:600 13px inherit;color:${MID};cursor:pointer;padding:18px 0 15px;border-bottom:2px solid transparent;}
       .d2d-tab.on{color:${DARK};border-bottom-color:${BRAND};}
-      .d2d-tick{height:34px;background:${DARK};display:flex;align-items:center;gap:10px;padding:0 26px;overflow:hidden;}
+      .d2d-tick{height:34px;background:${DARK};display:flex;align-items:center;gap:10px;overflow:hidden;}
       .d2d-tickt{font-size:12px;color:#EDEDF0;white-space:nowrap;}
-      .d2d-body{flex:1;overflow-y:auto;padding:18px 26px 40px;}
+      .d2d-body{flex:1;overflow-y:auto;padding:16px 0 40px;}
+      /* Week chips, matching the Week Hub's date circles rather than generic pills. */
+      .d2d-chip{width:64px;height:64px;border-radius:50%;border:1.5px solid rgba(0,0,0,.10);background:#fff;
+        display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;cursor:pointer;
+        font:inherit;color:${DARK};transition:border-color .18s ease,transform .18s cubic-bezier(.22,1,.36,1);flex-shrink:0;}
+      .d2d-chip:hover{border-color:rgba(0,0,0,.28);transform:translateY(-2px);}
+      .d2d-chip.on{border-color:${BRAND};border-width:2px;}
+      .d2d-chip .m{font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:${LIGHT};}
+      .d2d-chip.on .m{color:${BRAND};}
+      .d2d-chip .d{font-size:19px;font-weight:600;line-height:1;}
+      .d2d-chip .n{font-size:8.5px;color:${MID};}
+      /* The strip is capped so stages sit a sensible distance apart on a wide monitor. */
+      .d2d-striphold{max-width:1080px;}
       .d2d-x{border:0;background:#F2F2F5;width:34px;height:34px;border-radius:9px;cursor:pointer;font-size:18px;color:${MID};}
       .d2d-card{border:.5px solid rgba(16,18,27,.08);border-radius:14px;background:#fff;
         box-shadow:0 1px 2px rgba(16,18,27,.04),0 4px 12px rgba(16,18,27,.05);}
@@ -193,7 +208,7 @@
     const ov = document.createElement('div');
     ov.className = 'd2d-ov';
     ov.innerHTML = `
-      <div class="d2d-top">
+      <div class="d2d-top"><div class="d2d-wrap" style="display:flex;justify-content:space-between;align-items:center;">
         <div style="display:flex;align-items:center;gap:26px;">
           <span style="font-size:15px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Door to door</span>
           <div class="d2d-tabs" id="d2d-tabs"></div>
@@ -202,10 +217,11 @@
           <span class="d2d-num" style="font-size:11px;color:${MID};" id="d2d-scope"></span>
           <button class="d2d-x" id="d2d-close" aria-label="Close">&times;</button>
         </div>
-      </div>
-      <div class="d2d-tick"><span style="width:6px;height:6px;border-radius:50%;background:${LIME};flex-shrink:0;"></span>
-        <div style="position:relative;height:34px;flex:1;" id="d2d-ticker"></div></div>
-      <div class="d2d-body" id="d2d-body"><div class="d2d-empty">Loading&hellip;</div></div>`;
+      </div></div>
+      <div class="d2d-tick" id="d2d-tickbar"><div class="d2d-wrap" style="display:flex;align-items:center;gap:10px;">
+        <span style="width:6px;height:6px;border-radius:50%;background:${LIME};flex-shrink:0;"></span>
+        <div style="position:relative;height:34px;flex:1;" id="d2d-ticker"></div></div></div>
+      <div class="d2d-body"><div class="d2d-wrap" id="d2d-body"><div class="d2d-empty">Loading&hellip;</div></div></div>`;
     document.body.appendChild(ov);
     document.body.style.overflow = 'hidden';
     el('d2d-close').onclick = close;
@@ -270,7 +286,7 @@
         what: `${od.label} not recorded for ${s.reference || 'an unadvised container'}`,
         effect: `Planned ${day(s['plan_' + od.stage])}, ${od.days} day${od.days === 1 ? '' : 's'} ago`, sort: 100 + od.days });
       if (!s.reference) out.push({ kind: 'Missing', accent: YELL, ink: YINK,
-        what: 'Container number not advised', effect: 'Kerry cannot report milestones without it', sort: 60 });
+        what: 'Container number not advised', effect: 'The partner cannot report milestones without it', sort: 60 });
     }
     const released = d.bookings.filter(b => b.status === 'released');
     if (released.length) out.push({ kind: 'Decide', accent: BLUE, ink: BLUE,
@@ -295,7 +311,9 @@
     if (rel) lines.push(`${rel} sailing option${rel === 1 ? '' : 's'} awaiting your decision`);
     const done = d.shipments.filter(s => s.status === 'delivered').length;
     if (done) lines.push(`${done} of ${d.shipments.length} delivered this week`);
-    if (!lines.length) lines.push('Everything on plan this week');
+    // Nothing booked and nothing quoted means there is genuinely nothing to say — an empty
+    // black bar reads as broken chrome, so the bar hides instead.
+    if (!lines.length && (d.shipments.length || d.bookings.length)) lines.push('Everything on plan this week');
     return lines.slice(0, 3);
   }
 
@@ -312,8 +330,12 @@
       tw.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { _tab = b.getAttribute('data-tab'); paint(); });
     }
     const tick = el('d2d-ticker');
-    if (tick) tick.innerHTML = tickerLines(d).map((t, i) =>
-      `<span class="d2d-tickt" style="position:absolute;left:0;top:0;height:34px;display:flex;align-items:center;animation:d2d-tick 12s ${i * 4}s infinite;">${esc(t)}</span>`).join('');
+    const lines = tickerLines(d);
+    const bar = el('d2d-tickbar');
+    if (bar) bar.style.display = lines.length ? '' : 'none';
+    if (tick) tick.innerHTML = lines.map((t, i) =>
+      `<span class="d2d-tickt" style="position:absolute;left:0;top:0;height:34px;display:flex;align-items:center;${
+        lines.length > 1 ? `animation:d2d-tick ${lines.length * 4}s ${i * 4}s infinite;` : ''}">${esc(t)}</span>`).join('');
 
     const body = el('d2d-body'); if (!body) return;
     if (!d.weeks.length) {
@@ -322,13 +344,20 @@
     }
     // The pill says what the week needs, not just how many shipments it has — a quoted week
     // with nothing approved has no shipments at all and would otherwise read "· 0".
-    const weekBar = `<div class="d2d-wk">${d.weeks.map(w => {
-      const note = w.shipments ? String(w.shipments)
-        : w.awaiting ? w.awaiting + ' to decide'
-        : w.drafts ? w.drafts + ' to price' : '0';
-      return `<button class="d2d-wkb ${w.week_start === _week ? 'on' : ''}" data-w="${esc(w.week_start)}">${esc(day(w.week_start))}
-        <span style="opacity:.6;font-weight:500;">&middot; ${esc(note)}</span></button>`;
-    }).join('')}</div>`;
+    // Oldest to newest, left to right, like the Week Hub's date circles.
+    const chips = [...d.weeks].sort((a, b) => a.week_start < b.week_start ? -1 : 1);
+    const weekBar = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+      ${chips.map(w => {
+        const dt = new Date(w.week_start + 'T00:00:00Z');
+        const mon = isNaN(dt) ? '' : dt.toLocaleDateString('en-AU', { month: 'short', timeZone: 'UTC' }).toUpperCase();
+        const dnum = isNaN(dt) ? w.week_start : dt.getUTCDate();
+        const note = w.shipments ? w.shipments + (w.shipments === 1 ? ' shpt' : ' shpts')
+          : w.awaiting ? w.awaiting + ' to decide' : w.drafts ? w.drafts + ' to price' : '';
+        return `<button class="d2d-chip ${w.week_start === _week ? 'on' : ''}" data-w="${esc(w.week_start)}"
+          aria-label="Week of ${esc(day(w.week_start))}">
+          <span class="m">${esc(mon)}</span><span class="d">${esc(dnum)}</span><span class="n">${esc(note)}</span></button>`;
+      }).join('')}
+    </div>`;
 
     // Transit rules are not a property of a week, so the week bar is left off that tab.
     body.innerHTML = _tab === 'baselines' ? paintBaselines()
@@ -344,31 +373,45 @@
     const slips = d.shipments.map(slipOf).filter(x => x != null && x > 0);
     const approved = d.bookings.find(b => b.status === 'approved');
     const acts = actions(d);
+    const stat = (label, value, sub, colour) => `
+      <div class="flex items-baseline justify-between py-2.5" style="border-top:.5px solid rgba(0,0,0,.05);">
+        <span style="font-size:12px;color:${MID};">${label}</span>
+        <span style="text-align:right;">
+          <span style="display:block;font-size:15px;font-weight:600;color:${colour || DARK};">${value}</span>
+          ${sub ? `<span style="display:block;font-size:10.5px;color:${LIGHT};">${sub}</span>` : ''}
+        </span>
+      </div>`;
+
     return `
-      <div class="d2d-grid4" style="margin-bottom:14px;">
-        <div class="d2d-card d2d-tile d2d-rise"><div class="d2d-tl">Shipments</div><div class="d2d-tv">${d.shipments.length}</div><div class="d2d-ts">this week</div></div>
-        <div class="d2d-card d2d-tile d2d-rise" style="animation-delay:.05s"><div class="d2d-tl">In transit</div><div class="d2d-tv">${inTransit}</div><div class="d2d-ts">${delivered} delivered</div></div>
-        <div class="d2d-card d2d-tile d2d-rise" style="animation-delay:.1s"><div class="d2d-tl">Behind plan</div>
-          <div class="d2d-tv" style="color:${slips.length ? BRAND : DARK}">${slips.length}</div>
-          <div class="d2d-ts">${slips.length ? 'worst ' + Math.max(...slips) + ' days' : 'all on plan'}</div></div>
-        <div class="d2d-card d2d-tile d2d-rise" style="animation-delay:.15s"><div class="d2d-tl">Booked as</div>
-          <div class="d2d-tv" style="font-size:17px;line-height:1.3;">${approved ? esc(approved.title || approved.option_ref) : '&ndash;'}</div>
-          <div class="d2d-ts">${approved ? esc([approved.carrier, approved.transit_days ? approved.transit_days + ' days' : ''].filter(Boolean).join(' · ')) : 'no approved option'}</div></div>
-      </div>
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
+        <div class="lg:col-span-2" style="min-width:0;">
+          ${d.shipments.length ? d.shipments.map(shipmentCard).join('')
+            : `<div class="rounded-2xl border bg-white shadow-sm d2d-empty">Nothing booked for this week yet.</div>`}
+        </div>
 
-      <div style="display:flex;align-items:baseline;gap:9px;margin-bottom:8px;">
-        <span style="font-size:12.5px;font-weight:600;color:${DARK};">Next best action</span>
-        <span style="font-size:11px;color:${MID};">from this week's dates</span>
-      </div>
-      <div class="d2d-grid4" style="margin-bottom:18px;">
-        ${acts.map((a, i) => `<div class="d2d-card d2d-nba d2d-rise d2d-lift" style="border-left-color:${a.accent};animation-delay:${i * .05}s">
-          <span class="d2d-kind" style="color:${a.ink};">${esc(a.kind)}</span>
-          <span style="font-size:12.5px;font-weight:600;color:${DARK};line-height:1.35;">${esc(a.what)}</span>
-          <span style="font-size:11px;color:${MID};line-height:1.4;">${esc(a.effect)}</span>
-        </div>`).join('')}
-      </div>
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div class="rounded-2xl border bg-white shadow-sm d2d-rise" style="padding:14px 16px;">
+            <div style="font-size:12.5px;font-weight:600;color:${DARK};margin-bottom:2px;">This week</div>
+            ${stat('Shipments', d.shipments.length, null)}
+            ${stat('In transit', inTransit, delivered + ' delivered')}
+            ${stat('Behind plan', slips.length, slips.length ? 'worst ' + Math.max(...slips) + ' days' : 'all on plan', slips.length ? BRAND : DARK)}
+            ${stat('Booked as', approved ? esc(approved.title || approved.option_ref) : '&ndash;',
+                   approved ? esc([approved.carrier, approved.transit_days ? approved.transit_days + ' days' : ''].filter(Boolean).join(' · ')) : 'no approved option')}
+          </div>
 
-      ${d.shipments.map(shipmentCard).join('')}`;
+          <div class="rounded-2xl border bg-white shadow-sm d2d-rise" style="padding:14px 16px;animation-delay:.06s;">
+            <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px;">
+              <span style="font-size:12.5px;font-weight:600;color:${DARK};">Next best action</span>
+              <span style="font-size:10.5px;color:${LIGHT};">from this week's dates</span>
+            </div>
+            ${acts.map((a, i) => `<div class="d2d-nba" style="border-left-color:${a.accent};padding:9px 0 9px 11px;margin-bottom:${i === acts.length - 1 ? 0 : 8}px;">
+              <span class="d2d-kind" style="color:${a.ink};">${esc(a.kind)}</span>
+              <span style="font-size:12px;font-weight:600;color:${DARK};line-height:1.35;">${esc(a.what)}</span>
+              <span style="font-size:10.5px;color:${MID};line-height:1.4;">${esc(a.effect)}</span>
+            </div>`).join('')}
+          </div>
+        </div>
+      </div>`;
   }
 
   function shipmentCard(s) {
@@ -420,7 +463,7 @@
                 : (slip != null && slip > 0) ? ['+' + slip + ' days', '#fff', BRAND]
                 : s.status === 'in_transit' ? ['On plan', LINK, 'rgba(155,171,21,.20)']
                 : ['Booked', MID, '#F2F2F5'];
-    return `<div class="d2d-card d2d-sh d2d-rise">
+    return `<div class="rounded-2xl border bg-white shadow-sm d2d-sh d2d-rise">
       <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;">
         <div style="display:flex;align-items:baseline;gap:11px;">
           ${_internal
@@ -433,7 +476,7 @@
         </div>
         <span style="font-size:10.5px;font-weight:700;border-radius:6px;padding:3px 9px;color:${badge[1]};background:${badge[2]};">${esc(badge[0])}</span>
       </div>
-      <div class="d2d-strip">${cells}</div>
+      <div class="d2d-striphold"><div class="d2d-strip">${cells}</div></div>
     </div>`;
   }
 
@@ -450,7 +493,7 @@
                     : st === 'released' ? ['Awaiting decision', BLUE, 'rgba(44,111,187,.12)']
                     : st === 'draft' ? ['Not released', YINK, 'rgba(254,208,0,.20)']
                     : [st.charAt(0).toUpperCase() + st.slice(1), MID, '#F2F2F5'];
-        return `<div class="d2d-card d2d-opt d2d-rise d2d-lift" style="border-top-color:${accent};animation-delay:${i * .05}s">
+        return `<div class="rounded-2xl border bg-white shadow-sm d2d-opt d2d-rise d2d-lift" style="border-top-color:${accent};animation-delay:${i * .05}s">
           <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">
             <div>
               <div style="font-size:15px;font-weight:700;color:${DARK};letter-spacing:-.01em;">${esc(b.title || 'Option ' + b.option_ref)}</div>
@@ -482,10 +525,10 @@
     const drafts = rows.filter(b => b.status === 'draft');
     const below = drafts.filter(b => Number(b.margin_pct) < 15);
     return `
-      <div class="d2d-card" style="padding:0;overflow:hidden;margin-bottom:12px;">
+      <div class="rounded-2xl border bg-white shadow-sm" style="padding:0;overflow:hidden;margin-bottom:12px;">
         <div style="display:grid;grid-template-columns:1fr 110px 110px 104px 116px 128px;gap:0 12px;padding:11px 18px 8px;background:#FBFBFC;
              font-size:9.5px;font-weight:700;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">
-          <span>Option</span><span style="text-align:right;">Kerry cost</span><span style="text-align:right;">Our cost</span>
+          <span>Option</span><span style="text-align:right;">Partner cost</span><span style="text-align:right;">Our cost</span>
           <span style="text-align:right;">Margin %</span><span style="text-align:right;">Sell</span><span>Status</span>
         </div>
         ${rows.map(b => {
@@ -546,7 +589,7 @@
     catch (e) { host.innerHTML = `<div class="d2d-empty" style="color:${BRAND}">Could not load (${esc(e.message)}).</div>`; return; }
 
     host.innerHTML = rows.map(b => `
-      <div class="d2d-card" style="padding:15px 18px;margin-bottom:12px;">
+      <div class="rounded-2xl border bg-white shadow-sm" style="padding:15px 18px;margin-bottom:12px;">
         <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px;">
           <span style="font-size:14px;font-weight:700;color:${DARK};text-transform:capitalize;">${esc(b.mode)} freight</span>
           <span style="font-size:11px;color:${LIGHT};">${b.updated_by === 'default' ? 'never edited — starting values' : 'updated by ' + esc(b.updated_by || '')}</span>
@@ -661,7 +704,7 @@
       box-shadow:0 18px 40px rgba(16,18,27,.18);padding:14px;width:262px;font-family:inherit;`;
     pop.innerHTML = `
       <div style="font-size:12.5px;font-weight:600;color:${DARK};">Container and vessel</div>
-      <div style="font-size:11px;color:${MID};margin:2px 0 10px;">Kerry can advise this themselves</div>
+      <div style="font-size:11px;color:${MID};margin:2px 0 10px;">The partner can advise this themselves</div>
       <label for="d2d-refin" style="display:block;font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Container number</label>
       <input id="d2d-refin" type="text" value="${esc(cur)}" placeholder="ABCD1234567"
              style="width:100%;box-sizing:border-box;font:inherit;font-size:12.5px;border:.5px solid rgba(0,0,0,.18);border-radius:8px;padding:9px;min-height:44px;text-transform:uppercase;">
