@@ -1219,7 +1219,7 @@ module.exports = function mountD2D(deps) {
   // Preview and apply are separate calls on purpose: a bad file must never half-load into a
   // live week, and the preview is where supplier and container mismatches surface.
   const PO_COLUMNS = {
-    po_number:   ['po_number', 'po', 'po no', 'po #', 'purchase order', 'order'],
+    po_number:   ['po_number', 'po number', 'po', 'po no', 'po #', 'purchase order', 'order', 'order number', 'po ref'],
     week_start:  ['week_start', 'week', 'cargo week'],
     supplier:    ['supplier', 'vendor', 'factory'],
     cargo_ready: ['cargo_ready_date', 'cargo ready', 'crd', 'ex factory', 'ex-factory'],
@@ -1265,10 +1265,14 @@ module.exports = function mountD2D(deps) {
   }
 
   // Map whatever the file calls its columns onto what we need, so nobody has to rename headers.
+  const normHeader = (h) => String(h == null ? '' : h).toLowerCase().replace(/[^a-z0-9]/g, '');
   function mapColumns(headers) {
-    const found = {}, lower = headers.map(h => String(h).toLowerCase().trim());
+    const found = {}, norm = headers.map(normHeader);
     for (const [field, names] of Object.entries(PO_COLUMNS)) {
-      const i = lower.findIndex(h => names.includes(h));
+      const wanted = names.map(normHeader);
+      let i = norm.findIndex(h => wanted.includes(h));
+      // Then a looser pass: "po number (client)" or "total cbm" should still land.
+      if (i < 0) i = norm.findIndex(h => h && wanted.some(x => x.length > 2 && h.includes(x)));
       if (i >= 0) found[field] = headers[i];
     }
     return found;
@@ -1293,6 +1297,14 @@ module.exports = function mountD2D(deps) {
     if (!col.units) problems.push({ level: 'warn', message: 'No units column found; unit counts will be empty.' });
 
     const weekFallback = /^\d{4}-\d{2}-\d{2}$/.test(String((body || {}).week_start || '')) ? body.week_start : null;
+    // Monday of the week a date falls in. Weeks run Monday to Sunday.
+    const mondayOf = (ymd) => {
+      const d = new Date(String(ymd) + 'T00:00:00Z');
+      if (isNaN(d.getTime())) return null;
+      const dow = d.getUTCDay() || 7;                 // Sunday counts as the 7th day
+      d.setUTCDate(d.getUTCDate() - (dow - 1));
+      return d.toISOString().slice(0, 10);
+    };
 
     // Containers this client actually has, so the file can be matched against reality.
     const ships = req.d2d.all(`SELECT id, reference, week_start FROM d2d_shipment WHERE client_id = @client`);
@@ -1306,21 +1318,33 @@ module.exports = function mountD2D(deps) {
     rows.forEach((r, idx) => {
       const po = String(r[col.po_number] == null ? '' : r[col.po_number]).trim();
       if (!po) { problems.push({ level: 'row', row: idx + 2, message: 'No PO number on this row; skipped.' }); return; }
-      const week = dateOf(col.week_start ? r[col.week_start] : null) || weekFallback;
-      if (!week) { problems.push({ level: 'row', row: idx + 2, message: `PO ${po}: no week, and none supplied for the file.` }); return; }
+      // Where the week comes from, in order of what is most certainly true:
+      //   1. the container named on the row — it is already booked into a week
+      //   2. the cargo-ready date on the row, rounded back to its Monday
+      //   3. an explicit week column, if the file has one
+      //   4. the week being uploaded into
+      const cref0 = col.container ? String(r[col.container] || '').trim().toUpperCase() : '';
+      const crd = col.cargo_ready ? dateOf(r[col.cargo_ready]) : null;
+      const week = (cref0 && byRef[cref0] && byRef[cref0].week_start)
+        || (crd && mondayOf(crd))
+        || dateOf(col.week_start ? r[col.week_start] : null)
+        || weekFallback;
+      if (!week) { problems.push({ level: 'row', row: idx + 2,
+        message: `PO ${po}: no container, cargo-ready date or week on this row, so it cannot be placed in a week.` }); return; }
 
       const key = week + '|' + po;
       if (!orders.has(key)) {
         orders.set(key, {
           po_number: po, week_start: week,
           supplier: col.supplier ? String(r[col.supplier] || '').trim() || null : null,
-          cargo_ready_date: col.cargo_ready ? dateOf(r[col.cargo_ready]) : null,
+          cargo_ready_date: crd,
           cbm: null, weight_kg: null, value_amount: null,
           currency: col.currency ? (String(r[col.currency] || '').trim().toUpperCase() || null) : null,
           lines: [], containers: new Set(),
         });
       }
       const ord = orders.get(key);
+      if (crd && !ord.cargo_ready_date) ord.cargo_ready_date = crd;
       // PO-level figures repeat on every line; take them once rather than summing them.
       if (col.cbm && ord.cbm == null) ord.cbm = numOf(r[col.cbm]);
       if (col.weight_kg && ord.weight_kg == null) ord.weight_kg = numOf(r[col.weight_kg]);
@@ -1375,7 +1399,9 @@ module.exports = function mountD2D(deps) {
         sample: out.orders.slice(0, 8).map(o2 => ({
           po_number: o2.po_number, week_start: o2.week_start, supplier: o2.supplier,
           units: o2.units, lines: o2.lines.length, containers: o2.containers.length, cbm: o2.cbm,
+          cargo_ready_date: o2.cargo_ready_date,
         })),
+        week_source: 'Derived from the container, or from the cargo-ready date rounded back to its Monday.',
       });
     } catch (e) { console.error('[d2d] po preview', e); res.status(500).json({ error: String(e.message || e) }); }
   });
