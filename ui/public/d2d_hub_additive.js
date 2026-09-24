@@ -19,6 +19,16 @@
     ['arrived', 'Arrived'], ['dest_cleared', 'Dest cleared'],
     ['out_for_delivery', 'Out for delivery'], ['delivered', 'Delivered'],
   ];
+  // ISO week number: freight is planned and talked about in weeks, not dates.
+  function isoWeek(ymd) {
+    const d = new Date(String(ymd) + 'T00:00:00Z');
+    if (isNaN(d.getTime())) return null;
+    const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    t.setUTCDate(t.getUTCDate() + 4 - (t.getUTCDay() || 7));       // Thursday decides the year
+    const start = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+    return Math.ceil(((t - start) / 86400000 + 1) / 7);
+  }
+
   const el = (id) => document.getElementById(id);
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
   const day = (ymd) => { try { return new Date(ymd + 'T00:00:00Z').toLocaleDateString('en-AU', { day:'numeric', month:'short', timeZone:'UTC' }); } catch (e) { return ymd || ''; } };
@@ -204,7 +214,7 @@
         background:none;border:0;padding:0;font:inherit;color:inherit;text-align:center;}
       button.d2d-st{cursor:pointer;border-radius:10px;transition:background .18s ease;}
       button.d2d-st:hover{background:rgba(16,18,27,.035);}
-      .d2d-line{position:absolute;top:30px;height:3px;}
+      .d2d-line{position:absolute;top:43px;height:3px;}   /* 22px label + 5px gap + half of the 34px dot */
       .d2d-dot{width:34px;height:34px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;
         border:2px solid;box-sizing:border-box;position:relative;z-index:1;}
       .d2d-nba{border-left:3px solid;padding:12px 14px;display:flex;flex-direction:column;gap:5px;}
@@ -217,12 +227,15 @@
       @keyframes d2d-halo{0%{transform:scale(1);opacity:.45;}75%{transform:scale(2.1);opacity:0;}100%{opacity:0;}}
       @keyframes d2d-rise{from{opacity:0;transform:translateY(7px);}to{opacity:1;transform:none;}}36%,100%{opacity:0;transform:translateY(-9px);}}
       .d2d-pulse{animation:d2d-live 2.4s ease-in-out infinite;}
+      /* The leg being travelled drifts forward — a slow, quiet signal that this row is live. */
+      @keyframes d2d-travel{from{background-position:100% 0;}to{background-position:0% 0;}}
+      .d2d-travel{animation:d2d-travel 3.4s linear infinite;}
       @keyframes d2d-ping{0%{transform:scale(1);opacity:.35;}70%{transform:scale(2.2);opacity:0;}100%{opacity:0;}}
       .d2d-ping{animation:d2d-ping 2.8s ease-out infinite;transform-origin:center;transform-box:fill-box;}
       .d2d-halo{position:absolute;width:34px;height:34px;border-radius:50%;animation:d2d-halo 2.4s ease-out infinite;}
       .d2d-rise{animation:d2d-rise .42s cubic-bezier(.22,1,.36,1) both;}
       .d2d-lift{}
-      @media (prefers-reduced-motion:reduce){.d2d-pulse,.d2d-halo,.d2d-rise,.d2d-ping{animation:none;}.d2d-lift:hover{transform:none;}}
+      @media (prefers-reduced-motion:reduce){.d2d-pulse,.d2d-halo,.d2d-rise,.d2d-ping,.d2d-travel{animation:none;}.d2d-lift:hover{transform:none;}}
     `;
     document.head.appendChild(st);
   }
@@ -393,15 +406,15 @@
     const d = _data; if (!d) return;
     const scope = el('d2d-scope'); if (scope) scope.textContent = (window.pinpointClient || '') + (_internal ? ' · VelOzity view' : '');
 
-    const tabs = [['shipments', 'Overview'], ['list', 'Shipments'], ['bookings', 'Bookings'],
-                  ['po', 'Orders'], ['performance', 'Performance']]
+    const tabs = [['shipments', 'Live map'], ['list', 'Shipments'], ['po', 'Orders'],
+                  ['performance', 'Performance'], ['bookings', 'Bookings']]
       .concat(_internal ? [['pricing', 'Pricing'], ['baselines', 'Transit rules']] : []);
     const tw = el('d2d-tabs');
     if (tw) {
       tw.innerHTML = tabs.map(([k, l]) => `<button class="d2d-tab ${_tab === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('');
       tw.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => {
         _tab = b.getAttribute('data-tab');
-        if (_tab === 'shipments') _view = 'dashboard';     // the tab always returns to the top level
+        _view = 'dashboard';                 // a tab always returns to its top level
         paint();
       });
     }
@@ -448,15 +461,16 @@
     const wk = el('d2d-weeks');
     if (wk) wk.innerHTML = weekScoped ? weekBar : '';
     body.innerHTML =
-        _tab === 'baselines' ? paintBaselines()
-      : _tab === 'bookings'  ? paintBookings(d)
-      : _tab === 'pricing'   ? paintPricing(d)
-      : _tab === 'list'      ? paintList(d)
-      : _tab === 'po'        ? paintPO(d)
+        // A drill-down takes precedence over the tab: the tab says which list you came from,
+        // the view says what you opened from it.
+        _view === 'container' ? paintContainer(d)
+      : _view === 'week'      ? paintWeek(d)
+      : _tab === 'baselines'  ? paintBaselines()
+      : _tab === 'bookings'   ? paintBookings(d)
+      : _tab === 'pricing'    ? paintPricing(d)
+      : _tab === 'list'       ? paintList(d)
+      : _tab === 'po'         ? paintPO(d)
       : _tab === 'performance' ? paintPerformance(d)
-      : _view === 'week'     ? paintWeek(d)
-      : _view === 'container' ? paintContainer(d)
-      : _view === 'po'       ? paintPO(d)
       : paintShipments(d);
     if (_tab === 'baselines') loadBaselines();
     document.querySelectorAll('#d2d-weeks [data-w]').forEach(b => b.onclick = () => {
@@ -810,7 +824,7 @@
         </div>
 
         <div style="position:relative;background:#FBFCFD;">
-          <svg viewBox="${VIEW.x0} ${VIEW.y0} ${VIEW.w} ${VIEW.h}" width="100%" style="display:block;max-height:${big ? 760 : 470}px;" role="img"
+          <svg viewBox="${VIEW.x0} ${VIEW.y0} ${VIEW.w} ${VIEW.h}" width="100%" style="display:block;max-height:${big ? 760 : 588}px;" role="img"
                aria-label="Where this week's shipments are">
             ${seaField()}${dotField()}
             <path d="${routeD()}" fill="none" stroke="#C9CED6" stroke-width="${(1.6 * k).toFixed(2)}" stroke-dasharray="${(5 * k).toFixed(1)} ${(6 * k).toFixed(1)}"/>
@@ -950,6 +964,10 @@
       : sh.status === 'in_transit' ? ['On plan', LINK, 'rgba(155,171,21,.20)']
       : ['Booked', MID, '#F2F2F5'];
 
+    // Door to door, as planned and — once delivered — as it actually ran.
+    const planned = daysBetween(sh.plan_pickup, sh.plan_delivered);
+    const actualSpan = daysBetween(ev.pickup && ev.pickup.actual_at, ev.delivered && ev.delivered.actual_at);
+
     // The next thing to do about THIS shipment, from its own dates.
     const next = !sh.reference ? { kind: 'Missing', ink: YINK, accent: YELL,
                     what: 'Container number not advised', why: 'The partner cannot report milestones without it' }
@@ -972,9 +990,15 @@
       const live = overdue || i === liveIdx;
       const leftFill = i === 0 ? 'transparent' : (i <= liveIdx ? LIME : '#E4E4E9');
       const rightFill = i === STAGES.length - 1 ? 'transparent' : (i < liveIdx ? LIME : '#E4E4E9');
-      return `<div class="d2d-st">
+      const tag = _internal ? 'button' : 'div';
+      const attrs = _internal
+        ? ` type="button" class="d2d-st d2d-edit" data-ship="${esc(sh.id)}" data-stage="${kk}" data-label="${esc(label)}"
+            aria-label="Record ${esc(label)} for ${esc(sh.reference || 'this shipment')}"` : ' class="d2d-st"';
+      return `<${tag}${attrs}>
         <span class="d2d-line" style="left:0;right:50%;background:${leftFill};"></span>
-        <span class="d2d-line" style="left:50%;right:0;background:${rightFill};"></span>
+        <span class="d2d-line ${i === liveIdx ? 'd2d-travel' : ''}" style="left:50%;right:0;
+              background:${i === liveIdx ? `linear-gradient(90deg, ${LIME} 0%, ${LIME} 38%, #E4E4E9 62%, #E4E4E9 100%)` : rightFill};
+              ${i === liveIdx ? 'background-size:220% 100%;' : ''}"></span>
         <span style="font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;text-align:center;min-height:22px;">${label}</span>
         <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;">
           ${live ? `<span class="d2d-halo" style="background:${overdue ? 'rgba(153,0,51,.22)' : 'rgba(155,171,21,.22)'};"></span>` : ''}
@@ -987,20 +1011,31 @@
         <span class="d2d-num" style="font-size:10px;color:${LIGHT};">${plan ? day(plan) : ''}</span>
         <span class="d2d-num" style="font-size:11px;font-weight:600;color:${ink};">${actual ? day(actual) : (overdue ? 'overdue' : '&middot;')}</span>
         ${late ? `<span style="font-size:10px;font-weight:700;color:${BRAND};">+${dd}d</span>` : ''}
-      </div>`;
+      </${tag}>`;
     }).join('');
 
     return `
       <div class="rounded-2xl border bg-white shadow-sm d2d-rise" style="padding:15px 18px;margin-bottom:12px;">
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;">
-          <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">
-            <button type="button" class="d2d-num" data-open="${esc(sh.id)}"
-                    style="font-size:14px;color:${DARK};background:none;border:0;padding:0;cursor:pointer;
-                           border-bottom:1px dashed rgba(0,0,0,.25);">${esc(sh.reference || 'container not advised')}</button>
-            <span style="font-size:11px;color:${MID};">${esc([sh.container_type, sh.carrier, sh.vessel].filter(Boolean).join(' · '))}</span>
-            <span style="font-size:11px;color:${LIGHT};">week of ${esc(day(sh.week_start))}</span>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+            ${/* The week, stated plainly. Everyone plans in week numbers, so it leads. */ ''}
+            <span style="display:flex;flex-direction:column;align-items:center;justify-content:center;flex-shrink:0;
+                  background:#F2F2F5;border-radius:10px;padding:5px 11px;min-width:56px;">
+              <span style="font-size:8.5px;font-weight:700;color:${LIGHT};letter-spacing:.08em;">WEEK</span>
+              <span class="d2d-num" style="font-size:17px;font-weight:700;color:${DARK};line-height:1.05;">${isoWeek(sh.week_start) || '—'}</span>
+              <span style="font-size:8.5px;color:${MID};">${esc(day(sh.week_start))}</span>
+            </span>
+            <span>
+              <button type="button" class="d2d-num" data-open="${esc(sh.id)}"
+                      style="font-size:14px;color:${DARK};background:none;border:0;padding:0;cursor:pointer;
+                             border-bottom:1px dashed rgba(0,0,0,.25);">${esc(sh.reference || 'container not advised')}</button>
+              <span style="display:block;font-size:11px;color:${MID};margin-top:2px;">${esc([sh.container_type, sh.carrier, sh.vessel].filter(Boolean).join(' · '))}</span>
+            </span>
           </div>
-          <div style="display:flex;align-items:center;gap:10px;">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            ${planned != null ? `<span style="font-size:11px;color:${MID};">
+                 Planned pickup to delivery <b class="d2d-num" style="color:${DARK};">${planned} days</b>
+                 ${actualSpan != null ? ` &middot; actual <b class="d2d-num" style="color:${actualSpan > planned ? BRAND : LINK};">${actualSpan} days</b>` : ''}</span>` : ''}
             ${sh.po_count ? `<span style="font-size:11px;color:${MID};">
                  <b class="d2d-num" style="color:${DARK};">${sh.po_count}</b> orders &middot;
                  <b class="d2d-num" style="color:${DARK};">${Number(sh.units || 0).toLocaleString()}</b> units</span>` : ''}
@@ -1009,9 +1044,9 @@
           </div>
         </div>
 
-        <div class="d2d-striphold" style="max-width:none;"><div class="d2d-strip">${cells}</div></div>
+        <div class="d2d-striphold" style="max-width:820px;margin-top:4px;"><div class="d2d-strip">${cells}</div></div>
 
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:13px;
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:11px;
              padding-top:11px;border-top:.5px solid rgba(0,0,0,.05);flex-wrap:wrap;">
           <div style="display:flex;align-items:baseline;gap:9px;padding-left:10px;border-left:3px solid ${next.accent};">
             <span style="font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${next.ink};">${esc(next.kind)}</span>
@@ -1086,7 +1121,7 @@
     const docsPending = ship.filter(x => !x.reference).length;
 
     return `
-      ${crumb([{ label: 'Shipments', go: 'dashboard' }, { label: 'Week of ' + day(_week) }])}
+      ${crumb([{ label: _tab === 'list' ? 'Shipments' : 'Live map', go: 'dashboard' }, { label: 'Week of ' + day(_week) }])}
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
         <div class="lg:col-span-2" style="min-width:0;">
           <div style="display:flex;align-items:baseline;gap:9px;margin-bottom:8px;">
@@ -1146,7 +1181,7 @@
     const maxAbs = Math.max(1, ...legs.map(x => Math.abs(x.d)));
 
     return `
-      ${crumb([{ label: 'Shipments', go: 'dashboard' },
+      ${crumb([{ label: _tab === 'list' ? 'Shipments' : 'Live map', go: 'dashboard' },
                { label: 'Week of ' + day(sh.week_start), go: 'week' },
                { label: sh.reference || 'container not advised' }])}
 
@@ -1938,5 +1973,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v15 loaded');
+  console.log('[d2d-hub] v16 loaded');
 })();
