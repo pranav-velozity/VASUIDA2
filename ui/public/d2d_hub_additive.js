@@ -1228,6 +1228,8 @@
   function closeEditor() { const e = el('d2d-pop'); if (e) e.remove(); }
 
   function openEditor(btn) {
+    // 9800 sits above the detail drawer (9700) and the full-screen map (9600). At 9600 the
+    // date picker opened BEHIND the drawer that launched it and looked like a dead button.
     closeEditor();
     const ship = btn.getAttribute('data-ship'), stage = btn.getAttribute('data-stage'), label = btn.getAttribute('data-label');
     const card = _data.shipments.find(x => x.id === ship) || {};
@@ -1237,7 +1239,7 @@
 
     const pop = document.createElement('div');
     pop.id = 'd2d-pop';
-    pop.style.cssText = `position:fixed;z-index:9600;background:#fff;border:.5px solid rgba(0,0,0,.14);border-radius:12px;
+    pop.style.cssText = `position:fixed;z-index:9800;background:#fff;border:.5px solid rgba(0,0,0,.14);border-radius:12px;
       box-shadow:0 18px 40px rgba(16,18,27,.18);padding:14px;width:250px;font-family:inherit;`;
     pop.innerHTML = `
       <div style="font-size:12.5px;font-weight:600;color:${DARK};">${esc(label)}</div>
@@ -1287,7 +1289,7 @@
     const r = btn.getBoundingClientRect();
     const pop = document.createElement('div');
     pop.id = 'd2d-pop';
-    pop.style.cssText = `position:fixed;z-index:9600;background:#fff;border:.5px solid rgba(0,0,0,.14);border-radius:12px;
+    pop.style.cssText = `position:fixed;z-index:9800;background:#fff;border:.5px solid rgba(0,0,0,.14);border-radius:12px;
       box-shadow:0 18px 40px rgba(16,18,27,.18);padding:14px;width:262px;font-family:inherit;`;
     pop.innerHTML = `
       <div style="font-size:12.5px;font-weight:600;color:${DARK};">Container and vessel</div>
