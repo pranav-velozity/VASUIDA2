@@ -6943,6 +6943,9 @@ app.use('/bins', binsRouter);
 // is invisible until that is granted, and switching the capability off turns it all off.
 app.use('/d2d', require('./d2d_routes')({
   express, db, authenticateRequest, requireRole, curClient, tenancyResolve, auditLog,
+  // The partner RFQ reuses the air quote mailer and the same recipient list: it is the same
+  // forwarder, so the format and the inbox should not differ.
+  parseEmailList, sendPartnerMail: aqMail,
 }));
 
 const receivingRouter = express.Router();

@@ -171,6 +171,17 @@ module.exports = function mountD2D(deps) {
     );
     CREATE INDEX IF NOT EXISTS ix_d2d_request_week ON d2d_request(client_id, week_start);
 
+    -- A partner needs no account: the link carries a token, exactly as the air quotes work.
+    CREATE TABLE IF NOT EXISTS d2d_request_token (
+      token      TEXT PRIMARY KEY,
+      client_id  TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      purpose    TEXT NOT NULL DEFAULT 'partner_quote',
+      expires_at TEXT,
+      used_at    TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     -- Every state change, so the thread with the partner is auditable.
     CREATE TABLE IF NOT EXISTS d2d_request_event (
       id          TEXT PRIMARY KEY,
@@ -890,6 +901,287 @@ module.exports = function mountD2D(deps) {
         (byReq[b.request_id] = byReq[b.request_id] || []).push(internal ? b : forClient(b));
       }
       res.json({ requests: rows.map(r => ({ ...r, options: byReq[r.id] || [] })) });
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  // ── The partner's page ──
+  // Reached by a link, with no account and no client header, so it cannot use the scoped
+  // layer's usual entry point. The token carries the client, and every query below is scoped
+  // to that client explicitly.
+  function tokenLookup(raw) {
+    const t = String(raw || '').trim();
+    if (!/^[a-f0-9]{48}$/.test(t)) return { error: 'bad_link' };
+    const row = db.prepare(`SELECT * FROM d2d_request_token WHERE token = ?`).get(t);
+    if (!row) return { error: 'bad_link' };
+    if (row.expires_at && new Date(row.expires_at) < new Date()) return { error: 'expired' };
+    const sdb = scopedDb(row.client_id);
+    const rq = sdb.get(`SELECT * FROM d2d_request WHERE client_id = @client AND id = @id`, { id: row.request_id });
+    if (!rq) return { error: 'bad_link' };
+    return { token: row, rq, sdb };
+  }
+
+  const pageShell = (title, body) => `<!doctype html><html lang="en"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>${title}</title>
+    <style>
+      :root{color-scheme:light}
+      body{margin:0;background:#F7F8FA;color:#1C1C1E;
+        font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+      .wrap{max-width:820px;margin:0 auto;padding:26px 20px 60px;}
+      .card{background:#fff;border:.5px solid rgba(16,18,27,.10);border-radius:14px;padding:18px 20px;margin-bottom:14px;
+        box-shadow:0 1px 2px rgba(16,18,27,.04),0 4px 12px rgba(16,18,27,.05);}
+      h1{font-size:19px;letter-spacing:-.01em;margin:0 0 4px;}
+      .muted{color:#6E6E73;font-size:12.5px;}
+      label{display:block;font-size:10px;color:#AEAEB2;text-transform:uppercase;letter-spacing:.05em;margin-top:10px;}
+      input,select,textarea{display:block;width:100%;box-sizing:border-box;font:inherit;font-size:13px;
+        border:.5px solid rgba(0,0,0,.18);border-radius:9px;padding:9px 10px;margin-top:4px;background:#fff;min-height:42px;}
+      .grid{display:grid;gap:12px;}
+      .g2{grid-template-columns:repeat(2,minmax(0,1fr));} .g3{grid-template-columns:repeat(3,minmax(0,1fr));}
+      .g4{grid-template-columns:repeat(4,minmax(0,1fr));}
+      @media(max-width:640px){.g2,.g3,.g4{grid-template-columns:1fr;}}
+      button{font:inherit;font-weight:600;font-size:13px;border-radius:10px;padding:11px 18px;min-height:46px;cursor:pointer;}
+      .primary{background:#1C1C1E;color:#fff;border:0;}
+      .ghost{background:#fff;color:#1C1C1E;border:.5px solid rgba(0,0,0,.16);}
+      .facts{display:flex;flex-wrap:wrap;gap:18px;margin-top:10px;}
+      .fact b{display:block;font-size:15px;} .fact span{font-size:10px;color:#AEAEB2;text-transform:uppercase;letter-spacing:.05em;}
+      .opt{border:.5px solid rgba(0,0,0,.10);border-radius:12px;padding:14px 16px;margin-bottom:10px;}
+      .note{background:rgba(254,208,0,.12);border-left:3px solid #FED000;border-radius:9px;padding:10px 13px;font-size:12.5px;}
+      .ok{background:rgba(155,171,21,.14);border-left:3px solid #9BAB15;border-radius:9px;padding:12px 15px;}
+    </style></head><body><div class="wrap">${body}</div></body></html>`;
+
+  router.get('/quote', (req, res) => {
+    try {
+      const look = tokenLookup(req.query.token);
+      if (look.error) {
+        return res.status(look.error === 'expired' ? 410 : 404).send(pageShell('Link', `
+          <div class="card"><h1>${look.error === 'expired' ? 'This link has expired' : 'This link is not valid'}</h1>
+          <p class="muted">${look.error === 'expired'
+            ? 'Ask your VelOzity contact to send a fresh one.'
+            : 'Please check the link in the email, or ask your VelOzity contact to resend it.'}</p></div>`));
+      }
+      const { rq } = look;
+      const done = rq.state === 'costed' || rq.state === 'released' || rq.state === 'approved';
+      const last = look.sdb.all(`SELECT detail FROM d2d_request_event WHERE client_id = @client AND request_id = @id
+                                 AND to_state='repricing' ORDER BY at DESC LIMIT 1`, { id: rq.id })[0];
+
+      const optionFields = (n) => `
+        <div class="opt">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <b style="font-size:13px;">Option ${String.fromCharCode(65 + n)}</b>
+            ${n > 0 ? '<span class="muted">optional</span>' : ''}
+          </div>
+          <div class="grid g2">
+            <div><label>Description<input name="title_${n}" placeholder="2 x 40HQ, direct"></label></div>
+            <div><label>Carrier<input name="carrier_${n}" placeholder="ONE"></label></div>
+          </div>
+          <div class="grid g4">
+            <div><label>Equipment<select name="container_type_${n}">
+              <option value="40HQ">40HQ</option><option value="40GP">40GP</option>
+              <option value="20GP">20GP</option><option value="">Air / LCL</option></select></label></div>
+            <div><label>How many<input name="container_qty_${n}" type="number" min="1" value="1"></label></div>
+            <div><label>Transit days<input name="transit_days_${n}" type="number" min="1" placeholder="26"></label></div>
+            <div><label>Routing<select name="transhipment_${n}">
+              <option value="0">Direct</option><option value="1">Transhipment</option></select></label></div>
+          </div>
+          <div class="grid g3">
+            <div><label>Freight cost<input name="cost_amount_${n}" type="number" min="0" step="0.01" placeholder="8000"></label></div>
+            <div><label>Origin + destination charges<input name="accessorial_amount_${n}" type="number" min="0" step="0.01" placeholder="900"></label></div>
+            <div><label>Currency<select name="currency_${n}"><option>USD</option><option>AUD</option><option>CNY</option></select></label></div>
+          </div>
+        </div>`;
+
+      res.send(pageShell('Rates wanted · ' + (rq.ref || ''), `
+        <div class="card">
+          <h1>Rates wanted</h1>
+          <p class="muted">${rq.ref ? rq.ref + ' · ' : ''}cargo ready week of ${rq.week_start}${rq.origin ? ' · from ' + rq.origin : ''}${rq.destination ? ' to ' + rq.destination : ''}</p>
+          <div class="facts">
+            ${[['Packed as', rq.pack_type || '—'], ['Pallets', rq.pallets], ['Cartons', rq.cartons],
+               ['Units', rq.units], ['CBM', rq.cbm], ['Gross kg', rq.gross_weight_kg]]
+              .filter(([, v]) => v != null && v !== '')
+              .map(([l, v]) => `<span class="fact"><b>${typeof v === 'number' ? v.toLocaleString() : v}</b><span>${l}</span></span>`).join('')}
+          </div>
+          ${rq.notes ? `<p class="muted" style="margin-top:12px;">${rq.notes}</p>` : ''}
+        </div>
+
+        ${last && last.detail ? `<div class="card note"><b>Please look again:</b> ${last.detail}</div>` : ''}
+
+        ${done ? `<div class="card ok"><b>Thank you — your options are with us.</b>
+            <div class="muted" style="margin-top:4px;">You can send revised options below if anything changes.</div></div>` : ''}
+
+        <form method="POST" action="/d2d/quote">
+          <input type="hidden" name="token" value="${req.query.token}">
+          <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;">
+              <b>Your options</b><span class="muted">send as many as you can offer</span>
+            </div>
+            ${[0, 1, 2].map(optionFields).join('')}
+            <div class="grid g2">
+              <div><label>Your name<input name="partner_name" placeholder="Who we should reply to"></label></div>
+              <div><label>Valid until<input name="valid_until" type="date"></label></div>
+            </div>
+            <label>Anything we should know<textarea name="partner_note" rows="3"></textarea></label>
+            <div style="margin-top:16px;"><button class="primary" type="submit">Send these rates</button></div>
+          </div>
+        </form>`));
+    } catch (e) { console.error('[d2d] quote page', e); res.status(500).send('Something went wrong.'); }
+  });
+
+  router.post('/quote', express.urlencoded({ extended: false }), (req, res) => {
+    try {
+      const look = tokenLookup((req.body || {}).token);
+      if (look.error) return res.status(404).send(pageShell('Link', `<div class="card"><h1>This link is not valid</h1></div>`));
+      const { rq, sdb } = look;
+      const b = req.body || {};
+
+      const options = [];
+      for (let n = 0; n < 3; n++) {
+        const cost = Number(b['cost_amount_' + n]);
+        if (!isFinite(cost) || cost <= 0) continue;              // an empty block is not an option
+        options.push({
+          option_ref: String.fromCharCode(65 + options.length),
+          title: String(b['title_' + n] || '').trim() || null,
+          carrier: String(b['carrier_' + n] || '').trim() || null,
+          container_type: String(b['container_type_' + n] || '') || null,
+          container_qty: Number(b['container_qty_' + n]) || 1,
+          transit_days: Number(b['transit_days_' + n]) || null,
+          transhipment: String(b['transhipment_' + n] || '0') === '1' ? 1 : 0,
+          cost_amount: cost,
+          accessorial_amount: Number(b['accessorial_amount_' + n]) || 0,
+          currency: String(b['currency_' + n] || 'USD').toUpperCase(),
+        });
+      }
+      if (!options.length) {
+        return res.status(400).send(pageShell('Rates wanted', `<div class="card">
+          <h1>No rates received</h1><p class="muted">At least one option needs a freight cost. Please go back and try again.</p></div>`));
+      }
+
+      const who = String(b.partner_name || '').trim() || 'partner';
+      const tx = db.transaction(() => {
+        // A fresh submission supersedes the previous one rather than adding to it.
+        sdb.run(`UPDATE d2d_booking SET status='expired'
+                 WHERE client_id = @client AND request_id = @id AND status='draft'`, { id: rq.id });
+        for (const o of options) {
+          sdb.insert('d2d_booking', {
+            id: 'bk_' + crypto.randomUUID().slice(0, 12), week_start: rq.week_start,
+            option_ref: o.option_ref, title: o.title || (o.container_qty + ' x ' + (o.container_type || '')),
+            mode: rq.mode === 'air' ? 'air' : 'sea', container_type: o.container_type,
+            container_qty: o.container_qty, carrier: o.carrier, service: rq.origin || null,
+            transhipment: o.transhipment, transit_days: o.transit_days,
+            cost_amount: o.cost_amount, accessorial_amount: o.accessorial_amount,
+            margin_pct: MARGIN_FLOOR, sell_amount: sellFrom(o.cost_amount, o.accessorial_amount, MARGIN_FLOOR),
+            currency: o.currency, status: 'draft', recommended: 0, request_id: rq.id,
+          });
+        }
+        sdb.run(`UPDATE d2d_request SET state='costed' WHERE client_id = @client AND id = @id`, { id: rq.id });
+        sdb.insert('d2d_request_event', {
+          id: 'rqe_' + crypto.randomUUID().slice(0, 12), request_id: rq.id,
+          from_state: rq.state, to_state: 'costed', actor: who, role: 'partner',
+          detail: options.length + ' option(s) quoted' + (b.partner_note ? ' — ' + String(b.partner_note).slice(0, 300) : ''),
+        });
+        db.prepare(`UPDATE d2d_request_token SET used_at = datetime('now') WHERE token = ?`).run(look.token.token);
+      });
+      tx();
+      console.warn(`[d2d] partner quoted ${options.length} option(s) for ${rq.client_id} ${rq.ref}`);
+
+      res.send(pageShell('Thank you', `
+        <div class="card ok">
+          <h1 style="margin-bottom:6px;">Thank you</h1>
+          <p class="muted">${options.length} option${options.length === 1 ? '' : 's'} received for ${rq.ref || 'this booking'}.
+             We will come back to you once the client has decided.</p>
+        </div>
+        <div class="card"><p class="muted">Keep this link — if anything changes you can send revised rates from it.</p></div>`));
+    } catch (e) { console.error('[d2d] quote post', e); res.status(500).send('Something went wrong.'); }
+  });
+
+  // ── Sending it to the partner ──
+  // The same pattern as the air quotes: a token in a link, no account needed, and the page
+  // states the cargo so the partner is quoting the right thing. The difference is what comes
+  // back — sea partners return two or three OPTIONS, not a single cost.
+  const cargoLine = (rq) => [
+    rq.pack_type === 'pallets' ? (rq.pallets ? rq.pallets + ' pallets' : 'palletised')
+      : rq.pack_type === 'loose' ? 'loose cartons' : rq.pack_type,
+    rq.cartons ? rq.cartons.toLocaleString() + ' cartons' : null,
+    rq.units ? rq.units.toLocaleString() + ' units' : null,
+    rq.cbm ? rq.cbm + ' CBM' : null,
+    rq.gross_weight_kg ? Math.round(rq.gross_weight_kg).toLocaleString() + ' kg' : null,
+  ].filter(Boolean).join(' · ');
+
+  router.post('/requests/:id/send', authenticateRequest, requireRole(['admin']), requireD2D,
+    auditLog('send_d2d_rfq'), async (req, res) => {
+    if (internalOnly(req, res)) return;
+    try {
+      const rq = req.d2d.get(`SELECT * FROM d2d_request WHERE client_id = @client AND id = @id`, { id: req.params.id });
+      if (!rq) return res.status(404).json({ error: 'not_found' });
+      if (['approved', 'cancelled'].includes(rq.state)) return res.status(409).json({ error: 'not_sendable', state: rq.state });
+      // A partner cannot quote a sailing without knowing the volume.
+      if (!rq.cbm && !rq.cartons && !rq.pallets && !rq.units) {
+        return res.status(400).json({ error: 'no_cargo', message: 'Add the cargo details before sending: a partner cannot quote without them.' });
+      }
+
+      const days = Math.max(1, parseInt((req.body || {}).expires_days, 10) || 14);
+      const token = crypto.randomBytes(24).toString('hex');
+      req.d2d.insert('d2d_request_token', { token, request_id: rq.id, purpose: 'partner_quote',
+        expires_at: new Date(Date.now() + days * 86400000).toISOString() });
+
+      const base = String(process.env.PUBLIC_API_URL || (req.protocol + '://' + req.get('host'))).replace(/\/+$/, '');
+      const link = `${base}/d2d/quote?token=${token}`;
+      // Sea shares the air partner address for now: it is the same forwarder.
+      const to = deps.parseEmailList
+        ? deps.parseEmailList(process.env.D2D_PARTNER_EMAIL_TO || process.env.AIR_QUOTE_PARTNER_EMAIL_TO)
+        : [];
+      const subject = `Rates wanted — ${rq.ref || 'booking'} · cargo ready ${rq.week_start}`;
+      const html = `
+        <p>Hello,</p>
+        <p>We have cargo ready in the week of <b>${rq.week_start}</b>${rq.origin ? ' from <b>' + rq.origin + '</b>' : ''}
+           and would like your options.</p>
+        <p><b>Cargo:</b> ${cargoLine(rq) || 'see the link'}<br>
+           <b>Mode:</b> ${rq.mode}${rq.destination ? '<br><b>To:</b> ' + rq.destination : ''}
+           ${rq.notes ? '<br><b>Notes:</b> ' + rq.notes : ''}</p>
+        <p>Please enter your options here — you can send more than one sailing:<br>
+           <a href="${link}">${link}</a></p>
+        <p>The link works for ${days} days.</p>`;
+      const text = `Rates wanted for ${rq.ref}. Cargo ready ${rq.week_start}. ${cargoLine(rq)}. Enter options: ${link}`;
+
+      let mail = { skipped: true };
+      if (deps.sendPartnerMail && to.length) {
+        mail = await deps.sendPartnerMail(to, subject, html, text);
+      }
+
+      req.d2d.run(`UPDATE d2d_request SET state='sent', sent_at=@now WHERE client_id = @client AND id = @id`,
+        { now: new Date().toISOString(), id: rq.id });
+      reqEvent(req.d2d, rq.id, rq.state, 'sent', (req.auth && req.auth.userId) || 'velozity', 'internal',
+        'sent to the partner' + (mail && mail.to ? ' (' + mail.to.join(', ') + ')' : ''));
+
+      // The link is returned either way, so it can be pasted into an email if mail is not set up.
+      res.json({ ok: true, link, expires_days: days, mail });
+    } catch (e) { console.error('[d2d] send rfq', e); res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  // Ask the partner to look again, with a reason. This is the reject path.
+  router.post('/requests/:id/review', authenticateRequest, requireRole(['admin']), requireD2D,
+    auditLog('review_d2d_rfq'), async (req, res) => {
+    if (internalOnly(req, res)) return;
+    try {
+      const rq = req.d2d.get(`SELECT * FROM d2d_request WHERE client_id = @client AND id = @id`, { id: req.params.id });
+      if (!rq) return res.status(404).json({ error: 'not_found' });
+      const note = String((req.body || {}).note || '').trim();
+      if (!note) return res.status(400).json({ error: 'note_required', message: 'Say what needs looking at again.' });
+
+      // The options quoted so far are set aside rather than deleted: what was offered, and
+      // when, is part of the record.
+      req.d2d.run(`UPDATE d2d_booking SET status='expired'
+                   WHERE client_id = @client AND request_id = @id AND status='draft'`, { id: rq.id });
+      req.d2d.run(`UPDATE d2d_request SET state='repricing' WHERE client_id = @client AND id = @id`, { id: rq.id });
+      reqEvent(req.d2d, rq.id, rq.state, 'repricing', (req.auth && req.auth.userId) || 'velozity', 'internal', note);
+      res.json({ ok: true, state: 'repricing', note });
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  router.get('/requests/:id/events', authenticateRequest, requireD2D, (req, res) => {
+    try {
+      if (internalOnly(req, res)) return;
+      res.json({ events: req.d2d.all(`SELECT * FROM d2d_request_event
+        WHERE client_id = @client AND request_id = @id ORDER BY at`, { id: req.params.id }) });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
 
