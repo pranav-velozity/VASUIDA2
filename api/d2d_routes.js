@@ -345,13 +345,40 @@ module.exports = function mountD2D(deps) {
         : [];
       const load = {}; asg.forEach(a => { load[a.shipment_id] = a; });
 
-      res.json({ shipments: rows.map(r => ({
-        ...r,
-        events: byShipment[r.id] || [],
-        po_count: (load[r.id] || {}).po_count || 0,
-        units: (load[r.id] || {}).units || 0,
-        cbm: (load[r.id] || {}).cbm || null,
-      })) });
+      // The cargo stated on the booking request, carried down to the shipment. Without it a
+      // container can only report what the order file knows, and most weeks that is nothing yet.
+      const bIds = [...new Set(rows.map(r => r.booking_id).filter(Boolean))];
+      const bp = {}; bIds.forEach((id, i) => { bp['b' + i] = id; });
+      const reqs = bIds.length
+        ? req.d2d.all(`SELECT b.id AS booking_id, r.pack_type, r.pallets, r.cartons, r.units AS req_units,
+                              r.cbm AS req_cbm, r.gross_weight_kg, r.origin, r.destination
+                       FROM d2d_booking b JOIN d2d_request r ON r.id = b.request_id AND r.client_id = b.client_id
+                       WHERE b.client_id = @client AND b.id IN (${bIds.map((_, i) => '@b' + i).join(',')})`, bp)
+        : [];
+      const cargo = {}; reqs.forEach(x => { cargo[x.booking_id] = x; });
+
+      res.json({ shipments: rows.map(r => {
+        const c = cargo[r.booking_id] || {};
+        const qty = Math.max(1, rows.filter(x => x.booking_id === r.booking_id).length);
+        // Cargo is stated for the whole booking; split it evenly across its containers rather
+        // than repeating the week's total on each one.
+        const share = (v) => (v == null ? null : Math.round((Number(v) / qty) * 100) / 100);
+        return {
+          ...r,
+          events: byShipment[r.id] || [],
+          po_count: (load[r.id] || {}).po_count || 0,
+          units: (load[r.id] || {}).units || 0,
+          cbm: (load[r.id] || {}).cbm || null,
+          origin: r.origin || c.origin || null,
+          cargo: c.pack_type || c.pallets || c.cartons || c.req_units || c.req_cbm ? {
+            pack_type: c.pack_type || null,
+            pallets: share(c.pallets), cartons: share(c.cartons),
+            units: share(c.req_units), cbm: share(c.req_cbm),
+            gross_weight_kg: share(c.gross_weight_kg),
+            split_across: qty,
+          } : null,
+        };
+      }) });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
 
