@@ -316,9 +316,10 @@
     }
     // Everything, for the map: a vessel in flight belongs to no particular week.
     allShipments = (await soft('/d2d/shipments', { shipments })).shipments || shipments;
+    const po = _week ? await soft('/d2d/po?week=' + encodeURIComponent(_week), { orders: [] }) : { orders: [] };
 
     _internal = pricingVisible;
-    _data = { weeks, shipments, bookings, allShipments };
+    _data = { weeks, shipments, bookings, allShipments, orders: po.orders || [] };
     paint();
   }
 
@@ -392,7 +393,8 @@
     const d = _data; if (!d) return;
     const scope = el('d2d-scope'); if (scope) scope.textContent = (window.pinpointClient || '') + (_internal ? ' · VelOzity view' : '');
 
-    const tabs = [['shipments', 'Shipments'], ['bookings', 'Bookings'], ['po', 'Orders'], ['performance', 'Performance']]
+    const tabs = [['shipments', 'Overview'], ['list', 'Shipments'], ['bookings', 'Bookings'],
+                  ['po', 'Orders'], ['performance', 'Performance']]
       .concat(_internal ? [['pricing', 'Pricing'], ['baselines', 'Transit rules']] : []);
     const tw = el('d2d-tabs');
     if (tw) {
@@ -441,13 +443,15 @@
     // The week selector belongs with the menu, not on top of the content.
     // The week selector belongs to week-scoped screens only. On the dashboard it competed with
     // the map, and on Transit rules it meant nothing at all.
-    const weekScoped = (_tab === 'shipments' && _view !== 'dashboard') || _tab === 'bookings' || _tab === 'pricing';
+    const weekScoped = (_tab === 'shipments' && _view !== 'dashboard')
+      || ['list', 'bookings', 'pricing', 'po'].includes(_tab);
     const wk = el('d2d-weeks');
     if (wk) wk.innerHTML = weekScoped ? weekBar : '';
     body.innerHTML =
         _tab === 'baselines' ? paintBaselines()
       : _tab === 'bookings'  ? paintBookings(d)
       : _tab === 'pricing'   ? paintPricing(d)
+      : _tab === 'list'      ? paintList(d)
       : _tab === 'po'        ? paintPO(d)
       : _tab === 'performance' ? paintPerformance(d)
       : _view === 'week'     ? paintWeek(d)
@@ -490,6 +494,11 @@
                    slips.length ? BRAND : DARK)}
           </div>
           ${paintArriving(d)}
+
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="d2d-btn" data-go="week" style="flex:1;min-width:0;">Week summary &rarr;</button>
+            <button class="d2d-btn" data-tabgo="list" style="flex:1;min-width:0;">All shipments &rarr;</button>
+          </div>
         </div>
       </div>
 
@@ -507,16 +516,7 @@
           </div>`).join('')}
       </div>
 
-      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:9px;margin-bottom:8px;flex-wrap:wrap;">
-        <span style="display:flex;align-items:baseline;gap:9px;">
-          <span style="font-size:12.5px;font-weight:600;color:${DARK};">Week of ${esc(day(_week))}</span>
-          <span style="font-size:11px;color:${MID};">click a shipment for its milestones${_internal ? ' and to record them' : ''}</span>
-        </span>
-        <button class="d2d-btn" data-go="week" style="min-height:34px;padding:5px 11px;font-size:11px;">Open the week &rarr;</button>
-      </div>
-      ${d.shipments.length
-        ? `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">${d.shipments.map(shipmentCard).join('')}</div>`
-        : `<div class="rounded-2xl border bg-white shadow-sm d2d-empty">Nothing booked for this week yet.</div>`}`;
+      `;
   }
 
   // ── Live tracking ──
@@ -670,8 +670,10 @@
       const gap = step * 2;                        // half the density of land, so land still reads
       // Only across the visible frame: generating dots for the whole planet would be tens of
       // thousands of circles, almost all of them off screen.
-      for (let y = VIEW.y0; y < VIEW.y0 + VIEW.h; y += gap) {
-        for (let x = VIEW.x0; x < VIEW.x0 + VIEW.w; x += gap) {
+      // A little beyond the frame, so the full-screen view (which widens it) is still covered.
+      const m2 = 0.45;
+      for (let y = VIEW.y0 - VIEW.h * m2; y < VIEW.y0 + VIEW.h * (1 + m2); y += gap) {
+        for (let x = VIEW.x0 - VIEW.w * m2; x < VIEW.x0 + VIEW.w * (1 + m2); x += gap) {
           const key = Math.round(x / step) + ':' + Math.round(y / step);
           let onLand = false;
           for (let dx = -1; dx <= 1 && !onLand; dx++)
@@ -934,6 +936,115 @@
       </button>`;
   }
 
+  // ── Shipments, in full ──
+  // The long row the dashboard could not carry: every milestone, what is aboard, and the one
+  // thing this shipment needs next. One row per shipment, newest week first.
+  function shipmentRow(sh) {
+    const ev = evMap(sh);
+    const od = overdueOf(sh), slip = slipOf(sh);
+    let liveIdx = -1; STAGES.forEach(([kk], i) => { if (ev[kk] && ev[kk].actual_at) liveIdx = i; });
+    const odIdx = od ? STAGES.findIndex(([kk]) => kk === od.stage) : -1;
+    const pill = sh.status === 'delivered' ? ['Delivered', LINK, 'rgba(155,171,21,.20)']
+      : od ? [od.label + ' overdue', '#fff', BRAND]
+      : (slip != null && slip > 0) ? ['+' + slip + ' days', '#fff', BRAND]
+      : sh.status === 'in_transit' ? ['On plan', LINK, 'rgba(155,171,21,.20)']
+      : ['Booked', MID, '#F2F2F5'];
+
+    // The next thing to do about THIS shipment, from its own dates.
+    const next = !sh.reference ? { kind: 'Missing', ink: YINK, accent: YELL,
+                    what: 'Container number not advised', why: 'The partner cannot report milestones without it' }
+      : od ? { kind: 'Chase', ink: BRAND, accent: BRAND,
+               what: od.label + ' not recorded', why: 'Planned ' + day(sh['plan_' + od.stage]) + ', ' + od.days + ' days ago' }
+      : sh.status === 'delivered' ? { kind: 'Done', ink: LINK, accent: LIME,
+               what: 'Delivered', why: 'Nothing outstanding' }
+      : { kind: 'Next', ink: BLUE, accent: BLUE,
+          what: STAGES[Math.min(liveIdx + 1, STAGES.length - 1)][1],
+          why: 'planned ' + day(sh['plan_' + STAGES[Math.min(liveIdx + 1, STAGES.length - 1)][0]]) };
+
+    const cells = STAGES.map(([kk, label], i) => {
+      const e = ev[kk], actual = e && e.actual_at;
+      const plan = sh['plan_' + kk];
+      const dd = daysBetween(plan, actual);
+      const late = dd != null && dd > 0;
+      const overdue = i === odIdx;
+      const colour = overdue ? BRAND : (!actual ? '#D6D6DB' : (late ? BRAND : LIME));
+      const ink = overdue ? BRAND : (!actual ? LIGHT : (late ? BRAND : LINK));
+      const live = overdue || i === liveIdx;
+      const leftFill = i === 0 ? 'transparent' : (i <= liveIdx ? LIME : '#E4E4E9');
+      const rightFill = i === STAGES.length - 1 ? 'transparent' : (i < liveIdx ? LIME : '#E4E4E9');
+      return `<div class="d2d-st">
+        <span class="d2d-line" style="left:0;right:50%;background:${leftFill};"></span>
+        <span class="d2d-line" style="left:50%;right:0;background:${rightFill};"></span>
+        <span style="font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;text-align:center;min-height:22px;">${label}</span>
+        <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;">
+          ${live ? `<span class="d2d-halo" style="background:${overdue ? 'rgba(153,0,51,.22)' : 'rgba(155,171,21,.22)'};"></span>` : ''}
+          <span class="d2d-dot ${live ? 'd2d-pulse' : ''}" style="border-color:${colour};
+                background:${actual ? (late ? 'rgba(153,0,51,.10)' : 'rgba(155,171,21,.16)') : '#fff'};">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="${colour}" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${ICONS[i]}"></path></svg>
+          </span>
+        </span>
+        <span class="d2d-num" style="font-size:10px;color:${LIGHT};">${plan ? day(plan) : ''}</span>
+        <span class="d2d-num" style="font-size:11px;font-weight:600;color:${ink};">${actual ? day(actual) : (overdue ? 'overdue' : '&middot;')}</span>
+        ${late ? `<span style="font-size:10px;font-weight:700;color:${BRAND};">+${dd}d</span>` : ''}
+      </div>`;
+    }).join('');
+
+    return `
+      <div class="rounded-2xl border bg-white shadow-sm d2d-rise" style="padding:15px 18px;margin-bottom:12px;">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">
+            <button type="button" class="d2d-num" data-open="${esc(sh.id)}"
+                    style="font-size:14px;color:${DARK};background:none;border:0;padding:0;cursor:pointer;
+                           border-bottom:1px dashed rgba(0,0,0,.25);">${esc(sh.reference || 'container not advised')}</button>
+            <span style="font-size:11px;color:${MID};">${esc([sh.container_type, sh.carrier, sh.vessel].filter(Boolean).join(' · '))}</span>
+            <span style="font-size:11px;color:${LIGHT};">week of ${esc(day(sh.week_start))}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            ${sh.po_count ? `<span style="font-size:11px;color:${MID};">
+                 <b class="d2d-num" style="color:${DARK};">${sh.po_count}</b> orders &middot;
+                 <b class="d2d-num" style="color:${DARK};">${Number(sh.units || 0).toLocaleString()}</b> units</span>` : ''}
+            <span style="font-size:10.5px;font-weight:700;border-radius:6px;padding:3px 9px;
+                  color:${pill[1]};background:${pill[2]};">${esc(pill[0])}</span>
+          </div>
+        </div>
+
+        <div class="d2d-striphold" style="max-width:none;"><div class="d2d-strip">${cells}</div></div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:13px;
+             padding-top:11px;border-top:.5px solid rgba(0,0,0,.05);flex-wrap:wrap;">
+          <div style="display:flex;align-items:baseline;gap:9px;padding-left:10px;border-left:3px solid ${next.accent};">
+            <span style="font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${next.ink};">${esc(next.kind)}</span>
+            <span style="font-size:12px;font-weight:600;color:${DARK};">${esc(next.what)}</span>
+            <span style="font-size:11px;color:${MID};">${esc(next.why)}</span>
+          </div>
+          <button class="d2d-btn" data-open="${esc(sh.id)}" style="min-height:34px;padding:5px 11px;font-size:11px;">Open &rarr;</button>
+        </div>
+      </div>`;
+  }
+
+  function paintList(d) {
+    const rows = (d.shipments || []).slice();
+    const other = (d.allShipments || []).filter(x => !rows.some(y => y.id === x.id) && x.status !== 'delivered');
+    return `
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:9px;margin-bottom:10px;flex-wrap:wrap;">
+        <span style="display:flex;align-items:baseline;gap:9px;">
+          <span style="font-size:13px;font-weight:600;color:${DARK};">Week of ${esc(day(_week))}</span>
+          <span style="font-size:11px;color:${MID};">every milestone, and what each shipment needs next</span>
+        </span>
+        <button class="d2d-btn" data-go="week" style="min-height:34px;padding:5px 11px;font-size:11px;">Week summary &rarr;</button>
+      </div>
+      ${rows.length ? rows.map(shipmentRow).join('')
+        : `<div class="rounded-2xl border bg-white shadow-sm d2d-empty">Nothing booked for this week yet.</div>`}
+
+      ${other.length ? `
+        <div style="display:flex;align-items:baseline;gap:9px;margin:18px 0 10px;">
+          <span style="font-size:13px;font-weight:600;color:${DARK};">Still in flight from other weeks</span>
+          <span style="font-size:11px;color:${MID};">${other.length} shipment${other.length === 1 ? '' : 's'}</span>
+        </div>
+        ${other.map(shipmentRow).join('')}` : ''}`;
+  }
+
   // ── Shared pieces ──
   const crumb = (parts) => `
     <div style="display:flex;align-items:center;gap:7px;font-size:11.5px;margin-bottom:12px;flex-wrap:wrap;">
@@ -1139,30 +1250,177 @@
       </div>`;
   }
 
-  // ── Purchase order ──
-  // Mockup 4. The chain Week → Container → PO → SKU → Units is the spine of the product, so
-  // the screen exists with that structure in place and says plainly what it is waiting for.
+  // ── Orders ──
+  // Upload, preview, then apply. Two steps on purpose: a bad file must never half-load into a
+  // live week, and the preview is where supplier and container mismatches surface.
+  let _poPreview = null, _poCsv = '';
+
   function paintPO(d) {
+    const orders = d.orders || [];
+    const units = orders.reduce((n, x) => n + (Number(x.units) || 0), 0);
+    const assigned = orders.filter(x => (x.containers || []).length).length;
+
     return `
-      ${crumb([{ label: 'Shipments', go: 'dashboard' }, { label: 'Purchase orders' }])}
-      <div class="rounded-2xl border bg-white shadow-sm" style="padding:22px 24px;">
-        <div style="font-size:15px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Purchase orders</div>
-        <div style="font-size:12px;color:${MID};line-height:1.6;margin-top:6px;max-width:620px;">
-          This screen shows each order, the SKUs and units inside it, and which containers carry it &mdash;
-          an order can span several containers, and a container carries many orders.
+      <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:12px;flex-wrap:wrap;">
+        <div>
+          <div style="font-size:16px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Orders</div>
+          <div style="font-size:11.5px;color:${MID};margin-top:2px;">Week of ${esc(day(_week))} &middot; purchase orders, their SKUs, and the containers carrying them</div>
         </div>
-        <div style="display:flex;align-items:center;gap:8px;margin:16px 0 8px;">
-          ${['Week', 'Container', 'PO', 'SKU', 'Units'].map((x, i) => `
-            <span style="font-size:11px;font-weight:600;color:${i < 2 ? DARK : LIGHT};background:${i < 2 ? '#F2F2F5' : 'transparent'};
-                  border:.5px solid ${i < 2 ? 'transparent' : 'rgba(0,0,0,.10)'};border-radius:7px;padding:5px 10px;">${x}</span>
-            ${i < 4 ? `<span style="color:#D6D6DB;">&rsaquo;</span>` : ''}`).join('')}
+        ${_internal ? `<button class="d2d-btn dark" data-poupload="1">Upload order file</button>` : ''}
+      </div>
+
+      ${orders.length ? `
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3" style="margin-bottom:12px;">
+          <div class="rounded-2xl border bg-white shadow-sm d2d-tile"><div class="d2d-tl">Orders</div>
+            <div class="d2d-tv">${orders.length}</div><div class="d2d-ts">this week</div></div>
+          <div class="rounded-2xl border bg-white shadow-sm d2d-tile"><div class="d2d-tl">Units</div>
+            <div class="d2d-tv">${units.toLocaleString()}</div><div class="d2d-ts">across all SKUs</div></div>
+          <div class="rounded-2xl border bg-white shadow-sm d2d-tile"><div class="d2d-tl">On a container</div>
+            <div class="d2d-tv" style="color:${assigned === orders.length ? DARK : YINK};">${assigned}</div>
+            <div class="d2d-ts">${orders.length - assigned} not yet assigned</div></div>
+          <div class="rounded-2xl border bg-white shadow-sm d2d-tile"><div class="d2d-tl">Volume</div>
+            <div class="d2d-tv">${orders.reduce((n, x) => n + (Number(x.cbm) || 0), 0).toFixed(1)}</div>
+            <div class="d2d-ts">CBM declared</div></div>
         </div>
-        <div style="font-size:11px;color:${MID};">The first two links are live. The rest arrive with the order feed.</div>
-        <div style="margin-top:16px;">
-          ${pending('Waiting on GRBA&rsquo;s purchase order file',
-            'We need PO number, supplier, cargo-ready date, SKU lines with units, and CBM per PO. That one file also unlocks utilisation, landed cost per unit and the SKU rows on every container.')}
+
+        <div class="rounded-2xl border bg-white shadow-sm" style="padding:0;overflow:hidden;">
+          <div style="display:grid;grid-template-columns:110px 1fr 120px 92px 92px 1fr;gap:0 12px;padding:11px 18px 8px;
+               background:#FBFBFC;font-size:9.5px;font-weight:700;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">
+            <span>PO</span><span>Supplier</span><span>Cargo ready</span>
+            <span style="text-align:right;">Units</span><span style="text-align:right;">SKUs</span><span>On board</span>
+          </div>
+          ${orders.map(x => `
+            <div style="display:grid;grid-template-columns:110px 1fr 120px 92px 92px 1fr;gap:0 12px;padding:11px 18px;
+                 border-top:.5px solid rgba(0,0,0,.06);align-items:center;">
+              <span class="d2d-num" style="font-size:12.5px;color:${DARK};">${esc(x.po_number)}</span>
+              <span style="font-size:12px;color:${DARK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(x.supplier || '—')}</span>
+              <span class="d2d-num" style="font-size:11.5px;color:${MID};">${x.cargo_ready_date ? esc(day(x.cargo_ready_date)) : '—'}</span>
+              <span class="d2d-num" style="font-size:12.5px;color:${DARK};text-align:right;">${Number(x.units || 0).toLocaleString()}</span>
+              <span class="d2d-num" style="font-size:12px;color:${MID};text-align:right;">${(x.lines || []).length}</span>
+              <span style="display:flex;gap:6px;flex-wrap:wrap;">
+                ${(x.containers || []).length
+                  ? x.containers.map(c => `<button class="d2d-btn d2d-num" data-open="${esc(c.shipment_id)}"
+                       style="min-height:28px;padding:2px 8px;font-size:10.5px;">${esc(c.reference || 'container')}</button>`).join('')
+                  : `<span style="font-size:11px;color:${YINK};">not yet assigned</span>`}
+              </span>
+            </div>
+            ${(x.lines || []).length ? `
+              <div style="padding:0 18px 11px 128px;display:flex;flex-wrap:wrap;gap:6px;">
+                ${x.lines.map(l => `<span style="font-size:10.5px;color:${MID};background:#F7F8FA;border-radius:6px;padding:3px 8px;">
+                    <b class="d2d-num" style="color:${DARK};">${esc(l.sku_code)}</b>
+                    ${l.units != null ? ` · ${Number(l.units).toLocaleString()}` : ''}</span>`).join('')}
+              </div>` : ''}
+          `).join('')}
+        </div>`
+      : `<div class="rounded-2xl border bg-white shadow-sm" style="padding:22px 24px;">
+          <div style="font-size:14px;font-weight:600;color:${DARK};">No orders loaded for this week</div>
+          <div style="font-size:12px;color:${MID};line-height:1.6;margin-top:6px;max-width:620px;">
+            Upload GRBA&rsquo;s order file and the chain fills in: each PO, the SKUs and units inside it, and which
+            container carries it. An order can span several containers and a container carries many orders, so both
+            sides stay linked.
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;margin:16px 0 6px;flex-wrap:wrap;">
+            ${['Week', 'Container', 'PO', 'SKU', 'Units'].map((x, i2) => `
+              <span style="font-size:11px;font-weight:600;color:${DARK};background:#F2F2F5;border-radius:7px;padding:5px 10px;">${x}</span>
+              ${i2 < 4 ? `<span style="color:#D6D6DB;">&rsaquo;</span>` : ''}`).join('')}
+          </div>
+          <div style="font-size:11px;color:${MID};">Wanted columns: PO number, supplier, cargo-ready date, container, SKU, description, units, CBM, value.
+            Headers are matched loosely, so the file does not need renaming.</div>
+        </div>`}`;
+  }
+
+  function openPoUpload() {
+    if (el('d2d-poov')) return;
+    const ov = document.createElement('div');
+    ov.id = 'd2d-poov';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9700;background:rgba(16,18,27,.28);display:flex;align-items:center;justify-content:center;padding:24px;';
+    ov.innerHTML = `
+      <div class="rounded-2xl" style="background:#fff;width:min(820px,96vw);max-height:90vh;overflow-y:auto;
+           box-shadow:0 40px 80px rgba(16,18,27,.22);">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:.5px solid rgba(0,0,0,.08);">
+          <div>
+            <div style="font-size:15px;font-weight:700;color:${DARK};">Upload order file</div>
+            <div style="font-size:11px;color:${MID};margin-top:2px;">Week of ${esc(day(_week))} &middot; CSV, one row per SKU line</div>
+          </div>
+          <button class="d2d-btn" id="d2d-poclose">Close</button>
+        </div>
+        <div style="padding:18px 20px;">
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+            <input type="file" id="d2d-pofile" accept=".csv,text/csv" style="font:inherit;font-size:12px;">
+            <span style="font-size:11px;color:${MID};">or paste below</span>
+          </div>
+          <textarea id="d2d-potext" rows="7" placeholder="PO #,Vendor,Cargo Ready,Container Number,Style,Qty,CBM&#10;40117,D&amp;J Industries,05/10/2026,ONEU7654321,SKU-8891,420,18.4"
+            style="width:100%;box-sizing:border-box;font-family:ui-monospace,SFMono-Regular,monospace;font-size:11.5px;
+                   border:.5px solid rgba(0,0,0,.18);border-radius:10px;padding:11px;resize:vertical;"></textarea>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:12px;">
+            <button class="d2d-btn" id="d2d-pocheck">Check the file</button>
+            <button class="d2d-btn dark" id="d2d-poapply" disabled style="opacity:.5;">Apply to this week</button>
+            <span style="font-size:11px;color:${MID};" id="d2d-pomsg"></span>
+          </div>
+          <div id="d2d-poresult" style="margin-top:14px;"></div>
         </div>
       </div>`;
+    document.body.appendChild(ov);
+    el('d2d-poclose').onclick = () => ov.remove();
+    ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+    el('d2d-pofile').onchange = (e) => {
+      const f = e.target.files && e.target.files[0]; if (!f) return;
+      const rd = new FileReader();
+      rd.onload = () => { el('d2d-potext').value = String(rd.result || ''); };
+      rd.readAsText(f);
+    };
+    el('d2d-pocheck').onclick = async () => {
+      const csv = el('d2d-potext').value.trim();
+      const msg = el('d2d-pomsg'), out = el('d2d-poresult');
+      if (!csv) { msg.textContent = 'Nothing to check yet.'; return; }
+      msg.style.color = MID; msg.textContent = 'Checking…';
+      try {
+        const pv = await api('/d2d/po/preview', { method: 'POST', body: JSON.stringify({ csv, week_start: _week }) });
+        _poPreview = pv; _poCsv = csv;
+        msg.textContent = '';
+        const stops = (pv.problems || []).filter(x => x.level === 'stop');
+        const warns = (pv.problems || []).filter(x => x.level !== 'stop');
+        out.innerHTML = `
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-3" style="margin-bottom:12px;">
+            ${[['Rows', pv.rows], ['Orders', pv.orders], ['SKU lines', pv.lines], ['Units', Number(pv.units || 0).toLocaleString()]]
+              .map(([l, v]) => `<div class="rounded-2xl border bg-white shadow-sm d2d-tile">
+                 <div class="d2d-tl">${l}</div><div class="d2d-tv">${v}</div></div>`).join('')}
+          </div>
+          ${pv.sample && pv.sample.length ? `
+            <div style="border:.5px solid rgba(0,0,0,.08);border-radius:11px;overflow:hidden;margin-bottom:12px;">
+              <div style="display:grid;grid-template-columns:90px 1fr 84px 70px 90px;gap:0 10px;padding:8px 14px;background:#FBFBFC;
+                   font-size:9.5px;font-weight:700;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">
+                <span>PO</span><span>Supplier</span><span style="text-align:right;">Units</span>
+                <span style="text-align:right;">SKUs</span><span style="text-align:right;">Containers</span></div>
+              ${pv.sample.map(x => `<div style="display:grid;grid-template-columns:90px 1fr 84px 70px 90px;gap:0 10px;
+                   padding:8px 14px;border-top:.5px solid rgba(0,0,0,.05);font-size:11.5px;color:${DARK};">
+                <span class="d2d-num">${esc(x.po_number)}</span><span>${esc(x.supplier || '—')}</span>
+                <span class="d2d-num" style="text-align:right;">${Number(x.units || 0).toLocaleString()}</span>
+                <span class="d2d-num" style="text-align:right;">${x.lines}</span>
+                <span class="d2d-num" style="text-align:right;color:${x.containers ? DARK : YINK};">${x.containers || 'none'}</span></div>`).join('')}
+            </div>` : ''}
+          ${stops.length ? `<div style="border-left:3px solid ${BRAND};padding:10px 13px;background:rgba(153,0,51,.06);
+               border-radius:9px;margin-bottom:9px;">
+               ${stops.map(x => `<div style="font-size:12px;color:${DARK};">${esc(x.message)}</div>`).join('')}</div>` : ''}
+          ${warns.length ? `<div style="border-left:3px solid ${YELL};padding:10px 13px;background:rgba(254,208,0,.10);border-radius:9px;">
+               <div style="font-size:11px;font-weight:700;color:${YINK};text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px;">Worth knowing</div>
+               ${warns.map(x => `<div style="font-size:11.5px;color:${DARK};line-height:1.5;">${esc(x.message)}</div>`).join('')}</div>` : ''}
+          <div style="font-size:11px;color:${MID};margin-top:10px;">
+            Applying replaces any order with the same number in this week, so sending the file twice is safe.</div>`;
+        const ap = el('d2d-poapply');
+        ap.disabled = !pv.ok; ap.style.opacity = pv.ok ? '' : '.5';
+      } catch (e2) { msg.style.color = BRAND; msg.textContent = 'Could not check: ' + e2.message; }
+    };
+    el('d2d-poapply').onclick = async () => {
+      const b = el('d2d-poapply'), msg = el('d2d-pomsg');
+      b.disabled = true; b.style.opacity = '.5'; msg.style.color = MID; msg.textContent = 'Applying…';
+      try {
+        const out = await api('/d2d/po/apply', { method: 'POST', body: JSON.stringify({ csv: _poCsv, week_start: _week, confirm: '1' }) });
+        ov.remove();
+        await load();
+        console.warn('[d2d-hub] orders applied', out);
+      } catch (e2) { b.disabled = false; b.style.opacity = ''; msg.style.color = BRAND; msg.textContent = 'Could not apply: ' + e2.message; }
+    };
   }
 
   // ── Performance ──
@@ -1409,42 +1667,59 @@
     const source = mapFiltered(mapSource(_data));
     const marks = shipmentPositions(source);
     const moving = marks.filter(m => m.t > 0 && m.t < 1).length;
-    // Marks are sized against the frame here too. This was only defined inside paintMap, so
-    // opening full screen threw a ReferenceError and the map never appeared.
-    const k = VIEW.w / MAP.w;
+    // "slice" scaled the frame up to cover the screen, which cropped hard into the lane — the
+    // opposite of what full screen is for. "meet" fits the frame, and the frame itself is
+    // widened so the whole route sits inside a recognisable region.
+    const grow = 1.65;
+    const cx = VIEW.x0 + VIEW.w / 2, cy = VIEW.y0 + VIEW.h / 2;
+    const bounds = (_world && _world.view) || { x0: 0, y0: 0, w: MAP.w, h: MAP.h };
+    let fw = Math.min(VIEW.w * grow, bounds.w), fh = Math.min(VIEW.h * grow, bounds.h);
+    let fx = Math.max(bounds.x0, Math.min(cx - fw / 2, bounds.x0 + bounds.w - fw));
+    let fy = Math.max(bounds.y0, Math.min(cy - fh / 2, bounds.y0 + bounds.h - fh));
+    const FULLVIEW = { x0: fx, y0: fy, w: fw, h: fh };
+    const k = FULLVIEW.w / MAP.w;
 
     const ov = document.createElement('div');
     ov.id = 'd2d-fullmap';
     ov.style.cssText = 'position:fixed;inset:0;z-index:9600;background:#FBFCFD;overflow:hidden;';
     ov.innerHTML = `
-      <svg id="d2d-fullsvg" viewBox="${VIEW.x0} ${VIEW.y0} ${VIEW.w} ${VIEW.h}" preserveAspectRatio="xMidYMid slice"
+      <svg id="d2d-fullsvg" viewBox="${FULLVIEW.x0.toFixed(1)} ${FULLVIEW.y0.toFixed(1)} ${FULLVIEW.w.toFixed(1)} ${FULLVIEW.h.toFixed(1)}"
+           preserveAspectRatio="xMidYMid meet"
            style="position:absolute;inset:0;width:100%;height:100%;display:block;" role="img"
            aria-label="Live tracking, full screen">
         ${seaField()}${dotField()}
-        <path d="${routeD()}" fill="none" stroke="#C3C9D2" stroke-width="1.6" stroke-dasharray="5 6"/>
-        ${[[PORTS.origin, marks.filter(m => m.t === 0).length, LIME],
-           [PORTS.destination, marks.filter(m => m.t >= 0.82 && m.t < 0.9).length, BRAND],
-           [PORTS.customs, marks.filter(m => m.t >= 0.9 && m.t < 0.95).length, BRAND],
-           [PORTS.lastmile, marks.filter(m => m.t === 1).length, LINK]].map(([pt, n, c]) => `
+        <path d="${routeD()}" fill="none" stroke="#C3C9D2" stroke-width="${(1.6 * k).toFixed(2)}"
+              stroke-dasharray="${(5 * k).toFixed(1)} ${(6 * k).toFixed(1)}"/>
+        ${[[PORTS.origin, marks.filter(m => m.t === 0).length, LIME, 0],
+           [PORTS.destination, marks.filter(m => m.t >= 0.82 && m.t < 0.9).length, BRAND, 0],
+           [PORTS.customs, marks.filter(m => m.t >= 0.9 && m.t < 0.95).length, BRAND, 26],
+           [PORTS.lastmile, marks.filter(m => m.t === 1).length, LINK, 52]].map(([pt, n, c, off]) => `
           <g>
-            ${n ? `<circle cx="${pt.x}" cy="${pt.y}" r="10" fill="${c}" opacity=".22" class="d2d-ping"/>` : ''}
-            <circle cx="${pt.x}" cy="${pt.y}" r="5" fill="${n ? c : '#fff'}" stroke="${n ? c : '#AEB4BD'}" stroke-width="1.7"/>
-            <text x="${pt.x}" y="${pt.y - 13}" text-anchor="middle" font-size="11" font-weight="600" fill="${DARK}"
-                  font-family="inherit" stroke="#ffffff" stroke-width="3.4" paint-order="stroke" stroke-linejoin="round">${esc(pt.label)}</text>
-            ${n ? `<text x="${pt.x}" y="${pt.y + 19}" text-anchor="middle" font-size="10.5" font-weight="700" fill="${c}"
-                  font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="3.2" paint-order="stroke"
-                  stroke-linejoin="round">${n}</text>` : ''}
+            ${n ? `<circle cx="${pt.x}" cy="${pt.y}" r="${(10 * k).toFixed(1)}" fill="${c}" opacity=".22" class="d2d-ping"/>` : ''}
+            <circle cx="${pt.x}" cy="${pt.y}" r="${(5 * k).toFixed(1)}" fill="${n ? c : '#fff'}"
+                    stroke="${n ? c : '#AEB4BD'}" stroke-width="${(1.7 * k).toFixed(2)}"/>
+            ${/* Customs and the DC sit a few kilometres from the port, so their labels are
+                  stepped down the page rather than stacked on the same point. */ ''}
+            <text x="${pt.x}" y="${(pt.y - 13 * k + off * k).toFixed(1)}" text-anchor="middle"
+                  font-size="${(11 * k).toFixed(1)}" font-weight="600" fill="${DARK}"
+                  font-family="inherit" stroke="#ffffff" stroke-width="${(3.4 * k).toFixed(2)}"
+                  paint-order="stroke" stroke-linejoin="round">${esc(pt.label)}</text>
+            ${n ? `<text x="${pt.x}" y="${(pt.y + 19 * k + off * k).toFixed(1)}" text-anchor="middle"
+                  font-size="${(10.5 * k).toFixed(1)}" font-weight="700" fill="${c}"
+                  font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="${(3.2 * k).toFixed(2)}"
+                  paint-order="stroke" stroke-linejoin="round">${n}</text>` : ''}
           </g>`).join('')}
         ${marks.filter(m => m.t > 0 && m.t < 1).map(m => `
           <g class="d2d-vessel" data-open="${esc(m.sh.id)}" style="cursor:pointer;" role="button"
              aria-label="Open ${esc(m.sh.reference || 'shipment')}">
             <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(20 * k).toFixed(1)}" fill="transparent"/>
-            <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="12" fill="${m.colour}" opacity=".18" class="d2d-ping"/>
-            <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)})">
+            <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(12 * k).toFixed(1)}" fill="${m.colour}" opacity=".18" class="d2d-ping"/>
+            <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)}) scale(${k.toFixed(3)})">
               <path d="M-8 3 L8 3 L6 8 L-6 8 Z M0 -8 L0 3 M0 -8 L6 1 L0 1" fill="none" stroke="${m.colour}" stroke-width="1.8" stroke-linejoin="round"/>
             </g>
-            <text x="${(m.pos.x + 16).toFixed(1)}" y="${(m.pos.y + 3).toFixed(1)}" font-size="10.5" font-weight="600"
-                  fill="${DARK}" font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="3.2"
+            <text x="${(m.pos.x + 16 * k).toFixed(1)}" y="${(m.pos.y + 3.5 * k).toFixed(1)}"
+                  font-size="${(10.5 * k).toFixed(1)}" font-weight="600" fill="${DARK}"
+                  font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="${(3.2 * k).toFixed(2)}"
                   paint-order="stroke" stroke-linejoin="round">${esc(m.sh.reference || 'unadvised')}</text>
           </g>`).join('')}
       </svg>
@@ -1607,8 +1882,11 @@
       go('container', id);
     });
     root.querySelectorAll('[data-go]').forEach(b => b.onclick = () => go(b.getAttribute('data-go'), b.getAttribute('data-goid')));
+    root.querySelectorAll('[data-tabgo]').forEach(b => b.onclick = () => { _tab = b.getAttribute('data-tabgo'); paint(); });
     root.querySelectorAll('[data-filt]').forEach(b => b.onclick = () => { _mapFilter = b.getAttribute('data-filt'); paint(); });
     root.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { _mapScope = b.getAttribute('data-scope'); paint(); });
+    const up = root.querySelector('[data-poupload]');
+    if (up) up.onclick = () => openPoUpload();
     const full = root.querySelector('[data-mapfull]');
     if (full) full.onclick = () => openFullMap();
     root.querySelectorAll('.d2d-edit').forEach(b => b.onclick = () => openEditor(b));
@@ -1660,5 +1938,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v14 loaded');
+  console.log('[d2d-hub] v15 loaded');
 })();
