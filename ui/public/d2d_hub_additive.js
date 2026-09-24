@@ -122,7 +122,8 @@
     st.textContent = `
       /* The page sits inside the app's own container, so it needs no width of its own. */
       .d2d-head{margin-bottom:14px;};border-radius:10px;padding:0 14px;align-items:center;gap:10px;overflow:hidden;display:flex;margin-bottom:12px;}
-      .d2d-tabs{display:flex;gap:18px;}
+      .d2d-tabs{display:flex;align-items:center;}
+      .d2d-tabs .d2d-tab + .d2d-tab{margin-left:20px;}
       .d2d-filt{border:.5px solid rgba(0,0,0,.14);background:#fff;color:${MID};border-radius:7px;padding:4px 9px;
         font:600 10.5px inherit;cursor:pointer;transition:border-color .18s ease,background .18s ease,color .18s ease;}
       .d2d-filt:hover{border-color:rgba(0,0,0,.3);}
@@ -208,17 +209,17 @@
         <div id="d2d-header" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;
              padding:8px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;
              margin-bottom:8px;flex-wrap:wrap;">
-          <div style="display:flex;align-items:center;gap:18px;flex:1;min-width:0;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:22px;flex-shrink:0;">
             <div style="flex-shrink:0;">
               <div style="font-size:15px;font-weight:600;color:${DARK};letter-spacing:-.02em;line-height:1;">Door to door</div>
               <div style="font-size:9px;color:${LIGHT};margin-top:2px;" id="d2d-sub">Plan against actual</div>
             </div>
             <div class="d2d-tabs" id="d2d-tabs"></div>
           </div>
-          <div style="display:flex;align-items:center;gap:12px;flex-shrink:0;">
-            <span id="d2d-status" style="display:flex;align-items:center;gap:8px;font-size:12px;color:${MID};"></span>
-            <span class="d2d-num" style="font-size:10.5px;color:${LIGHT};" id="d2d-scope"></span>
-          </div>
+          <!-- The live line sits between the tabs and the account, where the eye lands. -->
+          <span id="d2d-status" style="display:flex;align-items:center;gap:8px;font-size:12px;color:${MID};
+                flex:1;min-width:0;justify-content:center;"></span>
+          <span class="d2d-num" style="font-size:10.5px;color:${LIGHT};flex-shrink:0;" id="d2d-scope"></span>
         </div>
       </div>
       <div id="d2d-body"><div class="d2d-empty">Loading&hellip;</div></div>`;
@@ -237,20 +238,22 @@
   }
 
   // ── Data ──
-  let _tab = 'shipments', _data = null, _internal = false, _mapFilter = 'all';
+  let _tab = 'shipments', _data = null, _internal = false, _mapFilter = 'all', _mapScope = 'live';
 
   async function load() {
     try {
       const weeks = (await api('/d2d/weeks')).weeks || [];
       if (!_week && weeks.length) _week = weeks[0].week_start;
-      let shipments = [], bookings = [], pricingVisible = false;
+      let shipments = [], bookings = [], pricingVisible = false, allShipments = [];
       if (_week) {
         shipments = (await api('/d2d/shipments?week=' + encodeURIComponent(_week))).shipments || [];
         const bk = await api('/d2d/bookings?week=' + encodeURIComponent(_week));
         bookings = bk.bookings || []; pricingVisible = !!bk.pricing_visible;
       }
+      // Everything, for the map: a vessel in flight belongs to no particular week.
+      try { allShipments = (await api('/d2d/shipments')).shipments || []; } catch (e) { allShipments = shipments; }
       _internal = pricingVisible;
-      _data = { weeks, shipments, bookings };
+      _data = { weeks, shipments, bookings, allShipments };
       paint();
     } catch (e) {
       if (e.status === 404 || e.status === 403) {
@@ -428,9 +431,10 @@
 
       <div style="display:flex;align-items:baseline;gap:9px;margin-bottom:8px;">
         <span style="font-size:12.5px;font-weight:600;color:${DARK};">Shipments this week</span>
-        <span style="font-size:11px;color:${MID};">plan against actual${_internal ? ' · click a stage to record it' : ''}</span>
+        <span style="font-size:11px;color:${MID};">click a shipment for its milestones${_internal ? ' and to record them' : ''}</span>
       </div>
-      ${d.shipments.length ? d.shipments.map(shipmentCard).join('')
+      ${d.shipments.length
+        ? `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">${d.shipments.map(shipmentCard).join('')}</div>`
         : `<div class="rounded-2xl border bg-white shadow-sm d2d-empty">Nothing booked for this week yet.</div>`}`;
   }
 
@@ -513,9 +517,18 @@
     return list;
   }
 
+  // A vessel does not belong to a week — it is either moving or it is not. The map therefore
+  // shows everything in flight by default, and can be narrowed to the selected week.
+  function mapSource(d) {
+    if (_mapScope === 'week') return d.shipments;
+    const all = d.allShipments && d.allShipments.length ? d.allShipments : d.shipments;
+    return all.filter(x => x.status !== 'delivered' || (d.shipments || []).some(y => y.id === x.id));
+  }
+
   function paintMap(d, opts) {
     const big = !!(opts && opts.big);
-    const marks = shipmentPositions(mapFiltered(d.shipments));
+    const source = mapSource(d);
+    const marks = shipmentPositions(mapFiltered(source));
     const moving = marks.filter(m => m.t > 0 && m.t < 1).length;
     const node = (pt, count, colour) => `
       <g>
@@ -538,7 +551,11 @@
              padding:12px 16px;border-bottom:.5px solid rgba(0,0,0,.07);">
           <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
             <span style="font-size:13px;font-weight:600;color:${DARK};">Live tracking</span>
-            <span style="font-size:11px;color:${MID};">${moving} in transit &middot; ${d.shipments.length} this week</span>
+            <span style="font-size:11px;color:${MID};">${moving} in transit &middot; ${source.length} shown</span>
+            <span style="display:flex;gap:6px;">
+              ${[['live', 'All in flight'], ['week', 'This week']].map(([k, l]) =>
+                `<button class="d2d-filt ${_mapScope === k ? 'on' : ''}" data-scope="${k}">${l}</button>`).join('')}
+            </span>
             <span style="display:flex;gap:6px;">
               ${[['all', 'All'], ['sea', 'Sea'], ['air', 'Air'], ['late', 'Late only']].map(([k, l]) =>
                 `<button class="d2d-filt ${_mapFilter === k ? 'on' : ''}" data-filt="${k}">${l}</button>`).join('')}
@@ -564,7 +581,9 @@
             ${node(PORTS.customs, atCustoms, BRAND)}
             ${node(PORTS.lastmile, delivered, LINK)}
             ${marks.filter(m => m.t > 0 && m.t < 1).map(m => `
-              <g>
+              <g class="d2d-vessel" data-open="${esc(m.sh.id)}" style="cursor:pointer;" role="button"
+                 aria-label="Open ${esc(m.sh.reference || 'shipment')}">
+                <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="18" fill="transparent"/>
                 <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="11" fill="${m.colour}" opacity=".18" class="d2d-ping"/>
                 <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)})">
                   <path d="M-7 3 L7 3 L5 7 L-5 7 Z M0 -7 L0 3 M0 -7 L5 1 L0 1" fill="none"
@@ -624,70 +643,55 @@
       </div>`;
   }
 
-  function shipmentCard(s) {
-    const ev = evMap(s);
+  // A tile, not a full-width strip. Seven stages across 2,000px was a lot of furniture for
+  // "where is it"; the tile answers that, and the detail lives one click away.
+  function shipmentCard(sh) {
+    const ev = evMap(sh);
+    const done = STAGES.filter(([k]) => ev[k] && ev[k].actual_at).length;
+    const pct = Math.round(done / STAGES.length * 100);
+    const od = overdueOf(sh);
+    const slip = slipOf(sh);
     let liveIdx = -1;
-    STAGES.forEach(([k], i) => { if (ev[k] && ev[k].actual_at) liveIdx = i; });
-    const od = overdueOf(s);
-    const odIdx = od ? STAGES.findIndex(([k]) => k === od.stage) : -1;
+    STAGES.forEach(([k], i2) => { if (ev[k] && ev[k].actual_at) liveIdx = i2; });
+    const stageLabel = od ? od.label + ' overdue'
+      : liveIdx >= 0 ? STAGES[liveIdx][1]
+      : 'Not yet collected';
+    const pill = sh.status === 'delivered' ? ['Delivered', LINK, 'rgba(155,171,21,.20)']
+      : od ? ['+' + od.days + 'd overdue', '#fff', BRAND]
+      : (slip != null && slip > 0) ? ['+' + slip + ' days', '#fff', BRAND]
+      : sh.status === 'in_transit' ? ['On plan', LINK, 'rgba(155,171,21,.20)']
+      : ['Booked', MID, '#F2F2F5'];
+    const bar = od || (slip || 0) > 0 ? BRAND : LIME;
+    const nextStage = STAGES[Math.min(liveIdx + 1, STAGES.length - 1)];
+    const nextPlan = sh['plan_' + nextStage[0]];
 
-    const cells = STAGES.map(([k, label], i) => {
-      const e = ev[k], actual = e && e.actual_at ? e.actual_at : null;
-      const plan = s['plan_' + k];
-      const slip = daysBetween(plan, actual);
-      const late = slip != null && slip > 0;
-      const overdue = i === odIdx;
-      const done = !!actual;
-      const colour = overdue ? BRAND : (!done ? '#D6D6DB' : (late ? BRAND : LIME));
-      const ink = overdue ? BRAND : (!done ? LIGHT : (late ? BRAND : LINK));
-      const fill = overdue ? 'rgba(153,0,51,.08)' : (done ? (late ? 'rgba(153,0,51,.10)' : 'rgba(155,171,21,.16)') : '#fff');
-      const live = overdue || i === liveIdx;
-      const leftFill = i === 0 ? 'transparent' : (i <= liveIdx ? LIME : '#E4E4E9');
-      const rightFill = i === STAGES.length - 1 ? 'transparent' : (i < liveIdx ? LIME : '#E4E4E9');
-      const clickable = _internal;
-      const tag = clickable ? 'button' : 'div';
-      const attrs = clickable
-        ? ` type="button" class="d2d-st d2d-edit" data-ship="${esc(s.id)}" data-stage="${k}" data-label="${esc(label)}"
-            aria-label="Record ${esc(label)} for ${esc(s.reference || 'this shipment')}"`
-        : ' class="d2d-st"';
-      return `<${tag}${attrs}>
-        <span class="d2d-line" style="left:0;right:50%;background:${leftFill};"></span>
-        <span class="d2d-line" style="left:50%;right:0;background:${rightFill};"></span>
-        <span style="font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;text-align:center;min-height:22px;">${label}</span>
-        <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;">
-          ${live ? `<span class="d2d-halo" style="background:${overdue ? 'rgba(153,0,51,.22)' : 'rgba(155,171,21,.22)'};"></span>` : ''}
-          <span class="d2d-dot ${live ? 'd2d-pulse' : ''}" style="border-color:${colour};background:${fill};">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${colour}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${ICONS[i]}"></path></svg>
+    return `
+      <button type="button" class="rounded-2xl border bg-white shadow-sm d2d-rise d2d-lift d2d-tilecard"
+              data-open="${esc(sh.id)}" style="padding:14px 15px;text-align:left;width:100%;cursor:pointer;">
+        <span style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">
+          <span style="min-width:0;">
+            <span class="d2d-num" style="display:block;font-size:13px;color:${DARK};overflow:hidden;
+                  text-overflow:ellipsis;white-space:nowrap;">${esc(sh.reference || 'container not advised')}</span>
+            <span style="display:block;font-size:10.5px;color:${MID};margin-top:2px;">${esc([sh.container_type, sh.carrier].filter(Boolean).join(' · '))}</span>
           </span>
+          <span style="font-size:10px;font-weight:700;border-radius:6px;padding:3px 8px;white-space:nowrap;
+                color:${pill[1]};background:${pill[2]};">${esc(pill[0])}</span>
         </span>
-        <span class="d2d-num" style="font-size:10px;color:${LIGHT};">${plan ? 'plan ' + day(plan) : ''}</span>
-        <span class="d2d-num" style="font-size:11.5px;font-weight:600;color:${ink};">${actual ? day(actual) : (overdue ? 'overdue' : '&middot;')}</span>
-        ${actual ? `<span style="font-size:9px;text-transform:uppercase;letter-spacing:.03em;color:${e.source === 'manual' ? YINK : MID};">${esc(e.source)}</span>` : ''}
-        ${late ? `<span style="font-size:10px;font-weight:700;color:${BRAND};">+${slip}d</span>` : ''}
-      </${tag}>`;
-    }).join('');
 
-    const slip = slipOf(s);
-    const badge = s.status === 'delivered' ? ['Delivered', LINK, 'rgba(155,171,21,.20)']
-                : od ? [od.label + ' overdue', '#fff', BRAND]
-                : (slip != null && slip > 0) ? ['+' + slip + ' days', '#fff', BRAND]
-                : s.status === 'in_transit' ? ['On plan', LINK, 'rgba(155,171,21,.20)']
-                : ['Booked', MID, '#F2F2F5'];
-    return `<div class="rounded-2xl border bg-white shadow-sm d2d-sh d2d-rise">
-      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;">
-        <div style="display:flex;align-items:baseline;gap:11px;">
-          ${_internal
-            ? `<button type="button" class="d2d-ref" data-ref="${esc(s.id)}" data-cur="${esc(s.reference || '')}"
-                 style="font-family:ui-monospace,SFMono-Regular,monospace;font-size:14px;color:${s.reference ? DARK : YINK};
-                        background:none;border:0;border-bottom:1px dashed rgba(0,0,0,.25);padding:0 0 1px;cursor:pointer;">
-                 ${esc(s.reference || 'advise container number')}</button>`
-            : `<span class="d2d-num" style="font-size:14px;color:${DARK};">${esc(s.reference || 'container not yet advised')}</span>`}
-          <span style="font-size:11px;color:${MID};">${esc([s.container_type, s.carrier, s.vessel].filter(Boolean).join(' · '))}</span>
-        </div>
-        <span style="font-size:10.5px;font-weight:700;border-radius:6px;padding:3px 9px;color:${badge[1]};background:${badge[2]};">${esc(badge[0])}</span>
-      </div>
-      <div class="d2d-striphold"><div class="d2d-strip">${cells}</div></div>
-    </div>`;
+        <span style="display:block;margin-top:12px;height:6px;background:#F0F0F3;border-radius:3px;overflow:hidden;">
+          <span style="display:block;height:6px;width:${pct}%;background:${bar};border-radius:3px;"></span>
+        </span>
+        <span style="display:flex;align-items:baseline;justify-content:space-between;margin-top:6px;">
+          <span style="font-size:11px;color:${od ? BRAND : DARK};font-weight:${od ? 600 : 500};">${esc(stageLabel)}</span>
+          <span style="font-size:10px;color:${LIGHT};">${done} of ${STAGES.length}</span>
+        </span>
+
+        <span style="display:flex;align-items:baseline;justify-content:space-between;margin-top:10px;
+              padding-top:9px;border-top:.5px solid rgba(0,0,0,.05);">
+          <span style="font-size:10.5px;color:${MID};">${sh.status === 'delivered' ? 'Delivered' : 'Next: ' + esc(nextStage[1])}</span>
+          <span class="d2d-num" style="font-size:11px;color:${DARK};">${nextPlan && sh.status !== 'delivered' ? 'plan ' + esc(day(nextPlan)) : ''}</span>
+        </span>
+      </button>`;
   }
 
   // ── Bookings: what the client decides ──
@@ -867,6 +871,115 @@
     document.addEventListener('keydown', onKey);
   }
 
+  // ── Shipment detail ──
+  // Opened from a tile or from a vessel on the map. Holds the full milestone strip, where the
+  // dates came from, and what is aboard. PO and SKU rows are marked as awaiting the client's
+  // order feed rather than filled with invented cargo.
+  function findShip(id) {
+    const all = (_data && _data.allShipments) || [];
+    return (_data.shipments || []).find(x => x.id === id) || all.find(x => x.id === id);
+  }
+
+  function openShipment(id) {
+    const sh = findShip(id); if (!sh) return;
+    closeDrawer();
+    const ev = evMap(sh);
+    const od = overdueOf(sh), slip = slipOf(sh);
+    let liveIdx = -1; STAGES.forEach(([k], i) => { if (ev[k] && ev[k].actual_at) liveIdx = i; });
+    const pos = shipmentPositions([sh])[0];
+
+    const row = (label, value, colour) => `
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:7px 0;
+           border-bottom:.5px solid rgba(0,0,0,.05);">
+        <span style="font-size:11.5px;color:${MID};">${label}</span>
+        <span class="d2d-num" style="font-size:12px;color:${colour || DARK};text-align:right;">${value}</span>
+      </div>`;
+
+    const dr = document.createElement('div');
+    dr.id = 'd2d-drawer';
+    dr.style.cssText = 'position:fixed;inset:0;z-index:9700;background:rgba(16,18,27,.28);display:flex;justify-content:flex-end;';
+    dr.innerHTML = `
+      <div class="d2d-drawerpanel" style="width:min(560px,94vw);background:#fff;height:100%;overflow-y:auto;
+           box-shadow:-18px 0 44px rgba(16,18,27,.18);">
+        <div style="position:sticky;top:0;background:#fff;border-bottom:.5px solid rgba(0,0,0,.08);padding:16px 20px;
+             display:flex;align-items:flex-start;justify-content:space-between;gap:12px;">
+          <div style="min-width:0;">
+            <div class="d2d-num" style="font-size:16px;color:${DARK};">${esc(sh.reference || 'container not advised')}</div>
+            <div style="font-size:11px;color:${MID};margin-top:2px;">${esc([sh.container_type, sh.carrier, sh.vessel].filter(Boolean).join(' · ')) || 'no vessel advised'}</div>
+          </div>
+          <button class="d2d-btn" id="d2d-drawerclose" aria-label="Close" style="min-height:36px;padding:7px 12px;">Close</button>
+        </div>
+
+        <div style="padding:16px 20px;">
+          <div style="display:flex;align-items:center;gap:9px;margin-bottom:14px;">
+            <span style="width:9px;height:9px;border-radius:50%;background:${pos.colour};"></span>
+            <span style="font-size:12.5px;color:${DARK};font-weight:600;">
+              ${od ? esc(od.label) + ' overdue by ' + od.days + ' days'
+                   : (slip > 0 ? esc(pos.stage) + ' · ' + slip + ' days behind plan'
+                   : (sh.status === 'delivered' ? 'Delivered' : 'Last recorded: ' + esc(pos.stage)))}</span>
+          </div>
+
+          <div style="font-size:10px;font-weight:600;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;">Journey</div>
+          ${STAGES.map(([k, label], i) => {
+            const e = ev[k], actual = e && e.actual_at;
+            const plan = sh['plan_' + k];
+            const d = daysBetween(plan, actual);
+            const late = d != null && d > 0;
+            const isOd = od && od.stage === k;
+            const colour = isOd ? BRAND : actual ? (late ? BRAND : LIME) : '#D6D6DB';
+            return `
+              <div style="display:flex;gap:12px;align-items:flex-start;">
+                <div style="display:flex;flex-direction:column;align-items:center;width:26px;flex-shrink:0;">
+                  <span style="width:26px;height:26px;border-radius:50%;border:2px solid ${colour};box-sizing:border-box;
+                        background:${actual ? (late ? 'rgba(153,0,51,.10)' : 'rgba(155,171,21,.16)') : '#fff'};
+                        display:inline-flex;align-items:center;justify-content:center;">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="${colour}" stroke-width="1.9"
+                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${ICONS[i]}"></path></svg>
+                  </span>
+                  ${i < STAGES.length - 1 ? `<span style="width:2px;flex:1;min-height:26px;background:${i < liveIdx ? LIME : 'rgba(0,0,0,.09)'};"></span>` : ''}
+                </div>
+                <div style="flex:1;min-width:0;padding-bottom:12px;">
+                  <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;">
+                    <span style="font-size:12.5px;font-weight:600;color:${isOd ? BRAND : DARK};">${esc(label)}</span>
+                    <span class="d2d-num" style="font-size:11.5px;color:${actual ? (late ? BRAND : DARK) : LIGHT};">
+                      ${actual ? esc(day(actual)) : (isOd ? 'overdue' : '—')}</span>
+                  </div>
+                  <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-top:1px;">
+                    <span style="font-size:10.5px;color:${LIGHT};">${plan ? 'plan ' + esc(day(plan)) : ''}</span>
+                    <span style="font-size:10px;color:${MID};text-transform:uppercase;letter-spacing:.03em;">
+                      ${actual ? esc(e.source) : ''}${late ? ` · <span style="color:${BRAND};font-weight:700;">+${d}d</span>` : ''}</span>
+                  </div>
+                  ${_internal ? `<button class="d2d-btn d2d-edit" data-ship="${esc(sh.id)}" data-stage="${k}" data-label="${esc(label)}"
+                       style="margin-top:6px;min-height:34px;padding:5px 10px;font-size:10.5px;">${actual ? 'Edit' : 'Record'}</button>` : ''}
+                </div>
+              </div>`;
+          }).join('')}
+
+          <div style="font-size:10px;font-weight:600;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;margin:14px 0 6px;">Shipment</div>
+          ${row('Week', esc(day(sh.week_start)))}
+          ${row('Mode', esc(sh.mode || 'sea'))}
+          ${row('Last known position', esc(pos.stage))}
+          ${row('Status', esc(sh.status))}
+
+          <div style="font-size:10px;font-weight:600;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;margin:16px 0 6px;">Orders and lines aboard</div>
+          <div style="border:1px dashed rgba(0,0,0,.16);border-radius:11px;padding:14px;background:#FBFBFC;">
+            <div style="font-size:12px;color:${DARK};font-weight:600;">Waiting on the order feed</div>
+            <div style="font-size:11px;color:${MID};line-height:1.5;margin-top:4px;">
+              POs, SKUs and unit counts appear here once GRBA's purchase order file is connected.
+              Nothing is shown until then rather than a placeholder that could be mistaken for cargo.</div>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(dr);
+    el('d2d-drawerclose').onclick = closeDrawer;
+    dr.addEventListener('click', (e) => { if (e.target === dr) closeDrawer(); });
+    wireActions(dr);
+    const onKey = (e) => { if (e.key === 'Escape') { closeDrawer(); document.removeEventListener('keydown', onKey); } };
+    document.addEventListener('keydown', onKey);
+  }
+
+  function closeDrawer() { const d = el('d2d-drawer'); if (d) d.remove(); }
+
   // ── Recording a milestone ──
   // A small popover anchored to the stage. Deliberately not a modal: the strip behind it is
   // the context, and hiding it to ask for one date would be a worse trade.
@@ -967,7 +1080,9 @@
 
   // ── Actions ──
   function wireActions(root) {
+    root.querySelectorAll('[data-open]').forEach(b => b.onclick = () => openShipment(b.getAttribute('data-open')));
     root.querySelectorAll('[data-filt]').forEach(b => b.onclick = () => { _mapFilter = b.getAttribute('data-filt'); paint(); });
+    root.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { _mapScope = b.getAttribute('data-scope'); paint(); });
     const full = root.querySelector('[data-mapfull]');
     if (full) full.onclick = () => openFullMap();
     root.querySelectorAll('.d2d-edit').forEach(b => b.onclick = () => openEditor(b));
@@ -1019,5 +1134,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v9 loaded');
+  console.log('[d2d-hub] v11 loaded');
 })();
