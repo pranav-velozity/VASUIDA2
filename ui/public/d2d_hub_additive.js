@@ -640,6 +640,12 @@
       const targetRatio = MAP.w / MAP.h;
       if (vw / vh < targetRatio) { const need = vh * targetRatio; x0 -= (need - vw) / 2; vw = need; }
       else { const need = vw / targetRatio; y0 -= (need - vh) / 2; vh = need; }
+      // One more step back, as a plain multiplier on the finished frame.
+      const ZOOM_OUT = 1.5;
+      const cx0 = x0 + vw / 2, cy0 = y0 + vh / 2;
+      vw *= ZOOM_OUT; vh *= ZOOM_OUT;
+      x0 = cx0 - vw / 2; y0 = cy0 - vh / 2;
+
       // Never wider than the world itself.
       vw = Math.min(vw, view.w); vh = Math.min(vh, view.h);
       x0 = Math.max(view.x0, Math.min(x0, view.x0 + view.w - vw));
@@ -655,7 +661,7 @@
   function dotField() {
     if (_dots) return _dots;
     if (_world) {
-      _dots = `<g fill="#AFB6C2">${_world.circles.replace(/<circle /g, `<circle r="${_world.r}" `)}</g>`;
+      _dots = `<g fill="#D2D7DF">${_world.circles.replace(/<circle /g, `<circle r="${_world.r}" `)}</g>`;
       return _dots;
     }
     const inside = (pt, poly) => {
@@ -670,7 +676,7 @@
     for (let y = 8; y < MAP.h; y += 9)
       for (let x = 8; x < MAP.w; x += 9)
         if (LAND.some(poly => inside([x, y], poly))) out.push(`<circle cx="${x}" cy="${y}" r="1.5"/>`);
-    _dots = `<g fill="#AFB6C2">${out.join('')}</g>`;
+    _dots = `<g fill="#D2D7DF">${out.join('')}</g>`;
     return _dots;
   }
 
@@ -681,7 +687,10 @@
     const out = [];
     if (_world) {
       const { step, occupied } = _world;
-      const gap = step * 2;                        // half the density of land, so land still reads
+      // Spacing is chosen for the size of the frame, not fixed: at a fixed gap a wide frame
+      // produced twelve thousand circles, which is a lot of DOM for a background texture.
+      const area = (VIEW.w * 1.9) * (VIEW.h * 1.9);
+      const gap = Math.max(step * 2, Math.sqrt(area / 3600));
       // Only across the visible frame: generating dots for the whole planet would be tens of
       // thousands of circles, almost all of them off screen.
       // A little beyond the frame, so the full-screen view (which widens it) is still covered.
