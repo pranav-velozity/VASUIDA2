@@ -289,6 +289,10 @@
       return;
     }
 
+    // Fetch the geography alongside the data; the map renders with whichever is ready and
+    // re-renders once the world arrives, so a slow file never blocks the page.
+    loadWorld().then(w => { if (w) paint(); }).catch(() => {});
+
     if (!_week && weeks.length) _week = weeks[0].week_start;
     let shipments = [], bookings = [], pricingVisible = _internal, allShipments = [];
     const soft = async (path, fallback) => {
@@ -487,30 +491,122 @@
   // nodes with counts. What is REAL here is the stage each shipment has reached, which places
   // it along its route. What is NOT real is a precise position at sea — that needs a carrier
   // feed, and the panel says so rather than implying GPS accuracy.
-  const MAP = { w: 900, h: 430 };
-  // Coarse landmasses for the Asia–Australia corridor, in map units.
+  // Geography comes from the same pre-generated dot map the sign-in screen uses
+  // (/public/login_map.json): real coastlines, no d3 and no CDN at runtime. Hand-drawn
+  // polygons were never going to look like the Live Map page, and this file already exists.
+  // 900x700 rather than 900x430: the lane runs 64 degrees of latitude against 34 of longitude,
+  // so a wide card forced the frame to span half the globe to keep the dots round. This shape
+  // frames Asia to Australia, which is the map this client needs.
+  const MAP = { w: 900, h: 700 };
+  // Drawn for a 430-high canvas, so y is scaled to the taller one.
   const LAND = [
-    [[250,20],[470,10],[560,70],[600,130],[520,175],[430,160],[360,115],[280,100]],   // China
-    [[140,95],[265,92],[300,150],[250,205],[165,185]],                                 // India
-    [[555,215],[640,200],[700,240],[690,295],[610,305],[555,265]],                     // Philippines
-    [[470,215],[560,235],[575,275],[500,290],[440,265]],                               // Indochina
-    [[560,330],[790,315],[845,380],[800,425],[640,428],[575,390]],                     // Australia
-  ];
-  const PORTS = {
-    origin: { x: 505, y: 120, label: 'Origin port' },
-    transhipment: { x: 640, y: 262, label: 'Transhipment' },
-    destination: { x: 700, y: 352, label: 'Port Botany' },
-    customs: { x: 676, y: 386, label: 'Customs' },
-    lastmile: { x: 735, y: 402, label: 'Last mile' },
+    [[250,20],[470,10],[560,70],[600,130],[520,175],[430,160],[360,115],[280,100]],
+    [[140,95],[265,92],[300,150],[250,205],[165,185]],
+    [[555,215],[640,200],[700,240],[690,295],[610,305],[555,265]],
+    [[470,215],[560,235],[575,275],[500,290],[440,265]],
+    [[560,330],[790,315],[845,380],[800,425],[640,428],[575,390]],
+  ].map(poly => poly.map(([x, y]) => [x, y * (700 / 430)]));
+  const S = 700 / 430;
+  const PORTS_FALLBACK = {
+    origin: { x: 505, y: 120 * S, label: 'Origin port' },
+    transhipment: { x: 640, y: 262 * S, label: 'Transhipment' },
+    destination: { x: 700, y: 352 * S, label: 'Port Botany' },
+    customs: { x: 676, y: 386 * S, label: 'Customs' },
+    lastmile: { x: 735, y: 402 * S, label: 'Last mile' },
   };
-  // How far along the route each stage sits. Between recorded stages a shipment simply holds
-  // its last known position: inventing motion between milestones would be a guess drawn as fact.
+  let PORTS = PORTS_FALLBACK;
+  let VIEW = { x0: 0, y0: 0, w: MAP.w, h: MAP.h };
+
+  // Real places, so the map can be geographic rather than schematic.
+  const PLACES = {
+    origin:       { lon: 121.55, lat: 29.87,  label: 'Ningbo' },
+    transhipment: { lon: 120.98, lat: 14.60,  label: 'Manila' },
+    destination:  { lon: 151.23, lat: -33.96, label: 'Port Botany' },
+    customs:      { lon: 151.19, lat: -33.86, label: 'Sydney customs' },
+    lastmile:     { lon: 150.86, lat: -33.80, label: 'Eastern Creek' },
+  };
+
+  // How far along the route each stage sits. Between recorded stages a shipment holds its last
+  // known position: inventing motion between milestones would be a guess drawn as fact.
   const STAGE_T = { pickup: 0, origin_cleared: 0.04, departed: 0.10, arrived: 0.82,
                     dest_cleared: 0.90, out_for_delivery: 0.95, delivered: 1 };
 
-  let _dots = null;
+  // Equirectangular, which is what these generated dot maps use — verified below against known
+  // coastal cities rather than assumed, because a wrong projection puts ports in the sea.
+  const project = (v, lon, lat) => ({ x: v.x0 + (lon + 180) / 360 * v.w, y: v.y0 + (90 - lat) / 180 * v.h });
+
+  let _world = null, _worldTried = false, _dots = null, _sea = null;
+
+  async function loadWorld() {
+    if (_world || _worldTried) return _world;
+    _worldTried = true;
+    try {
+      const r = await fetch('/public/login_map.json');
+      if (!r.ok) return null;
+      const m = await r.json();
+      const vb = String(m.viewBox || '').trim().split(/\s+/).map(Number);
+      if (vb.length !== 4 || vb.some(n => !isFinite(n))) return null;
+
+      const pts = [];
+      const rx = /cx="([-\d.]+)"\s+cy="([-\d.]+)"/g;
+      let mm; while ((mm = rx.exec(String(m.circles || '')))) pts.push([+mm[1], +mm[2]]);
+      if (pts.length < 200) return null;
+
+      const xs = [...new Set(pts.slice(0, 1200).map(q => q[0]))].sort((a, b) => a - b);
+      let step = Infinity;
+      for (let k = 1; k < xs.length; k++) { const dd = xs[k] - xs[k - 1]; if (dd > 0.01) step = Math.min(step, dd); }
+      if (!isFinite(step) || step <= 0) step = 6;
+
+      const view = { x0: vb[0], y0: vb[1], w: vb[2], h: vb[3] };
+      const occupied = new Set(pts.map(q => Math.round(q[0] / step) + ':' + Math.round(q[1] / step)));
+      const near = (lon, lat) => {
+        const q = project(view, lon, lat);
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++)
+          if (occupied.has((Math.round(q.x / step) + dx) + ':' + (Math.round(q.y / step) + dy))) return true;
+        return false;
+      };
+      const hits = [[121.55, 29.87], [151.21, -33.87], [114.06, 22.54], [-0.13, 51.51]]
+        .filter(([a, b]) => near(a, b)).length;
+      if (hits < 3) { console.warn('[d2d-hub] map projection did not line up; using the simple map'); return null; }
+
+      _world = { view, step, r: Number(m.r) || 1.4, circles: String(m.circles || ''), pts, occupied };
+      PORTS = {};
+      for (const [k, v] of Object.entries(PLACES)) {
+        const q = project(view, v.lon, v.lat);
+        PORTS[k] = { x: q.x, y: q.y, label: v.label };
+      }
+
+      // Frame the trade lane rather than the whole planet. Drawing the entire world would put
+      // this route in one corner with an empty ocean filling the card.
+      const px = Object.values(PORTS).map(q => q.x), py = Object.values(PORTS).map(q => q.y);
+      const c = curveC();
+      const minX = Math.min(...px, c.x), maxX = Math.max(...px, c.x);
+      const minY = Math.min(...py, c.y), maxY = Math.max(...py, c.y);
+      const padX = Math.max((maxX - minX) * 0.55, view.w * 0.06);
+      const padY = Math.max((maxY - minY) * 0.30, view.h * 0.06);
+      let x0 = minX - padX, y0 = minY - padY;
+      let vw = (maxX - minX) + padX * 2, vh = (maxY - minY) + padY * 2;
+      // Keep the card's own proportions so the dots stay round and nothing is squashed.
+      const targetRatio = MAP.w / MAP.h;
+      if (vw / vh < targetRatio) { const need = vh * targetRatio; x0 -= (need - vw) / 2; vw = need; }
+      else { const need = vw / targetRatio; y0 -= (need - vh) / 2; vh = need; }
+      // Stay inside the world.
+      x0 = Math.max(view.x0, Math.min(x0, view.x0 + view.w - vw));
+      y0 = Math.max(view.y0, Math.min(y0, view.y0 + view.h - vh));
+      VIEW = { x0, y0, w: vw, h: vh };
+
+      _dots = null; _sea = null;
+      return _world;
+    } catch (e) { return null; }
+  }
+
+  // Land dots. Real coastlines when the world loaded, the coarse polygons otherwise.
   function dotField() {
     if (_dots) return _dots;
+    if (_world) {
+      _dots = `<g fill="#AFB6C2">${_world.circles.replace(/<circle /g, `<circle r="${_world.r}" `)}</g>`;
+      return _dots;
+    }
     const inside = (pt, poly) => {
       let hit = false;
       for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -520,25 +616,67 @@
       return hit;
     };
     const out = [];
-    for (let y = 8; y < MAP.h; y += 9) {
-      for (let x = 8; x < MAP.w; x += 9) {
+    for (let y = 8; y < MAP.h; y += 9)
+      for (let x = 8; x < MAP.w; x += 9)
         if (LAND.some(poly => inside([x, y], poly))) out.push(`<circle cx="${x}" cy="${y}" r="1.5"/>`);
-      }
-    }
-    // Was #D6DAE1, which all but disappeared against the panel. The distance from white is
-    // roughly doubled here so the landmasses read without competing with the routes.
     _dots = `<g fill="#AFB6C2">${out.join('')}</g>`;
     return _dots;
   }
 
-  // Quadratic curve from origin to destination, bowed the way a great-circle route looks here.
-  const routeC = { x: 640, y: 210 };
-  const atT = (t) => {
-    const u = 1 - t, A = PORTS.origin, B = PORTS.destination;
-    return { x: u * u * A.x + 2 * u * t * routeC.x + t * t * B.x,
-             y: u * u * A.y + 2 * u * t * routeC.y + t * t * B.y };
+  // Water, as a very light blue dot field on the same grid — everywhere the land is not. Kept
+  // faint so it reads as texture behind the routes rather than competing with them.
+  function seaField() {
+    if (_sea) return _sea;
+    const out = [];
+    if (_world) {
+      const { step, occupied } = _world;
+      const gap = step * 2;                        // half the density of land, so land still reads
+      // Only across the visible frame: generating dots for the whole planet would be tens of
+      // thousands of circles, almost all of them off screen.
+      for (let y = VIEW.y0; y < VIEW.y0 + VIEW.h; y += gap) {
+        for (let x = VIEW.x0; x < VIEW.x0 + VIEW.w; x += gap) {
+          const key = Math.round(x / step) + ':' + Math.round(y / step);
+          let onLand = false;
+          for (let dx = -1; dx <= 1 && !onLand; dx++)
+            for (let dy = -1; dy <= 1 && !onLand; dy++)
+              if (occupied.has((Math.round(x / step) + dx) + ':' + (Math.round(y / step) + dy))) onLand = true;
+          if (!onLand) out.push(`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}"/>`);
+        }
+      }
+      _sea = `<g fill="#DCE8F5" opacity=".85"><g r="${(_world.r * .85).toFixed(2)}">${
+        out.map(c => c.replace('<circle ', `<circle r="${(_world.r * .85).toFixed(2)}" `)).join('')}</g></g>`;
+      return _sea;
+    }
+    const inside = (pt, poly) => {
+      let hit = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const [xi, yi] = poly[i], [xj, yj] = poly[j];
+        if ((yi > pt[1]) !== (yj > pt[1]) && pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi) hit = !hit;
+      }
+      return hit;
+    };
+    for (let y = 8; y < MAP.h; y += 18)
+      for (let x = 8; x < MAP.w; x += 18)
+        if (!LAND.some(poly => inside([x, y], poly))) out.push(`<circle cx="${x}" cy="${y}" r="1.3"/>`);
+    _sea = `<g fill="#DCE8F5" opacity=".85">${out.join('')}</g>`;
+    return _sea;
+  }
+
+  // The route bows through the sea rather than across land, anchored on the two ports.
+  const curveC = () => {
+    const A = PORTS.origin, B = PORTS.destination;
+    // Push the control point east so the arc runs down the Pacific side, as the sailing does.
+    return { x: Math.max(A.x, B.x) + Math.abs(B.x - A.x) * 0.55 + 10, y: (A.y + B.y) / 2 };
   };
-  const ROUTE_D = `M${PORTS.origin.x} ${PORTS.origin.y} Q${routeC.x} ${routeC.y} ${PORTS.destination.x} ${PORTS.destination.y}`;
+  const atT = (t) => {
+    const u = 1 - t, A = PORTS.origin, B = PORTS.destination, C = curveC();
+    return { x: u * u * A.x + 2 * u * t * C.x + t * t * B.x,
+             y: u * u * A.y + 2 * u * t * C.y + t * t * B.y };
+  };
+  const routeD = () => {
+    const A = PORTS.origin, B = PORTS.destination, C = curveC();
+    return `M${A.x.toFixed(1)} ${A.y.toFixed(1)} Q${C.x.toFixed(1)} ${C.y.toFixed(1)} ${B.x.toFixed(1)} ${B.y.toFixed(1)}`;
+  };
 
   function shipmentPositions(list) {
     return list.map(sh => {
@@ -618,10 +756,10 @@
         </div>
 
         <div style="position:relative;background:#FBFCFD;">
-          <svg viewBox="0 0 ${MAP.w} ${MAP.h}" width="100%" style="display:block;max-height:${big ? 640 : 380}px;" role="img"
+          <svg viewBox="${VIEW.x0} ${VIEW.y0} ${VIEW.w} ${VIEW.h}" width="100%" style="display:block;max-height:${big ? 760 : 470}px;" role="img"
                aria-label="Where this week's shipments are">
-            ${dotField()}
-            <path d="${ROUTE_D}" fill="none" stroke="#C9CED6" stroke-width="1.6" stroke-dasharray="5 6"/>
+            ${seaField()}${dotField()}
+            <path d="${routeD()}" fill="none" stroke="#C9CED6" stroke-width="1.6" stroke-dasharray="5 6"/>
             ${node(PORTS.origin, atOrigin, LIME)}
             ${node(PORTS.destination, atDest, BRAND)}
             ${node(PORTS.customs, atCustoms, BRAND)}
@@ -908,11 +1046,11 @@
     ov.id = 'd2d-fullmap';
     ov.style.cssText = 'position:fixed;inset:0;z-index:9600;background:#FBFCFD;overflow:hidden;';
     ov.innerHTML = `
-      <svg id="d2d-fullsvg" viewBox="0 0 ${MAP.w} ${MAP.h}" preserveAspectRatio="xMidYMid slice"
+      <svg id="d2d-fullsvg" viewBox="${VIEW.x0} ${VIEW.y0} ${VIEW.w} ${VIEW.h}" preserveAspectRatio="xMidYMid slice"
            style="position:absolute;inset:0;width:100%;height:100%;display:block;" role="img"
            aria-label="Live tracking, full screen">
-        ${dotField()}
-        <path d="${ROUTE_D}" fill="none" stroke="#C3C9D2" stroke-width="1.6" stroke-dasharray="5 6"/>
+        ${seaField()}${dotField()}
+        <path d="${routeD()}" fill="none" stroke="#C3C9D2" stroke-width="1.6" stroke-dasharray="5 6"/>
         ${[[PORTS.origin, marks.filter(m => m.t === 0).length, LIME],
            [PORTS.destination, marks.filter(m => m.t >= 0.82 && m.t < 0.9).length, BRAND],
            [PORTS.customs, marks.filter(m => m.t >= 0.9 && m.t < 0.95).length, BRAND],
@@ -1238,5 +1376,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v12 loaded');
+  console.log('[d2d-hub] v13 loaded');
 })();
