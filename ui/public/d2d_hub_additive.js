@@ -936,7 +936,7 @@
       const key = Math.round(base * 40);
       const n = (atStage[key] = (atStage[key] || 0) + 1) - 1;
       const t = (base === 0 || base >= 1) ? base : Math.min(0.97, base);
-      const across = base === 0 || base >= 1 ? 0 : ((n % 2 ? 1 : -1) * Math.ceil(n / 2) * 26);
+      const across = 0;                    // crowding is handled by clustering, not by fanning
 
       const from = ORIGIN_PORTS[originKey(sh.service || sh.origin)] || null;
       const p = air ? atAirT(t, from) : atT(t, from);
@@ -971,23 +971,74 @@
   // shipment's line is offset by the same amount as its marker, so the two agree.
   const SEA_LINE = '#6F93BC';
   function lanePaths(marks, k) {
-    const drawn = new Set();
-    return marks.map(m => {
+    // One line per route and mode. Two containers on the same sailing take the same route, so
+    // drawing each its own arc was both messy and untrue.
+    const lanes = new Map();
+    for (const m of marks) {
       const from = ORIGIN_PORTS[originKey(m.sh.service || m.sh.origin)] || null;
-      const off = (m.lane || 0) * ((m.lane % 2 ? -1 : 1)) * 26 * (VIEW.w / MAP.w);
-      const key = (m.air ? 'a' : 's') + (from ? from.label : '-') + Math.round(off);
-      if (drawn.has(key)) return '';
-      drawn.add(key);
+      const key = (m.air ? 'a' : 's') + (from ? from.label : '-');
+      if (!lanes.has(key)) lanes.set(key, { air: m.air, from });
+    }
+    return [...lanes.values()].map(({ air, from }) => {
       const A = from ? portXY(from) : PORTS.origin;
-      const B = PORTS.destination;
-      const C = m.air ? airC(A) : curveC(A);
-      const d2 = `M${A.x.toFixed(1)} ${(A.y + off).toFixed(1)} Q${C.x.toFixed(1)} ${(C.y + off).toFixed(1)} ${B.x.toFixed(1)} ${B.y.toFixed(1)}`;
-      return m.air
+      const d2 = air ? airD(from) : routeD(from);
+      return air
         ? `<path d="${d2}" fill="none" stroke="${BLUE}" stroke-width="${(1.5 * k).toFixed(2)}" stroke-linecap="round"
-                 stroke-dasharray="${(1.6 * k).toFixed(1)} ${(6 * k).toFixed(1)}" opacity=".85"/>`
+                 stroke-dasharray="${(1.6 * k).toFixed(1)} ${(6 * k).toFixed(1)}" opacity=".8"/>`
         : `<path d="${d2}" fill="none" stroke="${SEA_LINE}" stroke-width="${(2.2 * k).toFixed(2)}" stroke-linecap="round"
-                 stroke-dasharray="${(9 * k).toFixed(1)} ${(6 * k).toFixed(1)}" opacity=".75"/>`;
+                 stroke-dasharray="${(9 * k).toFixed(1)} ${(6 * k).toFixed(1)}" opacity=".72"/>`;
     }).join('');
+  }
+
+  // Vessels close together become ONE marker with a count. Three names fanned around a point
+  // is unreadable at any zoom, and the honest answer is that they are in the same place.
+  function clusterMarks(marks, k) {
+    const out = [];
+    const near = 26 * k;
+    for (const m of marks) {
+      const hit = out.find(c => Math.abs(c.pos.x - m.pos.x) < near && Math.abs(c.pos.y - m.pos.y) < near && c.air === m.air);
+      if (hit) { hit.items.push(m); continue; }
+      out.push({ pos: { x: m.pos.x, y: m.pos.y }, air: m.air, colour: m.colour, items: [m] });
+    }
+    // The worst status in a cluster is the one worth seeing.
+    for (const c of out) {
+      if (c.items.some(x => x.colour === BRAND)) c.colour = BRAND;
+      else if (c.items.some(x => x.colour === YELL)) c.colour = YELL;
+    }
+    return out;
+  }
+
+  // A single marker, whether it stands for one shipment or several. A count replaces the name
+  // when there is more than one, and the list opens on click.
+  function vesselMark(c, k) {
+    const many = c.items.length > 1;
+    const m = c.items[0];
+    const label = many ? c.items.length + ' shipments' : (m.sh.reference || 'unadvised');
+    const ids = c.items.map(x => x.sh.id).join(',');
+    return `
+      <g class="d2d-vessel" data-cluster="${esc(ids)}" ${many ? '' : `data-open="${esc(m.sh.id)}"`}
+         style="cursor:pointer;" role="button" aria-label="${esc(label)}">
+        <circle cx="${c.pos.x.toFixed(1)}" cy="${c.pos.y.toFixed(1)}" r="${(20 * k).toFixed(1)}" fill="transparent"/>
+        <circle cx="${c.pos.x.toFixed(1)}" cy="${c.pos.y.toFixed(1)}" r="${(11 * k).toFixed(1)}" fill="${c.colour}" opacity=".18" class="d2d-ping"/>
+        <circle cx="${c.pos.x.toFixed(1)}" cy="${c.pos.y.toFixed(1)}" r="${(9 * k).toFixed(1)}"
+                fill="${c.air ? 'rgba(44,111,187,.10)' : '#ffffff'}" stroke="${c.air ? BLUE : c.colour}"
+                stroke-width="${((c.air ? 1.8 : 1.3) * k).toFixed(2)}"
+                stroke-dasharray="${c.air ? (2.5 * k).toFixed(1) + ' ' + (2 * k).toFixed(1) : ''}" opacity=".97"/>
+        <g transform="translate(${c.pos.x.toFixed(1)},${c.pos.y.toFixed(1)}) scale(${(k * .78).toFixed(3)})">
+          <path d="${c.air ? ICON_PLANE : ICON_SHIP}" fill="${c.colour}" fill-opacity=".92"
+                stroke="${c.colour}" stroke-width=".8" stroke-linejoin="round"/>
+        </g>
+        ${many ? `
+          <circle cx="${(c.pos.x + 8 * k).toFixed(1)}" cy="${(c.pos.y - 8 * k).toFixed(1)}" r="${(6.5 * k).toFixed(1)}"
+                  fill="${DARK}"/>
+          <text x="${(c.pos.x + 8 * k).toFixed(1)}" y="${(c.pos.y - 5.6 * k).toFixed(1)}" text-anchor="middle"
+                font-size="${(8 * k).toFixed(1)}" font-weight="700" fill="#ffffff"
+                font-family="ui-monospace,monospace">${c.items.length}</text>` : ''}
+        <text x="${(c.pos.x + 14 * k).toFixed(1)}" y="${(c.pos.y + 3.5 * k).toFixed(1)}"
+              font-size="${(10.5 * k).toFixed(1)}" font-weight="600" fill="${DARK}"
+              font-family="${many ? 'inherit' : 'ui-monospace,monospace'}" stroke="#ffffff"
+              stroke-width="${(3.2 * k).toFixed(2)}" paint-order="stroke" stroke-linejoin="round">${esc(label)}</text>
+      </g>`;
   }
 
   function paintMap(d, opts) {
@@ -1071,25 +1122,7 @@
                   this scale printed them on top of each other. */ ''}
             ${node(PORTS.customs, atCustoms, BRAND, { label: big, dy: 22 })}
             ${node(PORTS.lastmile, delivered, LINK, { label: big, dy: 44 })}
-            ${marks.filter(m => m.t > 0 && m.t < 1).map(m => `
-              <g class="d2d-vessel" data-open="${esc(m.sh.id)}" style="cursor:pointer;" role="button"
-                 aria-label="Open ${esc(m.sh.reference || 'shipment')}">
-                <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="18" fill="transparent"/>
-                <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(11 * k).toFixed(1)}" fill="${m.colour}" opacity=".18" class="d2d-ping"/>
-                <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(8.5 * k).toFixed(1)}"
-                        fill="${m.air ? 'rgba(44,111,187,.10)' : '#ffffff'}" stroke="${m.air ? BLUE : m.colour}"
-                        stroke-width="${((m.air ? 1.8 : 1.3) * k).toFixed(2)}"
-                        stroke-dasharray="${m.air ? (2.5 * k).toFixed(1) + ' ' + (2 * k).toFixed(1) : ''}" opacity=".97"/>
-                <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)}) scale(${(k * .8).toFixed(3)})">
-                  <path d="${m.air ? ICON_PLANE : ICON_SHIP}" fill="${m.colour}" fill-opacity=".92"
-                        stroke="${m.colour}" stroke-width=".8" stroke-linejoin="round"/>
-                </g>
-                <text x="${(m.pos.x + (m.lane % 2 ? -15 : 15) * k).toFixed(1)}"
-                      y="${(m.pos.y + 3.5 * k).toFixed(1)}" text-anchor="${m.lane % 2 ? 'end' : 'start'}"
-                      font-size="${(10.5 * k).toFixed(1)}" font-weight="600" fill="${DARK}"
-                      font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="${(3.2 * k).toFixed(2)}"
-                      paint-order="stroke" stroke-linejoin="round">${esc(m.sh.reference || 'unadvised')}</text>
-              </g>`).join('')}
+            ${clusterMarks(marks.filter(m => m.t > 0 && m.t < 1), k).map(c => vesselMark(c, k)).join('')}
           </svg>
 
           <div style="position:absolute;left:14px;bottom:12px;background:rgba(255,255,255,.92);border:.5px solid rgba(0,0,0,.08);
@@ -2432,25 +2465,7 @@
                   font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="${(3.2 * k).toFixed(2)}"
                   paint-order="stroke" stroke-linejoin="round">${n}</text>` : ''}
           </g>`).join('')}
-        ${marks.filter(m => m.t > 0 && m.t < 1).map(m => `
-          <g class="d2d-vessel" data-open="${esc(m.sh.id)}" style="cursor:pointer;" role="button"
-             aria-label="Open ${esc(m.sh.reference || 'shipment')}">
-            <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(20 * k).toFixed(1)}" fill="transparent"/>
-            <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(12 * k).toFixed(1)}" fill="${m.colour}" opacity=".18" class="d2d-ping"/>
-            <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(9.5 * k).toFixed(1)}"
-                    fill="${m.air ? 'rgba(44,111,187,.10)' : '#ffffff'}" stroke="${m.air ? BLUE : m.colour}"
-                    stroke-width="${((m.air ? 1.9 : 1.4) * k).toFixed(2)}"
-                    stroke-dasharray="${m.air ? (2.5 * k).toFixed(1) + ' ' + (2 * k).toFixed(1) : ''}" opacity=".97"/>
-            <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)}) scale(${(k * .85).toFixed(3)})">
-              <path d="${m.air ? ICON_PLANE : ICON_SHIP}" fill="${m.colour}" fill-opacity=".92"
-                    stroke="${m.colour}" stroke-width=".8" stroke-linejoin="round"/>
-            </g>
-            <text x="${(m.pos.x + (m.lane % 2 ? -16 : 16) * k).toFixed(1)}"
-                  y="${(m.pos.y + 3.5 * k).toFixed(1)}" text-anchor="${m.lane % 2 ? 'end' : 'start'}"
-                  font-size="${(10.5 * k).toFixed(1)}" font-weight="600" fill="${DARK}"
-                  font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="${(3.2 * k).toFixed(2)}"
-                  paint-order="stroke" stroke-linejoin="round">${esc(m.sh.reference || 'unadvised')}</text>
-          </g>`).join('')}
+        ${clusterMarks(marks.filter(m => m.t > 0 && m.t < 1), k).map(c => vesselMark(c, k)).join('')}
       </svg>
 
       <div style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;
@@ -2493,6 +2508,13 @@
       if (_tab !== 'shipments') _tab = 'shipments';
       go('container', b.getAttribute('data-open'));
     }));
+    // A crowded point is one marker: clicking it has to list what is there. Without this the
+    // marker was simply dead in full screen.
+    ov.querySelectorAll('[data-cluster]').forEach(b => {
+      const ids = (b.getAttribute('data-cluster') || '').split(',').filter(Boolean);
+      if (ids.length < 2) return;
+      b.addEventListener('click', (e) => { e.stopPropagation(); openCluster(ids, b); });
+    });
     const onKey = (e) => { if (e.key === 'Escape') { shut(); document.removeEventListener('keydown', onKey); } };
     document.addEventListener('keydown', onKey);
   }
@@ -2501,6 +2523,41 @@
   function findShip(id) {
     const all = (_data && _data.allShipments) || [];
     return ((_data && _data.shipments) || []).find(x => x.id === id) || all.find(x => x.id === id);
+  }
+
+  // What is in a cluster, as a short list rather than three labels fighting for the same spot.
+  function openCluster(ids, anchor) {
+    closeEditor();
+    const rect = anchor.getBoundingClientRect();
+    const pop = document.createElement('div');
+    pop.id = 'd2d-pop';
+    pop.style.cssText = `position:fixed;z-index:9800;background:#fff;border:.5px solid rgba(0,0,0,.14);border-radius:12px;
+      box-shadow:0 18px 40px rgba(16,18,27,.18);padding:10px;width:250px;font-family:inherit;`;
+    pop.innerHTML = `
+      <div style="font-size:11px;color:${MID};padding:2px 6px 8px;">${ids.length} shipments here</div>
+      ${ids.map(id => {
+        const sh = findShip(id); if (!sh) return '';
+        const look = outlook(sh);
+        return `<button type="button" data-open="${esc(id)}" style="display:flex;align-items:center;gap:9px;width:100%;
+                text-align:left;background:none;border:0;padding:8px 6px;cursor:pointer;border-radius:8px;
+                border-top:.5px solid rgba(0,0,0,.05);">
+          <span style="width:7px;height:7px;border-radius:50%;background:${look.ink};flex-shrink:0;"></span>
+          <span style="flex:1;min-width:0;">
+            <span class="d2d-num" style="display:block;font-size:12px;color:${DARK};">${esc(sh.reference || 'not advised')}</span>
+            <span style="display:block;font-size:10.5px;color:${MID};">${esc([sh.container_type || (sh.mode === 'air' ? 'air' : ''), sh.carrier].filter(Boolean).join(' · '))}</span>
+          </span>
+          <span style="font-size:10.5px;color:${look.ink};">${esc(look.label)}</span>
+        </button>`;
+      }).join('')}`;
+    document.body.appendChild(pop);
+    pop.style.top = Math.max(12, Math.min(rect.bottom + 8, window.innerHeight - pop.offsetHeight - 12)) + 'px';
+    pop.style.left = Math.max(12, Math.min(rect.left, window.innerWidth - 262)) + 'px';
+    pop.querySelectorAll('[data-open]').forEach(b => b.onclick = () => {
+      closeEditor();
+      const fm = el('d2d-fullmap'); if (fm) { fm.remove(); document.body.style.overflow = ''; }
+      if (_tab !== 'shipments') _tab = 'shipments';
+      go('container', b.getAttribute('data-open'));
+    });
   }
 
   // ── Recording a milestone ──
@@ -2605,6 +2662,11 @@
 
   // ── Actions ──
   function wireActions(root) {
+    root.querySelectorAll('[data-cluster]').forEach(b => {
+      const ids = (b.getAttribute('data-cluster') || '').split(',').filter(Boolean);
+      if (ids.length < 2) return;                    // a single shipment already opens directly
+      b.onclick = (e) => { e.stopPropagation(); openCluster(ids, b); };
+    });
     root.querySelectorAll('[data-open]').forEach(b => b.onclick = () => {
       const id = b.getAttribute('data-open');
       const fm = el('d2d-fullmap'); if (fm) { fm.remove(); document.body.style.overflow = ''; }
@@ -2715,5 +2777,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v22 loaded');
+  console.log('[d2d-hub] v23 loaded');
 })();
