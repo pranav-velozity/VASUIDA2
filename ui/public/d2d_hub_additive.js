@@ -386,50 +386,52 @@
     const inTransit = d.shipments.filter(s => s.status === 'in_transit').length;
     const delivered = d.shipments.filter(s => s.status === 'delivered').length;
     const slips = d.shipments.map(slipOf).filter(x => x != null && x > 0);
-    const approved = d.bookings.find(b => b.status === 'approved');
+    const orders = d.shipments.reduce((n, s) => n + (Number(s.po_count) || 0), 0);
     const acts = actions(d);
-    const stat = (label, value, sub, colour) => `
-      <div class="flex items-baseline justify-between py-2.5" style="border-top:.5px solid rgba(0,0,0,.05);">
-        <span style="font-size:12px;color:${MID};">${label}</span>
-        <span style="text-align:right;">
-          <span style="display:block;font-size:15px;font-weight:600;color:${colour || DARK};">${value}</span>
-          ${sub ? `<span style="display:block;font-size:10.5px;color:${LIGHT};">${sub}</span>` : ''}
-        </span>
+
+    const tile = (label, value, sub, colour) => `
+      <div class="rounded-2xl border bg-white shadow-sm d2d-tile d2d-rise">
+        <div class="d2d-tl">${label}</div>
+        <div class="d2d-tv" style="color:${colour || DARK};">${value}</div>
+        <div class="d2d-ts">${sub}</div>
       </div>`;
 
+    // The mockup's shape: map two thirds with the rail beside it, actions across the bottom.
     return `
-      ${paintMap(d)}
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
-        <div class="lg:col-span-2" style="min-width:0;">
-          ${d.shipments.length ? d.shipments.map(shipmentCard).join('')
-            : `<div class="rounded-2xl border bg-white shadow-sm d2d-empty">Nothing booked for this week yet.</div>`}
-        </div>
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start" style="margin-bottom:12px;">
+        <div class="lg:col-span-2" style="min-width:0;">${paintMap(d)}</div>
 
-        <div style="display:flex;flex-direction:column;gap:12px;">
-          <div class="rounded-2xl border bg-white shadow-sm d2d-rise" style="padding:14px 16px;">
-            <div style="font-size:12.5px;font-weight:600;color:${DARK};margin-bottom:2px;">This week</div>
-            ${stat('Shipments', d.shipments.length, null)}
-            ${stat('In transit', inTransit, delivered + ' delivered')}
-            ${stat('Behind plan', slips.length, slips.length ? 'worst ' + Math.max(...slips) + ' days' : 'all on plan', slips.length ? BRAND : DARK)}
-            ${stat('Booked as', approved ? esc(approved.title || approved.option_ref) : '&ndash;',
-                   approved ? esc([approved.carrier, approved.transit_days ? approved.transit_days + ' days' : ''].filter(Boolean).join(' · ')) : 'no approved option')}
+        <div style="display:flex;flex-direction:column;gap:12px;min-width:0;">
+          <div class="grid grid-cols-2 gap-3">
+            ${tile('In transit', inTransit, `${d.shipments.length} this week` + (orders ? ` · ${orders} orders` : ''))}
+            ${tile('Behind plan', slips.length,
+                   slips.length ? 'worst ' + Math.max(...slips) + ' days' : 'all on plan',
+                   slips.length ? BRAND : DARK)}
           </div>
-
           ${paintArriving(d)}
-
-          <div class="rounded-2xl border bg-white shadow-sm d2d-rise" style="padding:14px 16px;animation-delay:.06s;">
-            <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px;">
-              <span style="font-size:12.5px;font-weight:600;color:${DARK};">Next best action</span>
-              <span style="font-size:10.5px;color:${LIGHT};">from this week's dates</span>
-            </div>
-            ${acts.map((a, i) => `<div class="d2d-nba" style="border-left-color:${a.accent};padding:9px 0 9px 11px;margin-bottom:${i === acts.length - 1 ? 0 : 8}px;">
-              <span class="d2d-kind" style="color:${a.ink};">${esc(a.kind)}</span>
-              <span style="font-size:12px;font-weight:600;color:${DARK};line-height:1.35;">${esc(a.what)}</span>
-              <span style="font-size:10.5px;color:${MID};line-height:1.4;">${esc(a.effect)}</span>
-            </div>`).join('')}
-          </div>
         </div>
-      </div>`;
+      </div>
+
+      <div style="display:flex;align-items:baseline;gap:9px;margin:2px 0 8px;">
+        <span style="font-size:12.5px;font-weight:600;color:${DARK};">Next best action</span>
+        <span style="font-size:11px;color:${MID};">from this week's dates</span>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3" style="margin-bottom:18px;">
+        ${acts.map((a, i2) => `
+          <div class="rounded-2xl border bg-white shadow-sm d2d-nba d2d-rise d2d-lift"
+               style="border-left:3px solid ${a.accent};padding:13px 15px;animation-delay:${i2 * .05}s;">
+            <span class="d2d-kind" style="color:${a.ink};">${esc(a.kind)}</span>
+            <span style="font-size:12.5px;font-weight:600;color:${DARK};line-height:1.35;">${esc(a.what)}</span>
+            <span style="font-size:11px;color:${MID};line-height:1.4;">${esc(a.effect)}</span>
+          </div>`).join('')}
+      </div>
+
+      <div style="display:flex;align-items:baseline;gap:9px;margin-bottom:8px;">
+        <span style="font-size:12.5px;font-weight:600;color:${DARK};">Shipments this week</span>
+        <span style="font-size:11px;color:${MID};">plan against actual${_internal ? ' · click a stage to record it' : ''}</span>
+      </div>
+      ${d.shipments.length ? d.shipments.map(shipmentCard).join('')
+        : `<div class="rounded-2xl border bg-white shadow-sm d2d-empty">Nothing booked for this week yet.</div>`}`;
   }
 
   // ── Live tracking ──
@@ -553,7 +555,7 @@
         </div>
 
         <div style="position:relative;background:#FBFCFD;">
-          <svg viewBox="0 0 ${MAP.w} ${MAP.h}" width="100%" style="display:block;max-height:430px;" role="img"
+          <svg viewBox="0 0 ${MAP.w} ${MAP.h}" width="100%" style="display:block;max-height:${big ? 640 : 380}px;" role="img"
                aria-label="Where this week's shipments are">
             ${dotField()}
             <path d="${ROUTE_D}" fill="none" stroke="#C9CED6" stroke-width="1.6" stroke-dasharray="5 6"/>
