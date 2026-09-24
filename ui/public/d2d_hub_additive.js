@@ -381,32 +381,43 @@
 
     for (const sh of mapSource(d)) {
       const od = overdueOf(sh);
-      if (od) out.push({ kind: 'Chase', accent: BRAND, ink: BRAND,
+      const slip = slipOf(sh);
+      if (od) out.push({ kind: 'Overdue', accent: BRAND, ink: BRAND,
         what: `${od.label} not recorded`,
         where: where(sh),
         effect: `Planned ${day(sh['plan_' + od.stage])} · ${od.days} day${od.days === 1 ? '' : 's'} ago`,
+        next: 'Chase the partner for the date, or record it if you have it',
         id: sh.id, sort: 100 + od.days });
+      else if (slip != null && slip > 0 && sh.status !== 'delivered') out.push({ kind: 'Behind plan', accent: BRAND, ink: BRAND,
+        what: `Running ${slip} day${slip === 1 ? '' : 's'} behind`,
+        where: where(sh),
+        effect: `Arrival moves to about ${day(addDaysISO(sh.plan_arrived, slip))}`,
+        next: slip > 4 ? 'Warn the client and look at the last-mile booking' : 'Recoverable before delivery — watch the next stage',
+        id: sh.id, sort: 70 + slip });
       else if (!sh.reference && sh.status !== 'delivered') out.push({ kind: 'Missing', accent: YELL, ink: YINK,
         what: 'Container number not advised',
         where: 'week ' + (isoWeek(sh.week_start) || day(sh.week_start)) + ' · ' + (sh.container_type || 'container'),
         effect: 'The partner cannot report milestones without it',
+        next: 'Ask the partner to advise it, or enter it on the shipment',
         id: sh.id, sort: 60 });
     }
 
     const released = d.bookings.filter(b => b.status === 'released');
-    if (released.length) out.push({ kind: 'Decide', accent: BLUE, ink: BLUE,
+    if (released.length) out.push({ kind: 'Undecided', accent: BLUE, ink: BLUE,
       what: `${released.length} option${released.length === 1 ? '' : 's'} awaiting a decision`,
       where: 'week ' + (isoWeek(_week) || day(_week)),
-      effect: 'Space is held until the cut-off', sort: 90 });
+      effect: 'Space is held until the cut-off',
+      next: 'Nudge the client — the rate expires with the sailing', sort: 90 });
 
     const drafts = d.bookings.filter(b => b.status === 'draft');
-    if (drafts.length && _internal) out.push({ kind: 'Price', accent: YELL, ink: YINK,
+    if (drafts.length && _internal) out.push({ kind: 'Unpriced', accent: YELL, ink: YINK,
       what: `${drafts.length} option${drafts.length === 1 ? '' : 's'} not yet released`,
       where: 'week ' + (isoWeek(_week) || day(_week)),
-      effect: 'Set the margin, then release to the client', sort: 80 });
+      effect: 'The client cannot see them until they are released',
+      next: 'Set the margin on Pricing, then release', sort: 80 });
 
     if (!out.length) out.push({ kind: 'Clear', accent: LIME, ink: LINK,
-      what: 'Nothing needs a decision', where: '', effect: 'Every stage is on plan or recorded', sort: 0 });
+      what: 'No exceptions', where: '', effect: 'Every stage is on plan or recorded', next: '', sort: 0 });
     return out.sort((a, b) => b.sort - a.sort).slice(0, 4);
   }
 
@@ -537,13 +548,13 @@
             const dec = decisions(d);
             if (!dec.length) return `
               <div class="rounded-2xl border bg-white shadow-sm" style="padding:14px 16px;">
-                <div style="font-size:12.5px;font-weight:600;color:${DARK};">Waiting on somebody</div>
-                <div style="font-size:11.5px;color:${LINK};margin-top:6px;">Nothing is waiting. Every option is decided and every container is advised.</div>
+                <div style="font-size:12.5px;font-weight:600;color:${DARK};">Open items</div>
+                <div style="font-size:11.5px;color:${LINK};margin-top:6px;">Nothing open. Every option is decided and every container is advised.</div>
               </div>`;
             return `
               <div class="rounded-2xl border bg-white shadow-sm" style="padding:14px 16px;">
                 <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px;">
-                  <span style="font-size:12.5px;font-weight:600;color:${DARK};">Waiting on somebody</span>
+                  <span style="font-size:12.5px;font-weight:600;color:${DARK};">Open items</span>
                   <span style="font-size:10.5px;color:${LIGHT};">across all weeks</span>
                 </div>
                 ${dec.map(x => `
@@ -596,8 +607,10 @@
       </div>
 
       <div style="display:flex;align-items:baseline;gap:9px;margin:2px 0 8px;">
-        <span style="font-size:12.5px;font-weight:600;color:${DARK};">Next best action</span>
-        <span style="font-size:11px;color:${MID};">from this week's dates</span>
+        <span style="font-size:12.5px;font-weight:600;color:${DARK};">Exceptions</span>
+        <span style="font-size:11px;color:${MID};">what is off plan, and what to do about it</span>
+        ${acts.length && acts[0].kind !== 'Clear'
+          ? `<span class="d2d-num" style="font-size:11px;color:${BRAND};font-weight:700;">${acts.length}</span>` : ''}
       </div>
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3" style="margin-bottom:18px;">
         ${acts.map((a, i2) => {
@@ -612,6 +625,11 @@
             </span>
             <span style="font-size:12.5px;font-weight:600;color:${DARK};line-height:1.35;">${esc(a.what)}</span>
             <span style="font-size:11px;color:${MID};line-height:1.4;">${esc(a.effect)}</span>
+            ${a.next ? `<span style="display:flex;align-items:baseline;gap:6px;margin-top:7px;padding-top:7px;
+                  border-top:.5px solid rgba(0,0,0,.06);">
+                 <span style="font-size:9px;font-weight:700;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">Next</span>
+                 <span style="font-size:11px;color:${DARK};line-height:1.4;">${esc(a.next)}</span>
+               </span>` : ''}
           </${tag}>`;
         }).join('')}
       </div>
@@ -684,6 +702,11 @@
   // Equirectangular, which is what these generated dot maps use — verified below against known
   // coastal cities rather than assumed, because a wrong projection puts ports in the sea.
   const project = (v, lon, lat) => ({ x: v.x0 + (lon + 180) / 360 * v.w, y: v.y0 + (90 - lat) / 180 * v.h });
+
+  // Seen from above, as a map should be: a container ship with stacked boxes, and a swept
+  // airframe. The earlier marks were a line drawing that read as the same shape at map scale.
+  const ICON_SHIP = 'M-10 2 L10 2 L7.5 7 L-7.5 7 Z M-6.5 -2 H-2.5 V2 H-6.5 Z M-1.5 -4.5 H2.5 V2 H-1.5 Z M4 -3 H6 V2 H4 Z';
+  const ICON_PLANE = 'M0 -10 L1.8 -4 L10 0.5 L10 2.6 L1.8 0.6 L1.8 6 L4.4 8 L4.4 9.4 L0 8.2 L-4.4 9.4 L-4.4 8 L-1.8 6 L-1.8 0.6 L-10 2.6 L-10 0.5 L-1.8 -4 Z';
 
   let _world = null, _worldTried = false, _dots = null, _sea = null;
 
@@ -908,7 +931,9 @@
       // into a single marker with two names printed over each other. They are stepped apart
       // across the lane, and the label offset is carried through so the text follows its own
       // marker rather than the one beside it.
-      const key = (air ? 'a' : 's') + Math.round(base * 40);
+      // One counter for everything near the same point, whatever the mode: an air and a sea
+      // marker in the same place were both given side zero and printed on top of each other.
+      const key = Math.round(base * 40);
       const n = (atStage[key] = (atStage[key] || 0) + 1) - 1;
       const t = (base === 0 || base >= 1) ? base : Math.min(0.97, base);
       const across = base === 0 || base >= 1 ? 0 : ((n % 2 ? 1 : -1) * Math.ceil(n / 2) * 26);
@@ -940,6 +965,29 @@
     if (_mapScope === 'week') return d.shipments;
     const all = d.allShipments && d.allShipments.length ? d.allShipments : d.shipments;
     return all.filter(x => x.status !== 'delivered' || (d.shipments || []).some(y => y.id === x.id));
+  }
+
+  // Sea is a heavier dashed line in water blue; air a fine dotted line in brand blue. Each
+  // shipment's line is offset by the same amount as its marker, so the two agree.
+  const SEA_LINE = '#6F93BC';
+  function lanePaths(marks, k) {
+    const drawn = new Set();
+    return marks.map(m => {
+      const from = ORIGIN_PORTS[originKey(m.sh.service || m.sh.origin)] || null;
+      const off = (m.lane || 0) * ((m.lane % 2 ? -1 : 1)) * 26 * (VIEW.w / MAP.w);
+      const key = (m.air ? 'a' : 's') + (from ? from.label : '-') + Math.round(off);
+      if (drawn.has(key)) return '';
+      drawn.add(key);
+      const A = from ? portXY(from) : PORTS.origin;
+      const B = PORTS.destination;
+      const C = m.air ? airC(A) : curveC(A);
+      const d2 = `M${A.x.toFixed(1)} ${(A.y + off).toFixed(1)} Q${C.x.toFixed(1)} ${(C.y + off).toFixed(1)} ${B.x.toFixed(1)} ${B.y.toFixed(1)}`;
+      return m.air
+        ? `<path d="${d2}" fill="none" stroke="${BLUE}" stroke-width="${(1.5 * k).toFixed(2)}" stroke-linecap="round"
+                 stroke-dasharray="${(1.6 * k).toFixed(1)} ${(6 * k).toFixed(1)}" opacity=".85"/>`
+        : `<path d="${d2}" fill="none" stroke="${SEA_LINE}" stroke-width="${(2.2 * k).toFixed(2)}" stroke-linecap="round"
+                 stroke-dasharray="${(9 * k).toFixed(1)} ${(6 * k).toFixed(1)}" opacity=".75"/>`;
+    }).join('');
   }
 
   function paintMap(d, opts) {
@@ -994,7 +1042,7 @@
             </span>
           </div>
           <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-            ${[['Sea', '#8FA8C4'], ['Air', BLUE], ['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]].map(([l, c]) =>
+            ${[['Sea', SEA_LINE], ['Air', BLUE], ['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]].map(([l, c]) =>
               `<span style="font-size:12.5px;color:${DARK};"><span style="display:inline-block;width:9.5px;height:9.5px;
                  border-radius:50%;background:${c};margin-right:6px;"></span>${l}</span>`).join('')}
             <button class="d2d-btn" data-mapfull="1" style="padding:7px 11px;min-height:36px;display:inline-flex;align-items:center;gap:6px;">
@@ -1007,14 +1055,9 @@
           <svg viewBox="${VIEW.x0} ${VIEW.y0} ${VIEW.w} ${VIEW.h}" width="100%" style="display:block;max-height:${big ? 760 : 588}px;" role="img"
                aria-label="Where this week's shipments are">
             ${seaField()}${dotField()}
-            ${originsUsed(source.filter(x => x.mode !== 'air')).map(from => `
-              <path d="${routeD(from)}" fill="none" stroke="#8FA8C4" stroke-width="${(2 * k).toFixed(2)}"
-                    stroke-linecap="round" stroke-dasharray="${(7 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".8"/>`).join('')}
-            ${source.some(x => x.mode === 'air')
-              ? originsUsed(source.filter(x => x.mode === 'air')).map(from => `
-                <path d="${airD(from)}" fill="none" stroke="${BLUE}" stroke-width="${(1.6 * k).toFixed(2)}"
-                      stroke-linecap="round" stroke-dasharray="${(2 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".8"/>`).join('')
-              : ''}
+            ${/* One line per shipment in flight, nudged apart. Two containers on the same lane
+                  drew a single path with two names hanging off it. */ ''}
+            ${lanePaths(marks, k)}
             ${/* The ports actually used, and the factories behind them. Globe ships from about
                   twenty plants through several ports, so a single origin dot was a fiction. */ ''}
             ${originsUsed(source).filter(Boolean).map(from => {
@@ -1038,8 +1081,8 @@
                         stroke-width="${((m.air ? 1.8 : 1.3) * k).toFixed(2)}"
                         stroke-dasharray="${m.air ? (2.5 * k).toFixed(1) + ' ' + (2 * k).toFixed(1) : ''}" opacity=".97"/>
                 <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)}) scale(${(k * .8).toFixed(3)})">
-                  <path d="${m.air ? 'M-8 0 L8 0 M-3 -5 L3 0 L-3 5' : 'M-7 3 L7 3 L5 7 L-5 7 Z M0 -7 L0 3 M0 -7 L5 1 L0 1'}"
-                        fill="none" stroke="${m.colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+                  <path d="${m.air ? ICON_PLANE : ICON_SHIP}" fill="${m.colour}" fill-opacity=".92"
+                        stroke="${m.colour}" stroke-width=".8" stroke-linejoin="round"/>
                 </g>
                 <text x="${(m.pos.x + (m.lane % 2 ? -15 : 15) * k).toFixed(1)}"
                       y="${(m.pos.y + 3.5 * k).toFixed(1)}" text-anchor="${m.lane % 2 ? 'end' : 'start'}"
@@ -1483,7 +1526,7 @@
             'CBM, weight and how full each box is arrive with GRBA&rsquo;s order file. Until then a utilisation figure would be a guess.')}
 
           <div class="rounded-2xl border bg-white shadow-sm" style="padding:14px 16px;">
-            <div style="font-size:12.5px;font-weight:600;color:${DARK};margin-bottom:8px;">Outstanding</div>
+            <div style="font-size:12.5px;font-weight:600;color:${DARK};margin-bottom:8px;">Exceptions</div>
             ${docsPending ? `<div style="font-size:12px;color:${DARK};line-height:1.45;">
                  <b>${docsPending}</b> container${docsPending === 1 ? '' : 's'} without a number advised</div>
                <div style="font-size:10.5px;color:${MID};margin-top:2px;">The partner cannot report milestones without it</div>` : ''}
@@ -2338,7 +2381,7 @@
     // The lane runs far further north to south than east to west, and a wide screen then
     // forces a wide frame. Padding is kept tight so the route fills the HEIGHT; the extra
     // width becomes context either side rather than the route shrinking to a dot.
-    const pad = 1.35;
+    const pad = 1.75;
     let fw = Math.max(lx1 - lx0, 1) * pad, fh = Math.max(ly1 - ly0, 1) * pad;
     const screen = Math.max(1.2, (window.innerWidth || 1600) / Math.max(400, (window.innerHeight || 900) - 60));
     if (fw / fh < screen) fw = fh * screen; else fh = fw / screen;
@@ -2357,14 +2400,7 @@
         <g>${seaField()}${dotField()}</g>
         <g transform="translate(${-worldW},0)">${seaField()}${dotField()}</g>
         <g transform="translate(${worldW},0)">${seaField()}${dotField()}</g>
-        ${originsUsed(source.filter(x => x.mode !== 'air')).map(from => `
-          <path d="${routeD(from)}" fill="none" stroke="#8FA8C4" stroke-width="${(2 * k).toFixed(2)}"
-                stroke-linecap="round" stroke-dasharray="${(7 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".8"/>`).join('')}
-        ${source.some(x => x.mode === 'air')
-          ? originsUsed(source.filter(x => x.mode === 'air')).map(from => `
-            <path d="${airD(from)}" fill="none" stroke="${BLUE}" stroke-width="${(1.6 * k).toFixed(2)}"
-                  stroke-linecap="round" stroke-dasharray="${(2 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".8"/>`).join('')
-          : ''}
+        ${lanePaths(marks, k)}
         ${originsUsed(source).filter(Boolean).map(from => {
           const q = portXY(from);
           const n = source.filter(x => (ORIGIN_PORTS[originKey(x.service || x.origin)] || {}).label === from.label).length;
@@ -2406,8 +2442,8 @@
                     stroke-width="${((m.air ? 1.9 : 1.4) * k).toFixed(2)}"
                     stroke-dasharray="${m.air ? (2.5 * k).toFixed(1) + ' ' + (2 * k).toFixed(1) : ''}" opacity=".97"/>
             <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)}) scale(${(k * .85).toFixed(3)})">
-              <path d="${m.air ? 'M-8 0 L8 0 M-3 -5 L3 0 L-3 5' : 'M-8 3 L8 3 L6 8 L-6 8 Z M0 -8 L0 3 M0 -8 L6 1 L0 1'}"
-                    fill="none" stroke="${m.colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+              <path d="${m.air ? ICON_PLANE : ICON_SHIP}" fill="${m.colour}" fill-opacity=".92"
+                    stroke="${m.colour}" stroke-width=".8" stroke-linejoin="round"/>
             </g>
             <text x="${(m.pos.x + (m.lane % 2 ? -16 : 16) * k).toFixed(1)}"
                   y="${(m.pos.y + 3.5 * k).toFixed(1)}" text-anchor="${m.lane % 2 ? 'end' : 'start'}"
@@ -2432,7 +2468,7 @@
           </span>
         </div>
         <div style="display:flex;align-items:center;gap:14px;">
-          ${[['Sea', '#8FA8C4'], ['Air', BLUE], ['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]].map(([l, c]) =>
+          ${[['Sea', SEA_LINE], ['Air', BLUE], ['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]].map(([l, c]) =>
             `<span style="font-size:12.5px;color:${DARK};"><span style="display:inline-block;width:9.5px;height:9.5px;
                border-radius:50%;background:${c};margin-right:6px;"></span>${l}</span>`).join('')}
           <button class="d2d-btn" id="d2d-fullclose" aria-label="Close full screen">Close</button>
@@ -2679,5 +2715,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v21 loaded');
+  console.log('[d2d-hub] v22 loaded');
 })();
