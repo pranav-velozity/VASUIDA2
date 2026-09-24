@@ -651,6 +651,23 @@
   let VIEW = { x0: 0, y0: 0, w: MAP.w, h: MAP.h };
 
   // Real places, so the map can be geographic rather than schematic.
+  // Origin ports actually used on this lane, plus the inland area the factories sit in.
+  const ORIGIN_PORTS = {
+    ningbo:    { lon: 121.55, lat: 29.87, label: 'Ningbo' },
+    qingdao:   { lon: 120.32, lat: 36.09, label: 'Qingdao' },
+    xiamen:    { lon: 118.09, lat: 24.48, label: 'Xiamen' },
+    hongkong:  { lon: 114.17, lat: 22.32, label: 'Hong Kong' },
+    shanghai:  { lon: 121.47, lat: 31.23, label: 'Shanghai' },
+    shenzhen:  { lon: 114.06, lat: 22.54, label: 'Shenzhen' },
+  };
+  // Free text on a booking is matched loosely: files say "NINGBO", "Ningbo, CN", "ningbo port".
+  function originKey(text) {
+    const t = String(text || '').toLowerCase();
+    for (const k of Object.keys(ORIGIN_PORTS)) if (t.includes(k)) return k;
+    if (/hong\s*kong|hkg/.test(t)) return 'hongkong';
+    return null;
+  }
+
   const PLACES = {
     origin:       { lon: 121.55, lat: 29.87,  label: 'Ningbo' },
     transhipment: { lon: 120.98, lat: 14.60,  label: 'Manila' },
@@ -811,36 +828,56 @@
   }
 
   // The route bows through the sea rather than across land, anchored on the two ports.
-  const curveC = () => {
-    const A = PORTS.origin, B = PORTS.destination;
+  // Where a route starts: the shipment's own port when we know it, Ningbo otherwise.
+  const portXY = (place) => {
+    if (!place) return PORTS.origin;
+    const q = project(VIEWSRC(), place.lon, place.lat);
+    return { x: q.x, y: q.y, label: place.label };
+  };
+  const VIEWSRC = () => (_world && _world.view) || { x0: 0, y0: 0, w: MAP.w, h: MAP.h };
+
+  const curveC = (from) => {
+    const A = from || PORTS.origin, B = PORTS.destination;
     // Push the control point east so the arc runs down the Pacific side, as the sailing does.
     return { x: Math.max(A.x, B.x) + Math.abs(B.x - A.x) * 0.55 + 10, y: (A.y + B.y) / 2 };
   };
-  const atT = (t) => {
-    const u = 1 - t, A = PORTS.origin, B = PORTS.destination, C = curveC();
+  const atT = (t, fromPlace) => {
+    const A = fromPlace ? portXY(fromPlace) : PORTS.origin;
+    const u = 1 - t, B = PORTS.destination, C = curveC(A);
     return { x: u * u * A.x + 2 * u * t * C.x + t * t * B.x,
              y: u * u * A.y + 2 * u * t * C.y + t * t * B.y };
   };
   // Air bows the other way and less far: it is a different journey, and overlaying it on the
   // sea lane made two modes look like one.
-  const airC = () => {
-    const A = PORTS.origin, B = PORTS.destination;
+  const airC = (from) => {
+    const A = from || PORTS.origin, B = PORTS.destination;
     return { x: (A.x + B.x) / 2 - Math.abs(B.x - A.x) * 0.35, y: (A.y + B.y) / 2 };
   };
-  const atAirT = (t) => {
-    const u = 1 - t, A = PORTS.origin, B = PORTS.destination, C = airC();
+  const atAirT = (t, fromPlace) => {
+    const A = fromPlace ? portXY(fromPlace) : PORTS.origin;
+    const u = 1 - t, B = PORTS.destination, C = airC(A);
     return { x: u * u * A.x + 2 * u * t * C.x + t * t * B.x,
              y: u * u * A.y + 2 * u * t * C.y + t * t * B.y };
   };
-  const airD = () => {
-    const A = PORTS.origin, B = PORTS.destination, C = airC();
-    return `M${A.x.toFixed(1)} ${A.y.toFixed(1)} Q${C.x.toFixed(1)} ${C.y.toFixed(1)} ${B.x.toFixed(1)} ${B.y.toFixed(1)}`;
+  const pathFrom = (A, C, B) =>
+    `M${A.x.toFixed(1)} ${A.y.toFixed(1)} Q${C.x.toFixed(1)} ${C.y.toFixed(1)} ${B.x.toFixed(1)} ${B.y.toFixed(1)}`;
+  const airD = (fromPlace) => {
+    const A = fromPlace ? portXY(fromPlace) : PORTS.origin;
+    return pathFrom(A, airC(A), PORTS.destination);
   };
 
-  const routeD = () => {
-    const A = PORTS.origin, B = PORTS.destination, C = curveC();
-    return `M${A.x.toFixed(1)} ${A.y.toFixed(1)} Q${C.x.toFixed(1)} ${C.y.toFixed(1)} ${B.x.toFixed(1)} ${B.y.toFixed(1)}`;
+  const routeD = (fromPlace) => {
+    const A = fromPlace ? portXY(fromPlace) : PORTS.origin;
+    return pathFrom(A, curveC(A), PORTS.destination);
   };
+  // Which origin ports are actually in play, so a lane is drawn for each rather than one
+  // pretending every factory ships from the same place.
+  function originsUsed(list) {
+    const keys = new Set();
+    for (const sh of list) { const k = originKey(sh.service || sh.origin); if (k) keys.add(k); }
+    if (!keys.size) return [null];
+    return [...keys].map(k => ORIGIN_PORTS[k]);
+  }
 
   function shipmentPositions(list) {
     // Everything at the same stage shares one position, so without this a whole sailing draws
@@ -851,17 +888,31 @@
       let last = null, lastStage = null;
       for (const [k, label] of STAGES) if (ev[k] && ev[k].actual_at) { last = k; lastStage = label; }
       const air = sh.mode === 'air';
-      const base = last ? STAGE_T[last] : 0;
+      let base = last ? STAGE_T[last] : 0;
 
-      const key = (air ? 'a' : 's') + base;
+      // Departed but not arrived: place it by how much of the voyage has actually elapsed.
+      // Pinning every departed vessel to a fixed 10% stacked a whole week on top of the port
+      // and told you nothing about how far along anything was.
+      if (last === 'departed') {
+        const left = ev.departed && ev.departed.actual_at;
+        const eta = sh.plan_arrived;
+        const total = daysBetween(left, eta);
+        const gone = daysBetween(left, today());
+        if (total && total > 0 && gone != null) {
+          const frac = Math.max(0, Math.min(1, gone / total));
+          base = STAGE_T.departed + frac * (STAGE_T.arrived - STAGE_T.departed);
+        }
+      }
+
+      const key = (air ? 'a' : 's') + Math.round(base * 40);
       const n = (atStage[key] = (atStage[key] || 0) + 1) - 1;
-      // Nudge forward a little and alternate above and below the line. A shipment that has not
-      // been collected stays exactly at the origin: nudging it onto the route would draw it as
-      // sailing when nothing has happened yet.
-      const t = (base === 0 || base >= 1) ? base : Math.min(0.97, base + n * 0.035);
-      const across = base === 0 || base >= 1 ? 0 : ((n % 2 ? 1 : -1) * Math.ceil(n / 2) * 13);
+      // Anything still sharing a spot is fanned across the lane rather than along it, so the
+      // position keeps meaning what it says.
+      const t = (base === 0 || base >= 1) ? base : Math.min(0.97, base);
+      const across = base === 0 || base >= 1 ? 0 : ((n % 2 ? 1 : -1) * Math.ceil(n / 2) * 15);
 
-      const p = air ? atAirT(t) : atT(t);
+      const from = ORIGIN_PORTS[originKey(sh.service || sh.origin)] || null;
+      const p = air ? atAirT(t, from) : atT(t, from);
       const slip = slipOf(sh);
       const od = overdueOf(sh);
       const colour = od || (slip != null && slip > 0) ? BRAND
@@ -940,7 +991,7 @@
             </span>
           </div>
           <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-            ${[['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]].map(([l, c]) =>
+            ${[['Sea', '#8FA8C4'], ['Air', BLUE], ['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]].map(([l, c]) =>
               `<span style="font-size:12.5px;color:${DARK};"><span style="display:inline-block;width:9.5px;height:9.5px;
                  border-radius:50%;background:${c};margin-right:6px;"></span>${l}</span>`).join('')}
             <button class="d2d-btn" data-mapfull="1" style="padding:7px 11px;min-height:36px;display:inline-flex;align-items:center;gap:6px;">
@@ -953,12 +1004,22 @@
           <svg viewBox="${VIEW.x0} ${VIEW.y0} ${VIEW.w} ${VIEW.h}" width="100%" style="display:block;max-height:${big ? 760 : 588}px;" role="img"
                aria-label="Where this week's shipments are">
             ${seaField()}${dotField()}
-            <path d="${routeD()}" fill="none" stroke="#8FA8C4" stroke-width="${(2 * k).toFixed(2)}"
-                  stroke-linecap="round" stroke-dasharray="${(7 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".85"/>
-            ${source.some(x => x.mode === 'air') ? `<path d="${airD()}" fill="none" stroke="${BLUE}"
-                  stroke-width="${(1.5 * k).toFixed(2)}" stroke-linecap="round"
-                  stroke-dasharray="${(2 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".75"/>` : ''}
-            ${node(PORTS.origin, atOrigin, LIME)}
+            ${originsUsed(source.filter(x => x.mode !== 'air')).map(from => `
+              <path d="${routeD(from)}" fill="none" stroke="#8FA8C4" stroke-width="${(2 * k).toFixed(2)}"
+                    stroke-linecap="round" stroke-dasharray="${(7 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".8"/>`).join('')}
+            ${source.some(x => x.mode === 'air')
+              ? originsUsed(source.filter(x => x.mode === 'air')).map(from => `
+                <path d="${airD(from)}" fill="none" stroke="${BLUE}" stroke-width="${(1.6 * k).toFixed(2)}"
+                      stroke-linecap="round" stroke-dasharray="${(2 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".8"/>`).join('')
+              : ''}
+            ${/* The ports actually used, and the factories behind them. Globe ships from about
+                  twenty plants through several ports, so a single origin dot was a fiction. */ ''}
+            ${originsUsed(source).filter(Boolean).map(from => {
+              const q = portXY(from);
+              const n = source.filter(x => (ORIGIN_PORTS[originKey(x.service || x.origin)] || {}).label === from.label).length;
+              return node({ x: q.x, y: q.y, label: from.label }, n, LIME);
+            }).join('')}
+            ${/* The origin nodes are drawn per port above; a single fixed one duplicated them. */ ''}
             ${node(PORTS.destination, atDest, BRAND)}
             ${/* Customs and the DC sit within a few kilometres of the port: naming all three at
                   this scale printed them on top of each other. */ ''}
@@ -970,7 +1031,9 @@
                 <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="18" fill="transparent"/>
                 <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(11 * k).toFixed(1)}" fill="${m.colour}" opacity=".18" class="d2d-ping"/>
                 <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(8.5 * k).toFixed(1)}"
-                        fill="#ffffff" stroke="${m.colour}" stroke-width="${(1.3 * k).toFixed(2)}" opacity=".95"/>
+                        fill="${m.air ? 'rgba(44,111,187,.10)' : '#ffffff'}" stroke="${m.air ? BLUE : m.colour}"
+                        stroke-width="${((m.air ? 1.8 : 1.3) * k).toFixed(2)}"
+                        stroke-dasharray="${m.air ? (2.5 * k).toFixed(1) + ' ' + (2 * k).toFixed(1) : ''}" opacity=".97"/>
                 <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)}) scale(${(k * .8).toFixed(3)})">
                   <path d="${m.air ? 'M-8 0 L8 0 M-3 -5 L3 0 L-3 5' : 'M-7 3 L7 3 L5 7 L-5 7 Z M0 -7 L0 3 M0 -7 L5 1 L0 1'}"
                         fill="none" stroke="${m.colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
@@ -2239,15 +2302,18 @@
     // widened so the whole route sits inside a recognisable region.
     // Centre on the route rather than the frame, and pull well back: the lane belongs in the
     // middle of a full screen, not off to one side of it.
-    const grow = 2.6;
+    // Pulled back further, and centred on the lane itself. The frame is NOT clamped to the
+    // world any more: clamping is what pushed China and Australia into the right-hand corner,
+    // since the lane sits at the eastern edge of an equirectangular map. The dot field is
+    // drawn again either side instead, so the map stays continuous.
+    const grow = 2.6 * 1.6;
     const mid = atT(0.5);
     const cx = (PORTS.origin.x + PORTS.destination.x + mid.x) / 3;
     const cy = (PORTS.origin.y + PORTS.destination.y + mid.y) / 3;
     const bounds = (_world && _world.view) || { x0: 0, y0: 0, w: MAP.w, h: MAP.h };
-    let fw = Math.min(VIEW.w * grow, bounds.w), fh = Math.min(VIEW.h * grow, bounds.h);
-    let fx = Math.max(bounds.x0, Math.min(cx - fw / 2, bounds.x0 + bounds.w - fw));
-    let fy = Math.max(bounds.y0, Math.min(cy - fh / 2, bounds.y0 + bounds.h - fh));
-    const FULLVIEW = { x0: fx, y0: fy, w: fw, h: fh };
+    const fw = VIEW.w * grow, fh = VIEW.h * grow;
+    const FULLVIEW = { x0: cx - fw / 2, y0: cy - fh / 2, w: fw, h: fh };
+    const worldW = bounds.w;
     const k = FULLVIEW.w / MAP.w;
 
     const ov = document.createElement('div');
@@ -2258,14 +2324,32 @@
            preserveAspectRatio="xMidYMid meet"
            style="position:absolute;inset:0;width:100%;height:100%;display:block;" role="img"
            aria-label="Live tracking, full screen">
-        ${seaField()}${dotField()}
-        <path d="${routeD()}" fill="none" stroke="#8FA8C4" stroke-width="${(2 * k).toFixed(2)}"
-              stroke-linecap="round" stroke-dasharray="${(7 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".85"/>
-        ${source.some(x => x.mode === 'air') ? `<path d="${airD()}" fill="none" stroke="${BLUE}"
-              stroke-width="${(1.5 * k).toFixed(2)}" stroke-linecap="round"
-              stroke-dasharray="${(2 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".75"/>` : ''}
-        ${[[PORTS.origin, marks.filter(m => m.t === 0).length, LIME, 0],
-           [PORTS.destination, marks.filter(m => m.t >= 0.82 && m.t < 0.9).length, BRAND, 0],
+        ${/* The same field, repeated either side, so a centred lane is not framed by nothing. */ ''}
+        <g>${seaField()}${dotField()}</g>
+        <g transform="translate(${-worldW},0)">${seaField()}${dotField()}</g>
+        <g transform="translate(${worldW},0)">${seaField()}${dotField()}</g>
+        ${originsUsed(source.filter(x => x.mode !== 'air')).map(from => `
+          <path d="${routeD(from)}" fill="none" stroke="#8FA8C4" stroke-width="${(2 * k).toFixed(2)}"
+                stroke-linecap="round" stroke-dasharray="${(7 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".8"/>`).join('')}
+        ${source.some(x => x.mode === 'air')
+          ? originsUsed(source.filter(x => x.mode === 'air')).map(from => `
+            <path d="${airD(from)}" fill="none" stroke="${BLUE}" stroke-width="${(1.6 * k).toFixed(2)}"
+                  stroke-linecap="round" stroke-dasharray="${(2 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".8"/>`).join('')
+          : ''}
+        ${originsUsed(source).filter(Boolean).map(from => {
+          const q = portXY(from);
+          const n = source.filter(x => (ORIGIN_PORTS[originKey(x.service || x.origin)] || {}).label === from.label).length;
+          return `<g>
+            <circle cx="${q.x}" cy="${q.y}" r="${(5 * k).toFixed(1)}" fill="${LIME}" stroke="${LIME}" stroke-width="${(1.7 * k).toFixed(2)}"/>
+            <text x="${q.x}" y="${(q.y - 13 * k).toFixed(1)}" text-anchor="middle" font-size="${(11 * k).toFixed(1)}"
+                  font-weight="600" fill="${DARK}" font-family="inherit" stroke="#ffffff"
+                  stroke-width="${(3.4 * k).toFixed(2)}" paint-order="stroke" stroke-linejoin="round">${esc(from.label)}</text>
+            ${n ? `<text x="${q.x}" y="${(q.y + 19 * k).toFixed(1)}" text-anchor="middle" font-size="${(10.5 * k).toFixed(1)}"
+                  font-weight="700" fill="${LINK}" font-family="ui-monospace,monospace" stroke="#ffffff"
+                  stroke-width="${(3.2 * k).toFixed(2)}" paint-order="stroke" stroke-linejoin="round">${n}</text>` : ''}
+          </g>`;
+        }).join('')}
+        ${[[PORTS.destination, marks.filter(m => m.t >= 0.82 && m.t < 0.9).length, BRAND, 0],
            [PORTS.customs, marks.filter(m => m.t >= 0.9 && m.t < 0.95).length, BRAND, 26],
            [PORTS.lastmile, marks.filter(m => m.t === 1).length, LINK, 52]].map(([pt, n, c, off]) => `
           <g>
@@ -2289,7 +2373,9 @@
             <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(20 * k).toFixed(1)}" fill="transparent"/>
             <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(12 * k).toFixed(1)}" fill="${m.colour}" opacity=".18" class="d2d-ping"/>
             <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(9.5 * k).toFixed(1)}"
-                    fill="#ffffff" stroke="${m.colour}" stroke-width="${(1.4 * k).toFixed(2)}" opacity=".95"/>
+                    fill="${m.air ? 'rgba(44,111,187,.10)' : '#ffffff'}" stroke="${m.air ? BLUE : m.colour}"
+                    stroke-width="${((m.air ? 1.9 : 1.4) * k).toFixed(2)}"
+                    stroke-dasharray="${m.air ? (2.5 * k).toFixed(1) + ' ' + (2 * k).toFixed(1) : ''}" opacity=".97"/>
             <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)}) scale(${(k * .85).toFixed(3)})">
               <path d="${m.air ? 'M-8 0 L8 0 M-3 -5 L3 0 L-3 5' : 'M-8 3 L8 3 L6 8 L-6 8 Z M0 -8 L0 3 M0 -8 L6 1 L0 1'}"
                     fill="none" stroke="${m.colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
@@ -2316,7 +2402,7 @@
           </span>
         </div>
         <div style="display:flex;align-items:center;gap:14px;">
-          ${[['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]].map(([l, c]) =>
+          ${[['Sea', '#8FA8C4'], ['Air', BLUE], ['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]].map(([l, c]) =>
             `<span style="font-size:12.5px;color:${DARK};"><span style="display:inline-block;width:9.5px;height:9.5px;
                border-radius:50%;background:${c};margin-right:6px;"></span>${l}</span>`).join('')}
           <button class="d2d-btn" id="d2d-fullclose" aria-label="Close full screen">Close</button>
