@@ -136,8 +136,10 @@
       .d2d-tabs .d2d-tab + .d2d-tab{margin-left:20px;}
       .d2d-crumb{border:0;background:none;font:inherit;font-size:11.5px;color:${BLUE};cursor:pointer;padding:0;}
       .d2d-crumb:hover{text-decoration:underline;}
-      .d2d-filt{border:.5px solid rgba(0,0,0,.14);background:#fff;color:${MID};border-radius:6px;padding:3px 7px;
-        font:600 9.5px inherit;letter-spacing:.01em;cursor:pointer;
+      /* Controls, not content: smaller and quieter than the legend, which is what a reader
+         actually needs to decode the map. 8px is as small as this face stays legible. */
+      .d2d-filt{border:.5px solid rgba(0,0,0,.13);background:#fff;color:${MID};border-radius:5px;padding:2px 6px;
+        font:600 8px inherit;letter-spacing:.02em;text-transform:uppercase;cursor:pointer;line-height:1.5;
         transition:border-color .18s ease,background .18s ease,color .18s ease;}
       .d2d-filt:hover{border-color:rgba(0,0,0,.3);}
       .d2d-filt.on{background:${DARK};border-color:${DARK};color:#fff;}
@@ -369,24 +371,39 @@
 
   function actions(d) {
     const out = [];
-    for (const s of d.shipments) {
-      const od = overdueOf(s);
+    // An action is only useful if you can tell what it is about. "Chase origin clearance"
+    // against forty containers is a to-do; against ONEU7654321 in week 41 it is a task.
+    const where = (sh) => [sh.reference || 'container not advised',
+                           'week ' + (isoWeek(sh.week_start) || day(sh.week_start))].join(' · ');
+
+    for (const sh of mapSource(d)) {
+      const od = overdueOf(sh);
       if (od) out.push({ kind: 'Chase', accent: BRAND, ink: BRAND,
-        what: `${od.label} not recorded for ${s.reference || 'an unadvised container'}`,
-        effect: `Planned ${day(s['plan_' + od.stage])}, ${od.days} day${od.days === 1 ? '' : 's'} ago`, sort: 100 + od.days });
-      if (!s.reference) out.push({ kind: 'Missing', accent: YELL, ink: YINK,
-        what: 'Container number not advised', effect: 'The partner cannot report milestones without it', sort: 60 });
+        what: `${od.label} not recorded`,
+        where: where(sh),
+        effect: `Planned ${day(sh['plan_' + od.stage])} · ${od.days} day${od.days === 1 ? '' : 's'} ago`,
+        id: sh.id, sort: 100 + od.days });
+      else if (!sh.reference && sh.status !== 'delivered') out.push({ kind: 'Missing', accent: YELL, ink: YINK,
+        what: 'Container number not advised',
+        where: 'week ' + (isoWeek(sh.week_start) || day(sh.week_start)) + ' · ' + (sh.container_type || 'container'),
+        effect: 'The partner cannot report milestones without it',
+        id: sh.id, sort: 60 });
     }
+
     const released = d.bookings.filter(b => b.status === 'released');
     if (released.length) out.push({ kind: 'Decide', accent: BLUE, ink: BLUE,
       what: `${released.length} option${released.length === 1 ? '' : 's'} awaiting a decision`,
+      where: 'week ' + (isoWeek(_week) || day(_week)),
       effect: 'Space is held until the cut-off', sort: 90 });
+
     const drafts = d.bookings.filter(b => b.status === 'draft');
     if (drafts.length && _internal) out.push({ kind: 'Price', accent: YELL, ink: YINK,
       what: `${drafts.length} option${drafts.length === 1 ? '' : 's'} not yet released`,
+      where: 'week ' + (isoWeek(_week) || day(_week)),
       effect: 'Set the margin, then release to the client', sort: 80 });
+
     if (!out.length) out.push({ kind: 'Clear', accent: LIME, ink: LINK,
-      what: 'Nothing needs a decision', effect: 'Every stage is on plan or recorded', sort: 0 });
+      what: 'Nothing needs a decision', where: '', effect: 'Every stage is on plan or recorded', sort: 0 });
     return out.sort((a, b) => b.sort - a.sort).slice(0, 4);
   }
 
@@ -480,6 +497,7 @@
     if (_tab === 'baselines') loadBaselines();
     document.querySelectorAll('#d2d-weeks [data-w]').forEach(b => b.onclick = () => {
       _week = b.getAttribute('data-w');
+      _rfqNote = '';
       if (_tab === 'shipments' && _view === 'container') _view = 'week';
       load();
     });
@@ -526,13 +544,20 @@
         <span style="font-size:11px;color:${MID};">from this week's dates</span>
       </div>
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3" style="margin-bottom:18px;">
-        ${acts.map((a, i2) => `
-          <div class="rounded-2xl border bg-white shadow-sm d2d-nba d2d-rise d2d-lift"
-               style="border-left:3px solid ${a.accent};padding:13px 15px;animation-delay:${i2 * .05}s;">
-            <span class="d2d-kind" style="color:${a.ink};">${esc(a.kind)}</span>
+        ${acts.map((a, i2) => {
+          const tag = a.id ? 'button' : 'div';
+          const attrs = a.id ? ` type="button" data-open="${esc(a.id)}" style="text-align:left;width:100%;cursor:pointer;` : ' style="';
+          return `
+          <${tag} class="rounded-2xl border bg-white shadow-sm d2d-nba d2d-rise d2d-lift"${attrs}
+               border-left:3px solid ${a.accent};padding:13px 15px;animation-delay:${i2 * .05}s;">
+            <span style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;">
+              <span class="d2d-kind" style="color:${a.ink};">${esc(a.kind)}</span>
+              ${a.where ? `<span class="d2d-num" style="font-size:9.5px;color:${LIGHT};">${esc(a.where)}</span>` : ''}
+            </span>
             <span style="font-size:12.5px;font-weight:600;color:${DARK};line-height:1.35;">${esc(a.what)}</span>
             <span style="font-size:11px;color:${MID};line-height:1.4;">${esc(a.effect)}</span>
-          </div>`).join('')}
+          </${tag}>`;
+        }).join('')}
       </div>
 
       `;
@@ -829,8 +854,8 @@
           </div>
           <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
             ${[['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]].map(([l, c]) =>
-              `<span style="font-size:10.5px;color:${MID};"><span style="display:inline-block;width:8px;height:8px;
-                 border-radius:50%;background:${c};margin-right:5px;"></span>${l}</span>`).join('')}
+              `<span style="font-size:12.5px;color:${DARK};"><span style="display:inline-block;width:9.5px;height:9.5px;
+                 border-radius:50%;background:${c};margin-right:6px;"></span>${l}</span>`).join('')}
             <button class="d2d-btn" data-mapfull="1" style="padding:7px 11px;min-height:36px;display:inline-flex;align-items:center;gap:6px;">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M9 3H3v6"/><path d="M15 21h6v-6"/><path d="M3 3l7 7"/><path d="M21 21l-7-7"/></svg>
               Full screen</button>
@@ -1167,6 +1192,7 @@
             ${actions(d).filter(a => a.kind !== 'Clear').slice(0, 3).map(a => `
               <div style="margin-top:10px;padding-left:10px;border-left:2px solid ${a.accent};">
                 <div style="font-size:12px;color:${DARK};line-height:1.4;">${esc(a.what)}</div>
+                ${a.where ? `<div class="d2d-num" style="font-size:10px;color:${LIGHT};">${esc(a.where)}</div>` : ''}
                 <div style="font-size:10.5px;color:${MID};">${esc(a.effect)}</div>
               </div>`).join('')}
             ${!docsPending && actions(d).every(a => a.kind === 'Clear')
@@ -1303,6 +1329,9 @@
   // Upload, preview, then apply. Two steps on purpose: a bad file must never half-load into a
   // live week, and the preview is where supplier and container mismatches surface.
   let _poPreview = null, _poCsv = '';
+  // Kept in state, not in the DOM: sending reloads the week, which would wipe a message
+  // written straight onto the element.
+  let _rfqNote = '';
 
   function paintPO(d) {
     const orders = d.orders || [];
@@ -1585,6 +1614,16 @@
           </div>
         </div>
         ${rq.notes ? `<div style="font-size:11px;color:${MID};margin-top:8px;">${esc(rq.notes)}</div>` : ''}
+        ${_internal ? `
+          <div style="display:flex;align-items:center;gap:8px;margin-top:11px;padding-top:11px;
+               border-top:.5px solid rgba(0,0,0,.05);flex-wrap:wrap;">
+            <button class="d2d-btn" data-rfq="${esc(rq.id)}" style="min-height:34px;padding:5px 11px;font-size:11.5px;">
+              ${rq.state === 'sent' || rq.state === 'costed' || rq.state === 'repricing' ? 'Resend to partner' : 'Send to partner'}</button>
+            ${(d.bookings || []).some(b => b.status === 'draft')
+              ? `<button class="d2d-btn" data-review="${esc(rq.id)}" style="min-height:34px;padding:5px 11px;font-size:11.5px;">Ask for a review</button>` : ''}
+            <span style="font-size:11px;color:${_rfqNote ? LINK : MID};" id="d2d-rfqmsg">${
+              _rfqNote ? esc(_rfqNote) : (rq.sent_at ? 'Sent ' + esc(day(String(rq.sent_at).slice(0, 10))) : '')}</span>
+          </div>` : ''}
       </div>` : '';
 
     if (!d.bookings.length) return header + cargo + `
@@ -2053,8 +2092,8 @@
         </div>
         <div style="display:flex;align-items:center;gap:14px;">
           ${[['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]].map(([l, c]) =>
-            `<span style="font-size:10.5px;color:${MID};"><span style="display:inline-block;width:8px;height:8px;
-               border-radius:50%;background:${c};margin-right:5px;"></span>${l}</span>`).join('')}
+            `<span style="font-size:12.5px;color:${DARK};"><span style="display:inline-block;width:9.5px;height:9.5px;
+               border-radius:50%;background:${c};margin-right:6px;"></span>${l}</span>`).join('')}
           <button class="d2d-btn" id="d2d-fullclose" aria-label="Close full screen">Close</button>
         </div>
       </div>
@@ -2198,6 +2237,35 @@
     root.querySelectorAll('[data-tabgo]').forEach(b => b.onclick = () => { _tab = b.getAttribute('data-tabgo'); paint(); });
     root.querySelectorAll('[data-filt]').forEach(b => b.onclick = () => { _mapFilter = b.getAttribute('data-filt'); paint(); });
     root.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { _mapScope = b.getAttribute('data-scope'); paint(); });
+    const rfq = root.querySelector('[data-rfq]');
+    if (rfq) rfq.onclick = async () => {
+      const msg = el('d2d-rfqmsg');
+      rfq.disabled = true; rfq.style.opacity = '.5';
+      if (msg) { msg.style.color = MID; msg.textContent = 'Sending…'; }
+      try {
+        const out = await api('/d2d/requests/' + rfq.getAttribute('data-rfq') + '/send', { method: 'POST', body: JSON.stringify({}) });
+        // The link is shown either way, so it can be pasted into an email if mail is not configured.
+        _rfqNote = (out.mail && out.mail.to && out.mail.to.length)
+          ? 'Sent to ' + out.mail.to.join(', ')
+          : 'Link ready — mail is not configured, copy it from the console';
+        if (!(out.mail && out.mail.to && out.mail.to.length)) console.warn('[d2d-hub] partner link:', out.link);
+        await load();
+      } catch (e) {
+        rfq.disabled = false; rfq.style.opacity = '';
+        if (msg) { msg.style.color = BRAND; msg.textContent = e.message; }
+      }
+    };
+    const rev = root.querySelector('[data-review]');
+    if (rev) rev.onclick = async () => {
+      const note = window.prompt('What should the partner look at again?');
+      if (!note || !note.trim()) return;
+      const msg = el('d2d-rfqmsg');
+      try {
+        await api('/d2d/requests/' + rev.getAttribute('data-review') + '/review', { method: 'POST', body: JSON.stringify({ note: note.trim() }) });
+        _rfqNote = 'Sent back for review';
+        await load();
+      } catch (e) { if (msg) { msg.style.color = BRAND; msg.textContent = e.message; } }
+    };
     const nb = root.querySelector('[data-newbooking]');
     if (nb) nb.onclick = () => openNewBooking();
     const up = root.querySelector('[data-poupload]');
@@ -2253,5 +2321,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v18 loaded');
+  console.log('[d2d-hub] v19 loaded');
 })();
