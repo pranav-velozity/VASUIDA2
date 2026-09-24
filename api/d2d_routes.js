@@ -273,7 +273,24 @@ module.exports = function mountD2D(deps) {
         : [];
       const byShipment = {};
       for (const e of events) (byShipment[e.shipment_id] = byShipment[e.shipment_id] || []).push(e);
-      res.json({ shipments: rows.map(r => ({ ...r, events: byShipment[r.id] || [] })) });
+
+      // What is aboard, from the assignments — so a container can say how many orders and
+      // units it carries without a second round trip.
+      const asg = ids.length
+        ? req.d2d.all(`SELECT shipment_id, COUNT(*) AS po_count, SUM(units) AS units, SUM(cbm) AS cbm
+                       FROM d2d_assignment WHERE client_id = @client
+                       AND shipment_id IN (${ids.map((_, i) => '@id' + i).join(',')})
+                       GROUP BY shipment_id`, idParams)
+        : [];
+      const load = {}; asg.forEach(a => { load[a.shipment_id] = a; });
+
+      res.json({ shipments: rows.map(r => ({
+        ...r,
+        events: byShipment[r.id] || [],
+        po_count: (load[r.id] || {}).po_count || 0,
+        units: (load[r.id] || {}).units || 0,
+        cbm: (load[r.id] || {}).cbm || null,
+      })) });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
 
@@ -701,6 +718,256 @@ module.exports = function mountD2D(deps) {
       const by = {};
       for (const e of events) (by[e.shipment_id] = by[e.shipment_id] || []).push(e);
       res.json({ shipments: rows.map(r => ({ ...r, events: by[r.id] || [] })), stages: STAGES });
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  // ── Orders: the PO, SKU and unit feed ──
+  // One row per SKU line. PO-level fields repeat down the rows, which is how every ERP export
+  // and every spreadsheet a supplier sends actually looks.
+  //
+  // Preview and apply are separate calls on purpose: a bad file must never half-load into a
+  // live week, and the preview is where supplier and container mismatches surface.
+  const PO_COLUMNS = {
+    po_number:   ['po_number', 'po', 'po no', 'po #', 'purchase order', 'order'],
+    week_start:  ['week_start', 'week', 'cargo week'],
+    supplier:    ['supplier', 'vendor', 'factory'],
+    cargo_ready: ['cargo_ready_date', 'cargo ready', 'crd', 'ex factory', 'ex-factory'],
+    container:   ['container', 'container_no', 'container number', 'reference', 'awb'],
+    sku_code:    ['sku', 'sku_code', 'item', 'item code', 'style'],
+    sku_desc:    ['description', 'sku_description', 'item description', 'name'],
+    units:       ['units', 'qty', 'quantity', 'pieces', 'pcs'],
+    cbm:         ['cbm', 'volume', 'm3'],
+    weight_kg:   ['weight', 'weight_kg', 'kg', 'gross weight'],
+    value:       ['value', 'value_amount', 'amount', 'commercial value', 'invoice value'],
+    currency:    ['currency', 'ccy'],
+  };
+
+  function splitCsvLine(line) {
+    const out = []; let cur = '', q = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (q) {
+        if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+        else if (c === '"') q = false;
+        else cur += c;
+      } else if (c === '"') q = true;
+      else if (c === ',') { out.push(cur); cur = ''; }
+      else cur += c;
+    }
+    out.push(cur);
+    return out.map(v => v.trim());
+  }
+
+  function parseRows(body) {
+    if (Array.isArray(body.rows)) return { rows: body.rows, headers: Object.keys(body.rows[0] || {}) };
+    const text = String(body.csv || '').replace(/^\uFEFF/, '').trim();
+    if (!text) return { rows: [], headers: [] };
+    const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
+    if (!lines.length) return { rows: [], headers: [] };
+    const headers = splitCsvLine(lines[0]).map(h => h.toLowerCase());
+    const rows = lines.slice(1).map(l => {
+      const cells = splitCsvLine(l), r = {};
+      headers.forEach((h, i) => { r[h] = cells[i] == null ? '' : cells[i]; });
+      return r;
+    });
+    return { rows, headers };
+  }
+
+  // Map whatever the file calls its columns onto what we need, so nobody has to rename headers.
+  function mapColumns(headers) {
+    const found = {}, lower = headers.map(h => String(h).toLowerCase().trim());
+    for (const [field, names] of Object.entries(PO_COLUMNS)) {
+      const i = lower.findIndex(h => names.includes(h));
+      if (i >= 0) found[field] = headers[i];
+    }
+    return found;
+  }
+
+  const numOf = (v) => { const n = Number(String(v == null ? '' : v).replace(/[, $]/g, '')); return isFinite(n) ? n : null; };
+  const dateOf = (v) => {
+    const t = String(v == null ? '' : v).trim();
+    if (!t) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+    const m = t.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);   // d/m/Y, as Australian files are
+    if (m) return `${m[3]}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`;
+    const d = new Date(t);
+    return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  };
+
+  function buildOrders(req, body) {
+    const { rows, headers } = parseRows(body || {});
+    const col = mapColumns(headers);
+    const problems = [];
+    if (!col.po_number) problems.push({ level: 'stop', message: 'No PO number column found. Expected one of: ' + PO_COLUMNS.po_number.join(', ') });
+    if (!col.units) problems.push({ level: 'warn', message: 'No units column found; unit counts will be empty.' });
+
+    const weekFallback = /^\d{4}-\d{2}-\d{2}$/.test(String((body || {}).week_start || '')) ? body.week_start : null;
+
+    // Containers this client actually has, so the file can be matched against reality.
+    const ships = req.d2d.all(`SELECT id, reference, week_start FROM d2d_shipment WHERE client_id = @client`);
+    const byRef = {};
+    for (const sh of ships) if (sh.reference) byRef[String(sh.reference).toUpperCase()] = sh;
+
+    const orders = new Map();
+    const unmatchedContainers = new Set();
+    let lineCount = 0;
+
+    rows.forEach((r, idx) => {
+      const po = String(r[col.po_number] == null ? '' : r[col.po_number]).trim();
+      if (!po) { problems.push({ level: 'row', row: idx + 2, message: 'No PO number on this row; skipped.' }); return; }
+      const week = dateOf(col.week_start ? r[col.week_start] : null) || weekFallback;
+      if (!week) { problems.push({ level: 'row', row: idx + 2, message: `PO ${po}: no week, and none supplied for the file.` }); return; }
+
+      const key = week + '|' + po;
+      if (!orders.has(key)) {
+        orders.set(key, {
+          po_number: po, week_start: week,
+          supplier: col.supplier ? String(r[col.supplier] || '').trim() || null : null,
+          cargo_ready_date: col.cargo_ready ? dateOf(r[col.cargo_ready]) : null,
+          cbm: null, weight_kg: null, value_amount: null,
+          currency: col.currency ? (String(r[col.currency] || '').trim().toUpperCase() || null) : null,
+          lines: [], containers: new Set(),
+        });
+      }
+      const ord = orders.get(key);
+      // PO-level figures repeat on every line; take them once rather than summing them.
+      if (col.cbm && ord.cbm == null) ord.cbm = numOf(r[col.cbm]);
+      if (col.weight_kg && ord.weight_kg == null) ord.weight_kg = numOf(r[col.weight_kg]);
+      if (col.value && ord.value_amount == null) ord.value_amount = numOf(r[col.value]);
+
+      const sku = col.sku_code ? String(r[col.sku_code] || '').trim() : '';
+      const units = col.units ? numOf(r[col.units]) : null;
+      if (sku) { ord.lines.push({ sku_code: sku, description: col.sku_desc ? String(r[col.sku_desc] || '').trim() : null, units: units }); lineCount++; }
+      else if (units != null && !ord.lines.length) { ord.lines.push({ sku_code: '(no sku)', description: null, units }); lineCount++; }
+
+      const cref = col.container ? String(r[col.container] || '').trim().toUpperCase() : '';
+      if (cref) {
+        if (byRef[cref]) ord.containers.add(byRef[cref].id);
+        else unmatchedContainers.add(cref);
+      }
+    });
+
+    const list = [...orders.values()].map(ord => ({
+      ...ord,
+      units: ord.lines.reduce((n, l) => n + (Number(l.units) || 0), 0),
+      containers: [...ord.containers],
+    }));
+
+    // A PO number may legitimately repeat in a later week. Twice in the SAME week is ambiguous
+    // and worth flagging rather than silently merging.
+    const seen = {};
+    for (const ord of list) {
+      seen[ord.po_number] = (seen[ord.po_number] || 0) + 1;
+    }
+    for (const [po, n] of Object.entries(seen)) {
+      if (n > 1) problems.push({ level: 'warn', message: `PO ${po} appears in ${n} different weeks in this file — each is treated as its own order.` });
+    }
+    for (const c of unmatchedContainers) {
+      problems.push({ level: 'warn', message: `Container ${c} is not one of this client's containers; those lines will load without a container.` });
+    }
+
+    return { orders: list, lineCount, problems, columns: col, headers, rowCount: rows.length };
+  }
+
+  router.post('/po/preview', authenticateRequest, requireRole(['admin']), requireD2D,
+    auditLog('preview_d2d_po'), (req, res) => {
+    if (internalOnly(req, res)) return;
+    try {
+      const out = buildOrders(req, req.body || {});
+      const weeks = [...new Set(out.orders.map(o2 => o2.week_start))].sort();
+      res.json({
+        ok: !out.problems.some(p2 => p2.level === 'stop'),
+        rows: out.rowCount, orders: out.orders.length, lines: out.lineCount,
+        units: out.orders.reduce((n, o2) => n + o2.units, 0),
+        weeks, columns_matched: out.columns, headers: out.headers,
+        problems: out.problems.slice(0, 40),
+        sample: out.orders.slice(0, 8).map(o2 => ({
+          po_number: o2.po_number, week_start: o2.week_start, supplier: o2.supplier,
+          units: o2.units, lines: o2.lines.length, containers: o2.containers.length, cbm: o2.cbm,
+        })),
+      });
+    } catch (e) { console.error('[d2d] po preview', e); res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  router.post('/po/apply', authenticateRequest, requireRole(['admin']), requireD2D,
+    auditLog('apply_d2d_po'), (req, res) => {
+    if (internalOnly(req, res)) return;
+    try {
+      if (String((req.body || {}).confirm || '') !== '1') return res.status(400).json({ error: 'confirm required' });
+      const out = buildOrders(req, req.body || {});
+      if (out.problems.some(p2 => p2.level === 'stop')) {
+        return res.status(400).json({ error: 'cannot_apply', problems: out.problems.filter(p2 => p2.level === 'stop') });
+      }
+      if (!out.orders.length) return res.status(400).json({ error: 'nothing_to_apply' });
+
+      let created = 0, replaced = 0, lines = 0, assigned = 0;
+      const tx = db.transaction(() => {
+        for (const ord of out.orders) {
+          // Re-uploading a week replaces that order rather than duplicating it: files get sent
+          // twice, and a second copy of an order would double every unit count downstream.
+          const existing = req.d2d.get(`SELECT id FROM d2d_po WHERE client_id = @client
+              AND week_start = @ws AND po_number = @po AND seq = 1`, { ws: ord.week_start, po: ord.po_number });
+          let poId;
+          if (existing) {
+            poId = existing.id; replaced++;
+            req.d2d.run(`DELETE FROM d2d_po_line WHERE client_id = @client AND po_id = @id`, { id: poId });
+            req.d2d.run(`DELETE FROM d2d_assignment WHERE client_id = @client AND po_id = @id`, { id: poId });
+            req.d2d.run(`UPDATE d2d_po SET supplier=@supplier, cargo_ready_date=@crd, units=@units,
+                           cbm=@cbm, weight_kg=@wk, value_amount=@val, currency=@ccy, source='upload'
+                         WHERE client_id = @client AND id = @id`,
+              { supplier: ord.supplier, crd: ord.cargo_ready_date, units: ord.units, cbm: ord.cbm,
+                wk: ord.weight_kg, val: ord.value_amount, ccy: ord.currency, id: poId });
+          } else {
+            poId = 'po_' + crypto.randomUUID().slice(0, 12); created++;
+            req.d2d.insert('d2d_po', {
+              id: poId, po_number: ord.po_number, week_start: ord.week_start, seq: 1,
+              supplier: ord.supplier, cargo_ready_date: ord.cargo_ready_date, units: ord.units,
+              cbm: ord.cbm, weight_kg: ord.weight_kg, value_amount: ord.value_amount,
+              currency: ord.currency, source: 'upload',
+            });
+          }
+          for (const l of ord.lines) {
+            req.d2d.insert('d2d_po_line', {
+              id: 'pl_' + crypto.randomUUID().slice(0, 12), po_id: poId,
+              sku_code: l.sku_code, description: l.description, units: l.units, cbm: null,
+            });
+            lines++;
+          }
+          for (const sid of ord.containers) {
+            req.d2d.insert('d2d_assignment', {
+              id: 'as_' + crypto.randomUUID().slice(0, 12), po_id: poId, shipment_id: sid,
+              units: ord.units, cbm: ord.cbm,
+            });
+            assigned++;
+          }
+        }
+      });
+      tx();
+      console.warn(`[d2d] ${req.d2d.client} orders applied — ${created} new, ${replaced} replaced, ${lines} lines`);
+      res.json({ ok: true, created, replaced, lines, assigned,
+                 warnings: out.problems.filter(p2 => p2.level !== 'stop').slice(0, 20) });
+    } catch (e) { console.error('[d2d] po apply', e); res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  // Orders for a week, with their lines and which containers carry them.
+  router.get('/po', authenticateRequest, requireD2D, auditLog('view_d2d_po'), (req, res) => {
+    try {
+      const ws = String(req.query.week || '');
+      const pos = ws
+        ? req.d2d.all(`SELECT * FROM d2d_po WHERE client_id = @client AND week_start = @ws ORDER BY po_number`, { ws })
+        : req.d2d.all(`SELECT * FROM d2d_po WHERE client_id = @client ORDER BY week_start DESC, po_number LIMIT 300`);
+      const ids = pos.map(r => r.id);
+      const idp = {}; ids.forEach((id, i) => { idp['id' + i] = id; });
+      const inList = ids.map((_, i) => '@id' + i).join(',');
+      const lines = ids.length ? req.d2d.all(`SELECT * FROM d2d_po_line WHERE client_id = @client AND po_id IN (${inList})`, idp) : [];
+      const asg = ids.length ? req.d2d.all(`SELECT * FROM d2d_assignment WHERE client_id = @client AND po_id IN (${inList})`, idp) : [];
+      const ships = req.d2d.all(`SELECT id, reference, container_type FROM d2d_shipment WHERE client_id = @client`);
+      const shipById = {}; ships.forEach(x => { shipById[x.id] = x; });
+
+      const byPo = {}, asgByPo = {};
+      for (const l of lines) (byPo[l.po_id] = byPo[l.po_id] || []).push(l);
+      for (const a of asg) (asgByPo[a.po_id] = asgByPo[a.po_id] || []).push({ ...a, reference: (shipById[a.shipment_id] || {}).reference || null });
+      res.json({ orders: pos.map(r => ({ ...r, lines: byPo[r.id] || [], containers: asgByPo[r.id] || [] })) });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
 
