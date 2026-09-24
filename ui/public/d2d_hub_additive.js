@@ -334,9 +334,10 @@
     // Everything, for the map: a vessel in flight belongs to no particular week.
     allShipments = (await soft('/d2d/shipments', { shipments })).shipments || shipments;
     const po = _week ? await soft('/d2d/po?week=' + encodeURIComponent(_week), { orders: [] }) : { orders: [] };
+    const rq = _week ? await soft('/d2d/requests?week=' + encodeURIComponent(_week), { requests: [] }) : { requests: [] };
 
     _internal = pricingVisible;
-    _data = { weeks, shipments, bookings, allShipments, orders: po.orders || [] };
+    _data = { weeks, shipments, bookings, allShipments, orders: po.orders || [], requests: rq.requests || [] };
     paint();
   }
 
@@ -1564,7 +1565,29 @@
         </div>
         ${_internal ? `<button class="d2d-btn dark" data-newbooking="1">New booking</button>` : ''}
       </div>`;
-    if (!d.bookings.length) return header + `
+    const rq = (d.requests || [])[0];
+    const cargo = rq ? `
+      <div class="rounded-2xl border bg-white shadow-sm" style="padding:13px 16px;margin-bottom:12px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">
+            <span class="d2d-num" style="font-size:12px;font-weight:600;color:${DARK};">${esc(rq.ref || 'request')}</span>
+            <span style="font-size:11px;color:${MID};">${esc([rq.origin, rq.destination].filter(Boolean).join(' → ')) || 'origin not stated'}</span>
+            <span style="font-size:10.5px;font-weight:700;border-radius:6px;padding:2px 8px;color:${MID};background:#F2F2F5;">${esc(rq.state)}</span>
+          </div>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;">
+            ${[['Packed as', rq.pack_type || '—'], ['Pallets', rq.pallets], ['Cartons', rq.cartons],
+               ['Units', rq.units], ['CBM', rq.cbm], ['Gross kg', rq.gross_weight_kg]]
+              .filter(([, v]) => v != null && v !== '')
+              .map(([l, v]) => `<span style="text-align:right;">
+                 <span style="display:block;font-size:9.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">${l}</span>
+                 <span class="d2d-num" style="display:block;font-size:13px;font-weight:600;color:${DARK};">${
+                   typeof v === 'number' ? v.toLocaleString() : esc(v)}</span></span>`).join('')}
+          </div>
+        </div>
+        ${rq.notes ? `<div style="font-size:11px;color:${MID};margin-top:8px;">${esc(rq.notes)}</div>` : ''}
+      </div>` : '';
+
+    if (!d.bookings.length) return header + cargo + `
       <div class="rounded-2xl border bg-white shadow-sm" style="padding:22px 24px;">
         <div style="font-size:14px;font-weight:600;color:${DARK};">Nothing quoted for this week</div>
         <div style="font-size:12px;color:${MID};line-height:1.6;margin-top:6px;max-width:600px;">
@@ -1575,7 +1598,7 @@
       </div>`;
     const order = { released: 0, approved: 1, draft: 2, declined: 3, expired: 4 };
     const rows = [...d.bookings].sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
-    return header + `<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;">
+    return header + cargo + `<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;">
       ${rows.map((b, i) => {
         const st = b.status;
         const accent = st === 'approved' ? LIME : st === 'released' ? BLUE : st === 'draft' ? YELL : '#D6D6DB';
@@ -1673,13 +1696,46 @@
         </div>
 
         <div style="padding:18px 20px;">
-          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:16px;">
+          <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px;">
             <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Cargo ready week
               <input class="d2d-in2" id="d2d-nbweek" type="date" value="${esc(nextMonday())}"></label>
             <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Mode
-              <select class="d2d-in2" id="d2d-nbmode"><option value="sea">Sea</option><option value="air">Air</option></select></label>
+              <select class="d2d-in2" id="d2d-nbmode">
+                <option value="sea">Sea</option><option value="air">Air</option><option value="both">Sea and air</option></select></label>
             <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Origin
               <input class="d2d-in2" id="d2d-nborigin" placeholder="Ningbo"></label>
+            <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Destination
+              <input class="d2d-in2" id="d2d-nbdest" placeholder="Port Botany"></label>
+          </div>
+
+          ${/* The cargo, stated once. A partner cannot quote a sailing without it, and stating
+                it on the header stops the same figures being retyped per option. */ ''}
+          <div style="border:.5px solid rgba(0,0,0,.10);border-radius:12px;padding:13px 15px;margin-bottom:16px;background:#FBFBFC;">
+            <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
+              <span style="font-size:12px;font-weight:600;color:${DARK};">What is shipping</span>
+              <span style="display:flex;align-items:center;gap:10px;">
+                <span style="font-size:11px;color:${MID};" id="d2d-nbprefillnote"></span>
+                <button class="d2d-btn" id="d2d-nbprefill" style="min-height:32px;padding:4px 10px;font-size:11px;display:none;">Use the order file</button>
+              </span>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;">
+              <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Packed as
+                <select class="d2d-in2" id="d2d-nbpack">
+                  <option value="">—</option><option value="loose">Loose cartons</option>
+                  <option value="pallets">Pallets</option><option value="mixed">Mixed</option></select></label>
+              <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Pallets
+                <input class="d2d-in2 d2d-num" id="d2d-nbpallets" type="number" min="0" placeholder="18"></label>
+              <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Cartons
+                <input class="d2d-in2 d2d-num" id="d2d-nbcartons" type="number" min="0" placeholder="940"></label>
+              <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Units
+                <input class="d2d-in2 d2d-num" id="d2d-nbunits" type="number" min="0" placeholder="11400"></label>
+              <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">CBM
+                <input class="d2d-in2 d2d-num" id="d2d-nbcbm" type="number" min="0" step="0.01" placeholder="62.5"></label>
+              <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Gross kg
+                <input class="d2d-in2 d2d-num" id="d2d-nbkg" type="number" min="0" step="0.1" placeholder="8400"></label>
+            </div>
+            <label style="display:block;font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;margin-top:10px;">Notes for the partner
+              <input class="d2d-in2" id="d2d-nbnotes" placeholder="Two suppliers, one collection"></label>
           </div>
 
           <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px;">
@@ -1698,6 +1754,34 @@
     document.body.appendChild(ov);
     el('d2d-nbclose').onclick = () => ov.remove();
     ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+
+    // If the orders for that week are already loaded, offer their figures rather than asking
+    // for numbers the system can already add up.
+    let _prefill = null;
+    const checkPrefill = async () => {
+      const wk = el('d2d-nbweek').value;
+      const note = el('d2d-nbprefillnote'), btn = el('d2d-nbprefill');
+      if (!note) return;
+      note.textContent = ''; btn.style.display = 'none'; _prefill = null;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(wk)) return;
+      try {
+        const r = await api('/d2d/requests/prefill?week=' + encodeURIComponent(wk));
+        if (r && r.from_orders && r.from_orders.orders) {
+          _prefill = r.from_orders;
+          note.textContent = `${_prefill.orders} orders loaded for this week`;
+          btn.style.display = '';
+        }
+      } catch (e2) { /* the offer is a convenience, not a requirement */ }
+    };
+    el('d2d-nbweek').onchange = checkPrefill;
+    checkPrefill();
+    el('d2d-nbprefill').onclick = () => {
+      if (!_prefill) return;
+      if (_prefill.units != null) el('d2d-nbunits').value = Math.round(_prefill.units);
+      if (_prefill.cbm != null) el('d2d-nbcbm').value = Number(_prefill.cbm).toFixed(2);
+      if (_prefill.gross_weight_kg != null) el('d2d-nbkg').value = Number(_prefill.gross_weight_kg).toFixed(1);
+      el('d2d-nbprefillnote').textContent = 'taken from the order file';
+    };
 
     let count = 2;
     el('d2d-nbadd').onclick = () => {
@@ -1743,8 +1827,18 @@
 
       btn.disabled = true; btn.style.opacity = '.5';
       msg.style.color = MID; msg.textContent = 'Creating…';
+      const numOr = (id2) => { const v = el(id2).value.trim(); return v === '' ? null : Number(v); };
       try {
-        await api('/d2d/bookings', { method: 'POST', body: JSON.stringify({ week_start: week, options }) });
+        // The header first: the options answer it, and it is what the partner will be asked to quote.
+        const rq = await api('/d2d/requests', { method: 'POST', body: JSON.stringify({
+          week_start: week, mode, origin: origin || null,
+          destination: el('d2d-nbdest').value.trim() || null,
+          pack_type: el('d2d-nbpack').value || null,
+          pallets: numOr('d2d-nbpallets'), cartons: numOr('d2d-nbcartons'), units: numOr('d2d-nbunits'),
+          cbm: numOr('d2d-nbcbm'), gross_weight_kg: numOr('d2d-nbkg'),
+          notes: el('d2d-nbnotes').value.trim() || null,
+        }) });
+        await api('/d2d/bookings', { method: 'POST', body: JSON.stringify({ week_start: week, request_id: rq.id, options }) });
         ov.remove();
         _week = week; _tab = 'pricing'; _view = 'dashboard';
         await load();                       // lands on Pricing for the week just created
@@ -2159,5 +2253,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v17 loaded');
+  console.log('[d2d-hub] v18 loaded');
 })();
