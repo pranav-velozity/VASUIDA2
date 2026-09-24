@@ -124,6 +124,8 @@
       .d2d-head{margin-bottom:14px;};border-radius:10px;padding:0 14px;align-items:center;gap:10px;overflow:hidden;display:flex;margin-bottom:12px;}
       .d2d-tabs{display:flex;align-items:center;}
       .d2d-tabs .d2d-tab + .d2d-tab{margin-left:20px;}
+      .d2d-crumb{border:0;background:none;font:inherit;font-size:11.5px;color:${BLUE};cursor:pointer;padding:0;}
+      .d2d-crumb:hover{text-decoration:underline;}
       .d2d-filt{border:.5px solid rgba(0,0,0,.14);background:#fff;color:${MID};border-radius:6px;padding:3px 7px;
         font:600 9.5px inherit;letter-spacing:.01em;cursor:pointer;
         transition:border-color .18s ease,background .18s ease,color .18s ease;}
@@ -169,15 +171,21 @@
         transition:box-shadow .28s cubic-bezier(.22,1,.36,1), transform .28s cubic-bezier(.22,1,.36,1),
           border-color .28s cubic-bezier(.22,1,.36,1), background-position .55s cubic-bezier(.22,1,.36,1);
       }
+      /* The lift and the shadow grow together, at the same -6px as every other Pinpoint tile.
+         At -4px with a smaller shadow the cards looked stuck to the page. */
       #page-d2d .rounded-2xl.bg-white:hover{
+        transform:translateY(-6px);
         background-position:0% 0%,0% 0%,0% 0%;
         box-shadow:
           inset 0 1px 0 rgba(255,255,255,1),
-          inset 1px 0 0 rgba(255,255,255,.65),
-          inset -1px 0 0 rgba(255,255,255,.5),
-          inset 0 -1px 0 rgba(16,18,27,.055),
+          inset 1px 0 0 rgba(255,255,255,.8),
+          inset -1px 0 0 rgba(255,255,255,.65),
+          inset 0 -1px 0 rgba(16,18,27,.06),
+          inset 0 22px 36px -20px rgba(255,255,255,1),
           0 2px 4px rgba(16,18,27,.06), 0 18px 38px rgba(16,18,27,.13);
+        border-color:rgba(16,18,27,.14);
       }
+      @media (prefers-reduced-motion:reduce){#page-d2d .rounded-2xl.bg-white:hover{transform:none;}}
       @media (prefers-reduced-motion:reduce){#page-d2d .rounded-2xl.bg-white{transition:none;}}
       .d2d-grid4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;}
       .d2d-tile{padding:14px 16px;}
@@ -213,8 +221,7 @@
       .d2d-ping{animation:d2d-ping 2.8s ease-out infinite;transform-origin:center;transform-box:fill-box;}
       .d2d-halo{position:absolute;width:34px;height:34px;border-radius:50%;animation:d2d-halo 2.4s ease-out infinite;}
       .d2d-rise{animation:d2d-rise .42s cubic-bezier(.22,1,.36,1) both;}
-      .d2d-lift{transition:transform .26s cubic-bezier(.22,1,.36,1),box-shadow .26s cubic-bezier(.22,1,.36,1);}
-      .d2d-lift:hover{transform:translateY(-4px);box-shadow:0 14px 30px rgba(16,18,27,.13);}
+      .d2d-lift{}
       @media (prefers-reduced-motion:reduce){.d2d-pulse,.d2d-halo,.d2d-rise,.d2d-ping{animation:none;}.d2d-lift:hover{transform:none;}}
     `;
     document.head.appendChild(st);
@@ -275,6 +282,9 @@
 
   // ── Data ──
   let _tab = 'shipments', _data = null, _internal = false, _mapFilter = 'all', _mapScope = 'live';
+  // Which screen inside the Shipments tab: the dashboard, one week, or one container.
+  let _view = 'dashboard', _openId = null;
+  const go = (view, id) => { _view = view; _openId = id || null; paint(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
 
   async function load() {
     // The FIRST call decides availability: a 404 there means this client has no door-to-door.
@@ -382,12 +392,16 @@
     const d = _data; if (!d) return;
     const scope = el('d2d-scope'); if (scope) scope.textContent = (window.pinpointClient || '') + (_internal ? ' · VelOzity view' : '');
 
-    const tabs = [['shipments', 'Shipments'], ['bookings', 'Bookings']]
+    const tabs = [['shipments', 'Shipments'], ['bookings', 'Bookings'], ['po', 'Orders'], ['performance', 'Performance']]
       .concat(_internal ? [['pricing', 'Pricing'], ['baselines', 'Transit rules']] : []);
     const tw = el('d2d-tabs');
     if (tw) {
       tw.innerHTML = tabs.map(([k, l]) => `<button class="d2d-tab ${_tab === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('');
-      tw.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { _tab = b.getAttribute('data-tab'); paint(); });
+      tw.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => {
+        _tab = b.getAttribute('data-tab');
+        if (_tab === 'shipments') _view = 'dashboard';     // the tab always returns to the top level
+        paint();
+      });
     }
     const lines = tickerLines(d);
     const st = el('d2d-status');
@@ -425,12 +439,27 @@
 
     // Transit rules are not a property of a week, so the week bar is left off that tab.
     // The week selector belongs with the menu, not on top of the content.
+    // The week selector belongs to week-scoped screens only. On the dashboard it competed with
+    // the map, and on Transit rules it meant nothing at all.
+    const weekScoped = (_tab === 'shipments' && _view !== 'dashboard') || _tab === 'bookings' || _tab === 'pricing';
     const wk = el('d2d-weeks');
-    if (wk) wk.innerHTML = _tab === 'baselines' ? '' : weekBar;
-    body.innerHTML = _tab === 'baselines' ? paintBaselines()
-      : (_tab === 'shipments' ? paintShipments(d) : _tab === 'bookings' ? paintBookings(d) : paintPricing(d));
+    if (wk) wk.innerHTML = weekScoped ? weekBar : '';
+    body.innerHTML =
+        _tab === 'baselines' ? paintBaselines()
+      : _tab === 'bookings'  ? paintBookings(d)
+      : _tab === 'pricing'   ? paintPricing(d)
+      : _tab === 'po'        ? paintPO(d)
+      : _tab === 'performance' ? paintPerformance(d)
+      : _view === 'week'     ? paintWeek(d)
+      : _view === 'container' ? paintContainer(d)
+      : _view === 'po'       ? paintPO(d)
+      : paintShipments(d);
     if (_tab === 'baselines') loadBaselines();
-    document.querySelectorAll('#d2d-weeks [data-w]').forEach(b => b.onclick = () => { _week = b.getAttribute('data-w'); load(); });
+    document.querySelectorAll('#d2d-weeks [data-w]').forEach(b => b.onclick = () => {
+      _week = b.getAttribute('data-w');
+      if (_tab === 'shipments' && _view === 'container') _view = 'week';
+      load();
+    });
     wireActions(body);
   }
 
@@ -478,9 +507,12 @@
           </div>`).join('')}
       </div>
 
-      <div style="display:flex;align-items:baseline;gap:9px;margin-bottom:8px;">
-        <span style="font-size:12.5px;font-weight:600;color:${DARK};">Shipments this week</span>
-        <span style="font-size:11px;color:${MID};">click a shipment for its milestones${_internal ? ' and to record them' : ''}</span>
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:9px;margin-bottom:8px;flex-wrap:wrap;">
+        <span style="display:flex;align-items:baseline;gap:9px;">
+          <span style="font-size:12.5px;font-weight:600;color:${DARK};">Week of ${esc(day(_week))}</span>
+          <span style="font-size:11px;color:${MID};">click a shipment for its milestones${_internal ? ' and to record them' : ''}</span>
+        </span>
+        <button class="d2d-btn" data-go="week" style="min-height:34px;padding:5px 11px;font-size:11px;">Open the week &rarr;</button>
       </div>
       ${d.shipments.length
         ? `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">${d.shipments.map(shipmentCard).join('')}</div>`
@@ -648,7 +680,7 @@
           if (!onLand) out.push(`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}"/>`);
         }
       }
-      _sea = `<g fill="#DCE8F5" opacity=".85"><g r="${(_world.r * .85).toFixed(2)}">${
+      _sea = `<g fill="#E3EDF7" opacity=".9"><g r="${(_world.r * .85).toFixed(2)}">${
         out.map(c => c.replace('<circle ', `<circle r="${(_world.r * .85).toFixed(2)}" `)).join('')}</g></g>`;
       return _sea;
     }
@@ -663,7 +695,7 @@
     for (let y = 8; y < MAP.h; y += 18)
       for (let x = 8; x < MAP.w; x += 18)
         if (!LAND.some(poly => inside([x, y], poly))) out.push(`<circle cx="${x}" cy="${y}" r="1.3"/>`);
-    _sea = `<g fill="#DCE8F5" opacity=".85">${out.join('')}</g>`;
+    _sea = `<g fill="#E3EDF7" opacity=".9">${out.join('')}</g>`;
     return _sea;
   }
 
@@ -730,10 +762,17 @@
         ${count ? `<circle cx="${pt.x}" cy="${pt.y}" r="${(9 * k).toFixed(1)}" fill="${colour}" opacity=".22" class="d2d-ping"/>` : ''}
         <circle cx="${pt.x}" cy="${pt.y}" r="${(4.5 * k).toFixed(1)}" fill="${count ? colour : '#fff'}"
                 stroke="${count ? colour : '#AEB4BD'}" stroke-width="${(1.6 * k).toFixed(2)}"/>
-        ${showLabel ? `<text x="${pt.x}" y="${(pt.y - 11 * k + dy).toFixed(1)}" text-anchor="middle"
-              font-size="${(9.5 * k).toFixed(1)}" fill="${MID}" font-family="inherit">${esc(pt.label)}</text>` : ''}
-        ${count ? `<text x="${pt.x}" y="${(pt.y + 17 * k + dy).toFixed(1)}" text-anchor="middle"
-              font-size="${(9 * k).toFixed(1)}" fill="${colour}" font-family="ui-monospace,monospace">${count}</text>` : ''}
+        ${/* A white halo under every label. Grey text on a grey dot field was unreadable, and
+              tinting the text alone would not fix it — the halo is what separates figure from
+              ground whatever the label happens to sit on. */ ''}
+        ${showLabel ? `<text x="${pt.x}" y="${(pt.y - 12 * k + dy).toFixed(1)}" text-anchor="middle"
+              font-size="${(10.5 * k).toFixed(1)}" font-weight="600" fill="${DARK}" font-family="inherit"
+              stroke="#ffffff" stroke-width="${(3.2 * k).toFixed(2)}" paint-order="stroke"
+              stroke-linejoin="round">${esc(pt.label)}</text>` : ''}
+        ${count ? `<text x="${pt.x}" y="${(pt.y + 18 * k + dy).toFixed(1)}" text-anchor="middle"
+              font-size="${(10 * k).toFixed(1)}" font-weight="700" fill="${colour}" font-family="ui-monospace,monospace"
+              stroke="#ffffff" stroke-width="${(3 * k).toFixed(2)}" paint-order="stroke"
+              stroke-linejoin="round">${count}</text>` : ''}
       </g>`;
     };
 
@@ -788,8 +827,10 @@
                   <path d="M-7 3 L7 3 L5 7 L-5 7 Z M0 -7 L0 3 M0 -7 L5 1 L0 1" fill="none"
                         stroke="${m.colour}" stroke-width="1.7" stroke-linejoin="round"/>
                 </g>
-                <text x="${(m.pos.x + 14 * k).toFixed(1)}" y="${(m.pos.y + 3 * k).toFixed(1)}"
-                      font-size="${(10 * k).toFixed(1)}" fill="${DARK}" font-family="ui-monospace,monospace">${esc(m.sh.reference || 'unadvised')}</text>
+                <text x="${(m.pos.x + 15 * k).toFixed(1)}" y="${(m.pos.y + 3.5 * k).toFixed(1)}"
+                      font-size="${(10.5 * k).toFixed(1)}" font-weight="600" fill="${DARK}"
+                      font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="${(3.2 * k).toFixed(2)}"
+                      paint-order="stroke" stroke-linejoin="round">${esc(m.sh.reference || 'unadvised')}</text>
               </g>`).join('')}
           </svg>
 
@@ -891,6 +932,318 @@
           <span class="d2d-num" style="font-size:11px;color:${DARK};">${nextPlan && sh.status !== 'delivered' ? 'plan ' + esc(day(nextPlan)) : ''}</span>
         </span>
       </button>`;
+  }
+
+  // ── Shared pieces ──
+  const crumb = (parts) => `
+    <div style="display:flex;align-items:center;gap:7px;font-size:11.5px;margin-bottom:12px;flex-wrap:wrap;">
+      ${parts.map((p2, i) => p2.go
+        ? `<button class="d2d-crumb" data-go="${p2.go}" ${p2.id ? `data-goid="${esc(p2.id)}"` : ''}>${esc(p2.label)}</button>
+           ${i < parts.length - 1 ? `<span style="color:#D6D6DB;">&rsaquo;</span>` : ''}`
+        : `<span style="color:${DARK};font-weight:600;">${esc(p2.label)}</span>
+           ${i < parts.length - 1 ? `<span style="color:#D6D6DB;">&rsaquo;</span>` : ''}`).join('')}
+    </div>`;
+
+  // Data we do not have yet is shown as a marked panel rather than invented. A convincing
+  // placeholder is worse than an empty one: it gets mistaken for fact.
+  const pending = (title, why, height) => `
+    <div class="rounded-2xl border bg-white shadow-sm" style="padding:16px 18px;${height ? `min-height:${height}px;` : ''}
+         display:flex;flex-direction:column;justify-content:center;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="width:7px;height:7px;border-radius:50%;background:${YELL};"></span>
+        <span style="font-size:12.5px;font-weight:600;color:${DARK};">${esc(title)}</span>
+      </div>
+      <div style="font-size:11.5px;color:${MID};line-height:1.5;margin-top:5px;">${why}</div>
+    </div>`;
+
+  const statRow = (label, value, sub, colour) => `
+    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:8px 0;
+         border-bottom:.5px solid rgba(0,0,0,.05);">
+      <span style="font-size:11.5px;color:${MID};">${label}</span>
+      <span style="text-align:right;">
+        <span class="d2d-num" style="display:block;font-size:13px;font-weight:600;color:${colour || DARK};">${value}</span>
+        ${sub ? `<span style="display:block;font-size:10px;color:${LIGHT};">${sub}</span>` : ''}
+      </span>
+    </div>`;
+
+  // ── Week ──
+  // Mockup 2: the containers moving this week, what the week holds, and what is outstanding.
+  function paintWeek(d) {
+    const ship = d.shipments;
+    const approved = d.bookings.find(b => b.status === 'approved');
+    const slips = ship.map(slipOf).filter(x => x != null && x > 0);
+    const docsPending = ship.filter(x => !x.reference).length;
+
+    return `
+      ${crumb([{ label: 'Shipments', go: 'dashboard' }, { label: 'Week of ' + day(_week) }])}
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
+        <div class="lg:col-span-2" style="min-width:0;">
+          <div style="display:flex;align-items:baseline;gap:9px;margin-bottom:8px;">
+            <span style="font-size:12.5px;font-weight:600;color:${DARK};">Containers this week</span>
+            <span style="font-size:11px;color:${MID};">click one for its milestones</span>
+          </div>
+          ${ship.length
+            ? `<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">${ship.map(shipmentCard).join('')}</div>`
+            : `<div class="rounded-2xl border bg-white shadow-sm d2d-empty">Nothing booked for this week yet.</div>`}
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:12px;min-width:0;">
+          <div class="rounded-2xl border bg-white shadow-sm" style="padding:14px 16px;">
+            <div style="font-size:12.5px;font-weight:600;color:${DARK};margin-bottom:4px;">The week</div>
+            ${statRow('Cargo ready', esc(day(_week)))}
+            ${statRow('Containers', ship.length, approved ? esc(approved.title || '') : '')}
+            ${statRow('Behind plan', slips.length, slips.length ? 'worst ' + Math.max(...slips) + ' days' : 'all on plan', slips.length ? BRAND : DARK)}
+            ${statRow('Transit booked', approved && approved.transit_days ? approved.transit_days + ' days' : '&ndash;', approved ? esc(approved.carrier || '') : '')}
+          </div>
+
+          ${pending('Volume and utilisation',
+            'CBM, weight and how full each box is arrive with GRBA&rsquo;s order file. Until then a utilisation figure would be a guess.')}
+
+          <div class="rounded-2xl border bg-white shadow-sm" style="padding:14px 16px;">
+            <div style="font-size:12.5px;font-weight:600;color:${DARK};margin-bottom:8px;">Outstanding</div>
+            ${docsPending ? `<div style="font-size:12px;color:${DARK};line-height:1.45;">
+                 <b>${docsPending}</b> container${docsPending === 1 ? '' : 's'} without a number advised</div>
+               <div style="font-size:10.5px;color:${MID};margin-top:2px;">The partner cannot report milestones without it</div>` : ''}
+            ${actions(d).filter(a => a.kind !== 'Clear').slice(0, 3).map(a => `
+              <div style="margin-top:10px;padding-left:10px;border-left:2px solid ${a.accent};">
+                <div style="font-size:12px;color:${DARK};line-height:1.4;">${esc(a.what)}</div>
+                <div style="font-size:10.5px;color:${MID};">${esc(a.effect)}</div>
+              </div>`).join('')}
+            ${!docsPending && actions(d).every(a => a.kind === 'Clear')
+              ? `<div style="font-size:12px;color:${LINK};">Nothing outstanding.</div>` : ''}
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // ── Container ──
+  // Mockup 3: plan against actual, where the days went, what is aboard, and where each date
+  // came from.
+  function paintContainer(d) {
+    const sh = findShip(_openId);
+    if (!sh) return `<div class="d2d-empty">That shipment is no longer in view.</div>`;
+    const ev = evMap(sh);
+    const od = overdueOf(sh), slip = slipOf(sh);
+    let liveIdx = -1; STAGES.forEach(([kk], i) => { if (ev[kk] && ev[kk].actual_at) liveIdx = i; });
+
+    // Where the days went: variance at each stage that has both a plan and an actual.
+    const legs = STAGES.map(([kk, label]) => {
+      const dd = daysBetween(sh['plan_' + kk], ev[kk] && ev[kk].actual_at);
+      return dd == null ? null : { label, d: dd };
+    }).filter(Boolean);
+    const worstLeg = legs.reduce((m, x) => (m == null || x.d > m.d ? x : m), null);
+    const maxAbs = Math.max(1, ...legs.map(x => Math.abs(x.d)));
+
+    return `
+      ${crumb([{ label: 'Shipments', go: 'dashboard' },
+               { label: 'Week of ' + day(sh.week_start), go: 'week' },
+               { label: sh.reference || 'container not advised' }])}
+
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:12px;">
+        <div>
+          <div class="d2d-num" style="font-size:20px;color:${DARK};letter-spacing:-.01em;">${esc(sh.reference || 'container not advised')}</div>
+          <div style="font-size:11.5px;color:${MID};margin-top:2px;">${esc([sh.container_type, sh.carrier, sh.vessel].filter(Boolean).join(' · ')) || 'no vessel advised'}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span style="font-size:11px;font-weight:700;border-radius:7px;padding:5px 11px;
+                color:${od || slip > 0 ? '#fff' : LINK};background:${od || slip > 0 ? BRAND : 'rgba(155,171,21,.20)'};">
+            ${od ? esc(od.label) + ' overdue by ' + od.days + 'd' : (slip > 0 ? '+' + slip + ' days' : 'On plan')}</span>
+          ${_internal ? `<button class="d2d-btn d2d-ref" data-ref="${esc(sh.id)}" data-cur="${esc(sh.reference || '')}">Container &amp; vessel</button>` : ''}
+        </div>
+      </div>
+
+      <div class="rounded-2xl border bg-white shadow-sm" style="padding:16px 18px;margin-bottom:12px;">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px;">
+          <span style="font-size:13px;font-weight:600;color:${DARK};">Plan against actual</span>
+          <span style="font-size:11px;color:${MID};">${sh.plan_frozen_at ? 'plan frozen at approval' : 'no frozen plan'}</span>
+        </div>
+        <div class="d2d-striphold" style="max-width:none;"><div class="d2d-strip">
+          ${STAGES.map(([kk, label], i) => {
+            const e = ev[kk], actual = e && e.actual_at;
+            const plan = sh['plan_' + kk];
+            const dd = daysBetween(plan, actual);
+            const late = dd != null && dd > 0;
+            const isOd = od && od.stage === kk;
+            const colour = isOd ? BRAND : (!actual ? '#D6D6DB' : (late ? BRAND : LIME));
+            const ink = isOd ? BRAND : (!actual ? LIGHT : (late ? BRAND : LINK));
+            const live = isOd || i === liveIdx;
+            const leftFill = i === 0 ? 'transparent' : (i <= liveIdx ? LIME : '#E4E4E9');
+            const rightFill = i === STAGES.length - 1 ? 'transparent' : (i < liveIdx ? LIME : '#E4E4E9');
+            const tag = _internal ? 'button' : 'div';
+            const attrs = _internal
+              ? ` type="button" class="d2d-st d2d-edit" data-ship="${esc(sh.id)}" data-stage="${kk}" data-label="${esc(label)}"
+                  aria-label="Record ${esc(label)}"` : ' class="d2d-st"';
+            return `<${tag}${attrs}>
+              <span class="d2d-line" style="left:0;right:50%;background:${leftFill};"></span>
+              <span class="d2d-line" style="left:50%;right:0;background:${rightFill};"></span>
+              <span style="font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;text-align:center;min-height:22px;">${label}</span>
+              <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;">
+                ${live ? `<span class="d2d-halo" style="background:${isOd ? 'rgba(153,0,51,.22)' : 'rgba(155,171,21,.22)'};"></span>` : ''}
+                <span class="d2d-dot ${live ? 'd2d-pulse' : ''}" style="border-color:${colour};
+                      background:${actual ? (late ? 'rgba(153,0,51,.10)' : 'rgba(155,171,21,.16)') : '#fff'};">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${colour}" stroke-width="1.9"
+                       stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${ICONS[i]}"></path></svg>
+                </span>
+              </span>
+              <span class="d2d-num" style="font-size:10px;color:${LIGHT};">${plan ? 'plan ' + day(plan) : ''}</span>
+              <span class="d2d-num" style="font-size:11.5px;font-weight:600;color:${ink};">${actual ? day(actual) : (isOd ? 'overdue' : '&middot;')}</span>
+              ${actual ? `<span style="font-size:9px;text-transform:uppercase;letter-spacing:.03em;color:${e.source === 'manual' ? YINK : MID};">${esc(e.source)}</span>` : ''}
+              ${late ? `<span style="font-size:10px;font-weight:700;color:${BRAND};">+${dd}d</span>` : ''}
+            </${tag}>`;
+          }).join('')}
+        </div></div>
+        ${od ? `<div style="margin-top:14px;padding:9px 13px;background:rgba(153,0,51,.08);border-radius:9px;font-size:12px;color:${DARK};">
+            <b>${esc(od.label)} has not been recorded.</b> Planned ${esc(day(sh['plan_' + od.stage]))}, ${od.days} day${od.days === 1 ? '' : 's'} ago.</div>` : ''}
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
+        <div class="rounded-2xl border bg-white shadow-sm" style="padding:15px 17px;">
+          <div style="font-size:12.5px;font-weight:600;color:${DARK};margin-bottom:3px;">Where the days went</div>
+          <div style="font-size:11px;color:${MID};margin-bottom:11px;">variance at each recorded stage</div>
+          ${legs.length ? legs.map(x => `
+            <div style="display:flex;align-items:center;gap:10px;padding:5px 0;">
+              <span style="font-size:11.5px;color:${MID};width:104px;flex-shrink:0;">${esc(x.label)}</span>
+              <span style="flex:1;height:8px;background:#F0F0F3;border-radius:4px;overflow:hidden;">
+                <span style="display:block;height:8px;width:${Math.round(Math.abs(x.d) / maxAbs * 100)}%;
+                      background:${x.d > 0 ? BRAND : LIME};border-radius:4px;"></span></span>
+              <span class="d2d-num" style="font-size:11px;color:${x.d > 0 ? BRAND : LINK};width:52px;text-align:right;">
+                ${x.d > 0 ? '+' + x.d + 'd' : (x.d === 0 ? 'on plan' : x.d + 'd')}</span>
+            </div>`).join('')
+            : `<div style="font-size:11.5px;color:${MID};">Nothing recorded yet.</div>`}
+          ${worstLeg && worstLeg.d > 0 ? `<div style="font-size:11px;color:${MID};margin-top:9px;padding-top:9px;
+               border-top:.5px solid rgba(0,0,0,.06);line-height:1.45;">
+               Most of the delay is at <b style="color:${DARK};">${esc(worstLeg.label)}</b>.</div>` : ''}
+        </div>
+
+        <div class="rounded-2xl border bg-white shadow-sm" style="padding:15px 17px;">
+          <div style="font-size:12.5px;font-weight:600;color:${DARK};margin-bottom:3px;">Every date, and its source</div>
+          <div style="font-size:11px;color:${MID};margin-bottom:9px;">a carrier feed and someone&rsquo;s typing deserve different trust</div>
+          ${STAGES.filter(([kk]) => ev[kk] && ev[kk].actual_at).map(([kk, label]) => {
+            const e = ev[kk];
+            const badge = e.source === 'carrier' ? [LINK, 'rgba(155,171,21,.20)']
+                        : e.source === 'partner' ? [BLUE, 'rgba(44,111,187,.12)']
+                        : e.source === 'import' ? [MID, '#F2F2F5'] : [YINK, 'rgba(254,208,0,.20)'];
+            return `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:6px 0;
+                    border-bottom:.5px solid rgba(0,0,0,.05);">
+              <span style="font-size:12px;color:${DARK};">${esc(label)}</span>
+              <span style="display:flex;align-items:center;gap:8px;">
+                <span class="d2d-num" style="font-size:11px;color:${MID};">${esc(day(e.actual_at))}</span>
+                <span style="font-size:9.5px;font-weight:700;border-radius:5px;padding:2px 7px;
+                      color:${badge[0]};background:${badge[1]};">${esc(e.source)}</span>
+              </span></div>`;
+          }).join('') || `<div style="font-size:11.5px;color:${MID};">No dates recorded yet.</div>`}
+        </div>
+
+        ${pending('Orders and lines aboard',
+          'POs, SKUs and unit counts appear here once GRBA&rsquo;s purchase order file is connected. Nothing is shown until then rather than a placeholder that could be mistaken for cargo.')}
+      </div>`;
+  }
+
+  // ── Purchase order ──
+  // Mockup 4. The chain Week → Container → PO → SKU → Units is the spine of the product, so
+  // the screen exists with that structure in place and says plainly what it is waiting for.
+  function paintPO(d) {
+    return `
+      ${crumb([{ label: 'Shipments', go: 'dashboard' }, { label: 'Purchase orders' }])}
+      <div class="rounded-2xl border bg-white shadow-sm" style="padding:22px 24px;">
+        <div style="font-size:15px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Purchase orders</div>
+        <div style="font-size:12px;color:${MID};line-height:1.6;margin-top:6px;max-width:620px;">
+          This screen shows each order, the SKUs and units inside it, and which containers carry it &mdash;
+          an order can span several containers, and a container carries many orders.
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin:16px 0 8px;">
+          ${['Week', 'Container', 'PO', 'SKU', 'Units'].map((x, i) => `
+            <span style="font-size:11px;font-weight:600;color:${i < 2 ? DARK : LIGHT};background:${i < 2 ? '#F2F2F5' : 'transparent'};
+                  border:.5px solid ${i < 2 ? 'transparent' : 'rgba(0,0,0,.10)'};border-radius:7px;padding:5px 10px;">${x}</span>
+            ${i < 4 ? `<span style="color:#D6D6DB;">&rsaquo;</span>` : ''}`).join('')}
+        </div>
+        <div style="font-size:11px;color:${MID};">The first two links are live. The rest arrive with the order feed.</div>
+        <div style="margin-top:16px;">
+          ${pending('Waiting on GRBA&rsquo;s purchase order file',
+            'We need PO number, supplier, cargo-ready date, SKU lines with units, and CBM per PO. That one file also unlocks utilisation, landed cost per unit and the SKU rows on every container.')}
+        </div>
+      </div>`;
+  }
+
+  // ── Performance ──
+  // Mockup 5. The shapes are here and honest about their inputs: distribution needs a few
+  // months of completed shipments, and anything costed needs the rates and the order file.
+  function paintPerformance(d) {
+    const all = (d.allShipments || []).slice();
+    const done = all.filter(x => x.status === 'delivered');
+    const durations = done.map(x => {
+      const ev = evMap(x);
+      return daysBetween(ev.pickup && ev.pickup.actual_at, ev.delivered && ev.delivered.actual_at);
+    }).filter(v => v != null && v > 0).sort((a, b) => a - b);
+    const median = durations.length ? durations[Math.floor(durations.length / 2)] : null;
+    const p90 = durations.length ? durations[Math.min(durations.length - 1, Math.floor(durations.length * 0.9))] : null;
+
+    const slipAll = all.map(slipOf).filter(v => v != null && v > 0);
+    const onPlan = all.length ? Math.round((all.length - slipAll.length) / all.length * 100) : null;
+
+    // Where lost days actually come from, from the dates we hold.
+    const byStage = {};
+    for (const sh of all) {
+      const ev = evMap(sh);
+      for (const [kk, label] of STAGES) {
+        const dd = daysBetween(sh['plan_' + kk], ev[kk] && ev[kk].actual_at);
+        if (dd != null && dd > 0) byStage[label] = (byStage[label] || 0) + dd;
+      }
+    }
+    const stages = Object.entries(byStage).sort((a, b) => b[1] - a[1]);
+    const maxStage = Math.max(1, ...stages.map(x => x[1]));
+
+    const tile = (label, value, sub, colour) => `
+      <div class="rounded-2xl border bg-white shadow-sm d2d-tile">
+        <div class="d2d-tl">${label}</div>
+        <div class="d2d-tv" style="color:${colour || DARK};">${value}</div>
+        <div class="d2d-ts">${sub}</div>
+      </div>`;
+
+    return `
+      <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:12px;flex-wrap:wrap;">
+        <div>
+          <div style="font-size:16px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Performance</div>
+          <div style="font-size:11.5px;color:${MID};margin-top:2px;">Every measure from recorded dates. Costed figures wait on the rates and the order file.</div>
+        </div>
+        <span style="font-size:11px;color:${MID};">${all.length} shipment${all.length === 1 ? '' : 's'} &middot; ${done.length} completed</span>
+      </div>
+
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3" style="margin-bottom:12px;">
+        ${tile('Door to door', median != null ? median + 'd' : '&ndash;',
+               p90 != null ? '90% within ' + p90 + 'd' : 'needs completed shipments')}
+        ${tile('On plan', onPlan != null ? onPlan + '%' : '&ndash;',
+               slipAll.length ? slipAll.length + ' behind plan' : 'all on plan', onPlan != null && onPlan < 80 ? BRAND : DARK)}
+        ${tile('Days lost', stages.reduce((n, x) => n + x[1], 0) || 0, stages.length ? 'across ' + stages.length + ' stages' : 'none recorded', stages.length ? BRAND : DARK)}
+        ${tile('Container utilisation', '&ndash;', 'needs CBM per PO', LIGHT)}
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 items-start">
+        <div class="rounded-2xl border bg-white shadow-sm" style="padding:16px 18px;">
+          <div style="font-size:13px;font-weight:600;color:${DARK};">Where the days are lost</div>
+          <div style="font-size:11px;color:${MID};margin-bottom:12px;">every stage that has run past its plan</div>
+          ${stages.length ? stages.map(([label, days]) => `
+            <div style="display:flex;align-items:center;gap:10px;padding:6px 0;">
+              <span style="font-size:11.5px;color:${DARK};width:118px;flex-shrink:0;">${esc(label)}</span>
+              <span style="flex:1;height:10px;background:#F0F0F3;border-radius:5px;overflow:hidden;">
+                <span style="display:block;height:10px;width:${Math.round(days / maxStage * 100)}%;background:${BRAND};border-radius:5px;"></span></span>
+              <span class="d2d-num" style="font-size:11.5px;color:${BRAND};width:44px;text-align:right;">${days}d</span>
+            </div>`).join('')
+            : `<div style="font-size:11.5px;color:${LINK};">Nothing has run late yet.</div>`}
+          <div style="font-size:11px;color:${MID};margin-top:10px;padding-top:9px;border-top:.5px solid rgba(0,0,0,.06);line-height:1.45;">
+            This is the one performance figure that is real today, because it comes from the dates being recorded.
+          </div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          ${pending('Transit distribution by lane',
+            'The spread matters more than the average, and a distribution needs a few months of completed shipments. With ' + done.length + ' so far, any curve would be noise.', 150)}
+          ${pending('Container utilisation and cost of empty space',
+            'Needs CBM and weight per PO from the order file, plus your contracted rate per container.', 150)}
+          ${pending('Cash in transit and landed cost per unit',
+            'Needs the commercial invoice value per PO. Until then these are the CFO figures we cannot honestly show.', 150)}
+        </div>
+      </div>`;
   }
 
   // ── Bookings: what the client decides ──
@@ -1056,6 +1409,9 @@
     const source = mapFiltered(mapSource(_data));
     const marks = shipmentPositions(source);
     const moving = marks.filter(m => m.t > 0 && m.t < 1).length;
+    // Marks are sized against the frame here too. This was only defined inside paintMap, so
+    // opening full screen threw a ReferenceError and the map never appeared.
+    const k = VIEW.w / MAP.w;
 
     const ov = document.createElement('div');
     ov.id = 'd2d-fullmap';
@@ -1073,8 +1429,11 @@
           <g>
             ${n ? `<circle cx="${pt.x}" cy="${pt.y}" r="10" fill="${c}" opacity=".22" class="d2d-ping"/>` : ''}
             <circle cx="${pt.x}" cy="${pt.y}" r="5" fill="${n ? c : '#fff'}" stroke="${n ? c : '#AEB4BD'}" stroke-width="1.7"/>
-            <text x="${pt.x}" y="${pt.y - 12}" text-anchor="middle" font-size="10" fill="${MID}" font-family="inherit">${esc(pt.label)}</text>
-            ${n ? `<text x="${pt.x}" y="${pt.y + 18}" text-anchor="middle" font-size="9.5" fill="${c}" font-family="ui-monospace,monospace">${n}</text>` : ''}
+            <text x="${pt.x}" y="${pt.y - 13}" text-anchor="middle" font-size="11" font-weight="600" fill="${DARK}"
+                  font-family="inherit" stroke="#ffffff" stroke-width="3.4" paint-order="stroke" stroke-linejoin="round">${esc(pt.label)}</text>
+            ${n ? `<text x="${pt.x}" y="${pt.y + 19}" text-anchor="middle" font-size="10.5" font-weight="700" fill="${c}"
+                  font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="3.2" paint-order="stroke"
+                  stroke-linejoin="round">${n}</text>` : ''}
           </g>`).join('')}
         ${marks.filter(m => m.t > 0 && m.t < 1).map(m => `
           <g class="d2d-vessel" data-open="${esc(m.sh.id)}" style="cursor:pointer;" role="button"
@@ -1084,7 +1443,9 @@
             <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)})">
               <path d="M-8 3 L8 3 L6 8 L-6 8 Z M0 -8 L0 3 M0 -8 L6 1 L0 1" fill="none" stroke="${m.colour}" stroke-width="1.8" stroke-linejoin="round"/>
             </g>
-            <text x="${(m.pos.x + 16).toFixed(1)}" y="${(m.pos.y + 3).toFixed(1)}" font-size="10.5" fill="${DARK}" font-family="ui-monospace,monospace">${esc(m.sh.reference || 'unadvised')}</text>
+            <text x="${(m.pos.x + 16).toFixed(1)}" y="${(m.pos.y + 3).toFixed(1)}" font-size="10.5" font-weight="600"
+                  fill="${DARK}" font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="3.2"
+                  paint-order="stroke" stroke-linejoin="round">${esc(m.sh.reference || 'unadvised')}</text>
           </g>`).join('')}
       </svg>
 
@@ -1123,119 +1484,20 @@
     // Filters inside full screen re-render it in place rather than dropping back to the page.
     ov.querySelectorAll('[data-filt]').forEach(b => b.onclick = () => { _mapFilter = b.getAttribute('data-filt'); shut(); openFullMap(); });
     ov.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { _mapScope = b.getAttribute('data-scope'); shut(); openFullMap(); });
-    ov.querySelectorAll('[data-open]').forEach(b => b.addEventListener('click', () => openShipment(b.getAttribute('data-open'))));
-    const onKey = (e) => { if (e.key === 'Escape' && !el('d2d-drawer')) { shut(); document.removeEventListener('keydown', onKey); } };
+    ov.querySelectorAll('[data-open]').forEach(b => b.addEventListener('click', () => {
+      shut();
+      if (_tab !== 'shipments') _tab = 'shipments';
+      go('container', b.getAttribute('data-open'));
+    }));
+    const onKey = (e) => { if (e.key === 'Escape') { shut(); document.removeEventListener('keydown', onKey); } };
     document.addEventListener('keydown', onKey);
   }
 
-  // ── Shipment detail ──
-  // Opened from a tile or from a vessel on the map. Holds the full milestone strip, where the
-  // dates came from, and what is aboard. PO and SKU rows are marked as awaiting the client's
-  // order feed rather than filled with invented cargo.
+  // findShip is used by the container screen and by the map.
   function findShip(id) {
     const all = (_data && _data.allShipments) || [];
-    return (_data.shipments || []).find(x => x.id === id) || all.find(x => x.id === id);
+    return ((_data && _data.shipments) || []).find(x => x.id === id) || all.find(x => x.id === id);
   }
-
-  function openShipment(id) {
-    const sh = findShip(id); if (!sh) return;
-    closeDrawer();
-    const ev = evMap(sh);
-    const od = overdueOf(sh), slip = slipOf(sh);
-    let liveIdx = -1; STAGES.forEach(([k], i) => { if (ev[k] && ev[k].actual_at) liveIdx = i; });
-    const pos = shipmentPositions([sh])[0];
-
-    const row = (label, value, colour) => `
-      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:7px 0;
-           border-bottom:.5px solid rgba(0,0,0,.05);">
-        <span style="font-size:11.5px;color:${MID};">${label}</span>
-        <span class="d2d-num" style="font-size:12px;color:${colour || DARK};text-align:right;">${value}</span>
-      </div>`;
-
-    const dr = document.createElement('div');
-    dr.id = 'd2d-drawer';
-    dr.style.cssText = 'position:fixed;inset:0;z-index:9700;background:rgba(16,18,27,.28);display:flex;justify-content:flex-end;';
-    dr.innerHTML = `
-      <div class="d2d-drawerpanel" style="width:min(560px,94vw);background:#fff;height:100%;overflow-y:auto;
-           box-shadow:-18px 0 44px rgba(16,18,27,.18);">
-        <div style="position:sticky;top:0;background:#fff;border-bottom:.5px solid rgba(0,0,0,.08);padding:16px 20px;
-             display:flex;align-items:flex-start;justify-content:space-between;gap:12px;">
-          <div style="min-width:0;">
-            <div class="d2d-num" style="font-size:16px;color:${DARK};">${esc(sh.reference || 'container not advised')}</div>
-            <div style="font-size:11px;color:${MID};margin-top:2px;">${esc([sh.container_type, sh.carrier, sh.vessel].filter(Boolean).join(' · ')) || 'no vessel advised'}</div>
-          </div>
-          <button class="d2d-btn" id="d2d-drawerclose" aria-label="Close" style="min-height:36px;padding:7px 12px;">Close</button>
-        </div>
-
-        <div style="padding:16px 20px;">
-          <div style="display:flex;align-items:center;gap:9px;margin-bottom:14px;">
-            <span style="width:9px;height:9px;border-radius:50%;background:${pos.colour};"></span>
-            <span style="font-size:12.5px;color:${DARK};font-weight:600;">
-              ${od ? esc(od.label) + ' overdue by ' + od.days + ' days'
-                   : (slip > 0 ? esc(pos.stage) + ' · ' + slip + ' days behind plan'
-                   : (sh.status === 'delivered' ? 'Delivered' : 'Last recorded: ' + esc(pos.stage)))}</span>
-          </div>
-
-          <div style="font-size:10px;font-weight:600;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;">Journey</div>
-          ${STAGES.map(([k, label], i) => {
-            const e = ev[k], actual = e && e.actual_at;
-            const plan = sh['plan_' + k];
-            const d = daysBetween(plan, actual);
-            const late = d != null && d > 0;
-            const isOd = od && od.stage === k;
-            const colour = isOd ? BRAND : actual ? (late ? BRAND : LIME) : '#D6D6DB';
-            return `
-              <div style="display:flex;gap:12px;align-items:flex-start;">
-                <div style="display:flex;flex-direction:column;align-items:center;width:26px;flex-shrink:0;">
-                  <span style="width:26px;height:26px;border-radius:50%;border:2px solid ${colour};box-sizing:border-box;
-                        background:${actual ? (late ? 'rgba(153,0,51,.10)' : 'rgba(155,171,21,.16)') : '#fff'};
-                        display:inline-flex;align-items:center;justify-content:center;">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="${colour}" stroke-width="1.9"
-                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${ICONS[i]}"></path></svg>
-                  </span>
-                  ${i < STAGES.length - 1 ? `<span style="width:2px;flex:1;min-height:26px;background:${i < liveIdx ? LIME : 'rgba(0,0,0,.09)'};"></span>` : ''}
-                </div>
-                <div style="flex:1;min-width:0;padding-bottom:12px;">
-                  <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;">
-                    <span style="font-size:12.5px;font-weight:600;color:${isOd ? BRAND : DARK};">${esc(label)}</span>
-                    <span class="d2d-num" style="font-size:11.5px;color:${actual ? (late ? BRAND : DARK) : LIGHT};">
-                      ${actual ? esc(day(actual)) : (isOd ? 'overdue' : '—')}</span>
-                  </div>
-                  <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-top:1px;">
-                    <span style="font-size:10.5px;color:${LIGHT};">${plan ? 'plan ' + esc(day(plan)) : ''}</span>
-                    <span style="font-size:10px;color:${MID};text-transform:uppercase;letter-spacing:.03em;">
-                      ${actual ? esc(e.source) : ''}${late ? ` · <span style="color:${BRAND};font-weight:700;">+${d}d</span>` : ''}</span>
-                  </div>
-                  ${_internal ? `<button class="d2d-btn d2d-edit" data-ship="${esc(sh.id)}" data-stage="${k}" data-label="${esc(label)}"
-                       style="margin-top:6px;min-height:34px;padding:5px 10px;font-size:10.5px;">${actual ? 'Edit' : 'Record'}</button>` : ''}
-                </div>
-              </div>`;
-          }).join('')}
-
-          <div style="font-size:10px;font-weight:600;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;margin:14px 0 6px;">Shipment</div>
-          ${row('Week', esc(day(sh.week_start)))}
-          ${row('Mode', esc(sh.mode || 'sea'))}
-          ${row('Last known position', esc(pos.stage))}
-          ${row('Status', esc(sh.status))}
-
-          <div style="font-size:10px;font-weight:600;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;margin:16px 0 6px;">Orders and lines aboard</div>
-          <div style="border:1px dashed rgba(0,0,0,.16);border-radius:11px;padding:14px;background:#FBFBFC;">
-            <div style="font-size:12px;color:${DARK};font-weight:600;">Waiting on the order feed</div>
-            <div style="font-size:11px;color:${MID};line-height:1.5;margin-top:4px;">
-              POs, SKUs and unit counts appear here once GRBA's purchase order file is connected.
-              Nothing is shown until then rather than a placeholder that could be mistaken for cargo.</div>
-          </div>
-        </div>
-      </div>`;
-    document.body.appendChild(dr);
-    el('d2d-drawerclose').onclick = closeDrawer;
-    dr.addEventListener('click', (e) => { if (e.target === dr) closeDrawer(); });
-    wireActions(dr);
-    const onKey = (e) => { if (e.key === 'Escape') { closeDrawer(); document.removeEventListener('keydown', onKey); } };
-    document.addEventListener('keydown', onKey);
-  }
-
-  function closeDrawer() { const d = el('d2d-drawer'); if (d) d.remove(); }
 
   // ── Recording a milestone ──
   // A small popover anchored to the stage. Deliberately not a modal: the strip behind it is
@@ -1339,7 +1601,12 @@
 
   // ── Actions ──
   function wireActions(root) {
-    root.querySelectorAll('[data-open]').forEach(b => b.onclick = () => openShipment(b.getAttribute('data-open')));
+    root.querySelectorAll('[data-open]').forEach(b => b.onclick = () => {
+      const id = b.getAttribute('data-open');
+      const fm = el('d2d-fullmap'); if (fm) { fm.remove(); document.body.style.overflow = ''; }
+      go('container', id);
+    });
+    root.querySelectorAll('[data-go]').forEach(b => b.onclick = () => go(b.getAttribute('data-go'), b.getAttribute('data-goid')));
     root.querySelectorAll('[data-filt]').forEach(b => b.onclick = () => { _mapFilter = b.getAttribute('data-filt'); paint(); });
     root.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { _mapScope = b.getAttribute('data-scope'); paint(); });
     const full = root.querySelector('[data-mapfull]');
@@ -1393,5 +1660,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v13 loaded');
+  console.log('[d2d-hub] v14 loaded');
 })();
