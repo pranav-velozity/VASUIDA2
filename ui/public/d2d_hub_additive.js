@@ -904,12 +904,14 @@
         }
       }
 
+      // Shipments that have only just left share one position, and at map scale they collapse
+      // into a single marker with two names printed over each other. They are stepped apart
+      // across the lane, and the label offset is carried through so the text follows its own
+      // marker rather than the one beside it.
       const key = (air ? 'a' : 's') + Math.round(base * 40);
       const n = (atStage[key] = (atStage[key] || 0) + 1) - 1;
-      // Anything still sharing a spot is fanned across the lane rather than along it, so the
-      // position keeps meaning what it says.
       const t = (base === 0 || base >= 1) ? base : Math.min(0.97, base);
-      const across = base === 0 || base >= 1 ? 0 : ((n % 2 ? 1 : -1) * Math.ceil(n / 2) * 15);
+      const across = base === 0 || base >= 1 ? 0 : ((n % 2 ? 1 : -1) * Math.ceil(n / 2) * 26);
 
       const from = ORIGIN_PORTS[originKey(sh.service || sh.origin)] || null;
       const p = air ? atAirT(t, from) : atT(t, from);
@@ -918,7 +920,8 @@
       const colour = od || (slip != null && slip > 0) ? BRAND
                    : sh.status === 'delivered' ? LINK
                    : last ? LIME : LIGHT;
-      return { sh, t, air, pos: { x: p.x, y: p.y + across * (VIEW.w / MAP.w) },
+      return { sh, t, air, lane: n,
+               pos: { x: p.x, y: p.y + across * (VIEW.w / MAP.w) },
                stage: lastStage || 'not yet collected', colour,
                note: od ? od.label + ' overdue' : (slip > 0 ? '+' + slip + ' days' : null) };
     });
@@ -1038,7 +1041,8 @@
                   <path d="${m.air ? 'M-8 0 L8 0 M-3 -5 L3 0 L-3 5' : 'M-7 3 L7 3 L5 7 L-5 7 Z M0 -7 L0 3 M0 -7 L5 1 L0 1'}"
                         fill="none" stroke="${m.colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
                 </g>
-                <text x="${(m.pos.x + 15 * k).toFixed(1)}" y="${(m.pos.y + 3.5 * k).toFixed(1)}"
+                <text x="${(m.pos.x + (m.lane % 2 ? -15 : 15) * k).toFixed(1)}"
+                      y="${(m.pos.y + 3.5 * k).toFixed(1)}" text-anchor="${m.lane % 2 ? 'end' : 'start'}"
                       font-size="${(10.5 * k).toFixed(1)}" font-weight="600" fill="${DARK}"
                       font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="${(3.2 * k).toFixed(2)}"
                       paint-order="stroke" stroke-linejoin="round">${esc(m.sh.reference || 'unadvised')}</text>
@@ -1245,10 +1249,19 @@
       : ['Booked', MID, '#F2F2F5'];
 
     const look = outlook(sh);
+    // Pallets, cartons, units and volume — the figures the booking was quoted on.
+    const cg = sh.cargo || {};
+    const cargo = [
+      ['Pallets', cg.pallets], ['Cartons', cg.cartons],
+      ['Units', cg.units != null ? cg.units : (sh.units || null)],
+      ['CBM', cg.cbm != null ? cg.cbm : (sh.cbm || null)],
+    ].filter(([, v]) => v != null && v !== '' && Number(v) > 0)
+     .map(([l, v]) => [l, Number(v) >= 1000 ? Number(v).toLocaleString() : String(v)]);
     // Capacity is roughly 67 CBM for a 40ft box and 33 for a 20ft. Only shown when the CBM
     // aboard is known, which means the order file has been loaded.
     const cap = /40/.test(sh.container_type || '') ? 67 : /20/.test(sh.container_type || '') ? 33 : null;
-    const util = (cap && sh.cbm) ? { pct: Math.round(Number(sh.cbm) / cap * 100) } : null;
+    const cbmAboard = sh.cbm != null ? sh.cbm : (sh.cargo && sh.cargo.cbm);
+    const util = (cap && cbmAboard) ? { pct: Math.round(Number(cbmAboard) / cap * 100) } : null;
 
     // Door to door, as planned and — once delivered — as it actually ran.
     const planned = daysBetween(sh.plan_pickup, sh.plan_delivered);
@@ -1323,11 +1336,20 @@
                  Planned <b class="d2d-num" style="color:${DARK};">${planned} days</b>
                  ${actualSpan != null ? ` &middot; actual <b class="d2d-num" style="color:${actualSpan > planned ? BRAND : LINK};">${actualSpan}</b>` : ''}</span>` : ''}
 
-            ${/* What is aboard, and how full it is. Utilisation needs CBM from the order file,
-                  so it is shown only when the figure is real. */ ''}
+            ${/* What is aboard. The order file gives orders and units once loaded; until then
+                  the booking's own cargo figures stand in, split across the containers booked
+                  rather than repeated whole on each one. */ ''}
             ${sh.po_count ? `<span style="text-align:right;">
                  <span style="display:block;font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Aboard</span>
                  <span class="d2d-num" style="display:block;font-size:12px;color:${DARK};">${sh.po_count} orders &middot; ${Number(sh.units || 0).toLocaleString()} units</span>
+               </span>` : ''}
+            ${cargo.length ? `<span style="display:flex;align-items:stretch;gap:0;border:.5px solid rgba(0,0,0,.09);
+                  border-radius:9px;overflow:hidden;">
+                 ${cargo.map((c, i2) => `<span style="padding:5px 10px;text-align:center;min-width:52px;
+                       ${i2 ? 'border-left:.5px solid rgba(0,0,0,.07);' : ''}background:${i2 % 2 ? '#FBFBFC' : '#fff'};">
+                     <span style="display:block;font-size:8.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">${c[0]}</span>
+                     <span class="d2d-num" style="display:block;font-size:13px;font-weight:600;color:${DARK};line-height:1.2;">${c[1]}</span>
+                   </span>`).join('')}
                </span>` : ''}
             ${util ? `<span style="text-align:right;min-width:92px;">
                  <span style="display:block;font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Utilisation</span>
@@ -2302,18 +2324,25 @@
     // widened so the whole route sits inside a recognisable region.
     // Centre on the route rather than the frame, and pull well back: the lane belongs in the
     // middle of a full screen, not off to one side of it.
-    // Pulled back further, and centred on the lane itself. The frame is NOT clamped to the
-    // world any more: clamping is what pushed China and Australia into the right-hand corner,
-    // since the lane sits at the eastern edge of an equirectangular map. The dot field is
-    // drawn again either side instead, so the map stays continuous.
-    const grow = 2.6 * 1.6;
-    const mid = atT(0.5);
-    const cx = (PORTS.origin.x + PORTS.destination.x + mid.x) / 3;
-    const cy = (PORTS.origin.y + PORTS.destination.y + mid.y) / 3;
+    // The frame is built from the LANE, not from the tile's frame. Deriving it from VIEW
+    // compounded two zoom-outs and ended up showing the world three times over. It is not
+    // clamped to the world either — clamping is what pushed China and Australia into the
+    // corner, since this lane sits at the eastern edge of an equirectangular map. The dot
+    // field repeats either side instead, so the map stays continuous.
     const bounds = (_world && _world.view) || { x0: 0, y0: 0, w: MAP.w, h: MAP.h };
-    const fw = VIEW.w * grow, fh = VIEW.h * grow;
-    const FULLVIEW = { x0: cx - fw / 2, y0: cy - fh / 2, w: fw, h: fh };
     const worldW = bounds.w;
+    const pts = originsUsed(source).filter(Boolean).map(portXY).concat([PORTS.origin, PORTS.destination, atT(0.5)]);
+    const lx0 = Math.min(...pts.map(q => q.x)), lx1 = Math.max(...pts.map(q => q.x));
+    const ly0 = Math.min(...pts.map(q => q.y)), ly1 = Math.max(...pts.map(q => q.y));
+    const cx = (lx0 + lx1) / 2, cy = (ly0 + ly1) / 2;
+    // The lane runs far further north to south than east to west, and a wide screen then
+    // forces a wide frame. Padding is kept tight so the route fills the HEIGHT; the extra
+    // width becomes context either side rather than the route shrinking to a dot.
+    const pad = 1.35;
+    let fw = Math.max(lx1 - lx0, 1) * pad, fh = Math.max(ly1 - ly0, 1) * pad;
+    const screen = Math.max(1.2, (window.innerWidth || 1600) / Math.max(400, (window.innerHeight || 900) - 60));
+    if (fw / fh < screen) fw = fh * screen; else fh = fw / screen;
+    const FULLVIEW = { x0: cx - fw / 2, y0: cy - fh / 2, w: fw, h: fh };
     const k = FULLVIEW.w / MAP.w;
 
     const ov = document.createElement('div');
@@ -2380,7 +2409,8 @@
               <path d="${m.air ? 'M-8 0 L8 0 M-3 -5 L3 0 L-3 5' : 'M-8 3 L8 3 L6 8 L-6 8 Z M0 -8 L0 3 M0 -8 L6 1 L0 1'}"
                     fill="none" stroke="${m.colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
             </g>
-            <text x="${(m.pos.x + 16 * k).toFixed(1)}" y="${(m.pos.y + 3.5 * k).toFixed(1)}"
+            <text x="${(m.pos.x + (m.lane % 2 ? -16 : 16) * k).toFixed(1)}"
+                  y="${(m.pos.y + 3.5 * k).toFixed(1)}" text-anchor="${m.lane % 2 ? 'end' : 'start'}"
                   font-size="${(10.5 * k).toFixed(1)}" font-weight="600" fill="${DARK}"
                   font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="${(3.2 * k).toFixed(2)}"
                   paint-order="stroke" stroke-linejoin="round">${esc(m.sh.reference || 'unadvised')}</text>
