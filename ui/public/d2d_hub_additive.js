@@ -131,19 +131,53 @@
       .d2d-tab{border:0;background:none;font:600 13px inherit;color:${MID};cursor:pointer;padding:6px 0;border-bottom:2px solid transparent;}
       .d2d-tab.on{color:${DARK};border-bottom-color:${BRAND};}
       /* Week chips, matching the Week Hub's date circles rather than generic pills. */
-      .d2d-chip{width:64px;height:64px;border-radius:50%;border:1.5px solid rgba(0,0,0,.10);background:#fff;
+      .d2d-chip{width:46px;height:46px;border-radius:50%;border:1.5px solid rgba(0,0,0,.10);background:#fff;
         display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;cursor:pointer;
         font:inherit;color:${DARK};transition:border-color .18s ease,transform .18s cubic-bezier(.22,1,.36,1);flex-shrink:0;}
       .d2d-chip:hover{border-color:rgba(0,0,0,.28);transform:translateY(-2px);}
       .d2d-chip.on{border-color:${BRAND};border-width:2px;}
       .d2d-chip .m{font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:${LIGHT};}
       .d2d-chip.on .m{color:${BRAND};}
-      .d2d-chip .d{font-size:19px;font-weight:600;line-height:1;}
-      .d2d-chip .n{font-size:8.5px;color:${MID};}
+      .d2d-chip .d{font-size:14px;font-weight:600;line-height:1;}
+      .d2d-chip .n{display:none;}
+      .d2d-chip .m{font-size:7.5px;}
       /* The strip is capped so stages sit a sensible distance apart on a wide monitor. */
       .d2d-striphold{max-width:1080px;}
       .d2d-card{border:.5px solid rgba(16,18,27,.08);border-radius:14px;background:#fff;
         box-shadow:0 1px 2px rgba(16,18,27,.04),0 4px 12px rgba(16,18,27,.05);}
+      /* The same glass as the Week Hub tiles: a travelling specular sheen, an ambient bloom
+         from the light source at top-left, and a body gradient that cools toward the bottom.
+         Copied rather than approximated so the two cannot drift apart. */
+      #page-d2d .rounded-2xl.bg-white, #d2d-drawer .d2d-glass{
+        background-image:
+          linear-gradient(115deg, rgba(255,255,255,0) 28%, rgba(255,255,255,.75) 42%,
+            rgba(255,255,255,.95) 48%, rgba(255,255,255,.75) 54%, rgba(255,255,255,0) 68%),
+          radial-gradient(120% 90% at 8% 0%, rgba(255,255,255,.95) 0%, rgba(255,255,255,0) 60%),
+          linear-gradient(168deg, #ffffff 0%, #ffffff 46%, #f7f9fc 100%);
+        background-size:220% 220%,100% 100%,100% 100%;
+        background-position:100% 0%,0% 0%,0% 0%;
+        background-repeat:no-repeat;
+        box-shadow:
+          inset 0 1px 0 rgba(255,255,255,1),
+          inset 1px 0 0 rgba(255,255,255,.65),
+          inset -1px 0 0 rgba(255,255,255,.5),
+          inset 0 -1px 0 rgba(16,18,27,.055),
+          inset 0 18px 30px -20px rgba(255,255,255,1),
+          0 1px 2px rgba(16,18,27,.045), 0 4px 12px rgba(16,18,27,.055);
+        border-color:rgba(16,18,27,.08);
+        transition:box-shadow .28s cubic-bezier(.22,1,.36,1), transform .28s cubic-bezier(.22,1,.36,1),
+          border-color .28s cubic-bezier(.22,1,.36,1), background-position .55s cubic-bezier(.22,1,.36,1);
+      }
+      #page-d2d .rounded-2xl.bg-white:hover{
+        background-position:0% 0%,0% 0%,0% 0%;
+        box-shadow:
+          inset 0 1px 0 rgba(255,255,255,1),
+          inset 1px 0 0 rgba(255,255,255,.65),
+          inset -1px 0 0 rgba(255,255,255,.5),
+          inset 0 -1px 0 rgba(16,18,27,.055),
+          0 2px 4px rgba(16,18,27,.06), 0 18px 38px rgba(16,18,27,.13);
+      }
+      @media (prefers-reduced-motion:reduce){#page-d2d .rounded-2xl.bg-white{transition:none;}}
       .d2d-grid4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;}
       .d2d-tile{padding:14px 16px;}
       .d2d-tl{font-size:10px;font-weight:600;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;}
@@ -215,6 +249,7 @@
               <div style="font-size:9px;color:${LIGHT};margin-top:2px;" id="d2d-sub">Plan against actual</div>
             </div>
             <div class="d2d-tabs" id="d2d-tabs"></div>
+            <span id="d2d-weeks" style="display:flex;align-items:center;gap:8px;"></span>
           </div>
           <!-- The live line sits between the tabs and the account, where the eye lands. -->
           <span id="d2d-status" style="display:flex;align-items:center;gap:8px;font-size:12px;color:${MID};
@@ -241,29 +276,35 @@
   let _tab = 'shipments', _data = null, _internal = false, _mapFilter = 'all', _mapScope = 'live';
 
   async function load() {
+    // The FIRST call decides availability: a 404 there means this client has no door-to-door.
+    // A 404 on a later call means that week or list is empty, and must not tear down the page
+    // — treating every 404 the same emptied the whole page when a week had no shipments.
+    let weeks;
     try {
-      const weeks = (await api('/d2d/weeks')).weeks || [];
-      if (!_week && weeks.length) _week = weeks[0].week_start;
-      let shipments = [], bookings = [], pricingVisible = false, allShipments = [];
-      if (_week) {
-        shipments = (await api('/d2d/shipments?week=' + encodeURIComponent(_week))).shipments || [];
-        const bk = await api('/d2d/bookings?week=' + encodeURIComponent(_week));
-        bookings = bk.bookings || []; pricingVisible = !!bk.pricing_visible;
-      }
-      // Everything, for the map: a vessel in flight belongs to no particular week.
-      try { allShipments = (await api('/d2d/shipments')).shipments || []; } catch (e) { allShipments = shipments; }
-      _internal = pricingVisible;
-      _data = { weeks, shipments, bookings, allShipments };
-      paint();
+      weeks = (await api('/d2d/weeks')).weeks || [];
     } catch (e) {
-      if (e.status === 404 || e.status === 403) {
-        // Not available for the active client — leave rather than show an error page.
-        _enabled = false; paintNav();
-        return;
-      }
-      const b = el('d2d-body');
-      if (b) b.innerHTML = `<div class="d2d-empty" style="color:${BRAND}">Could not load. ${esc(e.message)}</div>`;
+      if (e.status === 404 || e.status === 403) { _enabled = false; paintNav(); return; }
+      const b0 = el('d2d-body');
+      if (b0) b0.innerHTML = `<div class="d2d-empty" style="color:${BRAND}">Could not load. ${esc(e.message)}</div>`;
+      return;
     }
+
+    if (!_week && weeks.length) _week = weeks[0].week_start;
+    let shipments = [], bookings = [], pricingVisible = _internal, allShipments = [];
+    const soft = async (path, fallback) => {
+      try { return await api(path); } catch (e) { console.warn('[d2d-hub]', path, e.message); return fallback; }
+    };
+    if (_week) {
+      shipments = (await soft('/d2d/shipments?week=' + encodeURIComponent(_week), { shipments: [] })).shipments || [];
+      const bk = await soft('/d2d/bookings?week=' + encodeURIComponent(_week), { bookings: [], pricing_visible: _internal });
+      bookings = bk.bookings || []; pricingVisible = !!bk.pricing_visible;
+    }
+    // Everything, for the map: a vessel in flight belongs to no particular week.
+    allShipments = (await soft('/d2d/shipments', { shipments })).shipments || shipments;
+
+    _internal = pricingVisible;
+    _data = { weeks, shipments, bookings, allShipments };
+    paint();
   }
 
   // ── Derived signals: every figure below comes from the loaded rows, never a stored total ──
@@ -364,7 +405,7 @@
     // with nothing approved has no shipments at all and would otherwise read "· 0".
     // Oldest to newest, left to right, like the Week Hub's date circles.
     const chips = [...d.weeks].sort((a, b) => a.week_start < b.week_start ? -1 : 1);
-    const weekBar = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+    const weekBar = `<div style="display:flex;align-items:center;gap:7px;flex-wrap:nowrap;">
       ${chips.map(w => {
         const dt = new Date(w.week_start + 'T00:00:00Z');
         const mon = isNaN(dt) ? '' : dt.toLocaleDateString('en-AU', { month: 'short', timeZone: 'UTC' }).toUpperCase();
@@ -378,10 +419,13 @@
     </div>`;
 
     // Transit rules are not a property of a week, so the week bar is left off that tab.
+    // The week selector belongs with the menu, not on top of the content.
+    const wk = el('d2d-weeks');
+    if (wk) wk.innerHTML = _tab === 'baselines' ? '' : weekBar;
     body.innerHTML = _tab === 'baselines' ? paintBaselines()
-      : weekBar + (_tab === 'shipments' ? paintShipments(d) : _tab === 'bookings' ? paintBookings(d) : paintPricing(d));
+      : (_tab === 'shipments' ? paintShipments(d) : _tab === 'bookings' ? paintBookings(d) : paintPricing(d));
     if (_tab === 'baselines') loadBaselines();
-    body.querySelectorAll('[data-w]').forEach(b => b.onclick = () => { _week = b.getAttribute('data-w'); load(); });
+    document.querySelectorAll('#d2d-weeks [data-w]').forEach(b => b.onclick = () => { _week = b.getAttribute('data-w'); load(); });
     wireActions(body);
   }
 
@@ -481,7 +525,9 @@
         if (LAND.some(poly => inside([x, y], poly))) out.push(`<circle cx="${x}" cy="${y}" r="1.5"/>`);
       }
     }
-    _dots = `<g fill="#D6DAE1">${out.join('')}</g>`;
+    // Was #D6DAE1, which all but disappeared against the panel. The distance from white is
+    // roughly doubled here so the landmasses read without competing with the routes.
+    _dots = `<g fill="#AFB6C2">${out.join('')}</g>`;
     return _dots;
   }
 
@@ -849,25 +895,83 @@
     return (cur && cur !== 'USD' ? cur + ' ' : '$') + n.toLocaleString(undefined, { maximumFractionDigits: 0 });
   }
 
-  // The same map, larger. Reusing the renderer means the two can never drift apart.
+  // Truly full screen: the map fills the viewport with the controls floating over it. The
+  // first version simply re-rendered the page card inside an overlay, which gave a small map
+  // in a large empty page — the opposite of what full screen is for.
   function openFullMap() {
     if (el('d2d-fullmap')) return;
+    const source = mapFiltered(mapSource(_data));
+    const marks = shipmentPositions(source);
+    const moving = marks.filter(m => m.t > 0 && m.t < 1).length;
+
     const ov = document.createElement('div');
     ov.id = 'd2d-fullmap';
-    ov.style.cssText = 'position:fixed;inset:0;z-index:9600;background:#fff;display:flex;flex-direction:column;';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9600;background:#FBFCFD;overflow:hidden;';
     ov.innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:.5px solid rgba(0,0,0,.08);">
-        <div>
-          <div style="font-size:16px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Live tracking</div>
-          <div style="font-size:11px;color:${MID};margin-top:1px;">Week of ${esc(day(_week))}</div>
+      <svg id="d2d-fullsvg" viewBox="0 0 ${MAP.w} ${MAP.h}" preserveAspectRatio="xMidYMid slice"
+           style="position:absolute;inset:0;width:100%;height:100%;display:block;" role="img"
+           aria-label="Live tracking, full screen">
+        ${dotField()}
+        <path d="${ROUTE_D}" fill="none" stroke="#C3C9D2" stroke-width="1.6" stroke-dasharray="5 6"/>
+        ${[[PORTS.origin, marks.filter(m => m.t === 0).length, LIME],
+           [PORTS.destination, marks.filter(m => m.t >= 0.82 && m.t < 0.9).length, BRAND],
+           [PORTS.customs, marks.filter(m => m.t >= 0.9 && m.t < 0.95).length, BRAND],
+           [PORTS.lastmile, marks.filter(m => m.t === 1).length, LINK]].map(([pt, n, c]) => `
+          <g>
+            ${n ? `<circle cx="${pt.x}" cy="${pt.y}" r="10" fill="${c}" opacity=".22" class="d2d-ping"/>` : ''}
+            <circle cx="${pt.x}" cy="${pt.y}" r="5" fill="${n ? c : '#fff'}" stroke="${n ? c : '#AEB4BD'}" stroke-width="1.7"/>
+            <text x="${pt.x}" y="${pt.y - 12}" text-anchor="middle" font-size="10" fill="${MID}" font-family="inherit">${esc(pt.label)}</text>
+            ${n ? `<text x="${pt.x}" y="${pt.y + 18}" text-anchor="middle" font-size="9.5" fill="${c}" font-family="ui-monospace,monospace">${n}</text>` : ''}
+          </g>`).join('')}
+        ${marks.filter(m => m.t > 0 && m.t < 1).map(m => `
+          <g class="d2d-vessel" data-open="${esc(m.sh.id)}" style="cursor:pointer;" role="button"
+             aria-label="Open ${esc(m.sh.reference || 'shipment')}">
+            <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="20" fill="transparent"/>
+            <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="12" fill="${m.colour}" opacity=".18" class="d2d-ping"/>
+            <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)})">
+              <path d="M-8 3 L8 3 L6 8 L-6 8 Z M0 -8 L0 3 M0 -8 L6 1 L0 1" fill="none" stroke="${m.colour}" stroke-width="1.8" stroke-linejoin="round"/>
+            </g>
+            <text x="${(m.pos.x + 16).toFixed(1)}" y="${(m.pos.y + 3).toFixed(1)}" font-size="10.5" fill="${DARK}" font-family="ui-monospace,monospace">${esc(m.sh.reference || 'unadvised')}</text>
+          </g>`).join('')}
+      </svg>
+
+      <div style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;
+           gap:16px;padding:14px 20px;background:linear-gradient(180deg,rgba(251,252,253,.96),rgba(251,252,253,0));">
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+          <span style="font-size:15px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Live tracking</span>
+          <span style="font-size:11.5px;color:${MID};">${moving} in transit &middot; ${source.length} shown</span>
+          <span style="display:flex;gap:6px;">
+            ${[['live', 'All in flight'], ['week', 'This week']].map(([k, l]) =>
+              `<button class="d2d-filt ${_mapScope === k ? 'on' : ''}" data-scope="${k}">${l}</button>`).join('')}
+          </span>
+          <span style="display:flex;gap:6px;">
+            ${[['all', 'All'], ['sea', 'Sea'], ['air', 'Air'], ['late', 'Late only']].map(([k, l]) =>
+              `<button class="d2d-filt ${_mapFilter === k ? 'on' : ''}" data-filt="${k}">${l}</button>`).join('')}
+          </span>
         </div>
-        <button class="d2d-btn" id="d2d-fullclose" aria-label="Close full screen map">Close</button>
+        <div style="display:flex;align-items:center;gap:14px;">
+          ${[['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]].map(([l, c]) =>
+            `<span style="font-size:10.5px;color:${MID};"><span style="display:inline-block;width:8px;height:8px;
+               border-radius:50%;background:${c};margin-right:5px;"></span>${l}</span>`).join('')}
+          <button class="d2d-btn" id="d2d-fullclose" aria-label="Close full screen">Close</button>
+        </div>
       </div>
-      <div style="flex:1;overflow:auto;padding:16px 22px;">${paintMap(_data, { big: true })}</div>`;
+
+      <div style="position:absolute;left:20px;bottom:18px;background:rgba(255,255,255,.92);
+           border:.5px solid rgba(0,0,0,.08);border-radius:10px;padding:8px 12px;max-width:360px;">
+        <span style="font-size:11px;color:${MID};line-height:1.45;display:block;">
+          Positions follow the last recorded milestone. Click a vessel for what is aboard.
+          Exact positions need carrier tracking &mdash; <b style="color:${DARK};">not yet connected</b>.</span>
+      </div>`;
     document.body.appendChild(ov);
-    el('d2d-fullclose').onclick = () => ov.remove();
-    wireActions(ov);
-    const onKey = (e) => { if (e.key === 'Escape') { ov.remove(); document.removeEventListener('keydown', onKey); } };
+    document.body.style.overflow = 'hidden';
+    const shut = () => { ov.remove(); document.body.style.overflow = ''; };
+    el('d2d-fullclose').onclick = shut;
+    // Filters inside full screen re-render it in place rather than dropping back to the page.
+    ov.querySelectorAll('[data-filt]').forEach(b => b.onclick = () => { _mapFilter = b.getAttribute('data-filt'); shut(); openFullMap(); });
+    ov.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { _mapScope = b.getAttribute('data-scope'); shut(); openFullMap(); });
+    ov.querySelectorAll('[data-open]').forEach(b => b.addEventListener('click', () => openShipment(b.getAttribute('data-open'))));
+    const onKey = (e) => { if (e.key === 'Escape' && !el('d2d-drawer')) { shut(); document.removeEventListener('keydown', onKey); } };
     document.addEventListener('keydown', onKey);
   }
 
@@ -1134,5 +1238,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v11 loaded');
+  console.log('[d2d-hub] v12 loaded');
 })();
