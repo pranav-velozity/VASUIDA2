@@ -79,7 +79,17 @@
     // paints from whatever another client left in this browser — which is how ICONIC's week
     // appeared under a GRBA session. Hiding the pages is what actually stops that being seen.
     if (_enabled && noWeekHub) hideLegacyPages(true);
-    else if (_enabled === false) hideLegacyPages(false);
+    else if (_enabled === false) {
+      hideLegacyPages(false);
+      // This client has no door-to-door. Leaving the page visible meant switching to ICONIC
+      // showed an empty Door to door shell with "not_found", because the hash was still #d2d.
+      const page = el('page-d2d');
+      if (page) { page.style.display = 'none'; page.classList.add('hidden'); page.innerHTML = ''; }
+      _autoOpened = false;
+      if (String(location.hash || '') === '#d2d') {
+        try { if (typeof window.show === 'function') window.show('#week-hub'); } catch (e) {}
+      }
+    }
 
     // Nothing to land on, so open the hub once.
     if (_enabled && noWeekHub && !_autoOpened) {
@@ -111,14 +121,12 @@
     const st = document.createElement('style'); st.id = 'd2d-css';
     st.textContent = `
       /* The page sits inside the app's own container, so it needs no width of its own. */
-      .d2d-head{margin-bottom:14px;}
-      .d2d-tick{height:34px;background:${DARK};border-radius:10px;padding:0 14px;align-items:center;gap:10px;overflow:hidden;display:flex;margin-bottom:12px;}
+      .d2d-head{margin-bottom:14px;};border-radius:10px;padding:0 14px;align-items:center;gap:10px;overflow:hidden;display:flex;margin-bottom:12px;}
       .d2d-tabs{display:flex;gap:18px;}
       .d2d-filt{border:.5px solid rgba(0,0,0,.14);background:#fff;color:${MID};border-radius:7px;padding:4px 9px;
         font:600 10.5px inherit;cursor:pointer;transition:border-color .18s ease,background .18s ease,color .18s ease;}
       .d2d-filt:hover{border-color:rgba(0,0,0,.3);}
       .d2d-filt.on{background:${DARK};border-color:${DARK};color:#fff;}
-      .d2d-tickt{font-size:12px;color:#EDEDF0;white-space:nowrap;}
       .d2d-tab{border:0;background:none;font:600 13px inherit;color:${MID};cursor:pointer;padding:6px 0;border-bottom:2px solid transparent;}
       .d2d-tab.on{color:${DARK};border-bottom-color:${BRAND};}
       /* Week chips, matching the Week Hub's date circles rather than generic pills. */
@@ -163,8 +171,7 @@
       .d2d-empty{padding:44px;text-align:center;color:${MID};font-size:13px;}
       @keyframes d2d-live{0%,100%{transform:scale(1);}50%{transform:scale(1.13);}}
       @keyframes d2d-halo{0%{transform:scale(1);opacity:.45;}75%{transform:scale(2.1);opacity:0;}100%{opacity:0;}}
-      @keyframes d2d-rise{from{opacity:0;transform:translateY(7px);}to{opacity:1;transform:none;}}
-      @keyframes d2d-tick{0%,30%{opacity:1;transform:none;}36%,100%{opacity:0;transform:translateY(-9px);}}
+      @keyframes d2d-rise{from{opacity:0;transform:translateY(7px);}to{opacity:1;transform:none;}}36%,100%{opacity:0;transform:translateY(-9px);}}
       .d2d-pulse{animation:d2d-live 2.4s ease-in-out infinite;}
       @keyframes d2d-ping{0%{transform:scale(1);opacity:.35;}70%{transform:scale(2.2);opacity:0;}100%{opacity:0;}}
       .d2d-ping{animation:d2d-ping 2.8s ease-out infinite;transform-origin:center;transform-box:fill-box;}
@@ -194,24 +201,24 @@
   function shell() {
     const host = el('page-d2d'); if (!host) return null;
     if (el('d2d-body')) return el('d2d-body');
+    // Same header tile as the Week Hub: white card, title and week on the left, status inline.
+    // The black strip was a mockup device and does not appear anywhere else in Pinpoint.
     host.innerHTML = `
       <div class="d2d-head">
-        <div class="rounded-2xl border bg-white shadow-sm" style="padding:14px 18px;display:flex;align-items:center;
-             justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:12px;">
-          <div style="display:flex;align-items:center;gap:22px;">
-            <div>
-              <div style="font-size:16px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Door to door</div>
-              <div style="font-size:11px;color:${MID};margin-top:1px;" id="d2d-sub">Plan against actual</div>
+        <div id="d2d-header" style="background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:14px;
+             padding:8px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;
+             margin-bottom:8px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:18px;flex:1;min-width:0;flex-wrap:wrap;">
+            <div style="flex-shrink:0;">
+              <div style="font-size:15px;font-weight:600;color:${DARK};letter-spacing:-.02em;line-height:1;">Door to door</div>
+              <div style="font-size:9px;color:${LIGHT};margin-top:2px;" id="d2d-sub">Plan against actual</div>
             </div>
             <div class="d2d-tabs" id="d2d-tabs"></div>
           </div>
-          <div style="display:flex;align-items:center;gap:10px;">
-            <span class="d2d-num" style="font-size:11px;color:${MID};" id="d2d-scope"></span>
+          <div style="display:flex;align-items:center;gap:12px;flex-shrink:0;">
+            <span id="d2d-status" style="display:flex;align-items:center;gap:8px;font-size:12px;color:${MID};"></span>
+            <span class="d2d-num" style="font-size:10.5px;color:${LIGHT};" id="d2d-scope"></span>
           </div>
-        </div>
-        <div id="d2d-tickbar" class="d2d-tick" style="display:none;">
-          <span style="width:6px;height:6px;border-radius:50%;background:${LIME};flex-shrink:0;"></span>
-          <div style="position:relative;height:34px;flex:1;" id="d2d-ticker"></div>
         </div>
       </div>
       <div id="d2d-body"><div class="d2d-empty">Loading&hellip;</div></div>`;
@@ -219,6 +226,11 @@
   }
 
   async function open() {
+    // A bookmarked or leftover #d2d must not render for a client that does not have it.
+    if (_enabled === false) {
+      try { if (typeof window.show === 'function') window.show('#week-hub'); } catch (e) {}
+      return;
+    }
     styles();
     if (!shell()) return;
     await load();
@@ -241,8 +253,13 @@
       _data = { weeks, shipments, bookings };
       paint();
     } catch (e) {
+      if (e.status === 404 || e.status === 403) {
+        // Not available for the active client — leave rather than show an error page.
+        _enabled = false; paintNav();
+        return;
+      }
       const b = el('d2d-body');
-      if (b) b.innerHTML = `<div class="d2d-empty" style="color:${BRAND}">Could not load (${esc(e.message)}).</div>`;
+      if (b) b.innerHTML = `<div class="d2d-empty" style="color:${BRAND}">Could not load. ${esc(e.message)}</div>`;
     }
   }
 
@@ -323,13 +340,17 @@
       tw.innerHTML = tabs.map(([k, l]) => `<button class="d2d-tab ${_tab === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('');
       tw.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { _tab = b.getAttribute('data-tab'); paint(); });
     }
-    const tick = el('d2d-ticker');
     const lines = tickerLines(d);
-    const bar = el('d2d-tickbar');
-    if (bar) bar.style.display = lines.length ? 'flex' : 'none';
-    if (tick) tick.innerHTML = lines.map((t, i) =>
-      `<span class="d2d-tickt" style="position:absolute;left:0;top:0;height:34px;display:flex;align-items:center;${
-        lines.length > 1 ? `animation:d2d-tick ${lines.length * 4}s ${i * 4}s infinite;` : ''}">${esc(t)}</span>`).join('');
+    const st = el('d2d-status');
+    if (st) {
+      const worst = d.shipments.map(x => ({ od: overdueOf(x), slip: slipOf(x) }));
+      const bad = worst.some(x => x.od || (x.slip || 0) > 0);
+      st.innerHTML = lines.length
+        ? `<span style="width:7px;height:7px;border-radius:50%;background:${bad ? BRAND : LIME};flex-shrink:0;"></span>
+           <span style="color:${bad ? DARK : MID};">${esc(lines[0])}</span>
+           ${lines.length > 1 ? `<span style="color:${LIGHT};">&middot; ${lines.length - 1} more</span>` : ''}`
+        : '';
+    }
 
     const body = el('d2d-body'); if (!body) return;
     if (!d.weeks.length) {
@@ -996,5 +1017,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v8 loaded');
+  console.log('[d2d-hub] v9 loaded');
 })();
