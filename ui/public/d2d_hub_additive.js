@@ -221,6 +221,10 @@
       .d2d-kind{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;}
       .d2d-opt{padding:15px 17px;display:flex;flex-direction:column;gap:10px;border-top:3px solid;}
       .d2d-num{font-family:ui-monospace,SFMono-Regular,monospace;}
+      .d2d-in2{display:block;width:100%;box-sizing:border-box;font:inherit;font-size:12.5px;color:${DARK};
+        border:.5px solid rgba(0,0,0,.18);border-radius:8px;padding:8px 9px;min-height:38px;margin-top:4px;background:#fff;
+        text-transform:none;letter-spacing:normal;}
+      .d2d-in2:focus{outline:2px solid rgba(44,111,187,.35);outline-offset:1px;}
       .d2d-in{width:64px;font:inherit;font-size:12.5px;text-align:right;border:.5px solid rgba(0,0,0,.18);border-radius:7px;padding:7px 8px;}
       .d2d-empty{padding:44px;text-align:center;color:${MID};font-size:13px;}
       @keyframes d2d-live{0%,100%{transform:scale(1);}50%{transform:scale(1.13);}}
@@ -1550,10 +1554,28 @@
 
   // ── Bookings: what the client decides ──
   function paintBookings(d) {
-    if (!d.bookings.length) return `<div class="d2d-empty">No options for this week.</div>`;
+    const header = `
+      <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:12px;flex-wrap:wrap;">
+        <div>
+          <div style="font-size:14px;font-weight:600;color:${DARK};">Week of ${esc(day(_week))}</div>
+          <div style="font-size:11px;color:${MID};margin-top:2px;">${_internal
+            ? 'Options quoted for this week. The client approves one, and the plan freezes.'
+            : 'Choose the sailing that suits you. Approving freezes the plan.'}</div>
+        </div>
+        ${_internal ? `<button class="d2d-btn dark" data-newbooking="1">New booking</button>` : ''}
+      </div>`;
+    if (!d.bookings.length) return header + `
+      <div class="rounded-2xl border bg-white shadow-sm" style="padding:22px 24px;">
+        <div style="font-size:14px;font-weight:600;color:${DARK};">Nothing quoted for this week</div>
+        <div style="font-size:12px;color:${MID};line-height:1.6;margin-top:6px;max-width:600px;">
+          ${_internal
+            ? 'Start a booking with the rates the partner quoted. Enter cost only — margin is set on Pricing, and nothing reaches the client until you release it.'
+            : 'Options will appear here once they have been quoted.'}
+        </div>
+      </div>`;
     const order = { released: 0, approved: 1, draft: 2, declined: 3, expired: 4 };
     const rows = [...d.bookings].sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
-    return `<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;">
+    return header + `<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;">
       ${rows.map((b, i) => {
         const st = b.status;
         const accent = st === 'approved' ? LIME : st === 'released' ? BLUE : st === 'draft' ? YELL : '#D6D6DB';
@@ -1586,10 +1608,163 @@
     </div>`;
   }
 
+  // ── Starting a booking ──
+  // Options come in from the partner as rates; this is where they are entered. Cost only —
+  // the margin and the sell price are set on Pricing, so the two jobs stay separate.
+  const nextMonday = () => {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() + ((8 - d.getUTCDay()) % 7 || 7));
+    return d.toISOString().slice(0, 10);
+  };
+
+  function optionRow(n) {
+    return `
+      <div class="d2d-optrow" data-optrow="${n}" style="border:.5px solid rgba(0,0,0,.10);border-radius:12px;padding:13px 15px;margin-bottom:10px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;">
+          <span style="font-size:12px;font-weight:600;color:${DARK};">Option ${String.fromCharCode(65 + n)}</span>
+          <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:${MID};cursor:pointer;">
+            <input type="radio" name="d2d-rec" value="${n}" ${n === 0 ? 'checked' : ''}> recommend this one</label>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;">
+          <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Description
+            <input class="d2d-in2" data-f="title" placeholder="2 x 40HQ, direct"></label>
+          <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Carrier
+            <input class="d2d-in2" data-f="carrier" placeholder="ONE"></label>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:10px;">
+          <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Box type
+            <select class="d2d-in2" data-f="container_type">
+              <option value="40HQ">40HQ</option><option value="40GP">40GP</option>
+              <option value="20GP">20GP</option><option value="">n/a (air)</option></select></label>
+          <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">How many
+            <input class="d2d-in2 d2d-num" data-f="container_qty" type="number" min="1" max="20" value="1"></label>
+          <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Transit days
+            <input class="d2d-in2 d2d-num" data-f="transit_days" type="number" min="1" max="120" placeholder="26"></label>
+          <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Via
+            <select class="d2d-in2" data-f="transhipment">
+              <option value="0">direct</option><option value="1">transhipment</option></select></label>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px;">
+          <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Partner cost
+            <input class="d2d-in2 d2d-num" data-f="cost_amount" type="number" min="0" step="0.01" placeholder="8000"></label>
+          <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Origin + destination
+            <input class="d2d-in2 d2d-num" data-f="accessorial_amount" type="number" min="0" step="0.01" placeholder="900"></label>
+          <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Currency
+            <select class="d2d-in2" data-f="currency"><option>USD</option><option>AUD</option><option>CNY</option></select></label>
+        </div>
+      </div>`;
+  }
+
+  function openNewBooking() {
+    if (el('d2d-nbov')) return;
+    const ov = document.createElement('div');
+    ov.id = 'd2d-nbov';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9700;background:rgba(16,18,27,.28);display:flex;align-items:center;justify-content:center;padding:24px;';
+    ov.innerHTML = `
+      <div class="rounded-2xl" style="background:#fff;width:min(860px,96vw);max-height:90vh;overflow-y:auto;
+           box-shadow:0 40px 80px rgba(16,18,27,.22);">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;
+             border-bottom:.5px solid rgba(0,0,0,.08);position:sticky;top:0;background:#fff;">
+          <div>
+            <div style="font-size:15px;font-weight:700;color:${DARK};">New booking</div>
+            <div style="font-size:11px;color:${MID};margin-top:2px;">Enter the rates the partner quoted. Margin is set afterwards, on Pricing.</div>
+          </div>
+          <button class="d2d-btn" id="d2d-nbclose">Close</button>
+        </div>
+
+        <div style="padding:18px 20px;">
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:16px;">
+            <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Cargo ready week
+              <input class="d2d-in2" id="d2d-nbweek" type="date" value="${esc(nextMonday())}"></label>
+            <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Mode
+              <select class="d2d-in2" id="d2d-nbmode"><option value="sea">Sea</option><option value="air">Air</option></select></label>
+            <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Origin
+              <input class="d2d-in2" id="d2d-nborigin" placeholder="Ningbo"></label>
+          </div>
+
+          <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px;">
+            <span style="font-size:12.5px;font-weight:600;color:${DARK};">Options quoted</span>
+            <span style="font-size:11px;color:${MID};">the client will choose one</span>
+          </div>
+          <div id="d2d-nbopts">${optionRow(0)}${optionRow(1)}</div>
+          <button class="d2d-btn" id="d2d-nbadd" style="min-height:36px;padding:6px 12px;font-size:11.5px;">Add another option</button>
+
+          <div style="display:flex;align-items:center;gap:12px;margin-top:16px;padding-top:14px;border-top:.5px solid rgba(0,0,0,.07);">
+            <button class="d2d-btn dark" id="d2d-nbsave">Create and price &rarr;</button>
+            <span style="font-size:11px;color:${MID};" id="d2d-nbmsg">Options are created as drafts. Nothing reaches the client until you release them.</span>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(ov);
+    el('d2d-nbclose').onclick = () => ov.remove();
+    ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+
+    let count = 2;
+    el('d2d-nbadd').onclick = () => {
+      if (count >= 4) return;
+      el('d2d-nbopts').insertAdjacentHTML('beforeend', optionRow(count));
+      count++;
+      if (count >= 4) { el('d2d-nbadd').disabled = true; el('d2d-nbadd').style.opacity = '.5'; }
+    };
+
+    el('d2d-nbsave').onclick = async () => {
+      const msg = el('d2d-nbmsg'), btn = el('d2d-nbsave');
+      const week = el('d2d-nbweek').value;
+      const mode = el('d2d-nbmode').value;
+      const origin = el('d2d-nborigin').value.trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(week)) { msg.style.color = BRAND; msg.textContent = 'Pick a cargo-ready week.'; return; }
+
+      const options = [];
+      ov.querySelectorAll('[data-optrow]').forEach((row, i) => {
+        const get = (f) => { const n2 = row.querySelector(`[data-f="${f}"]`); return n2 ? n2.value.trim() : ''; };
+        const cost = Number(get('cost_amount'));
+        // A row with no cost is an empty row, not a zero-cost option.
+        if (!get('title') && !isFinite(cost)) return;
+        if (!isFinite(cost) || cost <= 0) return;
+        const rec = ov.querySelector('input[name="d2d-rec"]:checked');
+        options.push({
+          option_ref: String.fromCharCode(65 + i),
+          title: get('title') || (get('container_qty') + ' x ' + get('container_type')),
+          mode,
+          container_type: mode === 'air' ? null : (get('container_type') || null),
+          container_qty: Number(get('container_qty')) || 1,
+          carrier: get('carrier') || null,
+          service: origin || null,
+          transhipment: get('transhipment') === '1',
+          transit_days: Number(get('transit_days')) || null,
+          cost_amount: cost,
+          accessorial_amount: Number(get('accessorial_amount')) || 0,
+          currency: get('currency') || 'USD',
+          margin_pct: 18,
+          recommended: rec ? Number(rec.value) === i : i === 0,
+        });
+      });
+      if (!options.length) { msg.style.color = BRAND; msg.textContent = 'Add at least one option with a cost.'; return; }
+
+      btn.disabled = true; btn.style.opacity = '.5';
+      msg.style.color = MID; msg.textContent = 'Creating…';
+      try {
+        await api('/d2d/bookings', { method: 'POST', body: JSON.stringify({ week_start: week, options }) });
+        ov.remove();
+        _week = week; _tab = 'pricing'; _view = 'dashboard';
+        await load();                       // lands on Pricing for the week just created
+      } catch (e2) {
+        btn.disabled = false; btn.style.opacity = '';
+        msg.style.color = BRAND; msg.textContent = 'Could not create: ' + e2.message;
+      }
+    };
+    setTimeout(() => el('d2d-nbweek').focus(), 40);
+  }
+
   // ── Pricing: VelOzity only ──
   function paintPricing(d) {
     const rows = d.bookings.filter(b => ['draft', 'released', 'approved'].includes(b.status));
-    if (!rows.length) return `<div class="d2d-empty">No options to price for this week.</div>`;
+    if (!rows.length) return `
+      <div class="rounded-2xl border bg-white shadow-sm" style="padding:22px 24px;">
+        <div style="font-size:14px;font-weight:600;color:${DARK};">Nothing to price for this week</div>
+        <div style="font-size:12px;color:${MID};margin:6px 0 14px;">Enter the rates the partner quoted and they will appear here.</div>
+        <button class="d2d-btn dark" data-newbooking="1">New booking</button>
+      </div>`;
     const drafts = rows.filter(b => b.status === 'draft');
     const below = drafts.filter(b => Number(b.margin_pct) < 15);
     return `
@@ -1929,6 +2104,8 @@
     root.querySelectorAll('[data-tabgo]').forEach(b => b.onclick = () => { _tab = b.getAttribute('data-tabgo'); paint(); });
     root.querySelectorAll('[data-filt]').forEach(b => b.onclick = () => { _mapFilter = b.getAttribute('data-filt'); paint(); });
     root.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { _mapScope = b.getAttribute('data-scope'); paint(); });
+    const nb = root.querySelector('[data-newbooking]');
+    if (nb) nb.onclick = () => openNewBooking();
     const up = root.querySelector('[data-poupload]');
     if (up) up.onclick = () => openPoUpload();
     const full = root.querySelector('[data-mapfull]');
@@ -1982,5 +2159,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v16 loaded');
+  console.log('[d2d-hub] v17 loaded');
 })();
