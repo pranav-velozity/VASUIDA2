@@ -46,6 +46,7 @@ module.exports = function mountD2D(deps) {
       currency       TEXT NOT NULL DEFAULT 'USD',
       status         TEXT NOT NULL DEFAULT 'draft',     -- draft|released|approved|declined|expired
       recommended    INTEGER NOT NULL DEFAULT 0,
+      request_id     TEXT,                              -- the header this option answers
       released_at    TEXT,
       decision_token TEXT,
       decided_at     TEXT,
@@ -144,6 +145,46 @@ module.exports = function mountD2D(deps) {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS ux_d2d_assignment ON d2d_assignment(client_id, po_id, shipment_id);
 
+    -- A booking request: the cargo, stated once, that the options are quoted against.
+    -- Options used to float free of any header, so there was nowhere to record what was
+    -- actually shipping — and the partner cannot quote a sailing without knowing the volume.
+    CREATE TABLE IF NOT EXISTS d2d_request (
+      id             TEXT PRIMARY KEY,
+      client_id      TEXT NOT NULL,
+      week_start     TEXT NOT NULL,
+      ref            TEXT,                            -- human reference, e.g. SEA-2610-01
+      mode           TEXT NOT NULL DEFAULT 'sea',     -- 'sea' | 'air' | 'both'
+      origin         TEXT,
+      destination    TEXT,
+      ready_date     TEXT,                            -- cargo ready, if it differs from the week
+      pack_type      TEXT,                            -- 'loose' | 'pallets' | 'mixed'
+      pallets        INTEGER,
+      cartons        INTEGER,
+      units          INTEGER,
+      cbm            REAL,
+      gross_weight_kg REAL,
+      notes          TEXT,
+      state          TEXT NOT NULL DEFAULT 'draft',   -- draft|sent|costed|priced|released|approved|declined|cancelled
+      sent_at        TEXT,
+      created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+      created_by     TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ix_d2d_request_week ON d2d_request(client_id, week_start);
+
+    -- Every state change, so the thread with the partner is auditable.
+    CREATE TABLE IF NOT EXISTS d2d_request_event (
+      id          TEXT PRIMARY KEY,
+      client_id   TEXT NOT NULL,
+      request_id  TEXT NOT NULL,
+      from_state  TEXT,
+      to_state    TEXT,
+      actor       TEXT,
+      role        TEXT,
+      detail      TEXT,
+      at          TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS ix_d2d_request_event ON d2d_request_event(client_id, request_id);
+
     -- How long each stage is expected to take, per client and per mode. These were constants
     -- in this file: plausible guesses that nobody had validated, applied to every plan. Held
     -- here so they can be corrected as real lead times become known.
@@ -162,6 +203,15 @@ module.exports = function mountD2D(deps) {
       PRIMARY KEY (client_id, mode)
     );
   `);
+
+  // Older databases predate request_id, and CREATE TABLE IF NOT EXISTS leaves them as they are.
+  try {
+    const cols = db.prepare(`PRAGMA table_info(d2d_booking)`).all().map(c => c.name);
+    if (!cols.includes('request_id')) {
+      db.exec(`ALTER TABLE d2d_booking ADD COLUMN request_id TEXT`);
+      console.warn('[d2d] added d2d_booking.request_id');
+    }
+  } catch (e) { console.error('[d2d] could not add request_id', e); }
 
   // ── The scoped data layer ──
   // Nothing in this module talks to db directly. Queries must filter on client_id, and the
@@ -358,6 +408,13 @@ module.exports = function mountD2D(deps) {
       const opts = Array.isArray(b.options) ? b.options : [];
       if (!opts.length) return res.status(400).json({ error: 'options required' });
 
+      const requestId = String(b.request_id || '') || null;
+      if (requestId) {
+        const rq = req.d2d.get(`SELECT id, week_start FROM d2d_request WHERE client_id = @client AND id = @id`, { id: requestId });
+        if (!rq) return res.status(404).json({ error: 'request_not_found' });
+        if (rq.week_start !== week) return res.status(400).json({ error: 'week_mismatch', message: 'That request is for another week.' });
+      }
+
       const made = [];
       const tx = db.transaction(() => {
         for (const o of opts) {
@@ -381,8 +438,15 @@ module.exports = function mountD2D(deps) {
             currency: String(o.currency || 'USD').toUpperCase(),
             status: 'draft',
             recommended: o.recommended ? 1 : 0,
+            request_id: requestId,
           });
           made.push(id);
+        }
+        if (requestId) {
+          req.d2d.run(`UPDATE d2d_request SET state='costed' WHERE client_id = @client AND id = @id AND state IN ('draft','sent','repricing')`,
+            { id: requestId });
+          reqEvent(req.d2d, requestId, null, 'costed', (req.auth && req.auth.userId) || 'velozity', 'internal',
+            made.length + ' option(s) entered');
         }
       });
       tx();
@@ -437,6 +501,10 @@ module.exports = function mountD2D(deps) {
         }
       });
       tx();
+      for (const rid of [...new Set(rows.map(r => r.request_id).filter(Boolean))]) {
+        req.d2d.run(`UPDATE d2d_request SET state='released' WHERE client_id = @client AND id = @id`, { id: rid });
+        reqEvent(req.d2d, rid, 'costed', 'released', (req.auth && req.auth.userId) || 'velozity', 'internal', 'released to the client');
+      }
       console.warn(`[d2d] released ${rows.length} option(s) for ${req.d2d.client} week ${ws}`);
       res.json({ ok: true, released: rows.length, week_start: ws, overridden: !!below.length });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
@@ -518,6 +586,10 @@ module.exports = function mountD2D(deps) {
       });
       tx();
 
+      if (row.request_id) {
+        req.d2d.run(`UPDATE d2d_request SET state='approved' WHERE client_id = @client AND id = @id`, { id: row.request_id });
+        reqEvent(req.d2d, row.request_id, 'released', 'approved', who, 'client', 'approved ' + (row.title || row.option_ref));
+      }
       console.warn(`[d2d] ${req.d2d.client} approved ${row.id} — ${made.length} shipment(s), plan frozen`);
       res.json({ ok: true, status: 'approved', shipments: made.length, plan: plan });
     } catch (e) { console.error('[d2d] decision', e); res.status(500).json({ error: String(e.message || e) }); }
@@ -718,6 +790,106 @@ module.exports = function mountD2D(deps) {
       const by = {};
       for (const e of events) (by[e.shipment_id] = by[e.shipment_id] || []).push(e);
       res.json({ shipments: rows.map(r => ({ ...r, events: by[r.id] || [] })), stages: STAGES });
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  // ── Booking requests ──
+  const PACK_TYPES = ['loose', 'pallets', 'mixed'];
+
+  function reqEvent(sdb, requestId, from, to, actor, role, detail) {
+    sdb.insert('d2d_request_event', {
+      id: 'rqe_' + crypto.randomUUID().slice(0, 12), request_id: requestId,
+      from_state: from || null, to_state: to || null, actor: actor || null,
+      role: role || null, detail: detail || null,
+    });
+  }
+
+  // What the week already knows about its cargo, from the order file. Typing volume by hand
+  // when the orders are loaded is how two numbers end up disagreeing.
+  function cargoFromOrders(sdb, week) {
+    const r = sdb.get(`SELECT COUNT(*) AS orders, SUM(units) AS units, SUM(cbm) AS cbm,
+                              SUM(weight_kg) AS weight
+                       FROM d2d_po WHERE client_id = @client AND week_start = @ws`, { ws: week });
+    if (!r || !r.orders) return null;
+    return { orders: r.orders, units: r.units || null, cbm: r.cbm || null, gross_weight_kg: r.weight || null };
+  }
+
+  router.get('/requests/prefill', authenticateRequest, requireD2D, (req, res) => {
+    try {
+      if (internalOnly(req, res)) return;
+      const ws = String(req.query.week || '');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) return res.status(400).json({ error: 'week required' });
+      res.json({ week_start: ws, from_orders: cargoFromOrders(req.d2d, ws) });
+    } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  router.post('/requests', authenticateRequest, requireRole(['admin']), requireD2D,
+    auditLog('create_d2d_request'), (req, res) => {
+    if (internalOnly(req, res)) return;
+    try {
+      const b = req.body || {};
+      const week = String(b.week_start || '');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(week)) return res.status(400).json({ error: 'week_start required' });
+      const mode = ['sea', 'air', 'both'].includes(b.mode) ? b.mode : 'sea';
+      const pack = PACK_TYPES.includes(b.pack_type) ? b.pack_type : null;
+
+      const num = (v, whole) => {
+        if (v === '' || v == null) return null;
+        const n = Number(v);
+        if (!isFinite(n) || n < 0) return undefined;            // undefined means "rejected"
+        return whole ? Math.round(n) : n;
+      };
+      const vals = {
+        pallets: num(b.pallets, true), cartons: num(b.cartons, true), units: num(b.units, true),
+        cbm: num(b.cbm), gross_weight_kg: num(b.gross_weight_kg),
+      };
+      for (const [k, v] of Object.entries(vals)) {
+        if (v === undefined) return res.status(400).json({ error: 'invalid', field: k, message: k + ' must be a number of zero or more.' });
+      }
+      // Pallets without a pack type, or a pallet count on a loose shipment, is a contradiction
+      // the partner would have to come back and ask about.
+      if (pack === 'loose' && vals.pallets) {
+        return res.status(400).json({ error: 'contradiction', message: 'A loose shipment cannot have a pallet count.' });
+      }
+      if (pack === 'pallets' && !vals.pallets) {
+        return res.status(400).json({ error: 'contradiction', message: 'Palletised cargo needs a pallet count.' });
+      }
+
+      const seq = (req.d2d.get(`SELECT COUNT(*) n FROM d2d_request WHERE client_id = @client AND week_start = @ws`, { ws: week }) || {}).n || 0;
+      const id = 'rq_' + crypto.randomUUID().slice(0, 12);
+      const ref = (mode === 'air' ? 'AIR-' : 'SEA-') + week.slice(2, 4) + week.slice(5, 7) + '-' + String(seq + 1).padStart(2, '0');
+
+      req.d2d.insert('d2d_request', {
+        id, week_start: week, ref, mode,
+        origin: b.origin || null, destination: b.destination || null,
+        ready_date: /^\d{4}-\d{2}-\d{2}$/.test(String(b.ready_date || '')) ? b.ready_date : null,
+        pack_type: pack, ...vals, notes: b.notes || null,
+        state: 'draft', created_by: (req.auth && req.auth.userId) || 'velozity',
+      });
+      reqEvent(req.d2d, id, null, 'draft', (req.auth && req.auth.userId) || 'velozity', 'internal', 'created');
+      res.json({ ok: true, id, ref, week_start: week, mode });
+    } catch (e) { console.error('[d2d] create request', e); res.status(500).json({ error: String(e.message || e) }); }
+  });
+
+  router.get('/requests', authenticateRequest, requireD2D, auditLog('view_d2d_requests'), (req, res) => {
+    try {
+      const ws = String(req.query.week || '');
+      const rows = ws
+        ? req.d2d.all(`SELECT * FROM d2d_request WHERE client_id = @client AND week_start = @ws ORDER BY created_at DESC`, { ws })
+        : req.d2d.all(`SELECT * FROM d2d_request WHERE client_id = @client ORDER BY week_start DESC LIMIT 60`);
+      const internal = isInternal(req);
+      const ids = rows.map(r => r.id);
+      const idp = {}; ids.forEach((id, i) => { idp['id' + i] = id; });
+      const opts = ids.length
+        ? req.d2d.all(`SELECT * FROM d2d_booking WHERE client_id = @client
+                       AND request_id IN (${ids.map((_, i) => '@id' + i).join(',')})`, idp)
+        : [];
+      const byReq = {};
+      for (const b of opts) {
+        if (!internal && b.status === 'draft') continue;       // unreleased options are not the client's business
+        (byReq[b.request_id] = byReq[b.request_id] || []).push(internal ? b : forClient(b));
+      }
+      res.json({ requests: rows.map(r => ({ ...r, options: byReq[r.id] || [] })) });
     } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
 
