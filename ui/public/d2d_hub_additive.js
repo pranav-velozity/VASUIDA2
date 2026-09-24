@@ -114,6 +114,10 @@
       .d2d-head{margin-bottom:14px;}
       .d2d-tick{height:34px;background:${DARK};border-radius:10px;padding:0 14px;align-items:center;gap:10px;overflow:hidden;display:flex;margin-bottom:12px;}
       .d2d-tabs{display:flex;gap:18px;}
+      .d2d-filt{border:.5px solid rgba(0,0,0,.14);background:#fff;color:${MID};border-radius:7px;padding:4px 9px;
+        font:600 10.5px inherit;cursor:pointer;transition:border-color .18s ease,background .18s ease,color .18s ease;}
+      .d2d-filt:hover{border-color:rgba(0,0,0,.3);}
+      .d2d-filt.on{background:${DARK};border-color:${DARK};color:#fff;}
       .d2d-tickt{font-size:12px;color:#EDEDF0;white-space:nowrap;}
       .d2d-tab{border:0;background:none;font:600 13px inherit;color:${MID};cursor:pointer;padding:6px 0;border-bottom:2px solid transparent;}
       .d2d-tab.on{color:${DARK};border-bottom-color:${BRAND};}
@@ -162,11 +166,13 @@
       @keyframes d2d-rise{from{opacity:0;transform:translateY(7px);}to{opacity:1;transform:none;}}
       @keyframes d2d-tick{0%,30%{opacity:1;transform:none;}36%,100%{opacity:0;transform:translateY(-9px);}}
       .d2d-pulse{animation:d2d-live 2.4s ease-in-out infinite;}
+      @keyframes d2d-ping{0%{transform:scale(1);opacity:.35;}70%{transform:scale(2.2);opacity:0;}100%{opacity:0;}}
+      .d2d-ping{animation:d2d-ping 2.8s ease-out infinite;transform-origin:center;transform-box:fill-box;}
       .d2d-halo{position:absolute;width:34px;height:34px;border-radius:50%;animation:d2d-halo 2.4s ease-out infinite;}
       .d2d-rise{animation:d2d-rise .42s cubic-bezier(.22,1,.36,1) both;}
       .d2d-lift{transition:transform .26s cubic-bezier(.22,1,.36,1),box-shadow .26s cubic-bezier(.22,1,.36,1);}
       .d2d-lift:hover{transform:translateY(-4px);box-shadow:0 14px 30px rgba(16,18,27,.13);}
-      @media (prefers-reduced-motion:reduce){.d2d-pulse,.d2d-halo,.d2d-rise{animation:none;}.d2d-lift:hover{transform:none;}}
+      @media (prefers-reduced-motion:reduce){.d2d-pulse,.d2d-halo,.d2d-rise,.d2d-ping{animation:none;}.d2d-lift:hover{transform:none;}}
     `;
     document.head.appendChild(st);
   }
@@ -219,7 +225,7 @@
   }
 
   // ── Data ──
-  let _tab = 'shipments', _data = null, _internal = false;
+  let _tab = 'shipments', _data = null, _internal = false, _mapFilter = 'all';
 
   async function load() {
     try {
@@ -371,6 +377,7 @@
       </div>`;
 
     return `
+      ${paintMap(d)}
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
         <div class="lg:col-span-2" style="min-width:0;">
           ${d.shipments.length ? d.shipments.map(shipmentCard).join('')
@@ -387,6 +394,8 @@
                    approved ? esc([approved.carrier, approved.transit_days ? approved.transit_days + ' days' : ''].filter(Boolean).join(' · ')) : 'no approved option')}
           </div>
 
+          ${paintArriving(d)}
+
           <div class="rounded-2xl border bg-white shadow-sm d2d-rise" style="padding:14px 16px;animation-delay:.06s;">
             <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px;">
               <span style="font-size:12.5px;font-weight:600;color:${DARK};">Next best action</span>
@@ -399,6 +408,196 @@
             </div>`).join('')}
           </div>
         </div>
+      </div>`;
+  }
+
+  // ── Live tracking ──
+  // Follows the Live Map page: dotted basemap, a header strip with search and legend, named
+  // nodes with counts. What is REAL here is the stage each shipment has reached, which places
+  // it along its route. What is NOT real is a precise position at sea — that needs a carrier
+  // feed, and the panel says so rather than implying GPS accuracy.
+  const MAP = { w: 900, h: 430 };
+  // Coarse landmasses for the Asia–Australia corridor, in map units.
+  const LAND = [
+    [[250,20],[470,10],[560,70],[600,130],[520,175],[430,160],[360,115],[280,100]],   // China
+    [[140,95],[265,92],[300,150],[250,205],[165,185]],                                 // India
+    [[555,215],[640,200],[700,240],[690,295],[610,305],[555,265]],                     // Philippines
+    [[470,215],[560,235],[575,275],[500,290],[440,265]],                               // Indochina
+    [[560,330],[790,315],[845,380],[800,425],[640,428],[575,390]],                     // Australia
+  ];
+  const PORTS = {
+    origin: { x: 505, y: 120, label: 'Origin port' },
+    transhipment: { x: 640, y: 262, label: 'Transhipment' },
+    destination: { x: 700, y: 352, label: 'Port Botany' },
+    customs: { x: 676, y: 386, label: 'Customs' },
+    lastmile: { x: 735, y: 402, label: 'Last mile' },
+  };
+  // How far along the route each stage sits. Between recorded stages a shipment simply holds
+  // its last known position: inventing motion between milestones would be a guess drawn as fact.
+  const STAGE_T = { pickup: 0, origin_cleared: 0.04, departed: 0.10, arrived: 0.82,
+                    dest_cleared: 0.90, out_for_delivery: 0.95, delivered: 1 };
+
+  let _dots = null;
+  function dotField() {
+    if (_dots) return _dots;
+    const inside = (pt, poly) => {
+      let hit = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const [xi, yi] = poly[i], [xj, yj] = poly[j];
+        if ((yi > pt[1]) !== (yj > pt[1]) && pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi) hit = !hit;
+      }
+      return hit;
+    };
+    const out = [];
+    for (let y = 8; y < MAP.h; y += 9) {
+      for (let x = 8; x < MAP.w; x += 9) {
+        if (LAND.some(poly => inside([x, y], poly))) out.push(`<circle cx="${x}" cy="${y}" r="1.5"/>`);
+      }
+    }
+    _dots = `<g fill="#D6DAE1">${out.join('')}</g>`;
+    return _dots;
+  }
+
+  // Quadratic curve from origin to destination, bowed the way a great-circle route looks here.
+  const routeC = { x: 640, y: 210 };
+  const atT = (t) => {
+    const u = 1 - t, A = PORTS.origin, B = PORTS.destination;
+    return { x: u * u * A.x + 2 * u * t * routeC.x + t * t * B.x,
+             y: u * u * A.y + 2 * u * t * routeC.y + t * t * B.y };
+  };
+  const ROUTE_D = `M${PORTS.origin.x} ${PORTS.origin.y} Q${routeC.x} ${routeC.y} ${PORTS.destination.x} ${PORTS.destination.y}`;
+
+  function shipmentPositions(list) {
+    return list.map(sh => {
+      const ev = evMap(sh);
+      let last = null, lastStage = null;
+      for (const [k, label] of STAGES) if (ev[k] && ev[k].actual_at) { last = k; lastStage = label; }
+      const t = last ? STAGE_T[last] : 0;
+      const slip = slipOf(sh);
+      const od = overdueOf(sh);
+      const colour = od || (slip != null && slip > 0) ? BRAND
+                   : sh.status === 'delivered' ? LINK
+                   : last ? LIME : LIGHT;
+      return { sh, t, pos: atT(t), stage: lastStage || 'not yet collected', colour,
+               note: od ? od.label + ' overdue' : (slip > 0 ? '+' + slip + ' days' : null) };
+    });
+  }
+
+  function mapFiltered(list) {
+    if (_mapFilter === 'sea') return list.filter(x => (x.mode || 'sea') === 'sea');
+    if (_mapFilter === 'air') return list.filter(x => x.mode === 'air');
+    if (_mapFilter === 'late') return list.filter(x => overdueOf(x) || (slipOf(x) || 0) > 0);
+    return list;
+  }
+
+  function paintMap(d, opts) {
+    const big = !!(opts && opts.big);
+    const marks = shipmentPositions(mapFiltered(d.shipments));
+    const moving = marks.filter(m => m.t > 0 && m.t < 1).length;
+    const node = (pt, count, colour) => `
+      <g>
+        ${count ? `<circle cx="${pt.x}" cy="${pt.y}" r="9" fill="${colour}" opacity=".22" class="d2d-ping"/>` : ''}
+        <circle cx="${pt.x}" cy="${pt.y}" r="4.5" fill="${count ? colour : '#fff'}" stroke="${count ? colour : '#AEB4BD'}" stroke-width="1.6"/>
+        <text x="${pt.x}" y="${pt.y - 11}" text-anchor="middle" font-size="9.5" fill="${MID}"
+              font-family="inherit">${esc(pt.label)}</text>
+        ${count ? `<text x="${pt.x}" y="${pt.y + 17}" text-anchor="middle" font-size="9" fill="${colour}"
+              font-family="ui-monospace,monospace">${count}</text>` : ''}
+      </g>`;
+
+    const atOrigin = marks.filter(m => m.t === 0).length;
+    const atDest = marks.filter(m => m.t >= 0.82 && m.t < 0.9).length;
+    const atCustoms = marks.filter(m => m.t >= 0.9 && m.t < 0.95).length;
+    const delivered = marks.filter(m => m.t === 1).length;
+
+    return `
+      <div class="rounded-2xl border bg-white shadow-sm d2d-rise" style="overflow:hidden;margin-bottom:12px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
+             padding:12px 16px;border-bottom:.5px solid rgba(0,0,0,.07);">
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+            <span style="font-size:13px;font-weight:600;color:${DARK};">Live tracking</span>
+            <span style="font-size:11px;color:${MID};">${moving} in transit &middot; ${d.shipments.length} this week</span>
+            <span style="display:flex;gap:6px;">
+              ${[['all', 'All'], ['sea', 'Sea'], ['air', 'Air'], ['late', 'Late only']].map(([k, l]) =>
+                `<button class="d2d-filt ${_mapFilter === k ? 'on' : ''}" data-filt="${k}">${l}</button>`).join('')}
+            </span>
+          </div>
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+            ${[['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]].map(([l, c]) =>
+              `<span style="font-size:10.5px;color:${MID};"><span style="display:inline-block;width:8px;height:8px;
+                 border-radius:50%;background:${c};margin-right:5px;"></span>${l}</span>`).join('')}
+            <button class="d2d-btn" data-mapfull="1" style="padding:7px 11px;min-height:36px;display:inline-flex;align-items:center;gap:6px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M9 3H3v6"/><path d="M15 21h6v-6"/><path d="M3 3l7 7"/><path d="M21 21l-7-7"/></svg>
+              Full screen</button>
+          </div>
+        </div>
+
+        <div style="position:relative;background:#FBFCFD;">
+          <svg viewBox="0 0 ${MAP.w} ${MAP.h}" width="100%" style="display:block;max-height:430px;" role="img"
+               aria-label="Where this week's shipments are">
+            ${dotField()}
+            <path d="${ROUTE_D}" fill="none" stroke="#C9CED6" stroke-width="1.6" stroke-dasharray="5 6"/>
+            ${node(PORTS.origin, atOrigin, LIME)}
+            ${node(PORTS.destination, atDest, BRAND)}
+            ${node(PORTS.customs, atCustoms, BRAND)}
+            ${node(PORTS.lastmile, delivered, LINK)}
+            ${marks.filter(m => m.t > 0 && m.t < 1).map(m => `
+              <g>
+                <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="11" fill="${m.colour}" opacity=".18" class="d2d-ping"/>
+                <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)})">
+                  <path d="M-7 3 L7 3 L5 7 L-5 7 Z M0 -7 L0 3 M0 -7 L5 1 L0 1" fill="none"
+                        stroke="${m.colour}" stroke-width="1.7" stroke-linejoin="round"/>
+                </g>
+                <text x="${(m.pos.x + 14).toFixed(1)}" y="${(m.pos.y + 3).toFixed(1)}" font-size="10"
+                      fill="${DARK}" font-family="ui-monospace,monospace">${esc(m.sh.reference || 'unadvised')}</text>
+              </g>`).join('')}
+          </svg>
+
+          <div style="position:absolute;left:14px;bottom:12px;background:rgba(255,255,255,.92);border:.5px solid rgba(0,0,0,.08);
+               border-radius:9px;padding:7px 11px;max-width:330px;">
+            <span style="font-size:10.5px;color:${MID};line-height:1.45;display:block;">
+              Positions follow the last recorded milestone. Exact vessel positions need carrier tracking
+              &mdash; <b style="color:${DARK};">not yet connected</b>.</span>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // Arriving next — soonest first, with the exception spelled out rather than a bare "late".
+  function paintArriving(d) {
+    const rows = d.shipments
+      .filter(x => x.status !== 'delivered')
+      .map(x => {
+        const ev = evMap(x);
+        const arrived = ev.arrived && ev.arrived.actual_at;
+        const eta = arrived || x.plan_arrived;
+        const od = overdueOf(x), slip = slipOf(x);
+        return { x, eta, actual: !!arrived, od, slip,
+                 colour: od || (slip || 0) > 0 ? BRAND : arrived ? LINK : LIME };
+      })
+      .filter(r => r.eta)
+      .sort((a, b) => a.eta < b.eta ? -1 : 1)
+      .slice(0, 5);
+    if (!rows.length) return '';
+    return `
+      <div class="rounded-2xl border bg-white shadow-sm d2d-rise" style="padding:14px 16px;animation-delay:.12s;">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px;">
+          <span style="font-size:12.5px;font-weight:600;color:${DARK};">Arriving next</span>
+          <span style="font-size:10.5px;color:${LIGHT};">by planned arrival</span>
+        </div>
+        ${rows.map(r => `
+          <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-top:.5px solid rgba(0,0,0,.05);">
+            <span style="width:7px;height:7px;border-radius:50%;background:${r.colour};margin-top:5px;flex-shrink:0;"></span>
+            <span style="flex:1;min-width:0;">
+              <span class="d2d-num" style="display:block;font-size:12px;color:${DARK};">${esc(r.x.reference || 'container not advised')}</span>
+              <span style="display:block;font-size:10.5px;color:${MID};">${esc([r.x.container_type, r.x.carrier].filter(Boolean).join(' · '))}</span>
+              ${r.od ? `<span style="display:inline-block;margin-top:3px;font-size:10.5px;font-weight:600;color:${BRAND};
+                   background:rgba(153,0,51,.10);border-radius:6px;padding:2px 7px;">${esc(r.od.label)} overdue by ${r.od.days}d</span>` : ''}
+            </span>
+            <span style="text-align:right;flex-shrink:0;">
+              <span class="d2d-num" style="display:block;font-size:11.5px;color:${r.colour};">${esc(day(r.eta))}</span>
+              <span style="display:block;font-size:10px;color:${LIGHT};">${r.actual ? 'arrived' : 'planned'}</span>
+            </span>
+          </div>`).join('')}
       </div>`;
   }
 
@@ -623,6 +822,28 @@
     return (cur && cur !== 'USD' ? cur + ' ' : '$') + n.toLocaleString(undefined, { maximumFractionDigits: 0 });
   }
 
+  // The same map, larger. Reusing the renderer means the two can never drift apart.
+  function openFullMap() {
+    if (el('d2d-fullmap')) return;
+    const ov = document.createElement('div');
+    ov.id = 'd2d-fullmap';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9600;background:#fff;display:flex;flex-direction:column;';
+    ov.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:.5px solid rgba(0,0,0,.08);">
+        <div>
+          <div style="font-size:16px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Live tracking</div>
+          <div style="font-size:11px;color:${MID};margin-top:1px;">Week of ${esc(day(_week))}</div>
+        </div>
+        <button class="d2d-btn" id="d2d-fullclose" aria-label="Close full screen map">Close</button>
+      </div>
+      <div style="flex:1;overflow:auto;padding:16px 22px;">${paintMap(_data, { big: true })}</div>`;
+    document.body.appendChild(ov);
+    el('d2d-fullclose').onclick = () => ov.remove();
+    wireActions(ov);
+    const onKey = (e) => { if (e.key === 'Escape') { ov.remove(); document.removeEventListener('keydown', onKey); } };
+    document.addEventListener('keydown', onKey);
+  }
+
   // ── Recording a milestone ──
   // A small popover anchored to the stage. Deliberately not a modal: the strip behind it is
   // the context, and hiding it to ask for one date would be a worse trade.
@@ -723,6 +944,9 @@
 
   // ── Actions ──
   function wireActions(root) {
+    root.querySelectorAll('[data-filt]').forEach(b => b.onclick = () => { _mapFilter = b.getAttribute('data-filt'); paint(); });
+    const full = root.querySelector('[data-mapfull]');
+    if (full) full.onclick = () => openFullMap();
     root.querySelectorAll('.d2d-edit').forEach(b => b.onclick = () => openEditor(b));
     root.querySelectorAll('.d2d-ref').forEach(b => b.onclick = () => openRefEditor(b));
     const busy = (b, on) => { if (b) { b.disabled = on; b.style.opacity = on ? '.6' : ''; } };
@@ -772,5 +996,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v6 loaded');
+  console.log('[d2d-hub] v8 loaded');
 })();
