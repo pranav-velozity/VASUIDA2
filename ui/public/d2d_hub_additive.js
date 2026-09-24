@@ -124,8 +124,9 @@
       .d2d-head{margin-bottom:14px;};border-radius:10px;padding:0 14px;align-items:center;gap:10px;overflow:hidden;display:flex;margin-bottom:12px;}
       .d2d-tabs{display:flex;align-items:center;}
       .d2d-tabs .d2d-tab + .d2d-tab{margin-left:20px;}
-      .d2d-filt{border:.5px solid rgba(0,0,0,.14);background:#fff;color:${MID};border-radius:7px;padding:4px 9px;
-        font:600 10.5px inherit;cursor:pointer;transition:border-color .18s ease,background .18s ease,color .18s ease;}
+      .d2d-filt{border:.5px solid rgba(0,0,0,.14);background:#fff;color:${MID};border-radius:6px;padding:3px 7px;
+        font:600 9.5px inherit;letter-spacing:.01em;cursor:pointer;
+        transition:border-color .18s ease,background .18s ease,color .18s ease;}
       .d2d-filt:hover{border-color:rgba(0,0,0,.3);}
       .d2d-filt.on{background:${DARK};border-color:${DARK};color:#fff;}
       .d2d-tab{border:0;background:none;font:600 13px inherit;color:${MID};cursor:pointer;padding:6px 0;border-bottom:2px solid transparent;}
@@ -582,15 +583,19 @@
       const c = curveC();
       const minX = Math.min(...px, c.x), maxX = Math.max(...px, c.x);
       const minY = Math.min(...py, c.y), maxY = Math.max(...py, c.y);
-      const padX = Math.max((maxX - minX) * 0.55, view.w * 0.06);
-      const padY = Math.max((maxY - minY) * 0.30, view.h * 0.06);
+      // At 0.55/0.30 the lane filled the card and read as a close-up; at 1.25/0.85 it pulled
+      // back to almost the whole globe. This sits about 60% wider than the tight frame, which
+      // shows east Asia through to Australia with recognisable coastline around the route.
+      const padX = Math.max((maxX - minX) * 0.78, view.w * 0.08);
+      const padY = Math.max((maxY - minY) * 0.48, view.h * 0.08);
       let x0 = minX - padX, y0 = minY - padY;
       let vw = (maxX - minX) + padX * 2, vh = (maxY - minY) + padY * 2;
       // Keep the card's own proportions so the dots stay round and nothing is squashed.
       const targetRatio = MAP.w / MAP.h;
       if (vw / vh < targetRatio) { const need = vh * targetRatio; x0 -= (need - vw) / 2; vw = need; }
       else { const need = vw / targetRatio; y0 -= (need - vh) / 2; vh = need; }
-      // Stay inside the world.
+      // Never wider than the world itself.
+      vw = Math.min(vw, view.w); vh = Math.min(vh, view.h);
       x0 = Math.max(view.x0, Math.min(x0, view.x0 + view.w - vw));
       y0 = Math.max(view.y0, Math.min(y0, view.y0 + view.h - vh));
       VIEW = { x0, y0, w: vw, h: vh };
@@ -714,15 +719,23 @@
     const source = mapSource(d);
     const marks = shipmentPositions(mapFiltered(source));
     const moving = marks.filter(m => m.t > 0 && m.t < 1).length;
-    const node = (pt, count, colour) => `
+    // Scale marks with the frame so they stay the same visual size however far the camera is.
+    const k = VIEW.w / MAP.w;
+    const node = (pt, count, colour, opts2) => {
+      const o2 = opts2 || {};
+      const showLabel = o2.label !== false;
+      const dy = (o2.dy || 0) * k;
+      return `
       <g>
-        ${count ? `<circle cx="${pt.x}" cy="${pt.y}" r="9" fill="${colour}" opacity=".22" class="d2d-ping"/>` : ''}
-        <circle cx="${pt.x}" cy="${pt.y}" r="4.5" fill="${count ? colour : '#fff'}" stroke="${count ? colour : '#AEB4BD'}" stroke-width="1.6"/>
-        <text x="${pt.x}" y="${pt.y - 11}" text-anchor="middle" font-size="9.5" fill="${MID}"
-              font-family="inherit">${esc(pt.label)}</text>
-        ${count ? `<text x="${pt.x}" y="${pt.y + 17}" text-anchor="middle" font-size="9" fill="${colour}"
-              font-family="ui-monospace,monospace">${count}</text>` : ''}
+        ${count ? `<circle cx="${pt.x}" cy="${pt.y}" r="${(9 * k).toFixed(1)}" fill="${colour}" opacity=".22" class="d2d-ping"/>` : ''}
+        <circle cx="${pt.x}" cy="${pt.y}" r="${(4.5 * k).toFixed(1)}" fill="${count ? colour : '#fff'}"
+                stroke="${count ? colour : '#AEB4BD'}" stroke-width="${(1.6 * k).toFixed(2)}"/>
+        ${showLabel ? `<text x="${pt.x}" y="${(pt.y - 11 * k + dy).toFixed(1)}" text-anchor="middle"
+              font-size="${(9.5 * k).toFixed(1)}" fill="${MID}" font-family="inherit">${esc(pt.label)}</text>` : ''}
+        ${count ? `<text x="${pt.x}" y="${(pt.y + 17 * k + dy).toFixed(1)}" text-anchor="middle"
+              font-size="${(9 * k).toFixed(1)}" fill="${colour}" font-family="ui-monospace,monospace">${count}</text>` : ''}
       </g>`;
+    };
 
     const atOrigin = marks.filter(m => m.t === 0).length;
     const atDest = marks.filter(m => m.t >= 0.82 && m.t < 0.9).length;
@@ -759,22 +772,24 @@
           <svg viewBox="${VIEW.x0} ${VIEW.y0} ${VIEW.w} ${VIEW.h}" width="100%" style="display:block;max-height:${big ? 760 : 470}px;" role="img"
                aria-label="Where this week's shipments are">
             ${seaField()}${dotField()}
-            <path d="${routeD()}" fill="none" stroke="#C9CED6" stroke-width="1.6" stroke-dasharray="5 6"/>
+            <path d="${routeD()}" fill="none" stroke="#C9CED6" stroke-width="${(1.6 * k).toFixed(2)}" stroke-dasharray="${(5 * k).toFixed(1)} ${(6 * k).toFixed(1)}"/>
             ${node(PORTS.origin, atOrigin, LIME)}
             ${node(PORTS.destination, atDest, BRAND)}
-            ${node(PORTS.customs, atCustoms, BRAND)}
-            ${node(PORTS.lastmile, delivered, LINK)}
+            ${/* Customs and the DC sit within a few kilometres of the port: naming all three at
+                  this scale printed them on top of each other. */ ''}
+            ${node(PORTS.customs, atCustoms, BRAND, { label: big, dy: 22 })}
+            ${node(PORTS.lastmile, delivered, LINK, { label: big, dy: 44 })}
             ${marks.filter(m => m.t > 0 && m.t < 1).map(m => `
               <g class="d2d-vessel" data-open="${esc(m.sh.id)}" style="cursor:pointer;" role="button"
                  aria-label="Open ${esc(m.sh.reference || 'shipment')}">
                 <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="18" fill="transparent"/>
-                <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="11" fill="${m.colour}" opacity=".18" class="d2d-ping"/>
-                <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)})">
+                <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(11 * k).toFixed(1)}" fill="${m.colour}" opacity=".18" class="d2d-ping"/>
+                <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)}) scale(${k.toFixed(3)})">
                   <path d="M-7 3 L7 3 L5 7 L-5 7 Z M0 -7 L0 3 M0 -7 L5 1 L0 1" fill="none"
                         stroke="${m.colour}" stroke-width="1.7" stroke-linejoin="round"/>
                 </g>
-                <text x="${(m.pos.x + 14).toFixed(1)}" y="${(m.pos.y + 3).toFixed(1)}" font-size="10"
-                      fill="${DARK}" font-family="ui-monospace,monospace">${esc(m.sh.reference || 'unadvised')}</text>
+                <text x="${(m.pos.x + 14 * k).toFixed(1)}" y="${(m.pos.y + 3 * k).toFixed(1)}"
+                      font-size="${(10 * k).toFixed(1)}" fill="${DARK}" font-family="ui-monospace,monospace">${esc(m.sh.reference || 'unadvised')}</text>
               </g>`).join('')}
           </svg>
 
@@ -1064,7 +1079,7 @@
         ${marks.filter(m => m.t > 0 && m.t < 1).map(m => `
           <g class="d2d-vessel" data-open="${esc(m.sh.id)}" style="cursor:pointer;" role="button"
              aria-label="Open ${esc(m.sh.reference || 'shipment')}">
-            <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="20" fill="transparent"/>
+            <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(20 * k).toFixed(1)}" fill="transparent"/>
             <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="12" fill="${m.colour}" opacity=".18" class="d2d-ping"/>
             <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)})">
               <path d="M-8 3 L8 3 L6 8 L-6 8 Z M0 -8 L0 3 M0 -8 L6 1 L0 1" fill="none" stroke="${m.colour}" stroke-width="1.8" stroke-linejoin="round"/>
