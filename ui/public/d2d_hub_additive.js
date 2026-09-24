@@ -573,11 +573,12 @@
                   <button type="button" data-open="${esc(r.sh.id)}" style="display:flex;align-items:flex-start;gap:9px;width:100%;
                           text-align:left;background:none;border:0;padding:7px 0;cursor:pointer;
                           border-bottom:.5px solid rgba(0,0,0,.05);">
-                    <span style="width:6px;height:6px;border-radius:50%;background:${r.source === 'manual' ? YELL : LIME};margin-top:6px;flex-shrink:0;"></span>
+                    <span style="width:6px;height:6px;border-radius:50%;margin-top:6px;flex-shrink:0;
+                          background:${r.drift > 0 ? BRAND : (r.drift < 0 ? LIME : '#C9CED6')};"></span>
                     <span style="flex:1;min-width:0;">
-                      <span style="display:block;font-size:12px;color:${DARK};line-height:1.35;">${esc(r.label)}</span>
-                      <span class="d2d-num" style="display:block;font-size:10.5px;color:${MID};overflow:hidden;
-                            text-overflow:ellipsis;white-space:nowrap;">${esc(r.sh.reference || 'container not advised')}</span>
+                      <span style="display:block;font-size:12px;color:${DARK};line-height:1.35;">
+                        ${esc(r.label)} &middot; <span class="d2d-num">${esc(r.sh.reference || 'not advised')}</span></span>
+                      <span style="display:block;font-size:10.5px;color:${r.meaning.ink};line-height:1.35;">${esc(r.meaning.text)}</span>
                     </span>
                     <span style="text-align:right;flex-shrink:0;">
                       <span class="d2d-num" style="display:block;font-size:11px;color:${DARK};">${esc(day(r.at))}</span>
@@ -820,23 +821,54 @@
     return { x: u * u * A.x + 2 * u * t * C.x + t * t * B.x,
              y: u * u * A.y + 2 * u * t * C.y + t * t * B.y };
   };
+  // Air bows the other way and less far: it is a different journey, and overlaying it on the
+  // sea lane made two modes look like one.
+  const airC = () => {
+    const A = PORTS.origin, B = PORTS.destination;
+    return { x: (A.x + B.x) / 2 - Math.abs(B.x - A.x) * 0.35, y: (A.y + B.y) / 2 };
+  };
+  const atAirT = (t) => {
+    const u = 1 - t, A = PORTS.origin, B = PORTS.destination, C = airC();
+    return { x: u * u * A.x + 2 * u * t * C.x + t * t * B.x,
+             y: u * u * A.y + 2 * u * t * C.y + t * t * B.y };
+  };
+  const airD = () => {
+    const A = PORTS.origin, B = PORTS.destination, C = airC();
+    return `M${A.x.toFixed(1)} ${A.y.toFixed(1)} Q${C.x.toFixed(1)} ${C.y.toFixed(1)} ${B.x.toFixed(1)} ${B.y.toFixed(1)}`;
+  };
+
   const routeD = () => {
     const A = PORTS.origin, B = PORTS.destination, C = curveC();
     return `M${A.x.toFixed(1)} ${A.y.toFixed(1)} Q${C.x.toFixed(1)} ${C.y.toFixed(1)} ${B.x.toFixed(1)} ${B.y.toFixed(1)}`;
   };
 
   function shipmentPositions(list) {
+    // Everything at the same stage shares one position, so without this a whole sailing draws
+    // as a single vessel. Each is nudged along its route and offset across it.
+    const atStage = {};
     return list.map(sh => {
       const ev = evMap(sh);
       let last = null, lastStage = null;
       for (const [k, label] of STAGES) if (ev[k] && ev[k].actual_at) { last = k; lastStage = label; }
-      const t = last ? STAGE_T[last] : 0;
+      const air = sh.mode === 'air';
+      const base = last ? STAGE_T[last] : 0;
+
+      const key = (air ? 'a' : 's') + base;
+      const n = (atStage[key] = (atStage[key] || 0) + 1) - 1;
+      // Nudge forward a little and alternate above and below the line. A shipment that has not
+      // been collected stays exactly at the origin: nudging it onto the route would draw it as
+      // sailing when nothing has happened yet.
+      const t = (base === 0 || base >= 1) ? base : Math.min(0.97, base + n * 0.035);
+      const across = base === 0 || base >= 1 ? 0 : ((n % 2 ? 1 : -1) * Math.ceil(n / 2) * 13);
+
+      const p = air ? atAirT(t) : atT(t);
       const slip = slipOf(sh);
       const od = overdueOf(sh);
       const colour = od || (slip != null && slip > 0) ? BRAND
                    : sh.status === 'delivered' ? LINK
                    : last ? LIME : LIGHT;
-      return { sh, t, pos: atT(t), stage: lastStage || 'not yet collected', colour,
+      return { sh, t, air, pos: { x: p.x, y: p.y + across * (VIEW.w / MAP.w) },
+               stage: lastStage || 'not yet collected', colour,
                note: od ? od.label + ' overdue' : (slip > 0 ? '+' + slip + ' days' : null) };
     });
   }
@@ -921,7 +953,11 @@
           <svg viewBox="${VIEW.x0} ${VIEW.y0} ${VIEW.w} ${VIEW.h}" width="100%" style="display:block;max-height:${big ? 760 : 588}px;" role="img"
                aria-label="Where this week's shipments are">
             ${seaField()}${dotField()}
-            <path d="${routeD()}" fill="none" stroke="#C9CED6" stroke-width="${(1.6 * k).toFixed(2)}" stroke-dasharray="${(5 * k).toFixed(1)} ${(6 * k).toFixed(1)}"/>
+            <path d="${routeD()}" fill="none" stroke="#8FA8C4" stroke-width="${(2 * k).toFixed(2)}"
+                  stroke-linecap="round" stroke-dasharray="${(7 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".85"/>
+            ${source.some(x => x.mode === 'air') ? `<path d="${airD()}" fill="none" stroke="${BLUE}"
+                  stroke-width="${(1.5 * k).toFixed(2)}" stroke-linecap="round"
+                  stroke-dasharray="${(2 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".75"/>` : ''}
             ${node(PORTS.origin, atOrigin, LIME)}
             ${node(PORTS.destination, atDest, BRAND)}
             ${/* Customs and the DC sit within a few kilometres of the port: naming all three at
@@ -933,9 +969,11 @@
                  aria-label="Open ${esc(m.sh.reference || 'shipment')}">
                 <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="18" fill="transparent"/>
                 <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(11 * k).toFixed(1)}" fill="${m.colour}" opacity=".18" class="d2d-ping"/>
-                <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)}) scale(${k.toFixed(3)})">
-                  <path d="M-7 3 L7 3 L5 7 L-5 7 Z M0 -7 L0 3 M0 -7 L5 1 L0 1" fill="none"
-                        stroke="${m.colour}" stroke-width="1.7" stroke-linejoin="round"/>
+                <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(8.5 * k).toFixed(1)}"
+                        fill="#ffffff" stroke="${m.colour}" stroke-width="${(1.3 * k).toFixed(2)}" opacity=".95"/>
+                <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)}) scale(${(k * .8).toFixed(3)})">
+                  <path d="${m.air ? 'M-8 0 L8 0 M-3 -5 L3 0 L-3 5' : 'M-7 3 L7 3 L5 7 L-5 7 Z M0 -7 L0 3 M0 -7 L5 1 L0 1'}"
+                        fill="none" stroke="${m.colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
                 </g>
                 <text x="${(m.pos.x + 15 * k).toFixed(1)}" y="${(m.pos.y + 3.5 * k).toFixed(1)}"
                       font-size="${(10.5 * k).toFixed(1)}" font-weight="600" fill="${DARK}"
@@ -1044,6 +1082,41 @@
       </button>`;
   }
 
+  // Will this arrive on time? Answered from slip so far against the buffer still left before
+  // the planned delivery. Deliberately not dressed up as a probability: it is arithmetic on
+  // recorded dates, and the card says so.
+  function outlook(sh) {
+    const ev = evMap(sh);
+    if (sh.status === 'delivered') {
+      const d = daysBetween(sh.plan_delivered, ev.delivered && ev.delivered.actual_at);
+      return { state: 'done', label: d > 0 ? `Delivered ${d}d late` : 'Delivered on time',
+               ink: d > 0 ? BRAND : LINK, pct: 100, why: 'closed' };
+    }
+    const slip = slipOf(sh) || 0;
+    const od = overdueOf(sh);
+    const drift = Math.max(slip, od ? od.days : 0);
+    const total = daysBetween(sh.plan_pickup, sh.plan_delivered);
+    let done = -1;
+    STAGES.forEach(([k], i) => { if (ev[k] && ev[k].actual_at) done = i; });
+    const pct = Math.round((done + 1) / STAGES.length * 100);
+
+    // Everything after arrival is short and hard to recover in; before departure there is
+    // still a sailing's worth of room.
+    const recoverable = done < 3 ? 4 : 2;
+    if (!drift) return { state: 'on', label: 'On track', ink: LINK, pct,
+      why: total ? `${total} days planned, nothing lost yet` : 'nothing lost yet' };
+    if (drift <= recoverable) return { state: 'watch', label: `${drift}d behind, recoverable`, ink: YINK, pct,
+      why: `Can still be made up before ${done < 3 ? 'departure' : 'delivery'}` };
+    return { state: 'late', label: `${drift}d behind`, ink: BRAND, pct,
+      why: `Arrival slips to about ${day(addDaysISO(sh.plan_delivered, drift))}` };
+  }
+  const addDaysISO = (ymd, n) => {
+    const d = new Date(String(ymd) + 'T00:00:00Z');
+    if (isNaN(d.getTime())) return ymd;
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  };
+
   // ── What is waiting on somebody ──
   // The dashboard's job is to say what needs a person. Counts of things already moving are
   // reassurance; this is the part that changes what you do next.
@@ -1081,7 +1154,17 @@
     }
     rows.sort((a, b) => String(b.recorded).localeCompare(String(a.recorded)));
     const label = (k) => (STAGES.find(([kk]) => kk === k) || [k, k])[1];
-    return rows.slice(0, 6).map(r => ({ ...r, label: label(r.stage) }));
+    // A stage name and a container number is a log line. What matters is whether that date
+    // put the shipment ahead, behind, or left it where it was.
+    return rows.slice(0, 6).map(r => {
+      const plan = r.sh['plan_' + r.stage];
+      const d = daysBetween(plan, r.at);
+      const meaning = d == null ? { text: 'recorded', ink: MID }
+        : d > 0 ? { text: `${d} day${d === 1 ? '' : 's'} behind plan — needs bringing back`, ink: BRAND }
+        : d < 0 ? { text: `${-d} day${d === -1 ? '' : 's'} early — buffer gained`, ink: LINK }
+        : { text: 'on plan', ink: LINK };
+      return { ...r, label: label(r.stage), meaning, drift: d };
+    });
   }
 
   // ── Shipments, in full ──
@@ -1097,6 +1180,12 @@
       : (slip != null && slip > 0) ? ['+' + slip + ' days', '#fff', BRAND]
       : sh.status === 'in_transit' ? ['On plan', LINK, 'rgba(155,171,21,.20)']
       : ['Booked', MID, '#F2F2F5'];
+
+    const look = outlook(sh);
+    // Capacity is roughly 67 CBM for a 40ft box and 33 for a 20ft. Only shown when the CBM
+    // aboard is known, which means the order file has been loaded.
+    const cap = /40/.test(sh.container_type || '') ? 67 : /20/.test(sh.container_type || '') ? 33 : null;
+    const util = (cap && sh.cbm) ? { pct: Math.round(Number(sh.cbm) / cap * 100) } : null;
 
     // Door to door, as planned and — once delivered — as it actually ran.
     const planned = daysBetween(sh.plan_pickup, sh.plan_delivered);
@@ -1166,13 +1255,42 @@
               <span style="display:block;font-size:11px;color:${MID};margin-top:2px;">${esc([sh.container_type, sh.carrier, sh.vessel].filter(Boolean).join(' · '))}</span>
             </span>
           </div>
-          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
             ${planned != null ? `<span style="font-size:11px;color:${MID};">
-                 Planned pickup to delivery <b class="d2d-num" style="color:${DARK};">${planned} days</b>
-                 ${actualSpan != null ? ` &middot; actual <b class="d2d-num" style="color:${actualSpan > planned ? BRAND : LINK};">${actualSpan} days</b>` : ''}</span>` : ''}
-            ${sh.po_count ? `<span style="font-size:11px;color:${MID};">
-                 <b class="d2d-num" style="color:${DARK};">${sh.po_count}</b> orders &middot;
-                 <b class="d2d-num" style="color:${DARK};">${Number(sh.units || 0).toLocaleString()}</b> units</span>` : ''}
+                 Planned <b class="d2d-num" style="color:${DARK};">${planned} days</b>
+                 ${actualSpan != null ? ` &middot; actual <b class="d2d-num" style="color:${actualSpan > planned ? BRAND : LINK};">${actualSpan}</b>` : ''}</span>` : ''}
+
+            ${/* What is aboard, and how full it is. Utilisation needs CBM from the order file,
+                  so it is shown only when the figure is real. */ ''}
+            ${sh.po_count ? `<span style="text-align:right;">
+                 <span style="display:block;font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Aboard</span>
+                 <span class="d2d-num" style="display:block;font-size:12px;color:${DARK};">${sh.po_count} orders &middot; ${Number(sh.units || 0).toLocaleString()} units</span>
+               </span>` : ''}
+            ${util ? `<span style="text-align:right;min-width:92px;">
+                 <span style="display:block;font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Utilisation</span>
+                 <span style="display:flex;align-items:center;gap:7px;justify-content:flex-end;">
+                   <span style="display:block;width:52px;height:7px;background:#F0F0F3;border-radius:4px;overflow:hidden;">
+                     <span style="display:block;height:7px;width:${Math.min(100, util.pct)}%;border-radius:4px;
+                           background:${util.pct < 70 ? YELL : LIME};"></span></span>
+                   <span class="d2d-num" style="font-size:12px;color:${DARK};">${util.pct}%</span></span>
+               </span>` : ''}
+
+            ${/* The forecast: arithmetic on recorded dates, not a dressed-up probability. */ ''}
+            <span style="display:flex;align-items:center;gap:9px;padding:5px 11px;border-radius:9px;
+                  background:${look.state === 'late' ? 'rgba(153,0,51,.08)' : look.state === 'watch' ? 'rgba(254,208,0,.14)' : 'rgba(155,171,21,.14)'};">
+              <span style="position:relative;display:inline-flex;">
+                <svg width="26" height="26" viewBox="0 0 36 36" aria-hidden="true">
+                  <circle cx="18" cy="18" r="15" fill="none" stroke="rgba(0,0,0,.08)" stroke-width="4"/>
+                  <circle cx="18" cy="18" r="15" fill="none" stroke="${look.ink}" stroke-width="4" stroke-linecap="round"
+                          stroke-dasharray="${(look.pct / 100 * 94.2).toFixed(1)} 94.2" transform="rotate(-90 18 18)"/>
+                </svg>
+              </span>
+              <span>
+                <span style="display:block;font-size:11.5px;font-weight:600;color:${look.ink};line-height:1.3;">${esc(look.label)}</span>
+                <span style="display:block;font-size:10px;color:${MID};">${esc(look.why)}</span>
+              </span>
+            </span>
+
             <span style="font-size:10.5px;font-weight:700;border-radius:6px;padding:3px 9px;
                   color:${pill[1]};background:${pill[2]};">${esc(pill[0])}</span>
           </div>
@@ -1439,7 +1557,9 @@
           <div style="font-size:16px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Orders</div>
           <div style="font-size:11.5px;color:${MID};margin-top:2px;">Week of ${esc(day(_week))} &middot; purchase orders, their SKUs, and the containers carrying them</div>
         </div>
-        ${_internal ? `<button class="d2d-btn dark" data-poupload="1">Upload order file</button>` : ''}
+        ${_internal ? `<span style="display:flex;gap:8px;">
+          <button class="d2d-btn" data-potemplate="1">Download the format</button>
+          <button class="d2d-btn dark" data-poupload="1">Upload order file</button></span>` : ''}
       </div>
 
       ${orders.length ? `
@@ -2117,8 +2237,12 @@
     // "slice" scaled the frame up to cover the screen, which cropped hard into the lane — the
     // opposite of what full screen is for. "meet" fits the frame, and the frame itself is
     // widened so the whole route sits inside a recognisable region.
-    const grow = 1.65;
-    const cx = VIEW.x0 + VIEW.w / 2, cy = VIEW.y0 + VIEW.h / 2;
+    // Centre on the route rather than the frame, and pull well back: the lane belongs in the
+    // middle of a full screen, not off to one side of it.
+    const grow = 2.6;
+    const mid = atT(0.5);
+    const cx = (PORTS.origin.x + PORTS.destination.x + mid.x) / 3;
+    const cy = (PORTS.origin.y + PORTS.destination.y + mid.y) / 3;
     const bounds = (_world && _world.view) || { x0: 0, y0: 0, w: MAP.w, h: MAP.h };
     let fw = Math.min(VIEW.w * grow, bounds.w), fh = Math.min(VIEW.h * grow, bounds.h);
     let fx = Math.max(bounds.x0, Math.min(cx - fw / 2, bounds.x0 + bounds.w - fw));
@@ -2135,8 +2259,11 @@
            style="position:absolute;inset:0;width:100%;height:100%;display:block;" role="img"
            aria-label="Live tracking, full screen">
         ${seaField()}${dotField()}
-        <path d="${routeD()}" fill="none" stroke="#C3C9D2" stroke-width="${(1.6 * k).toFixed(2)}"
-              stroke-dasharray="${(5 * k).toFixed(1)} ${(6 * k).toFixed(1)}"/>
+        <path d="${routeD()}" fill="none" stroke="#8FA8C4" stroke-width="${(2 * k).toFixed(2)}"
+              stroke-linecap="round" stroke-dasharray="${(7 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".85"/>
+        ${source.some(x => x.mode === 'air') ? `<path d="${airD()}" fill="none" stroke="${BLUE}"
+              stroke-width="${(1.5 * k).toFixed(2)}" stroke-linecap="round"
+              stroke-dasharray="${(2 * k).toFixed(1)} ${(7 * k).toFixed(1)}" opacity=".75"/>` : ''}
         ${[[PORTS.origin, marks.filter(m => m.t === 0).length, LIME, 0],
            [PORTS.destination, marks.filter(m => m.t >= 0.82 && m.t < 0.9).length, BRAND, 0],
            [PORTS.customs, marks.filter(m => m.t >= 0.9 && m.t < 0.95).length, BRAND, 26],
@@ -2161,8 +2288,11 @@
              aria-label="Open ${esc(m.sh.reference || 'shipment')}">
             <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(20 * k).toFixed(1)}" fill="transparent"/>
             <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(12 * k).toFixed(1)}" fill="${m.colour}" opacity=".18" class="d2d-ping"/>
-            <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)}) scale(${k.toFixed(3)})">
-              <path d="M-8 3 L8 3 L6 8 L-6 8 Z M0 -8 L0 3 M0 -8 L6 1 L0 1" fill="none" stroke="${m.colour}" stroke-width="1.8" stroke-linejoin="round"/>
+            <circle cx="${m.pos.x.toFixed(1)}" cy="${m.pos.y.toFixed(1)}" r="${(9.5 * k).toFixed(1)}"
+                    fill="#ffffff" stroke="${m.colour}" stroke-width="${(1.4 * k).toFixed(2)}" opacity=".95"/>
+            <g transform="translate(${m.pos.x.toFixed(1)},${m.pos.y.toFixed(1)}) scale(${(k * .85).toFixed(3)})">
+              <path d="${m.air ? 'M-8 0 L8 0 M-3 -5 L3 0 L-3 5' : 'M-8 3 L8 3 L6 8 L-6 8 Z M0 -8 L0 3 M0 -8 L6 1 L0 1'}"
+                    fill="none" stroke="${m.colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
             </g>
             <text x="${(m.pos.x + 16 * k).toFixed(1)}" y="${(m.pos.y + 3.5 * k).toFixed(1)}"
                   font-size="${(10.5 * k).toFixed(1)}" font-weight="600" fill="${DARK}"
@@ -2363,6 +2493,23 @@
     };
     const nb = root.querySelector('[data-newbooking]');
     if (nb) nb.onclick = () => openNewBooking();
+    const tpl = root.querySelector('[data-potemplate]');
+    if (tpl) tpl.onclick = () => {
+      // A filled example, not an empty header row: the sample answers the questions a header
+      // alone raises — one row per SKU, PO fields repeated, d/m/Y dates.
+      const rows = [
+        'PO Number,Supplier,Cargo Ready,Container,SKU,Description,Units,CBM,Weight,Value,Currency',
+        '40117,D&J Industries,05/10/2026,ONEU7654321,SKU-8891,Ribbed tank black,420,18.4,2480,21500,USD',
+        '40117,D&J Industries,05/10/2026,ONEU7654321,SKU-8892,Ribbed tank white,380,18.4,2480,21500,USD',
+        '40118,NIR Accessories,05/10/2026,,SKU-5510,Canvas tote,610,11.2,1310,9800,USD',
+      ].join('\n');
+      const blob = new Blob([rows], { type: 'text/csv;charset=utf-8;' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'order-file-format.csv';
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+    };
     const up = root.querySelector('[data-poupload]');
     if (up) up.onclick = () => openPoUpload();
     const full = root.querySelector('[data-mapfull]');
@@ -2416,5 +2563,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v20 loaded');
+  console.log('[d2d-hub] v21 loaded');
 })();
