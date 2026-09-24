@@ -139,11 +139,13 @@
       /* Controls, not content: smaller and quieter than the legend, which is what a reader
          actually needs to decode the map. 8px is as small as this face stays legible. */
       .d2d-filt{border:.5px solid rgba(0,0,0,.13);background:#fff;color:${MID};border-radius:5px;padding:2px 6px;
-        font:600 8px inherit;letter-spacing:.02em;text-transform:uppercase;cursor:pointer;line-height:1.5;
+        font-family:inherit;font-weight:600;font-size:7.5px;letter-spacing:.03em;text-transform:uppercase;
+        cursor:pointer;line-height:1.6;
         transition:border-color .18s ease,background .18s ease,color .18s ease;}
       .d2d-filt:hover{border-color:rgba(0,0,0,.3);}
       .d2d-filt.on{background:${DARK};border-color:${DARK};color:#fff;}
-      .d2d-tab{border:0;background:none;font:600 13px inherit;color:${MID};cursor:pointer;padding:6px 0;border-bottom:2px solid transparent;}
+      .d2d-tab{border:0;background:none;font-family:inherit;font-weight:600;font-size:13px;color:${MID};
+        cursor:pointer;padding:6px 0;border-bottom:2px solid transparent;}
       .d2d-tab.on{color:${DARK};border-bottom-color:${BRAND};}
       /* Week chips, matching the Week Hub's date circles rather than generic pills. */
       .d2d-chip{width:46px;height:46px;border-radius:50%;border:1.5px solid rgba(0,0,0,.10);background:#fff;
@@ -206,7 +208,8 @@
       .d2d-ts{font-size:11px;color:${MID};}
       .d2d-wk{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;}
       .d2d-wkb,.d2d-btn{border:.5px solid rgba(0,0,0,.16);background:#fff;color:${DARK};border-radius:9px;padding:9px 13px;
-        font:600 12px inherit;cursor:pointer;min-height:44px;transition:border-color .2s ease,background .2s ease;}
+        font-family:inherit;font-weight:600;font-size:12px;cursor:pointer;min-height:44px;
+        transition:border-color .2s ease,background .2s ease;}
       .d2d-wkb:hover,.d2d-btn:hover{border-color:rgba(0,0,0,.34);background:#F7F8FA;}
       .d2d-wkb.on{background:${DARK};color:#fff;border-color:${DARK};}
       .d2d-btn.dark{background:${DARK};color:#fff;border-color:${DARK};}
@@ -530,7 +533,59 @@
                    slips.length ? 'worst ' + Math.max(...slips) + ' days' : 'all on plan',
                    slips.length ? BRAND : DARK)}
           </div>
-          ${paintArriving(d)}
+          ${(() => {
+            const dec = decisions(d);
+            if (!dec.length) return `
+              <div class="rounded-2xl border bg-white shadow-sm" style="padding:14px 16px;">
+                <div style="font-size:12.5px;font-weight:600;color:${DARK};">Waiting on somebody</div>
+                <div style="font-size:11.5px;color:${LINK};margin-top:6px;">Nothing is waiting. Every option is decided and every container is advised.</div>
+              </div>`;
+            return `
+              <div class="rounded-2xl border bg-white shadow-sm" style="padding:14px 16px;">
+                <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px;">
+                  <span style="font-size:12.5px;font-weight:600;color:${DARK};">Waiting on somebody</span>
+                  <span style="font-size:10.5px;color:${LIGHT};">across all weeks</span>
+                </div>
+                ${dec.map(x => `
+                  <button type="button" data-tabgo="${x.tab}" style="display:flex;align-items:center;gap:10px;width:100%;
+                          text-align:left;background:none;border:0;padding:8px 0;cursor:pointer;
+                          border-bottom:.5px solid rgba(0,0,0,.05);">
+                    <span class="d2d-num" style="font-size:18px;font-weight:700;color:${x.ink};min-width:26px;">${x.n}</span>
+                    <span style="flex:1;min-width:0;">
+                      <span style="display:block;font-size:12px;color:${DARK};line-height:1.35;">${esc(x.what)}</span>
+                      <span style="display:block;font-size:10.5px;color:${MID};">with ${esc(x.who)}</span>
+                    </span>
+                    <span style="color:${LIGHT};font-size:13px;">&rsaquo;</span>
+                  </button>`).join('')}
+              </div>`;
+          })()}
+
+          ${(() => {
+            const acts2 = recentActivity(d);
+            if (!acts2.length) return '';
+            return `
+              <div class="rounded-2xl border bg-white shadow-sm" style="padding:14px 16px;">
+                <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px;">
+                  <span style="font-size:12.5px;font-weight:600;color:${DARK};">Latest updates</span>
+                  <span style="font-size:10.5px;color:${LIGHT};">newest first</span>
+                </div>
+                ${acts2.map(r => `
+                  <button type="button" data-open="${esc(r.sh.id)}" style="display:flex;align-items:flex-start;gap:9px;width:100%;
+                          text-align:left;background:none;border:0;padding:7px 0;cursor:pointer;
+                          border-bottom:.5px solid rgba(0,0,0,.05);">
+                    <span style="width:6px;height:6px;border-radius:50%;background:${r.source === 'manual' ? YELL : LIME};margin-top:6px;flex-shrink:0;"></span>
+                    <span style="flex:1;min-width:0;">
+                      <span style="display:block;font-size:12px;color:${DARK};line-height:1.35;">${esc(r.label)}</span>
+                      <span class="d2d-num" style="display:block;font-size:10.5px;color:${MID};overflow:hidden;
+                            text-overflow:ellipsis;white-space:nowrap;">${esc(r.sh.reference || 'container not advised')}</span>
+                    </span>
+                    <span style="text-align:right;flex-shrink:0;">
+                      <span class="d2d-num" style="display:block;font-size:11px;color:${DARK};">${esc(day(r.at))}</span>
+                      <span style="display:block;font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.03em;">${esc(r.source)}</span>
+                    </span>
+                  </button>`).join('')}
+              </div>`;
+          })()}
 
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <button class="d2d-btn" data-go="week" style="flex:1;min-width:0;">Week summary &rarr;</button>
@@ -987,6 +1042,46 @@
           <span class="d2d-num" style="font-size:11px;color:${DARK};">${nextPlan && sh.status !== 'delivered' ? 'plan ' + esc(day(nextPlan)) : ''}</span>
         </span>
       </button>`;
+  }
+
+  // ── What is waiting on somebody ──
+  // The dashboard's job is to say what needs a person. Counts of things already moving are
+  // reassurance; this is the part that changes what you do next.
+  function decisions(d) {
+    const out = [];
+    const released = (d.bookings || []).filter(b => b.status === 'released').length;
+    const drafts = (d.bookings || []).filter(b => b.status === 'draft').length;
+    const awaitingPartner = (d.requests || []).filter(r => ['sent', 'repricing'].includes(r.state)).length;
+    const unassigned = (d.orders || []).filter(x => !(x.containers || []).length).length;
+    const noRef = (d.allShipments || []).filter(x => !x.reference && x.status !== 'delivered').length;
+
+    if (awaitingPartner) out.push({ n: awaitingPartner, who: 'the partner',
+      what: 'rate request' + (awaitingPartner === 1 ? '' : 's') + ' out', tab: 'bookings', ink: BLUE });
+    if (drafts && _internal) out.push({ n: drafts, who: 'you',
+      what: 'option' + (drafts === 1 ? '' : 's') + ' to price and release', tab: 'pricing', ink: YINK });
+    if (released) out.push({ n: released, who: 'the client',
+      what: 'option' + (released === 1 ? '' : 's') + ' to approve', tab: 'bookings', ink: BLUE });
+    if (noRef) out.push({ n: noRef, who: 'the partner',
+      what: 'container number' + (noRef === 1 ? '' : 's') + ' not advised', tab: 'list', ink: YINK });
+    if (unassigned) out.push({ n: unassigned, who: 'you',
+      what: 'order' + (unassigned === 1 ? '' : 's') + ' not on a container', tab: 'po', ink: YINK });
+    return out;
+  }
+
+  // What has actually been recorded lately, newest first. On a screen that is mostly plans,
+  // this is the part that shows the week moving.
+  function recentActivity(d) {
+    const rows = [];
+    for (const sh of (d.allShipments || [])) {
+      for (const e of (sh.events || [])) {
+        if (!e.actual_at) continue;
+        rows.push({ sh, stage: e.stage, at: e.actual_at, source: e.source,
+                    recorded: e.recorded_at || e.actual_at });
+      }
+    }
+    rows.sort((a, b) => String(b.recorded).localeCompare(String(a.recorded)));
+    const label = (k) => (STAGES.find(([kk]) => kk === k) || [k, k])[1];
+    return rows.slice(0, 6).map(r => ({ ...r, label: label(r.stage) }));
   }
 
   // ── Shipments, in full ──
@@ -2321,5 +2416,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v19 loaded');
+  console.log('[d2d-hub] v20 loaded');
 })();
