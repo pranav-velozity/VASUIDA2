@@ -764,7 +764,8 @@
     origin_port: '#F4BC1C',   // the mark: bright against the dot field
     port_ink:    '#8A6D00',   // the label: the bright value on white is 1.7:1, unreadable
     transit:     '#990033',
-    clearing:    '#2F6FD0',
+    clearing:    '#1E9BD7',   // the mark: bright, like the amber on the origin side
+    dest_ink:    '#15618F',   // the label: 6.7:1 on white, where the bright value is 3.1:1
     customs:     '#DC2626',
     last_mile:   '#1C1C1E',
     air:         '#4A9B8E',
@@ -958,7 +959,7 @@
               stroke="${colour}" stroke-width="1.5" class="d2d-sonar"/>` : ''}
         <circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="${here ? 5 : 3.5}" fill="${colour}"
                 stroke="#fff" stroke-width="1.5" opacity="${here ? 1 : .5}"/>
-        ${pinLabel(q.x, q.y, place.label, colour, false,
+        ${pinLabel(q.x, q.y, place.label, inCust ? MAP_PAL.customs : MAP_PAL.dest_ink, false,
                    parts || mine.length + (mine.length === 1 ? ' booked' : ' booked'), lbl.ly, lbl.lx)}
       </g>`;
     }).join('');
@@ -2729,8 +2730,9 @@
           </span>
         </div>
         <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-          ${[['Origin port', MAP_PAL.origin_port], ['In transit', MAP_PAL.transit], ['Air', MAP_PAL.air],
-             ['Customs', MAP_PAL.customs], ['Last mile', MAP_PAL.last_mile]].map(([l, c]) =>
+          ${[['Origin port', MAP_PAL.origin_port], ['Destination', MAP_PAL.clearing],
+             ['In transit', MAP_PAL.transit], ['Air', MAP_PAL.air],
+             ['Customs', MAP_PAL.customs]].map(([l, c]) =>
             `<span style="font-size:11px;color:${MID};"><span style="display:inline-block;width:9px;height:9px;
                border-radius:50%;background:${c};margin-right:5px;"></span>${l}</span>`).join('')}
           <button class="d2d-btn" id="d2d-fullclose" aria-label="Close full screen">Close</button>
