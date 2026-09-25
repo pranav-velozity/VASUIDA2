@@ -370,6 +370,9 @@ module.exports = function mountD2D(deps) {
           units: (load[r.id] || {}).units || 0,
           cbm: (load[r.id] || {}).cbm || null,
           origin: r.origin || c.origin || null,
+          // The booked destination, carried down. Without it every shipment was drawn to the
+          // same place regardless of what was quoted.
+          destination: r.destination || c.destination || null,
           cargo: c.pack_type || c.pallets || c.cartons || c.req_units || c.req_cbm ? {
             pack_type: c.pack_type || null,
             pallets: share(c.pallets), cartons: share(c.cartons),
@@ -386,9 +389,15 @@ module.exports = function mountD2D(deps) {
     try {
       const ws = String(req.query.week || '');
       const internal = isInternal(req);
+      // The lane comes off the request the option was quoted against, so a card can say which
+      // movement it is pricing rather than just naming the carrier.
+      const LANE = `, r.origin AS origin, r.destination AS destination, r.ref AS request_ref`;
+      const JOIN = ` LEFT JOIN d2d_request r ON r.id = b.request_id AND r.client_id = b.client_id`;
       const rows = ws
-        ? req.d2d.all(`SELECT * FROM d2d_booking WHERE client_id = @client AND week_start = @ws ORDER BY option_ref`, { ws })
-        : req.d2d.all(`SELECT * FROM d2d_booking WHERE client_id = @client ORDER BY week_start DESC LIMIT 60`);
+        ? req.d2d.all(`SELECT b.*${LANE} FROM d2d_booking b${JOIN}
+                       WHERE b.client_id = @client AND b.week_start = @ws ORDER BY b.option_ref`, { ws })
+        : req.d2d.all(`SELECT b.*${LANE} FROM d2d_booking b${JOIN}
+                       WHERE b.client_id = @client ORDER BY b.week_start DESC LIMIT 60`);
       // A client sees released options only, and never the cost behind them.
       const visible = internal ? rows : rows.filter(r => r.status !== 'draft').map(forClient);
       res.json({ bookings: visible, pricing_visible: internal });
