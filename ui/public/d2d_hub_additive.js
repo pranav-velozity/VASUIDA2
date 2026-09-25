@@ -135,6 +135,36 @@
       .d2d-tabs{display:flex;align-items:center;}
       .d2d-tabs .d2d-tab + .d2d-tab{margin-left:20px;}
       .d2d-cells > span:first-child{border-left:0 !important;}
+      /* One in-flight row: arrival, identity, its own lane, units, outlook. */
+      .d2d-frow{display:grid;grid-template-columns:88px 148px minmax(0,1fr) 86px 92px;gap:0 14px;align-items:center;
+        width:100%;text-align:left;background:none;border:0;border-top:.5px solid rgba(0,0,0,.05);
+        padding:9px 16px;cursor:pointer;font-family:inherit;transition:background .18s ease;}
+      .d2d-frow:hover{background:#FAFBFC;}
+      .d2d-fhead{cursor:default;border-top:0;padding-top:6px;padding-bottom:2px;}
+      .d2d-fhead:hover{background:none;}
+      .d2d-lane{position:relative;height:24px;}
+      .d2d-rail{position:absolute;left:0;right:0;top:10px;height:3px;background:#EDEFF3;border-radius:2px;}
+      .d2d-done{position:absolute;left:0;top:10px;height:3px;border-radius:2px;}
+      .d2d-node{position:absolute;top:6px;width:10px;height:10px;border-radius:50%;background:#fff;
+        border:2px solid #DDE1E7;transform:translateX(-50%);box-sizing:border-box;}
+      .d2d-here{position:absolute;top:1px;transform:translateX(-50%);width:20px;height:20px;border-radius:50%;
+        background:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 2px #fff;}
+      .d2d-ends{position:absolute;top:-3px;font-size:8.5px;color:#C2C6CD;}
+
+      /* Slow on purpose: a sheen along the leg being travelled and one breath on the marker.
+         Anything faster becomes wallpaper on a page left open all day. */
+      @keyframes d2d-drift{from{background-position:120% 0;}to{background-position:-20% 0;}}
+      .d2d-travel{background-image:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.85) 45%,transparent 90%);
+        background-size:220% 100%;animation:d2d-drift 4.2s linear infinite;}
+      @keyframes d2d-breathe{0%,100%{transform:translateX(-50%) scale(1);}50%{transform:translateX(-50%) scale(1.09);}}
+      .d2d-breathe{animation:d2d-breathe 3.4s ease-in-out infinite;}
+      @media (prefers-reduced-motion:reduce){.d2d-travel,.d2d-breathe{animation:none;}}
+
+      .d2d-seg{border:.5px solid rgba(0,0,0,.14);background:#fff;color:${MID};border-radius:8px;padding:5px 11px;
+        font-family:inherit;font-weight:600;font-size:11px;cursor:pointer;min-height:32px;
+        transition:background .18s ease,color .18s ease,border-color .18s ease;}
+      .d2d-seg:hover{border-color:rgba(0,0,0,.3);}
+      .d2d-seg.on{background:${DARK};border-color:${DARK};color:#fff;}
       .d2d-crumb{border:0;background:none;font:inherit;font-size:11.5px;color:${BLUE};cursor:pointer;padding:0;}
       .d2d-crumb:hover{text-decoration:underline;}
       /* Controls, not content: smaller and quieter than the legend, which is what a reader
@@ -307,6 +337,9 @@
   let _tab = 'shipments', _data = null, _internal = false, _mapFilter = 'all', _mapScope = 'live';
   // Which screen inside the Shipments tab: the dashboard, one week, or one container.
   let _view = 'dashboard', _openId = null;
+  // The rail shows one thing at a time. Updates by default — it is what changes during a day;
+  // the map is there when you want to see the shape of the week.
+  let _rail = 'updates';
   const go = (view, id) => { _view = view; _openId = id || null; paint(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
 
   async function load() {
@@ -383,19 +416,19 @@
     for (const sh of mapSource(d)) {
       const od = overdueOf(sh);
       const slip = slipOf(sh);
-      if (od) out.push({ kind: 'Overdue', accent: BRAND, ink: BRAND,
+      if (od) out.push({ kind: 'Overdue', accent: BRAND, ink: BRAND, who: 'the partner',
         what: `${od.label} not recorded`,
         where: where(sh),
         effect: `Planned ${day(sh['plan_' + od.stage])} · ${od.days} day${od.days === 1 ? '' : 's'} ago`,
         next: 'Chase the partner for the date, or record it if you have it',
         id: sh.id, sort: 100 + od.days });
-      else if (slip != null && slip > 0 && sh.status !== 'delivered') out.push({ kind: 'Behind plan', accent: BRAND, ink: BRAND,
+      else if (slip != null && slip > 0 && sh.status !== 'delivered') out.push({ kind: 'Behind plan', accent: BRAND, ink: BRAND, who: 'the carrier',
         what: `Running ${slip} day${slip === 1 ? '' : 's'} behind`,
         where: where(sh),
         effect: `Arrival moves to about ${day(addDaysISO(sh.plan_arrived, slip))}`,
         next: slip > 4 ? 'Warn the client and look at the last-mile booking' : 'Recoverable before delivery — watch the next stage',
         id: sh.id, sort: 70 + slip });
-      else if (!sh.reference && sh.status !== 'delivered') out.push({ kind: 'Missing', accent: YELL, ink: YINK,
+      else if (!sh.reference && sh.status !== 'delivered') out.push({ kind: 'Missing', accent: YELL, ink: YINK, who: 'the partner',
         what: 'Container number not advised',
         where: 'week ' + (isoWeek(sh.week_start) || day(sh.week_start)) + ' · ' + (sh.container_type || 'container'),
         effect: 'The partner cannot report milestones without it',
@@ -404,22 +437,57 @@
     }
 
     const released = d.bookings.filter(b => b.status === 'released');
-    if (released.length) out.push({ kind: 'Undecided', accent: BLUE, ink: BLUE,
+    if (released.length) out.push({ kind: 'Undecided', accent: BLUE, ink: BLUE, who: 'the client',
       what: `${released.length} option${released.length === 1 ? '' : 's'} awaiting a decision`,
       where: 'week ' + (isoWeek(_week) || day(_week)),
       effect: 'Space is held until the cut-off',
-      next: 'Nudge the client — the rate expires with the sailing', sort: 90 });
+      next: 'Nudge the client — the rate expires with the sailing', tab: 'bookings', sort: 90 });
 
     const drafts = d.bookings.filter(b => b.status === 'draft');
-    if (drafts.length && _internal) out.push({ kind: 'Unpriced', accent: YELL, ink: YINK,
+    if (drafts.length && _internal) out.push({ kind: 'Unpriced', accent: YELL, ink: YINK, who: 'you',
       what: `${drafts.length} option${drafts.length === 1 ? '' : 's'} not yet released`,
       where: 'week ' + (isoWeek(_week) || day(_week)),
       effect: 'The client cannot see them until they are released',
-      next: 'Set the margin on Pricing, then release', sort: 80 });
+      next: 'Set the margin on Pricing, then release', tab: 'pricing', sort: 80 });
 
-    if (!out.length) out.push({ kind: 'Clear', accent: LIME, ink: LINK,
+    // Waiting on somebody is an exception too — it was in its own panel answering the same
+    // question, so neither list was complete.
+    const awaitingPartner = (d.requests || []).filter(r => ['sent', 'repricing'].includes(r.state)).length;
+    if (awaitingPartner) out.push({ kind: 'Awaiting rates', accent: BLUE, ink: BLUE, who: 'the partner',
+      what: `${awaitingPartner} rate request${awaitingPartner === 1 ? '' : 's'} out`,
+      where: 'week ' + (isoWeek(_week) || day(_week)),
+      effect: 'Nothing can be priced until they come back',
+      next: 'Chase the partner, or resend the link', tab: 'bookings', sort: 85 });
+
+    const unassigned = (d.orders || []).filter(x => !(x.containers || []).length).length;
+    if (unassigned && _internal) out.push({ kind: 'Unassigned', accent: YELL, ink: YINK, who: 'you',
+      what: `${unassigned} order${unassigned === 1 ? '' : 's'} not on a container`,
+      where: 'week ' + (isoWeek(_week) || day(_week)),
+      effect: 'They will not appear against any shipment',
+      next: 'Name the container in the order file, or assign it here', tab: 'po', sort: 50 });
+
+    if (!out.length) out.push({ kind: 'Clear', accent: LIME, ink: LINK, who: '',
       what: 'No exceptions', where: '', effect: 'Every stage is on plan or recorded', next: '', sort: 0 });
-    return out.sort((a, b) => b.sort - a.sort).slice(0, 4);
+
+    // Three containers stuck at the same stage is one problem, not three cards. They collapse
+    // into a single card with a count; two or fewer stay named, because naming them is useful.
+    const grouped = [], byKey = {};
+    for (const a of out.sort((x, y) => y.sort - x.sort)) {
+      const key = a.id ? a.kind + '|' + a.what : null;      // only per-shipment ones group
+      if (!key) { grouped.push(a); continue; }
+      if (!byKey[key]) { byKey[key] = { ...a, items: [a] }; grouped.push(byKey[key]); }
+      else byKey[key].items.push(a);
+    }
+    for (const g of grouped) {
+      if (!g.items || g.items.length < 3) continue;
+      const n = g.items.length;
+      g.what = `${n} shipments · ${g.what.toLowerCase()}`;
+      const weeks = [...new Set(g.items.map(x => String(x.where || '').split('·').pop().trim()))].filter(Boolean);
+      g.where = weeks.length === 1 ? weeks[0] : `across ${weeks.length} weeks`;
+      g.id = null;                                          // a group opens the list, not one shipment
+      g.tab = 'list';
+    }
+    return grouped.slice(0, 6);
   }
 
   function tickerLines(d) {
@@ -519,86 +587,122 @@
     wireActions(body);
   }
 
-  function paintShipments(d) {
-    const inTransit = d.shipments.filter(s => s.status === 'in_transit').length;
-    const delivered = d.shipments.filter(s => s.status === 'delivered').length;
-    const slips = d.shipments.map(slipOf).filter(x => x != null && x > 0);
-    const orders = d.shipments.reduce((n, s) => n + (Number(s.po_count) || 0), 0);
-    const acts = actions(d);
+  // Each in-flight shipment on its own rail: origin to the DC, stage nodes, and the vessel at
+  // its real position. Two containers on the same sailing get separate rails, so they cannot
+  // collide the way map markers do.
+  const LANE_STOPS = ['0%', '12%', '22%', '78%', '88%', '100%'];
+  const ICON_SHIP_SM = 'M2 14 L22 14 L19.5 19 L4.5 19 Z M6 9 H10 V14 H6 Z M11 6 H15 V14 H11 Z M17 8 H19 V14 H17 Z';
+  const ICON_PLANE_SM = 'M12 2 L13.8 8 L22 12.5 L22 14.6 L13.8 12.6 L13.8 18 L16.4 20 L16.4 21.4 L12 20.2 L7.6 21.4 L7.6 20 L10.2 18 L10.2 12.6 L2 14.6 L2 12.5 L10.2 8 Z';
 
-    const tile = (label, value, sub, colour) => `
-      <div class="rounded-2xl border bg-white shadow-sm d2d-tile d2d-rise">
-        <div class="d2d-tl">${label}</div>
-        <div class="d2d-tv" style="color:${colour || DARK};">${value}</div>
-        <div class="d2d-ts">${sub}</div>
-      </div>`;
-
-    // The mockup's shape: map two thirds with the rail beside it, actions across the bottom.
+  function flightRow(m, i) {
+    const sh = m.sh;
+    const look = outlook(sh);
+    const pct = Math.round(m.t * 100);
+    const moving = m.t > 0 && m.t < 1;
+    const eta = sh.plan_arrived;
+    const slip = slipOf(sh) || 0;
     return `
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start" style="margin-bottom:12px;">
-        <div class="lg:col-span-2" style="min-width:0;">${paintMap(d)}</div>
+      <button type="button" data-open="${esc(sh.id)}" class="d2d-frow d2d-rise"
+              style="animation-delay:${(i * 0.035).toFixed(2)}s;">
+        <span>
+          <span class="d2d-num" style="display:block;font-size:13px;font-weight:600;color:${look.ink};">${eta ? esc(day(eta)) : '—'}</span>
+          <span style="display:block;font-size:9px;color:${LIGHT};">${slip > 0 ? '+' + slip + 'd on plan' : 'on plan'}</span>
+        </span>
+        <span style="min-width:0;">
+          <span class="d2d-num" style="display:block;font-size:12px;color:${DARK};overflow:hidden;
+                text-overflow:ellipsis;white-space:nowrap;">${esc(sh.reference || 'not advised')}</span>
+          <span style="display:block;font-size:10px;color:${MID};">${esc([sh.carrier, sh.po_count ? sh.po_count + ' orders' : ''].filter(Boolean).join(' · '))}</span>
+        </span>
+
+        <span class="d2d-lane">
+          <span class="d2d-ends" style="left:0;">${esc((sh.service || sh.origin || 'origin'))}</span>
+          <span class="d2d-ends" style="right:0;">Eastern Creek</span>
+          <span class="d2d-rail"></span>
+          <span class="d2d-done ${moving ? 'd2d-travel' : ''}" style="width:${pct}%;background:${look.ink};"></span>
+          ${LANE_STOPS.map(at => `<span class="d2d-node" style="left:${at};border-color:${parseFloat(at) <= pct ? look.ink : '#DDE1E7'};"></span>`).join('')}
+          <span class="d2d-here ${moving ? 'd2d-breathe' : ''}" style="left:${pct}%;">
+            <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="${m.air ? ICON_PLANE_SM : ICON_SHIP_SM}" fill="${look.ink}"/></svg>
+          </span>
+        </span>
+
+        <span class="d2d-num" style="font-size:12px;color:${DARK};text-align:right;">${sh.units ? Number(sh.units).toLocaleString() : (sh.cargo && sh.cargo.units ? Math.round(sh.cargo.units).toLocaleString() : '—')}</span>
+        <span style="font-size:10.5px;font-weight:600;color:${look.ink};">${esc(look.label)}</span>
+      </button>`;
+  }
+
+  function paintShipments(d) {
+    const source = mapSource(d);
+    const inTransit = source.filter(x => x.status === 'in_transit').length;
+    const slips = source.map(slipOf).filter(x => x != null && x > 0);
+    const acts = actions(d);
+    const updates = recentActivity(d);
+    const units = source.reduce((n, x) => n + (Number(x.units) || 0), 0);
+
+    // Soonest arrival first: the order someone actually reads a fleet in.
+    const marks = shipmentPositions(source)
+      .sort((a, b) => String(a.sh.plan_arrived || '').localeCompare(String(b.sh.plan_arrived || '')));
+    const moving = marks.filter(m => m.t > 0 && m.t < 1).length;
+
+    return `
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start" style="margin-bottom:14px;">
+        <div class="lg:col-span-2 rounded-2xl border bg-white shadow-sm" style="min-width:0;overflow:hidden;">
+          <div style="display:flex;align-items:baseline;justify-content:space-between;padding:13px 16px 2px;">
+            <span style="font-size:12.5px;font-weight:600;color:${DARK};">In flight</span>
+            <span style="font-size:10.5px;color:${LIGHT};">soonest arrival first</span>
+          </div>
+          <div class="d2d-frow d2d-fhead">
+            <span class="d2d-tl">Arriving</span><span class="d2d-tl">Shipment</span>
+            <span class="d2d-tl">Origin &rarr; Sydney</span>
+            <span class="d2d-tl" style="text-align:right;">Units</span><span class="d2d-tl">Outlook</span>
+          </div>
+          ${marks.length ? marks.map(flightRow).join('')
+            : `<div class="d2d-empty">Nothing in flight.</div>`}
+        </div>
 
         <div style="display:flex;flex-direction:column;gap:12px;min-width:0;">
           <div class="grid grid-cols-2 gap-3">
-            ${tile('In transit', inTransit, `${d.shipments.length} this week` + (orders ? ` · ${orders} orders` : ''))}
-            ${tile('Behind plan', slips.length,
-                   slips.length ? 'worst ' + Math.max(...slips) + ' days' : 'all on plan',
-                   slips.length ? BRAND : DARK)}
+            <div class="rounded-2xl border bg-white shadow-sm d2d-tile">
+              <div class="d2d-tl">In transit</div>
+              <div class="d2d-tv">${inTransit}</div>
+              <div class="d2d-ts">${source.length} shown${units ? ' · ' + units.toLocaleString() + ' units' : ''}</div>
+            </div>
+            <div class="rounded-2xl border bg-white shadow-sm d2d-tile">
+              <div class="d2d-tl">Behind plan</div>
+              <div class="d2d-tv" style="color:${slips.length ? BRAND : DARK};">${slips.length}</div>
+              <div class="d2d-ts">${slips.length ? 'worst ' + Math.max(...slips) + ' days' : 'all on plan'}</div>
+            </div>
           </div>
-          ${(() => {
-            const dec = decisions(d);
-            if (!dec.length) return `
-              <div class="rounded-2xl border bg-white shadow-sm" style="padding:14px 16px;">
-                <div style="font-size:12.5px;font-weight:600;color:${DARK};">Open items</div>
-                <div style="font-size:11.5px;color:${LINK};margin-top:6px;">Nothing open. Every option is decided and every container is advised.</div>
-              </div>`;
-            return `
-              <div class="rounded-2xl border bg-white shadow-sm" style="padding:14px 16px;">
-                <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px;">
-                  <span style="font-size:12.5px;font-weight:600;color:${DARK};">Open items</span>
-                  <span style="font-size:10.5px;color:${LIGHT};">across all weeks</span>
-                </div>
-                ${dec.map(x => `
-                  <button type="button" data-tabgo="${x.tab}" style="display:flex;align-items:center;gap:10px;width:100%;
-                          text-align:left;background:none;border:0;padding:8px 0;cursor:pointer;
-                          border-bottom:.5px solid rgba(0,0,0,.05);">
-                    <span class="d2d-num" style="font-size:18px;font-weight:700;color:${x.ink};min-width:26px;">${x.n}</span>
-                    <span style="flex:1;min-width:0;">
-                      <span style="display:block;font-size:12px;color:${DARK};line-height:1.35;">${esc(x.what)}</span>
-                      <span style="display:block;font-size:10.5px;color:${MID};">with ${esc(x.who)}</span>
-                    </span>
-                    <span style="color:${LIGHT};font-size:13px;">&rsaquo;</span>
-                  </button>`).join('')}
-              </div>`;
-          })()}
 
-          ${(() => {
-            const acts2 = recentActivity(d);
-            if (!acts2.length) return '';
-            return `
-              <div class="rounded-2xl border bg-white shadow-sm" style="padding:14px 16px;">
-                <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px;">
-                  <span style="font-size:12.5px;font-weight:600;color:${DARK};">Latest updates</span>
-                  <span style="font-size:10.5px;color:${LIGHT};">newest first</span>
-                </div>
-                ${acts2.map(r => `
-                  <button type="button" data-open="${esc(r.sh.id)}" style="display:flex;align-items:flex-start;gap:9px;width:100%;
-                          text-align:left;background:none;border:0;padding:7px 0;cursor:pointer;
-                          border-bottom:.5px solid rgba(0,0,0,.05);">
-                    <span style="width:6px;height:6px;border-radius:50%;margin-top:6px;flex-shrink:0;
-                          background:${r.drift > 0 ? BRAND : (r.drift < 0 ? LIME : '#C9CED6')};"></span>
-                    <span style="flex:1;min-width:0;">
-                      <span style="display:block;font-size:12px;color:${DARK};line-height:1.35;">
-                        ${esc(r.label)} &middot; <span class="d2d-num">${esc(r.sh.reference || 'not advised')}</span></span>
-                      <span style="display:block;font-size:10.5px;color:${r.meaning.ink};line-height:1.35;">${esc(r.meaning.text)}</span>
-                    </span>
-                    <span style="text-align:right;flex-shrink:0;">
-                      <span class="d2d-num" style="display:block;font-size:11px;color:${DARK};">${esc(day(r.at))}</span>
-                      <span style="display:block;font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.03em;">${esc(r.source)}</span>
-                    </span>
-                  </button>`).join('')}
-              </div>`;
-          })()}
+          <div style="display:flex;align-items:center;gap:6px;">
+            ${[['updates', 'Updates'], ['map', 'Live map']].map(([k, l]) =>
+              `<button class="d2d-seg ${_rail === k ? 'on' : ''}" data-rail="${k}">${l}</button>`).join('')}
+            <span style="flex:1;"></span>
+            ${_rail === 'map' ? `<span style="font-size:10px;color:${LIGHT};">${moving} moving</span>` : ''}
+          </div>
+
+          ${_rail === 'map' ? paintMap(d) : ''}
+
+          ${_rail === 'updates' && updates.length ? `
+            <div class="rounded-2xl border bg-white shadow-sm" style="padding:13px 15px;">
+              <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:2px;">
+                <span style="font-size:12px;font-weight:600;color:${DARK};">Latest updates</span>
+                <span style="font-size:10px;color:${LIGHT};">newest first</span>
+              </div>
+              ${updates.slice(0, 8).map((r, i2) => `
+                <button type="button" data-open="${esc(r.sh.id)}" class="d2d-rise"
+                        style="display:flex;gap:9px;width:100%;text-align:left;background:none;border:0;
+                               padding:7px 0;cursor:pointer;border-top:.5px solid rgba(0,0,0,.05);
+                               animation-delay:${(i2 * .04).toFixed(2)}s;">
+                  <span style="width:6px;height:6px;border-radius:50%;margin-top:5px;flex-shrink:0;
+                        background:${r.drift > 0 ? BRAND : (r.drift < 0 ? LIME : '#C9CED6')};"></span>
+                  <span style="flex:1;min-width:0;">
+                    <span style="display:block;font-size:11.5px;color:${DARK};line-height:1.3;">${esc(r.label)} &middot;
+                      <span class="d2d-num">${esc(r.sh.reference || 'not advised')}</span></span>
+                    <span style="display:block;font-size:10px;color:${r.meaning.ink};">${esc(r.meaning.text)}</span>
+                  </span>
+                  <span class="d2d-num" style="font-size:10px;color:${LIGHT};flex-shrink:0;">${esc(day(r.at))}</span>
+                </button>`).join('')}
+            </div>` : ''}
 
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <button class="d2d-btn" data-go="week" style="flex:1;min-width:0;">Week summary &rarr;</button>
@@ -609,14 +713,16 @@
 
       <div style="display:flex;align-items:baseline;gap:9px;margin:2px 0 8px;">
         <span style="font-size:12.5px;font-weight:600;color:${DARK};">Exceptions</span>
-        <span style="font-size:11px;color:${MID};">what is off plan, and what to do about it</span>
+        <span style="font-size:11px;color:${MID};">what is off plan or waiting on somebody</span>
         ${acts.length && acts[0].kind !== 'Clear'
           ? `<span class="d2d-num" style="font-size:11px;color:${BRAND};font-weight:700;">${acts.length}</span>` : ''}
       </div>
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3" style="margin-bottom:18px;">
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3" style="margin-bottom:18px;">
         ${acts.map((a, i2) => {
-          const tag = a.id ? 'button' : 'div';
-          const attrs = a.id ? ` type="button" data-open="${esc(a.id)}" style="text-align:left;width:100%;cursor:pointer;` : ' style="';
+          const tag = (a.id || a.tab) ? 'button' : 'div';
+          const attrs = a.id ? ` type="button" data-open="${esc(a.id)}" style="text-align:left;width:100%;cursor:pointer;`
+            : a.tab ? ` type="button" data-tabgo="${esc(a.tab)}" style="text-align:left;width:100%;cursor:pointer;`
+            : ' style="';
           return `
           <${tag} class="rounded-2xl border bg-white shadow-sm d2d-nba d2d-rise d2d-lift"${attrs}
                border-left:3px solid ${a.accent};padding:13px 15px;animation-delay:${i2 * .05}s;">
@@ -630,12 +736,11 @@
                   border-top:.5px solid rgba(0,0,0,.06);">
                  <span style="font-size:9px;font-weight:700;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">Next</span>
                  <span style="font-size:11px;color:${DARK};line-height:1.4;">${esc(a.next)}</span>
+                 ${a.who ? `<span style="font-size:10px;color:${LIGHT};white-space:nowrap;">· ${esc(a.who)}</span>` : ''}
                </span>` : ''}
           </${tag}>`;
         }).join('')}
-      </div>
-
-      `;
+      </div>`;
   }
 
   // ── Live tracking ──
@@ -686,6 +791,25 @@
     if (/hong\s*kong|hkg/.test(t)) return 'hongkong';
     return null;
   }
+
+  // Where each label sits relative to its dot: [dx, dy, anchor]. Fixed per place rather than
+  // computed, because these few points are always in the same relation to each other.
+  // Each label is pushed to its own side, far enough that neighbouring ports do not share
+  // space: Qingdao sits left, Ningbo above, Xiamen right and below.
+  // These ports are within a few hundred kilometres of each other, so two labels above two
+  // dots will always touch. Each is given a different SIDE instead: Qingdao left, Ningbo
+  // right, Xiamen right and lower.
+  const LABEL_AT = {
+    Qingdao:         [-16, -6, 'end'],
+    Ningbo:          [16, -2, 'start'],
+    Shanghai:        [-16, -14, 'end'],
+    Xiamen:          [16, 16, 'start'],
+    'Hong Kong':     [-16, 16, 'end'],
+    Shenzhen:        [-16, 26, 'end'],
+    'Port Botany':   [16, -8, 'start'],
+    'Sydney customs':[16, 8, 'start'],
+    'Eastern Creek': [16, 24, 'start'],
+  };
 
   const PLACES = {
     origin:       { lon: 121.55, lat: 29.87,  label: 'Ningbo' },
@@ -860,10 +984,17 @@
   };
   const VIEWSRC = () => (_world && _world.view) || { x0: 0, y0: 0, w: MAP.w, h: MAP.h };
 
+  // Each origin gets its own bow, so three lanes read as three rather than one thick line.
+  const BOW = { ningbo: 0.55, qingdao: 0.78, xiamen: 0.34, hongkong: 0.22, shanghai: 0.66, shenzhen: 0.44 };
+  const bowOf = (from) => {
+    if (!from) return 0.55;
+    const k = Object.keys(ORIGIN_PORTS).find(key => ORIGIN_PORTS[key].label === from.label);
+    return BOW[k] != null ? BOW[k] : 0.55;
+  };
   const curveC = (from) => {
     const A = from || PORTS.origin, B = PORTS.destination;
     // Push the control point east so the arc runs down the Pacific side, as the sailing does.
-    return { x: Math.max(A.x, B.x) + Math.abs(B.x - A.x) * 0.55 + 10, y: (A.y + B.y) / 2 };
+    return { x: Math.max(A.x, B.x) + Math.abs(B.x - A.x) * bowOf(from) + 10, y: (A.y + B.y) / 2 };
   };
   const atT = (t, fromPlace) => {
     const A = fromPlace ? portXY(fromPlace) : PORTS.origin;
@@ -1060,26 +1191,28 @@
     const moving = marks.filter(m => m.t > 0 && m.t < 1).length;
     // Scale marks with the frame so they stay the same visual size however far the camera is.
     const k = VIEW.w / MAP.w;
+
+    // The count goes INSIDE the dot. Drawn beside it, the number was a second piece of text
+    // per point, and with three ports a few hundred kilometres apart those collided with the
+    // neighbouring port's name.
     const node = (pt, count, colour, opts2) => {
       const o2 = opts2 || {};
       const showLabel = o2.label !== false;
-      const dy = (o2.dy || 0) * k;
+      const at = LABEL_AT[pt.label] || [0, -15, 'middle'];
+      const r = (count ? 9 : 5.5) * k;
+      const lx = pt.x + at[0] * k, ly = pt.y + at[1] * k;
       return `
       <g>
-        ${count ? `<circle cx="${pt.x}" cy="${pt.y}" r="${(9 * k).toFixed(1)}" fill="${colour}" opacity=".22" class="d2d-ping"/>` : ''}
-        <circle cx="${pt.x}" cy="${pt.y}" r="${(4.5 * k).toFixed(1)}" fill="${count ? colour : '#fff'}"
+        ${count ? `<circle cx="${pt.x}" cy="${pt.y}" r="${(r * 1.7).toFixed(1)}" fill="${colour}" opacity=".16" class="d2d-ping"/>` : ''}
+        <circle cx="${pt.x}" cy="${pt.y}" r="${r.toFixed(1)}" fill="${count ? colour : '#fff'}"
                 stroke="${count ? colour : '#AEB4BD'}" stroke-width="${(1.6 * k).toFixed(2)}"/>
-        ${/* A white halo under every label. Grey text on a grey dot field was unreadable, and
-              tinting the text alone would not fix it — the halo is what separates figure from
-              ground whatever the label happens to sit on. */ ''}
-        ${showLabel ? `<text x="${pt.x}" y="${(pt.y - 12 * k + dy).toFixed(1)}" text-anchor="middle"
+        ${count ? `<text x="${pt.x}" y="${(pt.y + 3.2 * k).toFixed(1)}" text-anchor="middle"
+              font-size="${(9.5 * k).toFixed(1)}" font-weight="700" fill="#ffffff"
+              font-family="ui-monospace,monospace">${count}</text>` : ''}
+        ${showLabel ? `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${at[2]}"
               font-size="${(10.5 * k).toFixed(1)}" font-weight="600" fill="${DARK}" font-family="inherit"
-              stroke="#ffffff" stroke-width="${(3.2 * k).toFixed(2)}" paint-order="stroke"
+              stroke="#ffffff" stroke-width="${(3.4 * k).toFixed(2)}" paint-order="stroke"
               stroke-linejoin="round">${esc(pt.label)}</text>` : ''}
-        ${count ? `<text x="${pt.x}" y="${(pt.y + 18 * k + dy).toFixed(1)}" text-anchor="middle"
-              font-size="${(10 * k).toFixed(1)}" font-weight="700" fill="${colour}" font-family="ui-monospace,monospace"
-              stroke="#ffffff" stroke-width="${(3 * k).toFixed(2)}" paint-order="stroke"
-              stroke-linejoin="round">${count}</text>` : ''}
       </g>`;
     };
 
@@ -1090,11 +1223,11 @@
 
     return `
       <div class="rounded-2xl border bg-white shadow-sm d2d-rise" style="overflow:hidden;margin-bottom:12px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
-             padding:12px 16px;border-bottom:.5px solid rgba(0,0,0,.07);">
-          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-            <span style="font-size:13px;font-weight:600;color:${DARK};">Live tracking</span>
-            <span style="font-size:11px;color:${MID};">${moving} in transit &middot; ${source.length} shown</span>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
+             padding:11px 14px;border-bottom:.5px solid rgba(0,0,0,.07);">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <span style="font-size:12px;font-weight:600;color:${DARK};">Live tracking</span>
+            <span style="font-size:10.5px;color:${MID};">${moving} in transit</span>
             <span style="display:flex;gap:6px;">
               ${[['live', 'All in flight'], ['week', 'This week']].map(([k, l]) =>
                 `<button class="d2d-filt ${_mapScope === k ? 'on' : ''}" data-scope="${k}">${l}</button>`).join('')}
@@ -1105,17 +1238,17 @@
             </span>
           </div>
           <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-            ${[['Sea', SEA_LINE], ['Air', BLUE], ['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]].map(([l, c]) =>
-              `<span style="font-size:12.5px;color:${DARK};"><span style="display:inline-block;width:9.5px;height:9.5px;
-                 border-radius:50%;background:${c};margin-right:6px;"></span>${l}</span>`).join('')}
-            <button class="d2d-btn" data-mapfull="1" style="padding:7px 11px;min-height:36px;display:inline-flex;align-items:center;gap:6px;">
+            ${[['Sea', SEA_LINE], ['Air', BLUE]].map(([l, c]) =>
+              `<span style="font-size:10.5px;color:${MID};"><span style="display:inline-block;width:8px;height:8px;
+                 border-radius:50%;background:${c};margin-right:5px;"></span>${l}</span>`).join('')}
+            <button class="d2d-btn" data-mapfull="1" style="padding:5px 9px;min-height:32px;font-size:10.5px;display:inline-flex;align-items:center;gap:5px;">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M9 3H3v6"/><path d="M15 21h6v-6"/><path d="M3 3l7 7"/><path d="M21 21l-7-7"/></svg>
               Full screen</button>
           </div>
         </div>
 
         <div style="position:relative;background:#FBFCFD;">
-          <svg viewBox="${VIEW.x0} ${VIEW.y0} ${VIEW.w} ${VIEW.h}" width="100%" style="display:block;max-height:${big ? 760 : 588}px;" role="img"
+          <svg viewBox="${VIEW.x0} ${VIEW.y0} ${VIEW.w} ${VIEW.h}" width="100%" style="display:block;max-height:${big ? 760 : 430}px;" role="img"
                aria-label="Where this week's shipments are">
             ${seaField()}${dotField()}
             ${/* One line per shipment in flight, nudged apart. Two containers on the same lane
@@ -1132,8 +1265,8 @@
             ${node(PORTS.destination, atDest, BRAND)}
             ${/* Customs and the DC sit within a few kilometres of the port: naming all three at
                   this scale printed them on top of each other. */ ''}
-            ${node(PORTS.customs, atCustoms, BRAND, { label: big, dy: 22 })}
-            ${node(PORTS.lastmile, delivered, LINK, { label: big, dy: 44 })}
+            ${node(PORTS.customs, atCustoms, BRAND, { label: big })}
+            ${node(PORTS.lastmile, delivered, LINK, { label: big })}
             ${labelRoom(clusterMarks(marks.filter(m => m.t > 0 && m.t < 1), k), k).map(c => vesselMark(c, k)).join('')}
           </svg>
 
@@ -2706,6 +2839,7 @@
     root.querySelectorAll('[data-tabgo]').forEach(b => b.onclick = () => { _tab = b.getAttribute('data-tabgo'); paint(); });
     root.querySelectorAll('[data-filt]').forEach(b => b.onclick = () => { _mapFilter = b.getAttribute('data-filt'); paint(); });
     root.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { _mapScope = b.getAttribute('data-scope'); paint(); });
+    root.querySelectorAll('[data-rail]').forEach(b => b.onclick = () => { _rail = b.getAttribute('data-rail'); paint(); });
     const rfq = root.querySelector('[data-rfq]');
     if (rfq) rfq.onclick = async () => {
       const msg = el('d2d-rfqmsg');
@@ -2807,5 +2941,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v24 loaded');
+  console.log('[d2d-hub] v26 loaded');
 })();
