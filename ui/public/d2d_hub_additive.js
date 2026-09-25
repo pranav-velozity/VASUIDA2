@@ -7,7 +7,9 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;(function () {
+;const D2D_BUILD = '42';    // bump with the ?v= in index.html — they must match
+
+(function () {
   'use strict';
   if (window.__D2D_HUB__) return;
   window.__D2D_HUB__ = true;
@@ -3057,5 +3059,9 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v31 loaded');
+  // Announce the build, and stamp it where it can be checked without the console:
+  //   window.__d2dBuild   ·   document.getElementById('page-d2d').dataset.build
+  window.__d2dBuild = D2D_BUILD;
+  try { const pg = document.getElementById('page-d2d'); if (pg) pg.dataset.build = D2D_BUILD; } catch (_) {}
+  console.log('[d2d-hub] build ' + D2D_BUILD + ' loaded');
 })();
