@@ -761,9 +761,10 @@
   // equirectangular grid this replaces could not be made to look right, because the problem
   // was the projection, not the styling.
   const MAP_PAL = {
-    origin_port: '#3B82F6',   // ports, as on the Live Map page
+    origin_port: '#F4BC1C',   // the mark: bright against the dot field
+    port_ink:    '#8A6D00',   // the label: the bright value on white is 1.7:1, unreadable
     transit:     '#990033',
-    clearing:    '#3B82F6',
+    clearing:    '#2F6FD0',
     customs:     '#DC2626',
     last_mile:   '#1C1C1E',
     air:         '#4A9B8E',
@@ -914,8 +915,14 @@
         const n = source.filter(x => (originKey(x.service || x.origin) || 'ningbo') === k2).length;
         return { kind: 'port', side: 'l', x: q.x, y: q.y, ly: q.y, label: place.label, n };
       }),
-      ...moving.map(sh => {
-        const q = laneFor(sh).at(markT(sh));
+      ...moving.map((sh, i2) => {
+        // Anything sharing a position with an earlier vessel is nudged a little further along
+        // its own lane, so every ship and plane is actually visible.
+        const t = markT(sh);
+        const same = moving.filter((o2, j) => j < i2 && Math.abs(markT(o2) - t) < 0.02
+                     && (originKey(o2.service || o2.origin) || 'ningbo') === (originKey(sh.service || sh.origin) || 'ningbo')
+                     && (o2.mode === 'air') === (sh.mode === 'air')).length;
+        const q = laneFor(sh).at(Math.min(0.97, t + same * 0.045));
         return { kind: 'vessel', side: 'r', sh, x: q.x, y: q.y, ly: q.y + 10 };
       }),
       ...destList.map(dk => {
@@ -929,7 +936,7 @@
                 stroke-width="1.5" class="d2d-sonar"/>
         <circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="5" fill="${MAP_PAL.origin_port}"
                 stroke="#fff" stroke-width="1.5"/>
-        ${pinLabel(pt.x, pt.y, pt.label, MAP_PAL.origin_port, true,
+        ${pinLabel(pt.x, pt.y, pt.label, MAP_PAL.port_ink, true,
                    pt.n + (pt.n === 1 ? ' shipment' : ' shipments'), pt.ly, pt.lx)}
       </g>`).join('');
 
@@ -1016,7 +1023,7 @@
     // Out of the shipping lanes entirely: left-hand labels to a gutter left of the westernmost
     // mark, right-hand ones to the right of the easternmost, roughly 12% of the frame clear.
     if (frame && pins.length) {
-      const pad = Math.max(60, frame.w * 0.12);
+      const pad = Math.max(40, frame.w * 0.078);        // 35% closer than before
       const minX = Math.min(...pins.map(p2 => p2.x));
       const maxX = Math.max(...pins.map(p2 => p2.x));
       for (const p2 of pins) {
@@ -1047,8 +1054,8 @@
     const moved = Math.abs(y2 - y) > 2 || Math.abs(ax - x) > 2;
     return `
       ${moved ? `<path d="M${x.toFixed(1)} ${y.toFixed(1)} L${(left ? ax - 6 : ax + 6).toFixed(1)} ${y2.toFixed(1)}"
-            stroke="${colour}" stroke-width=".9" opacity=".4" fill="none" stroke-linecap="round"/>
-        <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="1.6" fill="${colour}" opacity=".55"/>` : ''}
+            stroke="${colour}" stroke-width=".7" opacity=".22" fill="none" stroke-linecap="round"/>
+        <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="1.4" fill="${colour}" opacity=".35"/>` : ''}
       <rect x="${(left ? tx - w : tx - 4).toFixed(1)}" y="${(y2 - (sub ? 14 : 9)).toFixed(1)}"
             width="${(w + 8).toFixed(1)}" height="${sub ? 27 : 17}" rx="4" fill="#ffffff" opacity=".92"/>
       <text x="${tx.toFixed(1)}" y="${(y2 + (sub ? -2 : 4)).toFixed(1)}" text-anchor="${left ? 'end' : 'start'}"
@@ -3042,5 +3049,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v30 loaded');
+  console.log('[d2d-hub] v31 loaded');
 })();
