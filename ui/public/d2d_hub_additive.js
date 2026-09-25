@@ -164,7 +164,7 @@
         font-family:inherit;font-weight:600;font-size:11px;cursor:pointer;min-height:32px;
         transition:background .18s ease,color .18s ease,border-color .18s ease;}
       .d2d-seg:hover{border-color:rgba(0,0,0,.3);}
-      .d2d-seg.on{background:${DARK};border-color:${DARK};color:#fff;}
+      .d2d-seg.on{background:${BRAND};border-color:${BRAND};color:#fff;}
       .d2d-crumb{border:0;background:none;font:inherit;font-size:11.5px;color:${BLUE};cursor:pointer;padding:0;}
       .d2d-crumb:hover{text-decoration:underline;}
       /* Controls, not content: smaller and quieter than the legend, which is what a reader
@@ -1107,6 +1107,7 @@
   // Sea is a heavier dashed line in water blue; air a fine dotted line in brand blue. Each
   // shipment's line is offset by the same amount as its marker, so the two agree.
   const SEA_LINE = '#6F93BC';
+  const SEA_INK = '#3D6488';          // the vessel itself, darker than its lane
   function lanePaths(marks, k) {
     // One line per route and mode. Two containers on the same sailing take the same route, so
     // drawing each its own arc was both messy and untrue.
@@ -1129,18 +1130,21 @@
 
   // Vessels close together become ONE marker with a count. Three names fanned around a point
   // is unreadable at any zoom, and the honest answer is that they are in the same place.
-  function clusterMarks(marks, k) {
+  function clusterMarks(marks, k, tight) {
     const out = [];
-    const near = 30 * k;
+    const near = (tight ? 14 : 30) * k;
     for (const m of marks) {
       const hit = out.find(c => Math.abs(c.pos.x - m.pos.x) < near && Math.abs(c.pos.y - m.pos.y) < near && c.air === m.air);
       if (hit) { hit.items.push(m); continue; }
       out.push({ pos: { x: m.pos.x, y: m.pos.y }, air: m.air, colour: m.colour, items: [m] });
     }
-    // The worst status in a cluster is the one worth seeing.
+    // The worst status in a cluster is the one worth seeing — that decides the RING. The icon
+    // keeps its mode colour, so air and sea stay distinguishable when everything is on plan.
     for (const c of out) {
-      if (c.items.some(x => x.colour === BRAND)) c.colour = BRAND;
-      else if (c.items.some(x => x.colour === YELL)) c.colour = YELL;
+      c.ring = c.items.some(x => x.colour === BRAND) ? BRAND
+             : c.items.some(x => x.colour === YELL) ? YELL
+             : c.items.some(x => x.colour === LIGHT) ? LIGHT : LIME;
+      c.colour = c.air ? BLUE : SEA_INK;
     }
     return out;
   }
@@ -1156,11 +1160,11 @@
       <g class="d2d-vessel" data-cluster="${esc(ids)}" ${many ? '' : `data-open="${esc(m.sh.id)}"`}
          style="cursor:pointer;" role="button" aria-label="${esc(label)}">
         <circle cx="${c.pos.x.toFixed(1)}" cy="${c.pos.y.toFixed(1)}" r="${(20 * k).toFixed(1)}" fill="transparent"/>
-        <circle cx="${c.pos.x.toFixed(1)}" cy="${c.pos.y.toFixed(1)}" r="${(11 * k).toFixed(1)}" fill="${c.colour}" opacity=".18" class="d2d-ping"/>
+        <circle cx="${c.pos.x.toFixed(1)}" cy="${c.pos.y.toFixed(1)}" r="${(11 * k).toFixed(1)}"
+                fill="${c.ring || c.colour}" opacity=".18" class="d2d-ping"/>
         <circle cx="${c.pos.x.toFixed(1)}" cy="${c.pos.y.toFixed(1)}" r="${(9 * k).toFixed(1)}"
-                fill="${c.air ? 'rgba(44,111,187,.10)' : '#ffffff'}" stroke="${c.air ? BLUE : c.colour}"
-                stroke-width="${((c.air ? 1.8 : 1.3) * k).toFixed(2)}"
-                stroke-dasharray="${c.air ? (2.5 * k).toFixed(1) + ' ' + (2 * k).toFixed(1) : ''}" opacity=".97"/>
+                fill="#ffffff" stroke="${c.ring || c.colour}" stroke-width="${(2.1 * k).toFixed(2)}"
+                stroke-dasharray="${c.air ? (2.6 * k).toFixed(1) + ' ' + (2 * k).toFixed(1) : ''}" opacity=".98"/>
         <g transform="translate(${c.pos.x.toFixed(1)},${c.pos.y.toFixed(1)}) scale(${(k * .78).toFixed(3)})">
           <path d="${c.air ? ICON_PLANE : ICON_SHIP}" fill="${c.colour}" fill-opacity=".92"
                 stroke="${c.colour}" stroke-width=".8" stroke-linejoin="round"/>
@@ -1181,7 +1185,7 @@
   // A label is drawn only where there is room for it. Anything closer than a label's width to
   // its neighbour is left to the count badge and the list.
   function labelRoom(clusters, k) {
-    const gap = 150 * k;
+    const gap = 120 * k;
     return clusters.map((c, i) => ({
       ...c,
       showLabel: !clusters.some((o2, j) => j !== i
@@ -1216,8 +1220,9 @@
               font-size="${(9.5 * k).toFixed(1)}" font-weight="700" fill="#ffffff"
               font-family="ui-monospace,monospace">${count}</text>` : ''}
         ${showLabel ? `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${at[2]}"
-              font-size="${(10.5 * k).toFixed(1)}" font-weight="600" fill="${DARK}" font-family="inherit"
-              stroke="#ffffff" stroke-width="${(3.4 * k).toFixed(2)}" paint-order="stroke"
+              font-size="${(11.5 * k).toFixed(1)}" font-weight="600"
+              fill="${/Creek|customs/i.test(pt.label) ? DARK : BLUE}" font-family="inherit"
+              stroke="#ffffff" stroke-width="${(3.8 * k).toFixed(2)}" paint-order="stroke"
               stroke-linejoin="round">${esc(pt.label)}</text>` : ''}
       </g>`;
     };
@@ -1275,7 +1280,7 @@
                   this scale printed them on top of each other. */ ''}
             ${node(PORTS.customs, atCustoms, BRAND, { label: big })}
             ${node(PORTS.lastmile, delivered, LINK, { label: big })}
-            ${labelRoom(clusterMarks(marks.filter(m => m.t > 0 && m.t < 1), k), k).map(c => vesselMark(c, k)).join('')}
+            ${labelRoom(clusterMarks(marks.filter(m => m.t > 0 && m.t < 1), k, inPanel || big), k).map(c => vesselMark(c, k)).join('')}
           </svg>
 
           <div style="position:absolute;left:14px;bottom:12px;background:rgba(255,255,255,.92);border:.5px solid rgba(0,0,0,.08);
@@ -2615,7 +2620,7 @@
                   font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="${(3.2 * k).toFixed(2)}"
                   paint-order="stroke" stroke-linejoin="round">${n}</text>` : ''}
           </g>`).join('')}
-        ${labelRoom(clusterMarks(marks.filter(m => m.t > 0 && m.t < 1), k), k).map(c => vesselMark(c, k)).join('')}
+        ${labelRoom(clusterMarks(marks.filter(m => m.t > 0 && m.t < 1), k, true), k).map(c => vesselMark(c, k)).join('')}
       </svg>
 
       <div style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;
@@ -2949,5 +2954,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v27 loaded');
+  console.log('[d2d-hub] v28 loaded');
 })();
