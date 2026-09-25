@@ -1768,8 +1768,14 @@
   }
 
   function paintList(d) {
-    const rows = (d.shipments || []).slice();
-    const other = (d.allShipments || []).filter(x => !rows.some(y => y.id === x.id) && x.status !== 'delivered');
+    // Earliest week first, then by container so the order is stable between loads. Both lists
+    // arrived in whatever order the server returned them.
+    const byWeek = (a, b) => String(a.week_start || '').localeCompare(String(b.week_start || ''))
+                          || String(a.reference || '~').localeCompare(String(b.reference || '~'));
+    const rows = (d.shipments || []).slice().sort(byWeek);
+    const other = (d.allShipments || [])
+      .filter(x => !rows.some(y => y.id === x.id) && x.status !== 'delivered')
+      .sort(byWeek);
     return `
       <div style="display:flex;align-items:baseline;justify-content:space-between;gap:9px;margin-bottom:10px;flex-wrap:wrap;">
         <span style="display:flex;align-items:baseline;gap:9px;">
