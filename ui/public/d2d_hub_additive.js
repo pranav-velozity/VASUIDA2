@@ -270,12 +270,14 @@
       /* The leg being travelled drifts forward — a slow, quiet signal that this row is live. */
       @keyframes d2d-travel{from{background-position:100% 0;}to{background-position:0% 0;}}
       .d2d-travel{animation:d2d-travel 3.4s linear infinite;}
+      @keyframes d2d-sonar{0%{transform:scale(.7);opacity:.7;}80%{transform:scale(2.4);opacity:0;}100%{opacity:0;}}
+      .d2d-sonar{transform-box:fill-box;transform-origin:center;animation:d2d-sonar 3.5s ease-out infinite;}
       @keyframes d2d-ping{0%{transform:scale(1);opacity:.35;}70%{transform:scale(2.2);opacity:0;}100%{opacity:0;}}
       .d2d-ping{animation:d2d-ping 2.8s ease-out infinite;transform-origin:center;transform-box:fill-box;}
       .d2d-halo{position:absolute;width:34px;height:34px;border-radius:50%;animation:d2d-halo 2.4s ease-out infinite;}
       .d2d-rise{animation:d2d-rise .42s cubic-bezier(.22,1,.36,1) both;}
       .d2d-lift{}
-      @media (prefers-reduced-motion:reduce){.d2d-pulse,.d2d-halo,.d2d-rise,.d2d-ping,.d2d-travel{animation:none;}.d2d-lift:hover{transform:none;}}
+      @media (prefers-reduced-motion:reduce){.d2d-pulse,.d2d-halo,.d2d-rise,.d2d-ping,.d2d-travel,.d2d-sonar{animation:none;}.d2d-lift:hover{transform:none;}}
     `;
     document.head.appendChild(st);
   }
@@ -586,6 +588,8 @@
       load();
     });
     wireActions(body);
+    // The map needs the panel to have a size before it can be projected.
+    setTimeout(() => { mountMaps(d).catch(e => console.warn('[d2d-hub] map mount', e)); }, 30);
   }
 
   // Each in-flight shipment on its own rail: origin to the DC, stage nodes, and the vessel at
@@ -746,6 +750,230 @@
           </${tag}>`;
         }).join('')}
       </div>`;
+  }
+
+  // ── The world, drawn the way the Live Map page draws it ──
+  // Lifted from map_live_additive: a canvas dot field rendered from real country shapes
+  // through a Mercator projection centred on the Asia–Australia corridor. The hand-rolled
+  // equirectangular grid this replaces could not be made to look right, because the problem
+  // was the projection, not the styling.
+  const MAP_PAL = {
+    origin_port: '#3B82F6',   // ports, as on the Live Map page
+    transit:     '#990033',
+    clearing:    '#3B82F6',
+    customs:     '#DC2626',
+    last_mile:   '#1C1C1E',
+    air:         '#4A9B8E',
+    land:        '#C2C2C2',
+    sea_bg:      '#FAFAFA',
+  };
+
+  let _libsReady = null;
+  function loadMapLibs() {
+    if (_libsReady) return _libsReady;
+    const one = (src) => new Promise((res, rej) => {
+      const el2 = document.createElement('script');
+      el2.src = src; el2.onload = res; el2.onerror = rej;
+      document.head.appendChild(el2);
+    });
+    _libsReady = (async () => {
+      if (!window.d3) await one('https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js');
+      if (!window.topojson) await one('https://cdn.jsdelivr.net/npm/topojson@3/dist/topojson.min.js');
+    })();
+    return _libsReady;
+  }
+
+  let _topo = null;
+  async function worldShapes() {
+    if (_topo) return _topo;
+    const raw = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then(r => r.json());
+    _topo = window.topojson.feature(raw, raw.objects.countries).features;
+    return _topo;
+  }
+
+  // Returns the projection so markers land where the coastline says they should.
+  async function drawWorld(canvas) {
+    await loadMapLibs();
+    const w = canvas.offsetWidth || 900, h = canvas.offsetHeight || 480;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = w * dpr; canvas.height = h * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.fillStyle = MAP_PAL.sea_bg; ctx.fillRect(0, 0, w, h);
+
+    const projection = window.d3.geoMercator()
+      .center([133, -8])                 // the action is between 110°E and 155°E
+      .scale(w * 0.30)
+      .translate([w * 0.45, h * 0.46]);
+
+    const features = await worldShapes();
+    const STEP = 6, R = 1.4;
+    ctx.fillStyle = MAP_PAL.land;
+    const off = document.createElement('canvas');
+    off.width = w; off.height = h;
+    const octx = off.getContext('2d');
+    for (const feature of features) {
+      octx.clearRect(0, 0, w, h);
+      octx.beginPath();
+      window.d3.geoPath(projection, octx)(feature);
+      octx.fillStyle = '#000'; octx.fill();
+      const img = octx.getImageData(0, 0, w, h).data;
+      for (let px = STEP / 2; px < w; px += STEP) {
+        for (let py = STEP / 2; py < h; py += STEP) {
+          const idx = (Math.floor(py) * w + Math.floor(px)) * 4;
+          if (img[idx + 3] > 128) { ctx.beginPath(); ctx.arc(px, py, R, 0, Math.PI * 2); ctx.fill(); }
+        }
+      }
+    }
+    return { w, h, project: (lon, lat) => projection([lon, lat]) };
+  }
+
+  // Painted after the panel has a size: the projection needs real pixels, and the country
+  // shapes have to arrive first.
+  async function mountMaps(d) {
+    const boxes = document.querySelectorAll('#page-d2d .d2d-mapbox, #d2d-fullmap .d2d-mapbox');
+    for (const box of boxes) {
+      const canvas = box.querySelector('.d2d-mapcanvas');
+      const svg = box.querySelector('.d2d-mapsvg');
+      const loading = box.querySelector('.d2d-maploading');
+      if (!canvas || !svg || box.dataset.drawn === '1') continue;
+      try {
+        const dims = await drawWorld(canvas);
+        box.dataset.drawn = '1';
+        if (loading) loading.style.display = 'none';
+        svg.setAttribute('viewBox', `0 0 ${dims.w} ${dims.h}`);
+        svg.innerHTML = mapLayers(d, dims);
+        wireActions(svg);
+      } catch (e) {
+        // Offline, or the CDN is blocked: say so rather than leaving a blank panel.
+        console.warn('[d2d-hub] world map unavailable', e);
+        if (loading) loading.textContent = 'Map unavailable offline';
+      }
+    }
+  }
+
+  // Everything above the coastline: lanes, ports, vessels.
+  function mapLayers(d, dims) {
+    const P = (lon, lat) => { const q = dims.project(lon, lat); return { x: q[0], y: q[1] }; };
+    const source = mapFiltered(mapSource(d));
+    const dest = P(PLACES.destination.lon, PLACES.destination.lat);
+    const cust = P(PLACES.customs.lon, PLACES.customs.lat);
+    const dc = P(PLACES.lastmile.lon, PLACES.lastmile.lat);
+
+    // One lane per origin and mode. Sea bows east down the Pacific; air cuts inside it.
+    const lanes = new Map();
+    for (const sh of source) {
+      const k2 = originKey(sh.service || sh.origin) || 'ningbo';
+      const key = (sh.mode === 'air' ? 'a' : 's') + k2;
+      if (!lanes.has(key)) lanes.set(key, { air: sh.mode === 'air', place: ORIGIN_PORTS[k2] });
+    }
+
+    const arc = (A, B, bow, away) => {
+      const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
+      const dx = B.x - A.x, dy = B.y - A.y;
+      const cx = mx + (away ? -dy : dy) * bow, cy = my - (away ? -dx : dx) * bow;
+      return { d: `M${A.x.toFixed(1)} ${A.y.toFixed(1)} Q${cx.toFixed(1)} ${cy.toFixed(1)} ${B.x.toFixed(1)} ${B.y.toFixed(1)}`,
+               at: (t) => { const u = 1 - t; return { x: u * u * A.x + 2 * u * t * cx + t * t * B.x,
+                                                     y: u * u * A.y + 2 * u * t * cy + t * t * B.y }; } };
+    };
+
+    const laneFor = (sh) => {
+      const k2 = originKey(sh.service || sh.origin) || 'ningbo';
+      const A = P(ORIGIN_PORTS[k2].lon, ORIGIN_PORTS[k2].lat);
+      return arc(A, dest, sh.mode === 'air' ? 0.10 : 0.26, sh.mode === 'air');
+    };
+
+    const lanePaths = [...lanes.values()].map(({ air, place }) => {
+      const A = P(place.lon, place.lat);
+      const a = arc(A, dest, air ? 0.10 : 0.26, air);
+      return air
+        ? `<path d="${a.d}" fill="none" stroke="${MAP_PAL.air}" stroke-width="1.6" stroke-linecap="round"
+                 stroke-dasharray="2 7" opacity=".9"/>`
+        : `<path d="${a.d}" fill="none" stroke="${MAP_PAL.transit}" stroke-width="1.8" stroke-linecap="round"
+                 opacity=".55"/>`;
+    }).join('');
+
+    // Ports, with their counts, labelled left so they never sit on the lane.
+    const usedPorts = [...new Set(source.map(x => originKey(x.service || x.origin) || 'ningbo'))];
+    const portPins = usedPorts.map(k2 => {
+      const place = ORIGIN_PORTS[k2], q = P(place.lon, place.lat);
+      const n = source.filter(x => (originKey(x.service || x.origin) || 'ningbo') === k2).length;
+      return `<g>
+        <circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="7" fill="none" stroke="${MAP_PAL.origin_port}"
+                stroke-width="1.5" class="d2d-sonar"/>
+        <circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="5" fill="${MAP_PAL.origin_port}"
+                stroke="#fff" stroke-width="1.5"/>
+        ${pinLabel(q.x, q.y, place.label, MAP_PAL.origin_port, true, n + (n === 1 ? ' shipment' : ' shipments'))}
+      </g>`;
+    }).join('');
+
+    const destPins = [
+      [dest, PLACES.destination.label, MAP_PAL.clearing, source.filter(x => { const t = markT(x); return t >= 0.82 && t < 0.9; }).length],
+      [cust, PLACES.customs.label, MAP_PAL.customs, source.filter(x => { const t = markT(x); return t >= 0.9 && t < 0.95; }).length],
+      [dc, PLACES.lastmile.label, MAP_PAL.last_mile, source.filter(x => markT(x) >= 1).length],
+    ].map(([q, label, colour, n]) => `<g>
+        ${n ? `<circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="7" fill="none" stroke="${colour}"
+               stroke-width="1.5" class="d2d-sonar"/>` : ''}
+        <circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="${n ? 5 : 3.5}" fill="${colour}"
+                stroke="#fff" stroke-width="1.5" opacity="${n ? 1 : .45}"/>
+        ${pinLabel(q.x, q.y, label, colour, false, n ? n + (n === 1 ? ' shipment' : ' shipments') : '')}
+      </g>`).join('');
+
+    // One vessel per shipment, on its own lane, at its elapsed position.
+    const vessels = source.map(sh => {
+      const t = markT(sh);
+      if (!(t > 0 && t < 1)) return '';
+      const q = laneFor(sh).at(t);
+      const look = outlook(sh);
+      const air = sh.mode === 'air';
+      const colour = air ? MAP_PAL.air : MAP_PAL.transit;
+      return `<g class="d2d-vessel" data-open="${esc(sh.id)}" style="cursor:pointer;" role="button"
+                 aria-label="${esc(sh.reference || 'shipment')}">
+        <circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="13" fill="transparent"/>
+        ${look.state === 'late' ? `<circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="10" fill="${BRAND}"
+              opacity=".18" class="d2d-sonar"/>` : ''}
+        <g transform="translate(${q.x.toFixed(1)},${q.y.toFixed(1)}) scale(.62)">
+          ${air
+            ? `<path d="${ICON_PLANE}" fill="${colour}"/>`
+            : `<path d="M-16,5 L-16,2 L-12,2 L12,2 L17,-1 L18,5 Z" fill="${colour}"/>
+               <path d="M-12,2 L-12,-4 L-2,-4 L-2,2 Z" fill="${colour}" opacity=".7"/>
+               <path d="M2,2 L2,-7 L8,-7 L8,2 Z" fill="${colour}" opacity=".85"/>`}
+        </g>
+        ${pinLabel(q.x + 12, q.y + 12, sh.reference || 'not advised', DARK, false, look.label)}
+      </g>`;
+    }).join('');
+
+    return lanePaths + portPins + destPins + vessels;
+  }
+
+  // Where a shipment sits along its lane, 0 to 1.
+  function markT(sh) {
+    const ev = evMap(sh);
+    let last = null;
+    for (const [k2] of STAGES) if (ev[k2] && ev[k2].actual_at) last = k2;
+    let base = last ? STAGE_T[last] : 0;
+    if (last === 'departed') {
+      const left = ev.departed && ev.departed.actual_at;
+      const total = daysBetween(left, sh.plan_arrived);
+      const gone = daysBetween(left, today());
+      if (total && total > 0 && gone != null) {
+        base = STAGE_T.departed + Math.max(0, Math.min(1, gone / total)) * (STAGE_T.arrived - STAGE_T.departed);
+      }
+    }
+    return base;
+  }
+
+  // A label that can be read over a dot field: white pill, then the text.
+  function pinLabel(x, y, text, colour, left, sub) {
+    const w = text.length * 5.8 + 10;
+    const tx = left ? x - 9 : x + 9;
+    return `
+      <rect x="${(left ? tx - w : tx - 3).toFixed(1)}" y="${(y - (sub ? 15 : 9)).toFixed(1)}"
+            width="${(w + 6).toFixed(1)}" height="${sub ? 26 : 17}" rx="3" fill="#ffffff" opacity=".88"/>
+      <text x="${tx.toFixed(1)}" y="${(y + (sub ? -3 : 4)).toFixed(1)}" text-anchor="${left ? 'end' : 'start'}"
+            font-size="11" font-weight="600" fill="${colour}" font-family="inherit">${esc(text)}</text>
+      ${sub ? `<text x="${tx.toFixed(1)}" y="${(y + 9).toFixed(1)}" text-anchor="${left ? 'end' : 'start'}"
+            font-size="9.5" fill="${MID}" font-family="ui-monospace,monospace">${esc(sub)}</text>` : ''}`;
   }
 
   // ── Live tracking ──
@@ -913,73 +1141,6 @@
     } catch (e) { return null; }
   }
 
-  // Land dots. Real coastlines when the world loaded, the coarse polygons otherwise.
-  function dotField() {
-    if (_dots) return _dots;
-    if (_world) {
-      _dots = `<g fill="#D2D7DF">${_world.circles.replace(/<circle /g, `<circle r="${_world.r}" `)}</g>`;
-      return _dots;
-    }
-    const inside = (pt, poly) => {
-      let hit = false;
-      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-        const [xi, yi] = poly[i], [xj, yj] = poly[j];
-        if ((yi > pt[1]) !== (yj > pt[1]) && pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi) hit = !hit;
-      }
-      return hit;
-    };
-    const out = [];
-    for (let y = 8; y < MAP.h; y += 9)
-      for (let x = 8; x < MAP.w; x += 9)
-        if (LAND.some(poly => inside([x, y], poly))) out.push(`<circle cx="${x}" cy="${y}" r="1.5"/>`);
-    _dots = `<g fill="#D2D7DF">${out.join('')}</g>`;
-    return _dots;
-  }
-
-  // Water, as a very light blue dot field on the same grid — everywhere the land is not. Kept
-  // faint so it reads as texture behind the routes rather than competing with them.
-  function seaField() {
-    if (_sea) return _sea;
-    const out = [];
-    if (_world) {
-      const { step, occupied } = _world;
-      // Spacing is chosen for the size of the frame, not fixed: at a fixed gap a wide frame
-      // produced twelve thousand circles, which is a lot of DOM for a background texture.
-      const area = (VIEW.w * 1.9) * (VIEW.h * 1.9);
-      const gap = Math.max(step * 2, Math.sqrt(area / 3600));
-      // Only across the visible frame: generating dots for the whole planet would be tens of
-      // thousands of circles, almost all of them off screen.
-      // A little beyond the frame, so the full-screen view (which widens it) is still covered.
-      const m2 = 0.45;
-      for (let y = VIEW.y0 - VIEW.h * m2; y < VIEW.y0 + VIEW.h * (1 + m2); y += gap) {
-        for (let x = VIEW.x0 - VIEW.w * m2; x < VIEW.x0 + VIEW.w * (1 + m2); x += gap) {
-          const key = Math.round(x / step) + ':' + Math.round(y / step);
-          let onLand = false;
-          for (let dx = -1; dx <= 1 && !onLand; dx++)
-            for (let dy = -1; dy <= 1 && !onLand; dy++)
-              if (occupied.has((Math.round(x / step) + dx) + ':' + (Math.round(y / step) + dy))) onLand = true;
-          if (!onLand) out.push(`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}"/>`);
-        }
-      }
-      _sea = `<g fill="#E3EDF7" opacity=".9"><g r="${(_world.r * .85).toFixed(2)}">${
-        out.map(c => c.replace('<circle ', `<circle r="${(_world.r * .85).toFixed(2)}" `)).join('')}</g></g>`;
-      return _sea;
-    }
-    const inside = (pt, poly) => {
-      let hit = false;
-      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-        const [xi, yi] = poly[i], [xj, yj] = poly[j];
-        if ((yi > pt[1]) !== (yj > pt[1]) && pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi) hit = !hit;
-      }
-      return hit;
-    };
-    for (let y = 8; y < MAP.h; y += 18)
-      for (let x = 8; x < MAP.w; x += 18)
-        if (!LAND.some(poly => inside([x, y], poly))) out.push(`<circle cx="${x}" cy="${y}" r="1.3"/>`);
-    _sea = `<g fill="#E3EDF7" opacity=".9">${out.join('')}</g>`;
-    return _sea;
-  }
-
   // The route bows through the sea rather than across land, anchored on the two ports.
   // Where a route starts: the shipment's own port when we know it, Ningbo otherwise.
   const portXY = (place) => {
@@ -1001,89 +1162,36 @@
     // Push the control point east so the arc runs down the Pacific side, as the sailing does.
     return { x: Math.max(A.x, B.x) + Math.abs(B.x - A.x) * bowOf(from) + 10, y: (A.y + B.y) / 2 };
   };
-  const atT = (t, fromPlace) => {
-    const A = fromPlace ? portXY(fromPlace) : PORTS.origin;
-    const u = 1 - t, B = PORTS.destination, C = curveC(A);
-    return { x: u * u * A.x + 2 * u * t * C.x + t * t * B.x,
-             y: u * u * A.y + 2 * u * t * C.y + t * t * B.y };
-  };
+  
   // Air bows the other way and less far: it is a different journey, and overlaying it on the
   // sea lane made two modes look like one.
   const airC = (from) => {
     const A = from || PORTS.origin, B = PORTS.destination;
     return { x: (A.x + B.x) / 2 - Math.abs(B.x - A.x) * 0.35, y: (A.y + B.y) / 2 };
   };
-  const atAirT = (t, fromPlace) => {
-    const A = fromPlace ? portXY(fromPlace) : PORTS.origin;
-    const u = 1 - t, B = PORTS.destination, C = airC(A);
-    return { x: u * u * A.x + 2 * u * t * C.x + t * t * B.x,
-             y: u * u * A.y + 2 * u * t * C.y + t * t * B.y };
-  };
+  
   const pathFrom = (A, C, B) =>
     `M${A.x.toFixed(1)} ${A.y.toFixed(1)} Q${C.x.toFixed(1)} ${C.y.toFixed(1)} ${B.x.toFixed(1)} ${B.y.toFixed(1)}`;
-  const airD = (fromPlace) => {
-    const A = fromPlace ? portXY(fromPlace) : PORTS.origin;
-    return pathFrom(A, airC(A), PORTS.destination);
-  };
+  
 
-  const routeD = (fromPlace) => {
-    const A = fromPlace ? portXY(fromPlace) : PORTS.origin;
-    return pathFrom(A, curveC(A), PORTS.destination);
-  };
+  
   // Which origin ports are actually in play, so a lane is drawn for each rather than one
   // pretending every factory ships from the same place.
-  function originsUsed(list) {
-    const keys = new Set();
-    for (const sh of list) { const k = originKey(sh.service || sh.origin); if (k) keys.add(k); }
-    if (!keys.size) return [null];
-    return [...keys].map(k => ORIGIN_PORTS[k]);
-  }
+  
 
+  // What each shipment is doing, for the rows and the counters. Position on the map is worked
+  // out separately, from the live projection.
   function shipmentPositions(list) {
-    // Everything at the same stage shares one position, so without this a whole sailing draws
-    // as a single vessel. Each is nudged along its route and offset across it.
-    const atStage = {};
     return list.map(sh => {
       const ev = evMap(sh);
-      let last = null, lastStage = null;
-      for (const [k, label] of STAGES) if (ev[k] && ev[k].actual_at) { last = k; lastStage = label; }
-      const air = sh.mode === 'air';
-      let base = last ? STAGE_T[last] : 0;
-
-      // Departed but not arrived: place it by how much of the voyage has actually elapsed.
-      // Pinning every departed vessel to a fixed 10% stacked a whole week on top of the port
-      // and told you nothing about how far along anything was.
-      if (last === 'departed') {
-        const left = ev.departed && ev.departed.actual_at;
-        const eta = sh.plan_arrived;
-        const total = daysBetween(left, eta);
-        const gone = daysBetween(left, today());
-        if (total && total > 0 && gone != null) {
-          const frac = Math.max(0, Math.min(1, gone / total));
-          base = STAGE_T.departed + frac * (STAGE_T.arrived - STAGE_T.departed);
-        }
-      }
-
-      // Shipments that have only just left share one position, and at map scale they collapse
-      // into a single marker with two names printed over each other. They are stepped apart
-      // across the lane, and the label offset is carried through so the text follows its own
-      // marker rather than the one beside it.
-      // One counter for everything near the same point, whatever the mode: an air and a sea
-      // marker in the same place were both given side zero and printed on top of each other.
-      const key = Math.round(base * 40);
-      const n = (atStage[key] = (atStage[key] || 0) + 1) - 1;
-      const t = (base === 0 || base >= 1) ? base : Math.min(0.97, base);
-      const across = 0;                    // crowding is handled by clustering, not by fanning
-
-      const from = ORIGIN_PORTS[originKey(sh.service || sh.origin)] || null;
-      const p = air ? atAirT(t, from) : atT(t, from);
+      let lastStage = null;
+      for (const [k2, label] of STAGES) if (ev[k2] && ev[k2].actual_at) lastStage = label;
       const slip = slipOf(sh);
       const od = overdueOf(sh);
       const colour = od || (slip != null && slip > 0) ? BRAND
                    : sh.status === 'delivered' ? LINK
-                   : last ? LIME : LIGHT;
-      return { sh, t, air, lane: n,
-               pos: { x: p.x, y: p.y + across * (VIEW.w / MAP.w) },
+                   : lastStage ? LIME : LIGHT;
+      return { sh, t: markT(sh), air: sh.mode === 'air',
                stage: lastStage || 'not yet collected', colour,
                note: od ? od.label + ' overdue' : (slip > 0 ? '+' + slip + ' days' : null) };
     });
@@ -1108,90 +1216,6 @@
   // shipment's line is offset by the same amount as its marker, so the two agree.
   const SEA_LINE = '#6F93BC';
   const SEA_INK = '#3D6488';          // the vessel itself, darker than its lane
-  function lanePaths(marks, k) {
-    // One line per route and mode. Two containers on the same sailing take the same route, so
-    // drawing each its own arc was both messy and untrue.
-    const lanes = new Map();
-    for (const m of marks) {
-      const from = ORIGIN_PORTS[originKey(m.sh.service || m.sh.origin)] || null;
-      const key = (m.air ? 'a' : 's') + (from ? from.label : '-');
-      if (!lanes.has(key)) lanes.set(key, { air: m.air, from });
-    }
-    return [...lanes.values()].map(({ air, from }) => {
-      const A = from ? portXY(from) : PORTS.origin;
-      const d2 = air ? airD(from) : routeD(from);
-      return air
-        ? `<path d="${d2}" fill="none" stroke="${BLUE}" stroke-width="${(1.5 * k).toFixed(2)}" stroke-linecap="round"
-                 stroke-dasharray="${(1.6 * k).toFixed(1)} ${(6 * k).toFixed(1)}" opacity=".8"/>`
-        : `<path d="${d2}" fill="none" stroke="${SEA_LINE}" stroke-width="${(2.2 * k).toFixed(2)}" stroke-linecap="round"
-                 stroke-dasharray="${(9 * k).toFixed(1)} ${(6 * k).toFixed(1)}" opacity=".72"/>`;
-    }).join('');
-  }
-
-  // Vessels close together become ONE marker with a count. Three names fanned around a point
-  // is unreadable at any zoom, and the honest answer is that they are in the same place.
-  function clusterMarks(marks, k, tight) {
-    const out = [];
-    const near = (tight ? 14 : 30) * k;
-    for (const m of marks) {
-      const hit = out.find(c => Math.abs(c.pos.x - m.pos.x) < near && Math.abs(c.pos.y - m.pos.y) < near && c.air === m.air);
-      if (hit) { hit.items.push(m); continue; }
-      out.push({ pos: { x: m.pos.x, y: m.pos.y }, air: m.air, colour: m.colour, items: [m] });
-    }
-    // The worst status in a cluster is the one worth seeing — that decides the RING. The icon
-    // keeps its mode colour, so air and sea stay distinguishable when everything is on plan.
-    for (const c of out) {
-      c.ring = c.items.some(x => x.colour === BRAND) ? BRAND
-             : c.items.some(x => x.colour === YELL) ? YELL
-             : c.items.some(x => x.colour === LIGHT) ? LIGHT : LIME;
-      c.colour = c.air ? BLUE : SEA_INK;
-    }
-    return out;
-  }
-
-  // A single marker, whether it stands for one shipment or several. A count replaces the name
-  // when there is more than one, and the list opens on click.
-  function vesselMark(c, k) {
-    const many = c.items.length > 1;
-    const m = c.items[0];
-    const label = many ? c.items.length + ' shipments' : (m.sh.reference || 'unadvised');
-    const ids = c.items.map(x => x.sh.id).join(',');
-    return `
-      <g class="d2d-vessel" data-cluster="${esc(ids)}" ${many ? '' : `data-open="${esc(m.sh.id)}"`}
-         style="cursor:pointer;" role="button" aria-label="${esc(label)}">
-        <circle cx="${c.pos.x.toFixed(1)}" cy="${c.pos.y.toFixed(1)}" r="${(20 * k).toFixed(1)}" fill="transparent"/>
-        <circle cx="${c.pos.x.toFixed(1)}" cy="${c.pos.y.toFixed(1)}" r="${(11 * k).toFixed(1)}"
-                fill="${c.ring || c.colour}" opacity=".18" class="d2d-ping"/>
-        <circle cx="${c.pos.x.toFixed(1)}" cy="${c.pos.y.toFixed(1)}" r="${(9 * k).toFixed(1)}"
-                fill="#ffffff" stroke="${c.ring || c.colour}" stroke-width="${(2.1 * k).toFixed(2)}"
-                stroke-dasharray="${c.air ? (2.6 * k).toFixed(1) + ' ' + (2 * k).toFixed(1) : ''}" opacity=".98"/>
-        <g transform="translate(${c.pos.x.toFixed(1)},${c.pos.y.toFixed(1)}) scale(${(k * .78).toFixed(3)})">
-          <path d="${c.air ? ICON_PLANE : ICON_SHIP}" fill="${c.colour}" fill-opacity=".92"
-                stroke="${c.colour}" stroke-width=".8" stroke-linejoin="round"/>
-        </g>
-        ${many ? `
-          <circle cx="${(c.pos.x + 8 * k).toFixed(1)}" cy="${(c.pos.y - 8 * k).toFixed(1)}" r="${(6.5 * k).toFixed(1)}"
-                  fill="${DARK}"/>
-          <text x="${(c.pos.x + 8 * k).toFixed(1)}" y="${(c.pos.y - 5.6 * k).toFixed(1)}" text-anchor="middle"
-                font-size="${(8 * k).toFixed(1)}" font-weight="700" fill="#ffffff"
-                font-family="ui-monospace,monospace">${c.items.length}</text>` : ''}
-        ${c.showLabel ? `<text x="${(c.pos.x + 14 * k).toFixed(1)}" y="${(c.pos.y + 3.5 * k).toFixed(1)}"
-              font-size="${(10.5 * k).toFixed(1)}" font-weight="600" fill="${DARK}"
-              font-family="${many ? 'inherit' : 'ui-monospace,monospace'}" stroke="#ffffff"
-              stroke-width="${(3.2 * k).toFixed(2)}" paint-order="stroke" stroke-linejoin="round">${esc(label)}</text>` : ''}
-      </g>`;
-  }
-
-  // A label is drawn only where there is room for it. Anything closer than a label's width to
-  // its neighbour is left to the count badge and the list.
-  function labelRoom(clusters, k) {
-    const gap = 120 * k;
-    return clusters.map((c, i) => ({
-      ...c,
-      showLabel: !clusters.some((o2, j) => j !== i
-        && Math.abs(o2.pos.x - c.pos.x) < gap && Math.abs(o2.pos.y - c.pos.y) < 22 * k),
-    }));
-  }
 
   function paintMap(d, opts) {
     const big = !!(opts && opts.big);
@@ -1260,28 +1284,15 @@
           </div>
         </div>
 
-        <div style="position:relative;background:#FBFCFD;${inPanel ? 'flex:1;min-height:0;' : ''}">
-          <svg viewBox="${VIEW.x0} ${VIEW.y0} ${VIEW.w} ${VIEW.h}" width="100%" style="display:block;max-height:${big ? 760 : (inPanel ? 520 : 430)}px;" role="img"
-               aria-label="Where this week's shipments are">
-            ${seaField()}${dotField()}
-            ${/* One line per shipment in flight, nudged apart. Two containers on the same lane
-                  drew a single path with two names hanging off it. */ ''}
-            ${lanePaths(marks, k)}
-            ${/* The ports actually used, and the factories behind them. Globe ships from about
-                  twenty plants through several ports, so a single origin dot was a fiction. */ ''}
-            ${originsUsed(source).filter(Boolean).map(from => {
-              const q = portXY(from);
-              const n = source.filter(x => (ORIGIN_PORTS[originKey(x.service || x.origin)] || {}).label === from.label).length;
-              return node({ x: q.x, y: q.y, label: from.label }, n, LIME);
-            }).join('')}
-            ${/* The origin nodes are drawn per port above; a single fixed one duplicated them. */ ''}
-            ${node(PORTS.destination, atDest, BRAND)}
-            ${/* Customs and the DC sit within a few kilometres of the port: naming all three at
-                  this scale printed them on top of each other. */ ''}
-            ${node(PORTS.customs, atCustoms, BRAND, { label: big })}
-            ${node(PORTS.lastmile, delivered, LINK, { label: big })}
-            ${labelRoom(clusterMarks(marks.filter(m => m.t > 0 && m.t < 1), k, inPanel || big), k).map(c => vesselMark(c, k)).join('')}
-          </svg>
+        <div class="d2d-mapbox" style="position:relative;background:${MAP_PAL.sea_bg};
+             ${inPanel ? 'flex:1;min-height:420px;' : 'height:400px;'}">
+          ${/* The world is painted onto a canvas from real country shapes; routes and markers
+                sit on an SVG above it, positioned by the same projection. */ ''}
+          <canvas class="d2d-mapcanvas" style="position:absolute;inset:0;width:100%;height:100%;display:block;"></canvas>
+          <svg class="d2d-mapsvg" style="position:absolute;inset:0;width:100%;height:100%;display:block;"
+               role="img" aria-label="Where this week's shipments are"></svg>
+          <div class="d2d-maploading" style="position:absolute;inset:0;display:flex;align-items:center;
+               justify-content:center;font-size:11.5px;color:${MID};">Drawing the map&hellip;</div>
 
           <div style="position:absolute;left:14px;bottom:12px;background:rgba(255,255,255,.92);border:.5px solid rgba(0,0,0,.08);
                border-radius:9px;padding:7px 11px;max-width:330px;">
@@ -2545,138 +2556,81 @@
   // Truly full screen: the map fills the viewport with the controls floating over it. The
   // first version simply re-rendered the page card inside an overlay, which gave a small map
   // in a large empty page — the opposite of what full screen is for.
+  // Full screen uses the SAME renderer as the panel — one map, drawn bigger. Keeping a second
+  // implementation for full screen is how the two ended up looking different.
   function openFullMap() {
     if (el('d2d-fullmap')) return;
-    const source = mapFiltered(mapSource(_data));
-    const marks = shipmentPositions(source);
-    const moving = marks.filter(m => m.t > 0 && m.t < 1).length;
-    // "slice" scaled the frame up to cover the screen, which cropped hard into the lane — the
-    // opposite of what full screen is for. "meet" fits the frame, and the frame itself is
-    // widened so the whole route sits inside a recognisable region.
-    // Centre on the route rather than the frame, and pull well back: the lane belongs in the
-    // middle of a full screen, not off to one side of it.
-    // The frame is built from the LANE, not from the tile's frame. Deriving it from VIEW
-    // compounded two zoom-outs and ended up showing the world three times over. It is not
-    // clamped to the world either — clamping is what pushed China and Australia into the
-    // corner, since this lane sits at the eastern edge of an equirectangular map. The dot
-    // field repeats either side instead, so the map stays continuous.
-    const bounds = (_world && _world.view) || { x0: 0, y0: 0, w: MAP.w, h: MAP.h };
-    const worldW = bounds.w;
-    const pts = originsUsed(source).filter(Boolean).map(portXY).concat([PORTS.origin, PORTS.destination, atT(0.5)]);
-    const lx0 = Math.min(...pts.map(q => q.x)), lx1 = Math.max(...pts.map(q => q.x));
-    const ly0 = Math.min(...pts.map(q => q.y)), ly1 = Math.max(...pts.map(q => q.y));
-    const cx = (lx0 + lx1) / 2, cy = (ly0 + ly1) / 2;
-    // The lane runs far further north to south than east to west, and a wide screen then
-    // forces a wide frame. Padding is kept tight so the route fills the HEIGHT; the extra
-    // width becomes context either side rather than the route shrinking to a dot.
-    const pad = 1.75;
-    let fw = Math.max(lx1 - lx0, 1) * pad, fh = Math.max(ly1 - ly0, 1) * pad;
-    const screen = Math.max(1.2, (window.innerWidth || 1600) / Math.max(400, (window.innerHeight || 900) - 60));
-    if (fw / fh < screen) fw = fh * screen; else fh = fw / screen;
-    const FULLVIEW = { x0: cx - fw / 2, y0: cy - fh / 2, w: fw, h: fh };
-    const k = FULLVIEW.w / MAP.w;
+    const d = _data; if (!d) return;
+    const source = mapFiltered(mapSource(d));
+    const moving = source.filter(x => { const t = markT(x); return t > 0 && t < 1; }).length;
 
     const ov = document.createElement('div');
     ov.id = 'd2d-fullmap';
-    ov.style.cssText = 'position:fixed;inset:0;z-index:9600;background:#FBFCFD;overflow:hidden;';
+    ov.style.cssText = `position:fixed;inset:0;z-index:9600;background:${MAP_PAL.sea_bg};display:flex;flex-direction:column;`;
     ov.innerHTML = `
-      <svg id="d2d-fullsvg" viewBox="${FULLVIEW.x0.toFixed(1)} ${FULLVIEW.y0.toFixed(1)} ${FULLVIEW.w.toFixed(1)} ${FULLVIEW.h.toFixed(1)}"
-           preserveAspectRatio="xMidYMid meet"
-           style="position:absolute;inset:0;width:100%;height:100%;display:block;" role="img"
-           aria-label="Live tracking, full screen">
-        ${/* The same field, repeated either side, so a centred lane is not framed by nothing. */ ''}
-        <g>${seaField()}${dotField()}</g>
-        <g transform="translate(${-worldW},0)">${seaField()}${dotField()}</g>
-        <g transform="translate(${worldW},0)">${seaField()}${dotField()}</g>
-        ${lanePaths(marks, k)}
-        ${originsUsed(source).filter(Boolean).map(from => {
-          const q = portXY(from);
-          const n = source.filter(x => (ORIGIN_PORTS[originKey(x.service || x.origin)] || {}).label === from.label).length;
-          return `<g>
-            <circle cx="${q.x}" cy="${q.y}" r="${(5 * k).toFixed(1)}" fill="${LIME}" stroke="${LIME}" stroke-width="${(1.7 * k).toFixed(2)}"/>
-            <text x="${q.x}" y="${(q.y - 13 * k).toFixed(1)}" text-anchor="middle" font-size="${(11 * k).toFixed(1)}"
-                  font-weight="600" fill="${DARK}" font-family="inherit" stroke="#ffffff"
-                  stroke-width="${(3.4 * k).toFixed(2)}" paint-order="stroke" stroke-linejoin="round">${esc(from.label)}</text>
-            ${n ? `<text x="${q.x}" y="${(q.y + 19 * k).toFixed(1)}" text-anchor="middle" font-size="${(10.5 * k).toFixed(1)}"
-                  font-weight="700" fill="${LINK}" font-family="ui-monospace,monospace" stroke="#ffffff"
-                  stroke-width="${(3.2 * k).toFixed(2)}" paint-order="stroke" stroke-linejoin="round">${n}</text>` : ''}
-          </g>`;
-        }).join('')}
-        ${[[PORTS.destination, marks.filter(m => m.t >= 0.82 && m.t < 0.9).length, BRAND, 0],
-           [PORTS.customs, marks.filter(m => m.t >= 0.9 && m.t < 0.95).length, BRAND, 26],
-           [PORTS.lastmile, marks.filter(m => m.t === 1).length, LINK, 52]].map(([pt, n, c, off]) => `
-          <g>
-            ${n ? `<circle cx="${pt.x}" cy="${pt.y}" r="${(10 * k).toFixed(1)}" fill="${c}" opacity=".22" class="d2d-ping"/>` : ''}
-            <circle cx="${pt.x}" cy="${pt.y}" r="${(5 * k).toFixed(1)}" fill="${n ? c : '#fff'}"
-                    stroke="${n ? c : '#AEB4BD'}" stroke-width="${(1.7 * k).toFixed(2)}"/>
-            ${/* Customs and the DC sit a few kilometres from the port, so their labels are
-                  stepped down the page rather than stacked on the same point. */ ''}
-            <text x="${pt.x}" y="${(pt.y - 13 * k + off * k).toFixed(1)}" text-anchor="middle"
-                  font-size="${(11 * k).toFixed(1)}" font-weight="600" fill="${DARK}"
-                  font-family="inherit" stroke="#ffffff" stroke-width="${(3.4 * k).toFixed(2)}"
-                  paint-order="stroke" stroke-linejoin="round">${esc(pt.label)}</text>
-            ${n ? `<text x="${pt.x}" y="${(pt.y + 19 * k + off * k).toFixed(1)}" text-anchor="middle"
-                  font-size="${(10.5 * k).toFixed(1)}" font-weight="700" fill="${c}"
-                  font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="${(3.2 * k).toFixed(2)}"
-                  paint-order="stroke" stroke-linejoin="round">${n}</text>` : ''}
-          </g>`).join('')}
-        ${labelRoom(clusterMarks(marks.filter(m => m.t > 0 && m.t < 1), k, true), k).map(c => vesselMark(c, k)).join('')}
-      </svg>
-
-      <div style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;
-           gap:16px;padding:14px 20px;background:linear-gradient(180deg,rgba(251,252,253,.96),rgba(251,252,253,0));">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
+           padding:12px 20px;background:#fff;border-bottom:.5px solid rgba(0,0,0,.08);">
         <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-          <span style="font-size:15px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Live tracking</span>
-          <span style="font-size:11.5px;color:${MID};">${moving} in transit &middot; ${source.length} shown</span>
+          <span style="font-size:14px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Live tracking</span>
+          <span style="font-size:11.5px;color:${MID};">${moving} moving &middot; ${source.length} shown</span>
           <span style="display:flex;gap:6px;">
-            ${[['live', 'All in flight'], ['week', 'This week']].map(([k, l]) =>
-              `<button class="d2d-filt ${_mapScope === k ? 'on' : ''}" data-scope="${k}">${l}</button>`).join('')}
+            ${[['live', 'All in flight'], ['week', 'This week']].map(([k2, l]) =>
+              `<button class="d2d-filt ${_mapScope === k2 ? 'on' : ''}" data-scope="${k2}">${l}</button>`).join('')}
           </span>
           <span style="display:flex;gap:6px;">
-            ${[['all', 'All'], ['sea', 'Sea'], ['air', 'Air'], ['late', 'Late only']].map(([k, l]) =>
-              `<button class="d2d-filt ${_mapFilter === k ? 'on' : ''}" data-filt="${k}">${l}</button>`).join('')}
+            ${[['all', 'All'], ['sea', 'Sea'], ['air', 'Air'], ['late', 'Late only']].map(([k2, l]) =>
+              `<button class="d2d-filt ${_mapFilter === k2 ? 'on' : ''}" data-filt="${k2}">${l}</button>`).join('')}
           </span>
         </div>
-        <div style="display:flex;align-items:center;gap:14px;">
-          ${[['Sea', SEA_LINE], ['Air', BLUE], ['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]].map(([l, c]) =>
-            `<span style="font-size:12.5px;color:${DARK};"><span style="display:inline-block;width:9.5px;height:9.5px;
-               border-radius:50%;background:${c};margin-right:6px;"></span>${l}</span>`).join('')}
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+          ${[['Origin port', MAP_PAL.origin_port], ['In transit', MAP_PAL.transit], ['Air', MAP_PAL.air],
+             ['Customs', MAP_PAL.customs], ['Last mile', MAP_PAL.last_mile]].map(([l, c]) =>
+            `<span style="font-size:11px;color:${MID};"><span style="display:inline-block;width:9px;height:9px;
+               border-radius:50%;background:${c};margin-right:5px;"></span>${l}</span>`).join('')}
           <button class="d2d-btn" id="d2d-fullclose" aria-label="Close full screen">Close</button>
         </div>
       </div>
 
-      ${/* With everything bunched near one port, the map cannot carry the names. The list can,
-             and it stays readable however crowded the map gets. */ ''}
-      <div style="position:absolute;right:20px;top:64px;width:260px;background:rgba(255,255,255,.96);
-           border:.5px solid rgba(0,0,0,.08);border-radius:12px;padding:10px 12px;
-           box-shadow:0 12px 30px rgba(16,18,27,.10);max-height:calc(100vh - 140px);overflow-y:auto;">
-        <div style="font-size:11px;font-weight:600;color:${DARK};margin-bottom:6px;">In flight</div>
-        ${marks.filter(m => m.t > 0 && m.t < 1).length
-          ? marks.filter(m => m.t > 0 && m.t < 1).map(m => `
-            <button type="button" data-open="${esc(m.sh.id)}" style="display:flex;align-items:center;gap:8px;width:100%;
-                    text-align:left;background:none;border:0;padding:7px 2px;cursor:pointer;
+      <div class="d2d-mapbox" style="position:relative;flex:1;min-height:0;background:${MAP_PAL.sea_bg};">
+        <canvas class="d2d-mapcanvas" style="position:absolute;inset:0;width:100%;height:100%;display:block;"></canvas>
+        <svg class="d2d-mapsvg" style="position:absolute;inset:0;width:100%;height:100%;display:block;"
+             role="img" aria-label="Live tracking, full screen"></svg>
+        <div class="d2d-maploading" style="position:absolute;inset:0;display:flex;align-items:center;
+             justify-content:center;font-size:12px;color:${MID};">Drawing the map&hellip;</div>
+
+        <div style="position:absolute;right:20px;top:20px;width:250px;background:rgba(255,255,255,.96);
+             border:.5px solid rgba(0,0,0,.08);border-radius:12px;padding:10px 12px;
+             box-shadow:0 12px 30px rgba(16,18,27,.10);max-height:calc(100vh - 140px);overflow-y:auto;">
+          <div style="font-size:11px;font-weight:600;color:${DARK};margin-bottom:6px;">In flight</div>
+          ${source.filter(x => { const t = markT(x); return t > 0 && t < 1; }).map(sh => {
+            const look = outlook(sh);
+            return `<button type="button" data-open="${esc(sh.id)}" style="display:flex;align-items:center;gap:8px;
+                    width:100%;text-align:left;background:none;border:0;padding:7px 2px;cursor:pointer;
                     border-top:.5px solid rgba(0,0,0,.05);">
-              <span style="width:7px;height:7px;border-radius:50%;background:${m.colour};flex-shrink:0;"></span>
+              <span style="width:7px;height:7px;border-radius:50%;flex-shrink:0;
+                    background:${sh.mode === 'air' ? MAP_PAL.air : MAP_PAL.transit};"></span>
               <span style="flex:1;min-width:0;">
                 <span class="d2d-num" style="display:block;font-size:11.5px;color:${DARK};overflow:hidden;
-                      text-overflow:ellipsis;white-space:nowrap;">${esc(m.sh.reference || 'not advised')}</span>
-                <span style="display:block;font-size:10px;color:${MID};">${esc(m.air ? 'air' : 'sea')} &middot; ${esc(m.stage)}</span>
+                      text-overflow:ellipsis;white-space:nowrap;">${esc(sh.reference || 'not advised')}</span>
+                <span style="display:block;font-size:10px;color:${MID};">${esc(sh.mode === 'air' ? 'air' : 'sea')} &middot; ${esc(sh.service || sh.origin || '')}</span>
               </span>
-            </button>`).join('')
-          : `<div style="font-size:11px;color:${MID};">Nothing in transit.</div>`}
-      </div>
+              <span style="font-size:10px;color:${look.ink};flex-shrink:0;">${esc(look.label)}</span>
+            </button>`;
+          }).join('') || `<div style="font-size:11px;color:${MID};">Nothing in transit.</div>`}
+        </div>
 
-      <div style="position:absolute;left:20px;bottom:18px;background:rgba(255,255,255,.92);
-           border:.5px solid rgba(0,0,0,.08);border-radius:10px;padding:8px 12px;max-width:360px;">
-        <span style="font-size:11px;color:${MID};line-height:1.45;display:block;">
-          Positions follow the last recorded milestone. Click a vessel for what is aboard.
-          Exact positions need carrier tracking &mdash; <b style="color:${DARK};">not yet connected</b>.</span>
+        <div style="position:absolute;left:20px;bottom:18px;background:rgba(255,255,255,.92);
+             border:.5px solid rgba(0,0,0,.08);border-radius:10px;padding:8px 12px;max-width:380px;">
+          <span style="font-size:11px;color:${MID};line-height:1.45;display:block;">
+            Positions follow the last recorded milestone. Click a vessel for what is aboard.
+            Exact positions need carrier tracking &mdash; <b style="color:${DARK};">not yet connected</b>.</span>
+        </div>
       </div>`;
     document.body.appendChild(ov);
     document.body.style.overflow = 'hidden';
+
     const shut = () => { ov.remove(); document.body.style.overflow = ''; };
     el('d2d-fullclose').onclick = shut;
-    // Filters inside full screen re-render it in place rather than dropping back to the page.
     ov.querySelectorAll('[data-filt]').forEach(b => b.onclick = () => { _mapFilter = b.getAttribute('data-filt'); shut(); openFullMap(); });
     ov.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { _mapScope = b.getAttribute('data-scope'); shut(); openFullMap(); });
     ov.querySelectorAll('[data-open]').forEach(b => b.addEventListener('click', () => {
@@ -2684,21 +2638,10 @@
       if (_tab !== 'shipments') _tab = 'shipments';
       go('container', b.getAttribute('data-open'));
     }));
-    // A crowded point is one marker: clicking it has to list what is there. Without this the
-    // marker was simply dead in full screen.
-    ov.querySelectorAll('[data-cluster]').forEach(b => {
-      const ids = (b.getAttribute('data-cluster') || '').split(',').filter(Boolean);
-      if (ids.length < 2) return;
-      b.addEventListener('click', (e) => { e.stopPropagation(); openCluster(ids, b); });
-    });
     const onKey = (e) => { if (e.key === 'Escape') { shut(); document.removeEventListener('keydown', onKey); } };
     document.addEventListener('keydown', onKey);
-  }
 
-  // findShip is used by the container screen and by the map.
-  function findShip(id) {
-    const all = (_data && _data.allShipments) || [];
-    return ((_data && _data.shipments) || []).find(x => x.id === id) || all.find(x => x.id === id);
+    setTimeout(() => { mountMaps(d).catch(e => console.warn('[d2d-hub] full map', e)); }, 30);
   }
 
   // What is in a cluster, as a short list rather than three labels fighting for the same spot.
@@ -2734,6 +2677,12 @@
       if (_tab !== 'shipments') _tab = 'shipments';
       go('container', b.getAttribute('data-open'));
     });
+  }
+
+  // Used by the container screen and by the map's cluster list.
+  function findShip(id) {
+    const all = (_data && _data.allShipments) || [];
+    return ((_data && _data.shipments) || []).find(x => x.id === id) || all.find(x => x.id === id);
   }
 
   // ── Recording a milestone ──
@@ -2954,5 +2903,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v28 loaded');
+  console.log('[d2d-hub] v29 loaded');
 })();
