@@ -134,6 +134,7 @@
       .d2d-head{margin-bottom:14px;};border-radius:10px;padding:0 14px;align-items:center;gap:10px;overflow:hidden;display:flex;margin-bottom:12px;}
       .d2d-tabs{display:flex;align-items:center;}
       .d2d-tabs .d2d-tab + .d2d-tab{margin-left:20px;}
+      .d2d-cells > span:first-child{border-left:0 !important;}
       .d2d-crumb{border:0;background:none;font:inherit;font-size:11.5px;color:${BLUE};cursor:pointer;padding:0;}
       .d2d-crumb:hover{text-decoration:underline;}
       /* Controls, not content: smaller and quieter than the legend, which is what a reader
@@ -994,7 +995,7 @@
   // is unreadable at any zoom, and the honest answer is that they are in the same place.
   function clusterMarks(marks, k) {
     const out = [];
-    const near = 26 * k;
+    const near = 30 * k;
     for (const m of marks) {
       const hit = out.find(c => Math.abs(c.pos.x - m.pos.x) < near && Math.abs(c.pos.y - m.pos.y) < near && c.air === m.air);
       if (hit) { hit.items.push(m); continue; }
@@ -1034,11 +1035,22 @@
           <text x="${(c.pos.x + 8 * k).toFixed(1)}" y="${(c.pos.y - 5.6 * k).toFixed(1)}" text-anchor="middle"
                 font-size="${(8 * k).toFixed(1)}" font-weight="700" fill="#ffffff"
                 font-family="ui-monospace,monospace">${c.items.length}</text>` : ''}
-        <text x="${(c.pos.x + 14 * k).toFixed(1)}" y="${(c.pos.y + 3.5 * k).toFixed(1)}"
+        ${c.showLabel ? `<text x="${(c.pos.x + 14 * k).toFixed(1)}" y="${(c.pos.y + 3.5 * k).toFixed(1)}"
               font-size="${(10.5 * k).toFixed(1)}" font-weight="600" fill="${DARK}"
               font-family="${many ? 'inherit' : 'ui-monospace,monospace'}" stroke="#ffffff"
-              stroke-width="${(3.2 * k).toFixed(2)}" paint-order="stroke" stroke-linejoin="round">${esc(label)}</text>
+              stroke-width="${(3.2 * k).toFixed(2)}" paint-order="stroke" stroke-linejoin="round">${esc(label)}</text>` : ''}
       </g>`;
+  }
+
+  // A label is drawn only where there is room for it. Anything closer than a label's width to
+  // its neighbour is left to the count badge and the list.
+  function labelRoom(clusters, k) {
+    const gap = 150 * k;
+    return clusters.map((c, i) => ({
+      ...c,
+      showLabel: !clusters.some((o2, j) => j !== i
+        && Math.abs(o2.pos.x - c.pos.x) < gap && Math.abs(o2.pos.y - c.pos.y) < 22 * k),
+    }));
   }
 
   function paintMap(d, opts) {
@@ -1122,7 +1134,7 @@
                   this scale printed them on top of each other. */ ''}
             ${node(PORTS.customs, atCustoms, BRAND, { label: big, dy: 22 })}
             ${node(PORTS.lastmile, delivered, LINK, { label: big, dy: 44 })}
-            ${clusterMarks(marks.filter(m => m.t > 0 && m.t < 1), k).map(c => vesselMark(c, k)).join('')}
+            ${labelRoom(clusterMarks(marks.filter(m => m.t > 0 && m.t < 1), k), k).map(c => vesselMark(c, k)).join('')}
           </svg>
 
           <div style="position:absolute;left:14px;bottom:12px;background:rgba(255,255,255,.92);border:.5px solid rgba(0,0,0,.08);
@@ -1313,6 +1325,14 @@
   // ── Shipments, in full ──
   // The long row the dashboard could not carry: every milestone, what is aboard, and the one
   // thing this shipment needs next. One row per shipment, newest week first.
+  // One cell shape for every figure on a row, so the columns line up down the page instead of
+  // each row sizing itself.
+  const cell = (label, value, ink) => `
+    <span style="padding:5px 11px;text-align:right;min-width:62px;border-left:.5px solid rgba(0,0,0,.07);">
+      <span style="display:block;font-size:8.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">${label}</span>
+      <span class="d2d-num" style="display:block;font-size:13px;font-weight:600;color:${ink || DARK};line-height:1.25;">${value}</span>
+    </span>`;
+
   function shipmentRow(sh) {
     const ev = evMap(sh);
     const od = overdueOf(sh), slip = slipOf(sh);
@@ -1325,14 +1345,22 @@
       : ['Booked', MID, '#F2F2F5'];
 
     const look = outlook(sh);
-    // Pallets, cartons, units and volume — the figures the booking was quoted on.
+    // Pallets, cartons, units and volume — the figures the booking was quoted on. Volume is a
+    // division of the booking total across its containers, so it arrives as 29.599999999999998
+    // unless it is rounded here.
     const cg = sh.cargo || {};
+    const tidy = (v, dp) => {
+      const n = Number(v);
+      if (!isFinite(n)) return null;
+      const r = Math.round(n * Math.pow(10, dp)) / Math.pow(10, dp);
+      return r.toLocaleString(undefined, { maximumFractionDigits: dp });
+    };
     const cargo = [
-      ['Pallets', cg.pallets], ['Cartons', cg.cartons],
-      ['Units', cg.units != null ? cg.units : (sh.units || null)],
-      ['CBM', cg.cbm != null ? cg.cbm : (sh.cbm || null)],
+      ['Pallets', cg.pallets, 0], ['Cartons', cg.cartons, 0],
+      ['Units', cg.units != null ? cg.units : (sh.units || null), 0],
+      ['CBM', cg.cbm != null ? cg.cbm : (sh.cbm || null), 1],
     ].filter(([, v]) => v != null && v !== '' && Number(v) > 0)
-     .map(([l, v]) => [l, Number(v) >= 1000 ? Number(v).toLocaleString() : String(v)]);
+     .map(([l, v, dp]) => [l, tidy(v, dp)]);
     // Capacity is roughly 67 CBM for a 40ft box and 33 for a 20ft. Only shown when the CBM
     // aboard is known, which means the order file has been loaded.
     const cap = /40/.test(sh.container_type || '') ? 67 : /20/.test(sh.container_type || '') ? 33 : null;
@@ -1407,53 +1435,34 @@
               <span style="display:block;font-size:11px;color:${MID};margin-top:2px;">${esc([sh.container_type, sh.carrier, sh.vessel].filter(Boolean).join(' · '))}</span>
             </span>
           </div>
-          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-            ${planned != null ? `<span style="font-size:11px;color:${MID};">
-                 Planned <b class="d2d-num" style="color:${DARK};">${planned} days</b>
-                 ${actualSpan != null ? ` &middot; actual <b class="d2d-num" style="color:${actualSpan > planned ? BRAND : LINK};">${actualSpan}</b>` : ''}</span>` : ''}
-
-            ${/* What is aboard. The order file gives orders and units once loaded; until then
-                  the booking's own cargo figures stand in, split across the containers booked
-                  rather than repeated whole on each one. */ ''}
-            ${sh.po_count ? `<span style="text-align:right;">
-                 <span style="display:block;font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Aboard</span>
-                 <span class="d2d-num" style="display:block;font-size:12px;color:${DARK};">${sh.po_count} orders &middot; ${Number(sh.units || 0).toLocaleString()} units</span>
-               </span>` : ''}
-            ${cargo.length ? `<span style="display:flex;align-items:stretch;gap:0;border:.5px solid rgba(0,0,0,.09);
-                  border-radius:9px;overflow:hidden;">
-                 ${cargo.map((c, i2) => `<span style="padding:5px 10px;text-align:center;min-width:52px;
-                       ${i2 ? 'border-left:.5px solid rgba(0,0,0,.07);' : ''}background:${i2 % 2 ? '#FBFBFC' : '#fff'};">
-                     <span style="display:block;font-size:8.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">${c[0]}</span>
-                     <span class="d2d-num" style="display:block;font-size:13px;font-weight:600;color:${DARK};line-height:1.2;">${c[1]}</span>
-                   </span>`).join('')}
-               </span>` : ''}
-            ${util ? `<span style="text-align:right;min-width:92px;">
-                 <span style="display:block;font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Utilisation</span>
-                 <span style="display:flex;align-items:center;gap:7px;justify-content:flex-end;">
-                   <span style="display:block;width:52px;height:7px;background:#F0F0F3;border-radius:4px;overflow:hidden;">
-                     <span style="display:block;height:7px;width:${Math.min(100, util.pct)}%;border-radius:4px;
-                           background:${util.pct < 70 ? YELL : LIME};"></span></span>
-                   <span class="d2d-num" style="font-size:12px;color:${DARK};">${util.pct}%</span></span>
-               </span>` : ''}
-
-            ${/* The forecast: arithmetic on recorded dates, not a dressed-up probability. */ ''}
-            <span style="display:flex;align-items:center;gap:9px;padding:5px 11px;border-radius:9px;
-                  background:${look.state === 'late' ? 'rgba(153,0,51,.08)' : look.state === 'watch' ? 'rgba(254,208,0,.14)' : 'rgba(155,171,21,.14)'};">
-              <span style="position:relative;display:inline-flex;">
-                <svg width="26" height="26" viewBox="0 0 36 36" aria-hidden="true">
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:7px;flex-shrink:0;">
+            <div style="display:flex;align-items:center;gap:9px;">
+              ${/* The forecast: arithmetic on recorded dates, not a dressed-up probability. */ ''}
+              <span style="display:flex;align-items:center;gap:9px;padding:5px 11px;border-radius:9px;
+                    background:${look.state === 'late' ? 'rgba(153,0,51,.08)' : look.state === 'watch' ? 'rgba(254,208,0,.14)' : 'rgba(155,171,21,.14)'};">
+                <svg width="24" height="24" viewBox="0 0 36 36" aria-hidden="true" style="flex-shrink:0;">
                   <circle cx="18" cy="18" r="15" fill="none" stroke="rgba(0,0,0,.08)" stroke-width="4"/>
                   <circle cx="18" cy="18" r="15" fill="none" stroke="${look.ink}" stroke-width="4" stroke-linecap="round"
                           stroke-dasharray="${(look.pct / 100 * 94.2).toFixed(1)} 94.2" transform="rotate(-90 18 18)"/>
                 </svg>
+                <span>
+                  <span style="display:block;font-size:11.5px;font-weight:600;color:${look.ink};line-height:1.3;">${esc(look.label)}</span>
+                  <span style="display:block;font-size:10px;color:${MID};">${esc(look.why)}</span>
+                </span>
               </span>
-              <span>
-                <span style="display:block;font-size:11.5px;font-weight:600;color:${look.ink};line-height:1.3;">${esc(look.label)}</span>
-                <span style="display:block;font-size:10px;color:${MID};">${esc(look.why)}</span>
-              </span>
-            </span>
+              <span style="font-size:10.5px;font-weight:700;border-radius:6px;padding:3px 9px;
+                    color:${pill[1]};background:${pill[2]};">${esc(pill[0])}</span>
+            </div>
 
-            <span style="font-size:10.5px;font-weight:700;border-radius:6px;padding:3px 9px;
-                  color:${pill[1]};background:${pill[2]};">${esc(pill[0])}</span>
+            ${/* Everything measurable about the load, on one line beneath the outlook. */ ''}
+            ${(cargo.length || util || planned != null || sh.po_count) ? `
+              <div class="d2d-cells" style="display:flex;align-items:stretch;border:.5px solid rgba(0,0,0,.08);
+                   border-radius:9px;overflow:hidden;background:#fff;">
+                ${planned != null ? cell('Planned', planned + 'd', null) : ''}
+                ${sh.po_count ? cell('Orders', String(sh.po_count), null) : ''}
+                ${cargo.map(([l, v]) => cell(l, v, null)).join('')}
+                ${util ? cell('Util', util.pct + '%', util.pct < 70 ? YINK : LINK) : ''}
+              </div>` : ''}
           </div>
         </div>
 
@@ -2465,7 +2474,7 @@
                   font-family="ui-monospace,monospace" stroke="#ffffff" stroke-width="${(3.2 * k).toFixed(2)}"
                   paint-order="stroke" stroke-linejoin="round">${n}</text>` : ''}
           </g>`).join('')}
-        ${clusterMarks(marks.filter(m => m.t > 0 && m.t < 1), k).map(c => vesselMark(c, k)).join('')}
+        ${labelRoom(clusterMarks(marks.filter(m => m.t > 0 && m.t < 1), k), k).map(c => vesselMark(c, k)).join('')}
       </svg>
 
       <div style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;
@@ -2488,6 +2497,27 @@
                border-radius:50%;background:${c};margin-right:6px;"></span>${l}</span>`).join('')}
           <button class="d2d-btn" id="d2d-fullclose" aria-label="Close full screen">Close</button>
         </div>
+      </div>
+
+      ${/* With everything bunched near one port, the map cannot carry the names. The list can,
+             and it stays readable however crowded the map gets. */ ''}
+      <div style="position:absolute;right:20px;top:64px;width:260px;background:rgba(255,255,255,.96);
+           border:.5px solid rgba(0,0,0,.08);border-radius:12px;padding:10px 12px;
+           box-shadow:0 12px 30px rgba(16,18,27,.10);max-height:calc(100vh - 140px);overflow-y:auto;">
+        <div style="font-size:11px;font-weight:600;color:${DARK};margin-bottom:6px;">In flight</div>
+        ${marks.filter(m => m.t > 0 && m.t < 1).length
+          ? marks.filter(m => m.t > 0 && m.t < 1).map(m => `
+            <button type="button" data-open="${esc(m.sh.id)}" style="display:flex;align-items:center;gap:8px;width:100%;
+                    text-align:left;background:none;border:0;padding:7px 2px;cursor:pointer;
+                    border-top:.5px solid rgba(0,0,0,.05);">
+              <span style="width:7px;height:7px;border-radius:50%;background:${m.colour};flex-shrink:0;"></span>
+              <span style="flex:1;min-width:0;">
+                <span class="d2d-num" style="display:block;font-size:11.5px;color:${DARK};overflow:hidden;
+                      text-overflow:ellipsis;white-space:nowrap;">${esc(m.sh.reference || 'not advised')}</span>
+                <span style="display:block;font-size:10px;color:${MID};">${esc(m.air ? 'air' : 'sea')} &middot; ${esc(m.stage)}</span>
+              </span>
+            </button>`).join('')
+          : `<div style="font-size:11px;color:${MID};">Nothing in transit.</div>`}
       </div>
 
       <div style="position:absolute;left:20px;bottom:18px;background:rgba(255,255,255,.92);
@@ -2777,5 +2807,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v23 loaded');
+  console.log('[d2d-hub] v24 loaded');
 })();
