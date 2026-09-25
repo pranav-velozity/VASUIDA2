@@ -337,9 +337,10 @@
   let _tab = 'shipments', _data = null, _internal = false, _mapFilter = 'all', _mapScope = 'live';
   // Which screen inside the Shipments tab: the dashboard, one week, or one container.
   let _view = 'dashboard', _openId = null;
-  // The rail shows one thing at a time. Updates by default — it is what changes during a day;
-  // the map is there when you want to see the shape of the week.
-  let _rail = 'updates';
+  // The main panel shows one of two things: the list of what is in flight, or the same fleet
+  // on a map. They answer the same question two ways, so they share the space and the toggle.
+  // The rail keeps its tiles and updates whichever is showing.
+  let _main = 'flight';
   const go = (view, id) => { _view = view; _openId = id || null; paint(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
 
   async function load() {
@@ -645,18 +646,31 @@
 
     return `
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start" style="margin-bottom:14px;">
-        <div class="lg:col-span-2 rounded-2xl border bg-white shadow-sm" style="min-width:0;overflow:hidden;">
-          <div style="display:flex;align-items:baseline;justify-content:space-between;padding:13px 16px 2px;">
-            <span style="font-size:12.5px;font-weight:600;color:${DARK};">In flight</span>
-            <span style="font-size:10.5px;color:${LIGHT};">soonest arrival first</span>
+        <div class="lg:col-span-2" style="min-width:0;display:flex;flex-direction:column;">
+          ${/* A minimum height so the page keeps its shape on a quiet week. Four rows and a
+                short rail used to leave a hole down the middle of the screen. */ ''}
+          <div class="rounded-2xl border bg-white shadow-sm" style="min-height:560px;display:flex;
+               flex-direction:column;overflow:hidden;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;
+                 padding:12px 16px;flex-wrap:wrap;">
+              <div style="display:flex;align-items:center;gap:8px;">
+                ${[['flight', 'In flight'], ['map', 'Live map']].map(([k2, l]) =>
+                  `<button class="d2d-seg ${_main === k2 ? 'on' : ''}" data-main="${k2}">${l}</button>`).join('')}
+              </div>
+              <span style="font-size:10.5px;color:${LIGHT};">
+                ${_main === 'flight' ? 'soonest arrival first' : moving + ' moving · ' + source.length + ' shown'}</span>
+            </div>
+
+            ${_main === 'flight' ? `
+              <div class="d2d-frow d2d-fhead">
+                <span class="d2d-tl">Arriving</span><span class="d2d-tl">Shipment</span>
+                <span class="d2d-tl">Origin &rarr; Sydney</span>
+                <span class="d2d-tl" style="text-align:right;">Units</span><span class="d2d-tl">Outlook</span>
+              </div>
+              ${marks.length ? marks.map(flightRow).join('')
+                : `<div class="d2d-empty">Nothing in flight.</div>`}`
+            : `<div style="flex:1;display:flex;flex-direction:column;min-height:0;">${paintMap(d, { inPanel: true })}</div>`}
           </div>
-          <div class="d2d-frow d2d-fhead">
-            <span class="d2d-tl">Arriving</span><span class="d2d-tl">Shipment</span>
-            <span class="d2d-tl">Origin &rarr; Sydney</span>
-            <span class="d2d-tl" style="text-align:right;">Units</span><span class="d2d-tl">Outlook</span>
-          </div>
-          ${marks.length ? marks.map(flightRow).join('')
-            : `<div class="d2d-empty">Nothing in flight.</div>`}
         </div>
 
         <div style="display:flex;flex-direction:column;gap:12px;min-width:0;">
@@ -673,22 +687,13 @@
             </div>
           </div>
 
-          <div style="display:flex;align-items:center;gap:6px;">
-            ${[['updates', 'Updates'], ['map', 'Live map']].map(([k, l]) =>
-              `<button class="d2d-seg ${_rail === k ? 'on' : ''}" data-rail="${k}">${l}</button>`).join('')}
-            <span style="flex:1;"></span>
-            ${_rail === 'map' ? `<span style="font-size:10px;color:${LIGHT};">${moving} moving</span>` : ''}
-          </div>
-
-          ${_rail === 'map' ? paintMap(d) : ''}
-
-          ${_rail === 'updates' && updates.length ? `
-            <div class="rounded-2xl border bg-white shadow-sm" style="padding:13px 15px;">
+          ${updates.length ? `
+            <div class="rounded-2xl border bg-white shadow-sm" style="padding:13px 15px;flex:1;min-height:0;">
               <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:2px;">
                 <span style="font-size:12px;font-weight:600;color:${DARK};">Latest updates</span>
                 <span style="font-size:10px;color:${LIGHT};">newest first</span>
               </div>
-              ${updates.slice(0, 8).map((r, i2) => `
+              ${updates.slice(0, 9).map((r, i2) => `
                 <button type="button" data-open="${esc(r.sh.id)}" class="d2d-rise"
                         style="display:flex;gap:9px;width:100%;text-align:left;background:none;border:0;
                                padding:7px 0;cursor:pointer;border-top:.5px solid rgba(0,0,0,.05);
@@ -1186,6 +1191,7 @@
 
   function paintMap(d, opts) {
     const big = !!(opts && opts.big);
+    const inPanel = !!(opts && opts.inPanel);
     const source = mapSource(d);
     const marks = shipmentPositions(mapFiltered(source));
     const moving = marks.filter(m => m.t > 0 && m.t < 1).length;
@@ -1222,12 +1228,13 @@
     const delivered = marks.filter(m => m.t === 1).length;
 
     return `
-      <div class="rounded-2xl border bg-white shadow-sm d2d-rise" style="overflow:hidden;margin-bottom:12px;">
+      <div class="${inPanel ? '' : 'rounded-2xl border bg-white shadow-sm'} d2d-rise"
+           style="overflow:hidden;${inPanel ? 'flex:1;display:flex;flex-direction:column;min-height:0;' : 'margin-bottom:12px;'}">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
-             padding:11px 14px;border-bottom:.5px solid rgba(0,0,0,.07);">
+             padding:${inPanel ? '0 16px 10px' : '11px 14px'};${inPanel ? '' : 'border-bottom:.5px solid rgba(0,0,0,.07);'}">
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-            <span style="font-size:12px;font-weight:600;color:${DARK};">Live tracking</span>
-            <span style="font-size:10.5px;color:${MID};">${moving} in transit</span>
+            ${inPanel ? '' : `<span style="font-size:12px;font-weight:600;color:${DARK};">Live tracking</span>
+            <span style="font-size:10.5px;color:${MID};">${moving} in transit</span>`}
             <span style="display:flex;gap:6px;">
               ${[['live', 'All in flight'], ['week', 'This week']].map(([k, l]) =>
                 `<button class="d2d-filt ${_mapScope === k ? 'on' : ''}" data-scope="${k}">${l}</button>`).join('')}
@@ -1238,7 +1245,8 @@
             </span>
           </div>
           <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-            ${[['Sea', SEA_LINE], ['Air', BLUE]].map(([l, c]) =>
+            ${(inPanel ? [['Sea', SEA_LINE], ['Air', BLUE], ['On plan', LIME], ['Drifting', YELL], ['Late or held', BRAND], ['Delivered', LINK]]
+                        : [['Sea', SEA_LINE], ['Air', BLUE]]).map(([l, c]) =>
               `<span style="font-size:10.5px;color:${MID};"><span style="display:inline-block;width:8px;height:8px;
                  border-radius:50%;background:${c};margin-right:5px;"></span>${l}</span>`).join('')}
             <button class="d2d-btn" data-mapfull="1" style="padding:5px 9px;min-height:32px;font-size:10.5px;display:inline-flex;align-items:center;gap:5px;">
@@ -1247,8 +1255,8 @@
           </div>
         </div>
 
-        <div style="position:relative;background:#FBFCFD;">
-          <svg viewBox="${VIEW.x0} ${VIEW.y0} ${VIEW.w} ${VIEW.h}" width="100%" style="display:block;max-height:${big ? 760 : 430}px;" role="img"
+        <div style="position:relative;background:#FBFCFD;${inPanel ? 'flex:1;min-height:0;' : ''}">
+          <svg viewBox="${VIEW.x0} ${VIEW.y0} ${VIEW.w} ${VIEW.h}" width="100%" style="display:block;max-height:${big ? 760 : (inPanel ? 520 : 430)}px;" role="img"
                aria-label="Where this week's shipments are">
             ${seaField()}${dotField()}
             ${/* One line per shipment in flight, nudged apart. Two containers on the same lane
@@ -2839,7 +2847,7 @@
     root.querySelectorAll('[data-tabgo]').forEach(b => b.onclick = () => { _tab = b.getAttribute('data-tabgo'); paint(); });
     root.querySelectorAll('[data-filt]').forEach(b => b.onclick = () => { _mapFilter = b.getAttribute('data-filt'); paint(); });
     root.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { _mapScope = b.getAttribute('data-scope'); paint(); });
-    root.querySelectorAll('[data-rail]').forEach(b => b.onclick = () => { _rail = b.getAttribute('data-rail'); paint(); });
+    root.querySelectorAll('[data-main]').forEach(b => b.onclick = () => { _main = b.getAttribute('data-main'); paint(); });
     const rfq = root.querySelector('[data-rfq]');
     if (rfq) rfq.onclick = async () => {
       const msg = el('d2d-rfqmsg');
@@ -2941,5 +2949,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v26 loaded');
+  console.log('[d2d-hub] v27 loaded');
 })();
