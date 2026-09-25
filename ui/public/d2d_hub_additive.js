@@ -420,9 +420,9 @@
       const od = overdueOf(sh);
       const slip = slipOf(sh);
       if (od) out.push({ kind: 'Overdue', accent: BRAND, ink: BRAND, who: 'the partner',
-        what: `${od.label} not recorded`,
+        what: DELAY_LABEL[od.stage] || `${od.label} delayed`,
         where: where(sh),
-        effect: `Planned ${day(sh['plan_' + od.stage])} · ${od.days} day${od.days === 1 ? '' : 's'} ago`,
+        effect: `Planned ${day(sh['plan_' + od.stage])} — ${od.days} day${od.days === 1 ? '' : 's'} ago, nothing reported since`,
         next: 'Chase the partner for the date, or record it if you have it',
         id: sh.id, sort: 100 + od.days });
       else if (slip != null && slip > 0 && sh.status !== 'delivered') out.push({ kind: 'Behind plan', accent: BRAND, ink: BRAND, who: 'the carrier',
@@ -484,7 +484,7 @@
     for (const g of grouped) {
       if (!g.items || g.items.length < 3) continue;
       const n = g.items.length;
-      g.what = `${n} shipments · ${g.what.toLowerCase()}`;
+      g.what = `${g.what} — ${n} shipments`;
       const weeks = [...new Set(g.items.map(x => String(x.where || '').split('·').pop().trim()))].filter(Boolean);
       g.where = weeks.length === 1 ? weeks[0] : `across ${weeks.length} weeks`;
       g.id = null;                                          // a group opens the list, not one shipment
@@ -620,8 +620,11 @@
         </span>
 
         <span class="d2d-lane">
-          <span class="d2d-ends" style="left:0;">${esc((sh.service || sh.origin || 'origin'))}</span>
-          <span class="d2d-ends" style="right:0;">Eastern Creek</span>
+          ${/* Named, not implied: the destination is whatever was booked. */ ''}
+          <span class="d2d-ends" style="left:0;">
+            <span style="color:${LIGHT};">FROM</span> ${esc(sh.service || sh.origin || 'origin')}</span>
+          <span class="d2d-ends" style="right:0;">
+            <span style="color:${LIGHT};">TO</span> ${esc(destOf(sh).label)}</span>
           <span class="d2d-rail"></span>
           <span class="d2d-done ${moving ? 'd2d-travel' : ''}" style="width:${pct}%;background:${look.ink};"></span>
           ${LANE_STOPS.map(at => `<span class="d2d-node" style="left:${at};border-color:${parseFloat(at) <= pct ? look.ink : '#DDE1E7'};"></span>`).join('')}
@@ -858,14 +861,12 @@
   function mapLayers(d, dims) {
     const P = (lon, lat) => { const q = dims.project(lon, lat); return { x: q[0], y: q[1] }; };
     const source = mapFiltered(mapSource(d));
-    const dest = P(PLACES.destination.lon, PLACES.destination.lat);
-    const cust = P(PLACES.customs.lon, PLACES.customs.lat);
-    const dc = P(PLACES.lastmile.lon, PLACES.lastmile.lat);
 
     // One lane per origin and mode, each bowed differently so two sailings out of neighbouring
     // ports do not trace the same line. The elongation is deliberate: a fatter arc separates
     // the lanes and reads as a longer voyage, which it is.
     const originList = [...new Set(source.map(x => originKey(x.service || x.origin) || 'ningbo'))];
+    const destList = [...new Set(source.map(x => destKey(x.destination) || 'sydney'))];
     const bowOfOrigin = (k2) => 0.20 + originList.indexOf(k2) * 0.09;
 
     const arc = (A, B, bow, away) => {
@@ -880,19 +881,24 @@
     const laneFor = (sh) => {
       const k2 = originKey(sh.service || sh.origin) || 'ningbo';
       const A = P(ORIGIN_PORTS[k2].lon, ORIGIN_PORTS[k2].lat);
+      const B = P(destOf(sh).lon, destOf(sh).lat);
       const air = sh.mode === 'air';
-      return arc(A, dest, air ? 0.12 : bowOfOrigin(k2), air);
+      return arc(A, B, air ? 0.12 : bowOfOrigin(k2), air);
     };
 
+    // A lane is an origin, a destination and a mode. It was keyed on origin alone, so a
+    // Melbourne booking borrowed the Sydney line.
     const lanes = new Map();
     for (const sh of source) {
       const k2 = originKey(sh.service || sh.origin) || 'ningbo';
-      const key = (sh.mode === 'air' ? 'a' : 's') + k2;
-      if (!lanes.has(key)) lanes.set(key, { air: sh.mode === 'air', k: k2 });
+      const dk = destKey(sh.destination) || 'sydney';
+      const key = (sh.mode === 'air' ? 'a' : 's') + k2 + '>' + dk;
+      if (!lanes.has(key)) lanes.set(key, { air: sh.mode === 'air', k: k2, dk });
     }
-    const lanePaths = [...lanes.values()].map(({ air, k: k2 }) => {
+    const lanePaths = [...lanes.values()].map(({ air, k: k2, dk }) => {
       const A = P(ORIGIN_PORTS[k2].lon, ORIGIN_PORTS[k2].lat);
-      const a = arc(A, dest, air ? 0.12 : bowOfOrigin(k2), air);
+      const B = P(DEST_PORTS[dk].lon, DEST_PORTS[dk].lat);
+      const a = arc(A, B, air ? 0.12 : bowOfOrigin(k2), air);
       return air
         ? `<path d="${a.d}" fill="none" stroke="${MAP_PAL.air}" stroke-width="1.5" stroke-linecap="round"
                  stroke-dasharray="2 7" opacity=".85"/>`
@@ -912,8 +918,11 @@
         const q = laneFor(sh).at(markT(sh));
         return { kind: 'vessel', side: 'r', sh, x: q.x, y: q.y, ly: q.y + 10 };
       }),
-      { kind: 'dest', side: 'r', x: dest.x, y: dest.y, ly: dest.y },
-    ]);
+      ...destList.map(dk => {
+        const q = P(DEST_PORTS[dk].lon, DEST_PORTS[dk].lat);
+        return { kind: 'dest', dk, side: 'r', x: q.x, y: q.y, ly: q.y };
+      }),
+    ], dims);
     const portPts = allLabels.filter(x => x.kind === 'port');
     const portPins = portPts.map(pt => `<g>
         <circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="7" fill="none" stroke="${MAP_PAL.origin_port}"
@@ -921,29 +930,33 @@
         <circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="5" fill="${MAP_PAL.origin_port}"
                 stroke="#fff" stroke-width="1.5"/>
         ${pinLabel(pt.x, pt.y, pt.label, MAP_PAL.origin_port, true,
-                   pt.n + (pt.n === 1 ? ' shipment' : ' shipments'), pt.ly)}
+                   pt.n + (pt.n === 1 ? ' shipment' : ' shipments'), pt.ly, pt.lx)}
       </g>`).join('');
 
-    // Port Botany, Sydney customs and Eastern Creek are 40km apart: at this scale they are one
-    // dot. They are drawn as a single Sydney arrival point with the breakdown beneath.
-    const atPort = source.filter(x => { const t = markT(x); return t >= 0.82 && t < 0.9; }).length;
-    const atCustoms = source.filter(x => { const t = markT(x); return t >= 0.9 && t < 0.95; }).length;
-    const delivered = source.filter(x => markT(x) >= 1).length;
-    const here = atPort + atCustoms + delivered;
-    const parts = [atPort && atPort + ' at port', atCustoms && atCustoms + ' in customs',
-                   delivered && delivered + ' delivered'].filter(Boolean).join(' · ');
-    const destPins = `<g>
-        ${here ? `<circle cx="${dest.x.toFixed(1)}" cy="${dest.y.toFixed(1)}" r="7" fill="none"
-              stroke="${atCustoms ? MAP_PAL.customs : MAP_PAL.clearing}" stroke-width="1.5" class="d2d-sonar"/>` : ''}
-        <circle cx="${dest.x.toFixed(1)}" cy="${dest.y.toFixed(1)}" r="${here ? 5 : 3.5}"
-                fill="${atCustoms ? MAP_PAL.customs : MAP_PAL.clearing}" stroke="#fff" stroke-width="1.5"
-                opacity="${here ? 1 : .5}"/>
-        ${pinLabel(dest.x, dest.y, 'Sydney', atCustoms ? MAP_PAL.customs : MAP_PAL.clearing, false,
-                   parts || 'Port Botany · Eastern Creek',
-                   (allLabels.find(x => x.kind === 'dest') || {}).ly)}
+    // One pin per destination actually booked. Port and DC are 40km apart — one dot at this
+    // scale — so each city is a single arrival point with its breakdown beneath.
+    const destPins = destList.map(dk => {
+      const place = DEST_PORTS[dk], q = P(place.lon, place.lat);
+      const mine = source.filter(x => (destKey(x.destination) || 'sydney') === dk);
+      const atPort = mine.filter(x => { const t = markT(x); return t >= 0.82 && t < 0.9; }).length;
+      const inCust = mine.filter(x => { const t = markT(x); return t >= 0.9 && t < 0.95; }).length;
+      const done = mine.filter(x => markT(x) >= 1).length;
+      const here = atPort + inCust + done;
+      const parts = [atPort && atPort + ' at port', inCust && inCust + ' in customs',
+                     done && done + ' delivered'].filter(Boolean).join(' · ');
+      const colour = inCust ? MAP_PAL.customs : MAP_PAL.clearing;
+      const lbl = allLabels.find(x => x.kind === 'dest' && x.dk === dk) || {};
+      return `<g>
+        ${here ? `<circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="7" fill="none"
+              stroke="${colour}" stroke-width="1.5" class="d2d-sonar"/>` : ''}
+        <circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="${here ? 5 : 3.5}" fill="${colour}"
+                stroke="#fff" stroke-width="1.5" opacity="${here ? 1 : .5}"/>
+        ${pinLabel(q.x, q.y, place.label, colour, false,
+                   parts || mine.length + (mine.length === 1 ? ' booked' : ' booked'), lbl.ly, lbl.lx)}
       </g>`;
+    }).join('');
 
-    const vessels = allLabels.filter(x => x.kind === 'vessel').map(({ sh, x, y, ly }) => {
+    const vessels = allLabels.filter(x => x.kind === 'vessel').map(({ sh, x, y, ly, lx }) => {
       const look = outlook(sh);
       const air = sh.mode === 'air';
       const colour = air ? MAP_PAL.air : MAP_PAL.transit;
@@ -959,7 +972,7 @@
                <path d="M-12,2 L-12,-4 L-2,-4 L-2,2 Z" fill="${colour}" opacity=".7"/>
                <path d="M2,2 L2,-7 L8,-7 L8,2 Z" fill="${colour}" opacity=".85"/>`}
         </g>
-        ${pinLabel(x + 9, y, sh.reference || 'not advised', DARK, false, look.label, ly)}
+        ${pinLabel(x, y, sh.reference || 'not advised', DARK, false, look.label, ly, lx)}
       </g>`;
     }).join('');
 
@@ -986,7 +999,7 @@
   // Pins within a few pixels print their names over each other. Labels are pushed apart
   // vertically and given a leader line back to their dot, which is what a map does when two
   // places are genuinely close together.
-  function spreadLabels(pins) {
+  function spreadLabels(pins, frame) {
     // Real box collision rather than column buckets: a left-anchored label and a right-anchored
     // one can still cross, and bucketing by x never catches that. Each label is placed in turn
     // and nudged down until its box is clear of everything already placed.
@@ -994,15 +1007,29 @@
       const text = String(p2.label || (p2.sh && p2.sh.reference) || 'not advised');
       const sub = String(p2.n != null ? p2.n + ' shipments' : 'status');
       const w = Math.max(text.length, sub.length * 0.85) * 5.9 + 20;
-      const x0 = p2.side === 'l' ? p2.x - 11 - w : p2.x + 7;
+      const ax = (p2.lx == null ? p2.x : p2.lx);
+      const x0 = p2.side === 'l' ? ax - 11 - w : ax + 7;
       return { x0, x1: x0 + w, y0: p2.ly - 15, y1: p2.ly + 14 };
     };
     const hits = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
 
+    // Out of the shipping lanes entirely: left-hand labels to a gutter left of the westernmost
+    // mark, right-hand ones to the right of the easternmost, roughly 12% of the frame clear.
+    if (frame && pins.length) {
+      const pad = Math.max(60, frame.w * 0.12);
+      const minX = Math.min(...pins.map(p2 => p2.x));
+      const maxX = Math.max(...pins.map(p2 => p2.x));
+      for (const p2 of pins) {
+        p2.lx = p2.side === 'l'
+          ? Math.max(90, minX - pad)
+          : Math.min(frame.w - 40, maxX + pad);
+      }
+    }
+
     const placed = [];
     for (const p2 of [...pins].sort((a, b) => a.y - b.y)) {
       let box = boxOf(p2), guard = 0;
-      while (placed.some(q => hits(box, q)) && guard++ < 40) {
+      while (placed.some(q => hits(box, q)) && guard++ < 60) {
         p2.ly += 7;
         box = boxOf(p2);
       }
@@ -1012,16 +1039,18 @@
   }
 
   // A label that can be read over a dot field: white pill, then the text.
-  function pinLabel(x, y, text, colour, left, sub, ly) {
+  function pinLabel(x, y, text, colour, left, sub, ly, lx) {
     const w = Math.max(text.length, (sub || '').length * 0.85) * 5.9 + 12;
-    const tx = left ? x - 11 : x + 11;
+    const ax = (lx == null ? x : lx);              // where the label sits, out in the gutter
+    const tx = left ? ax - 11 : ax + 11;
     const y2 = (ly == null ? y : ly);
-    const moved = Math.abs(y2 - y) > 2;
+    const moved = Math.abs(y2 - y) > 2 || Math.abs(ax - x) > 2;
     return `
-      ${moved ? `<path d="M${x.toFixed(1)} ${y.toFixed(1)} L${(left ? x - 7 : x + 7).toFixed(1)} ${y2.toFixed(1)}"
-            stroke="${colour}" stroke-width="1" opacity=".45" fill="none"/>` : ''}
+      ${moved ? `<path d="M${x.toFixed(1)} ${y.toFixed(1)} L${(left ? ax - 6 : ax + 6).toFixed(1)} ${y2.toFixed(1)}"
+            stroke="${colour}" stroke-width=".9" opacity=".4" fill="none" stroke-linecap="round"/>
+        <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="1.6" fill="${colour}" opacity=".55"/>` : ''}
       <rect x="${(left ? tx - w : tx - 4).toFixed(1)}" y="${(y2 - (sub ? 14 : 9)).toFixed(1)}"
-            width="${(w + 8).toFixed(1)}" height="${sub ? 27 : 17}" rx="4" fill="#ffffff" opacity=".9"/>
+            width="${(w + 8).toFixed(1)}" height="${sub ? 27 : 17}" rx="4" fill="#ffffff" opacity=".92"/>
       <text x="${tx.toFixed(1)}" y="${(y2 + (sub ? -2 : 4)).toFixed(1)}" text-anchor="${left ? 'end' : 'start'}"
             font-size="11" font-weight="600" fill="${colour}" font-family="inherit">${esc(text)}</text>
       ${sub ? `<text x="${tx.toFixed(1)}" y="${(y2 + 10).toFixed(1)}" text-anchor="${left ? 'end' : 'start'}"
@@ -1095,6 +1124,29 @@
     'Sydney customs':[16, 8, 'start'],
     'Eastern Creek': [16, 24, 'start'],
   };
+
+  // Where a booking can actually land. Matched loosely, the same way origins are.
+  const DEST_PORTS = {
+    sydney:    { lon: 151.21, lat: -33.87, label: 'Sydney' },
+    melbourne: { lon: 144.94, lat: -37.84, label: 'Melbourne' },
+    brisbane:  { lon: 153.10, lat: -27.38, label: 'Brisbane' },
+    perth:     { lon: 115.75, lat: -32.05, label: 'Perth' },
+    adelaide:  { lon: 138.51, lat: -34.85, label: 'Adelaide' },
+    fremantle: { lon: 115.74, lat: -32.06, label: 'Fremantle' },
+    auckland:  { lon: 174.77, lat: -36.84, label: 'Auckland' },
+  };
+  const DEST_ALIAS = {
+    'port botany': 'sydney', 'botany': 'sydney', 'eastern creek': 'sydney', 'syd': 'sydney',
+    'melb': 'melbourne', 'mel': 'melbourne', 'bne': 'brisbane', 'per': 'perth', 'akl': 'auckland',
+  };
+  function destKey(text) {
+    const t = String(text || '').toLowerCase();
+    for (const [alias, k] of Object.entries(DEST_ALIAS)) if (t.includes(alias)) return k;
+    for (const k of Object.keys(DEST_PORTS)) if (t.includes(k)) return k;
+    return null;
+  }
+  // Falls back to Sydney only when nothing was booked — and says so rather than pretending.
+  const destOf = (sh) => DEST_PORTS[destKey(sh.destination || sh.service_to) || 'sydney'];
 
   const PLACES = {
     origin:       { lon: 121.55, lat: 29.87,  label: 'Ningbo' },
@@ -1446,6 +1498,17 @@
       </button>`;
   }
 
+  // How a missed milestone reads to someone who has to act on it.
+  const DELAY_LABEL = {
+    pickup:           'Pickup delayed',
+    origin_cleared:   'Origin clearance delayed',
+    departed:         'Departure delayed',
+    arrived:          'Arrival delayed',
+    dest_cleared:     'Customs clearance delayed',
+    out_for_delivery: 'Dispatch delayed',
+    delivered:        'Delivery delayed',
+  };
+
   // Will this arrive on time? Answered from slip so far against the buffer still left before
   // the planned delivery. Deliberately not dressed up as a probability: it is arithmetic on
   // recorded dates, and the card says so.
@@ -1642,6 +1705,13 @@
                       style="font-size:14px;color:${DARK};background:none;border:0;padding:0;cursor:pointer;
                              border-bottom:1px dashed rgba(0,0,0,.25);">${esc(sh.reference || 'container not advised')}</button>
               <span style="display:block;font-size:11px;color:${MID};margin-top:2px;">${esc([sh.container_type, sh.carrier, sh.vessel].filter(Boolean).join(' · '))}</span>
+              ${/* The booked lane, named rather than implied. */ ''}
+              <span style="display:block;font-size:11px;color:${MID};margin-top:3px;">
+                <span style="font-size:8.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">From</span>
+                <b style="color:${DARK};font-weight:600;">${esc(sh.service || sh.origin || '—')}</b>
+                <span style="color:${LIGHT};">&rarr;</span>
+                <span style="font-size:8.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">To</span>
+                <b style="color:${DARK};font-weight:600;">${esc(destOf(sh).label)}</b></span>
             </span>
           </div>
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:7px;flex-shrink:0;">
@@ -2177,6 +2247,21 @@
   }
 
   // ── Bookings: what the client decides ──
+  // From and to, on anything that represents a booked movement. It reads off the option first
+  // and falls back to the request it belongs to.
+  function laneLine(b) {
+    const from = b.origin || b.service || (b.request && b.request.origin);
+    const to = b.destination || (b.request && b.request.destination);
+    if (!from && !to) return '';
+    return `<div style="font-size:10.5px;color:${MID};margin-top:3px;">
+      <span style="font-size:8.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">From</span>
+      <b style="color:${DARK};font-weight:600;">${esc(from || '—')}</b>
+      <span style="color:${LIGHT};">&rarr;</span>
+      <span style="font-size:8.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">To</span>
+      <b style="color:${DARK};font-weight:600;">${esc(to || '—')}</b>
+    </div>`;
+  }
+
   function paintBookings(d) {
     const header = `
       <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:12px;flex-wrap:wrap;">
@@ -2244,6 +2329,7 @@
             <div>
               <div style="font-size:15px;font-weight:700;color:${DARK};letter-spacing:-.01em;">${esc(b.title || 'Option ' + b.option_ref)}</div>
               <div style="font-size:11px;color:${MID};margin-top:2px;">${esc([b.carrier, b.container_qty ? b.container_qty + ' x ' + (b.container_type || '') : '', b.transhipment ? 'via transhipment' : 'direct'].filter(Boolean).join(' · '))}</div>
+              ${laneLine(b)}
             </div>
             <span style="font-size:9.5px;font-weight:700;border-radius:6px;padding:3px 8px;white-space:nowrap;color:${badge[1]};background:${badge[2]};">${esc(badge[0])}</span>
           </div>
@@ -2507,7 +2593,8 @@
           return `<div style="display:grid;grid-template-columns:1fr 110px 110px 104px 116px 128px;gap:0 12px;padding:12px 18px;
                        border-top:.5px solid rgba(0,0,0,.06);align-items:center;">
             <span><span style="display:block;font-size:13px;font-weight:600;color:${DARK};">${esc(b.title || 'Option ' + b.option_ref)}</span>
-              <span style="display:block;font-size:10.5px;color:${MID};">${esc(b.carrier || '')}</span></span>
+              <span style="display:block;font-size:10.5px;color:${MID};">${esc(b.carrier || '')}</span>
+              ${laneLine(b)}</span>
             <span class="d2d-num" style="font-size:12.5px;color:${MID};text-align:right;">${money(b.cost_amount, b.currency)}</span>
             <span class="d2d-num" style="font-size:12.5px;color:${DARK};text-align:right;">${money(ourCost, b.currency)}</span>
             <span style="text-align:right;">${b.status === 'draft'
@@ -2955,5 +3042,5 @@
   // The router calls this when #d2d is opened.
   window.renderD2D = () => { open().catch(e => console.error('[d2d-hub] render failed', e)); };
   window.__openD2D = open;
-  console.log('[d2d-hub] v29 loaded');
+  console.log('[d2d-hub] v30 loaded');
 })();
