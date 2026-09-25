@@ -801,10 +801,12 @@
     ctx.scale(dpr, dpr);
     ctx.fillStyle = MAP_PAL.sea_bg; ctx.fillRect(0, 0, w, h);
 
+    // The corridor runs roughly 36°N (Qingdao) to 34°S (Sydney) — about 70° of latitude. The
+    // scale has to honour the shorter side or the top of China falls off the panel.
     const projection = window.d3.geoMercator()
-      .center([133, -8])                 // the action is between 110°E and 155°E
-      .scale(w * 0.30)
-      .translate([w * 0.45, h * 0.46]);
+      .center([133, -4])                 // the action is between 110°E and 155°E
+      .scale(Math.min(w * 0.30, h * 0.52))
+      .translate([w * 0.46, h * 0.48]);
 
     const features = await worldShapes();
     const STEP = 6, R = 1.4;
@@ -860,13 +862,11 @@
     const cust = P(PLACES.customs.lon, PLACES.customs.lat);
     const dc = P(PLACES.lastmile.lon, PLACES.lastmile.lat);
 
-    // One lane per origin and mode. Sea bows east down the Pacific; air cuts inside it.
-    const lanes = new Map();
-    for (const sh of source) {
-      const k2 = originKey(sh.service || sh.origin) || 'ningbo';
-      const key = (sh.mode === 'air' ? 'a' : 's') + k2;
-      if (!lanes.has(key)) lanes.set(key, { air: sh.mode === 'air', place: ORIGIN_PORTS[k2] });
-    }
+    // One lane per origin and mode, each bowed differently so two sailings out of neighbouring
+    // ports do not trace the same line. The elongation is deliberate: a fatter arc separates
+    // the lanes and reads as a longer voyage, which it is.
+    const originList = [...new Set(source.map(x => originKey(x.service || x.origin) || 'ningbo'))];
+    const bowOfOrigin = (k2) => 0.20 + originList.indexOf(k2) * 0.09;
 
     const arc = (A, B, bow, away) => {
       const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
@@ -880,66 +880,86 @@
     const laneFor = (sh) => {
       const k2 = originKey(sh.service || sh.origin) || 'ningbo';
       const A = P(ORIGIN_PORTS[k2].lon, ORIGIN_PORTS[k2].lat);
-      return arc(A, dest, sh.mode === 'air' ? 0.10 : 0.26, sh.mode === 'air');
+      const air = sh.mode === 'air';
+      return arc(A, dest, air ? 0.12 : bowOfOrigin(k2), air);
     };
 
-    const lanePaths = [...lanes.values()].map(({ air, place }) => {
-      const A = P(place.lon, place.lat);
-      const a = arc(A, dest, air ? 0.10 : 0.26, air);
+    const lanes = new Map();
+    for (const sh of source) {
+      const k2 = originKey(sh.service || sh.origin) || 'ningbo';
+      const key = (sh.mode === 'air' ? 'a' : 's') + k2;
+      if (!lanes.has(key)) lanes.set(key, { air: sh.mode === 'air', k: k2 });
+    }
+    const lanePaths = [...lanes.values()].map(({ air, k: k2 }) => {
+      const A = P(ORIGIN_PORTS[k2].lon, ORIGIN_PORTS[k2].lat);
+      const a = arc(A, dest, air ? 0.12 : bowOfOrigin(k2), air);
       return air
-        ? `<path d="${a.d}" fill="none" stroke="${MAP_PAL.air}" stroke-width="1.6" stroke-linecap="round"
-                 stroke-dasharray="2 7" opacity=".9"/>`
-        : `<path d="${a.d}" fill="none" stroke="${MAP_PAL.transit}" stroke-width="1.8" stroke-linecap="round"
-                 opacity=".55"/>`;
+        ? `<path d="${a.d}" fill="none" stroke="${MAP_PAL.air}" stroke-width="1.5" stroke-linecap="round"
+                 stroke-dasharray="2 7" opacity=".85"/>`
+        : `<path d="${a.d}" fill="none" stroke="${MAP_PAL.transit}" stroke-width="1.6" stroke-linecap="round"
+                 opacity=".45"/>`;
     }).join('');
 
-    // Ports, with their counts, labelled left so they never sit on the lane.
-    const usedPorts = [...new Set(source.map(x => originKey(x.service || x.origin) || 'ningbo'))];
-    const portPins = usedPorts.map(k2 => {
-      const place = ORIGIN_PORTS[k2], q = P(place.lon, place.lat);
-      const n = source.filter(x => (originKey(x.service || x.origin) || 'ningbo') === k2).length;
-      return `<g>
-        <circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="7" fill="none" stroke="${MAP_PAL.origin_port}"
+    // Every label on the map, laid out in one pass so a port cannot land on a vessel.
+    const moving = source.filter(sh => { const t = markT(sh); return t > 0 && t < 1; });
+    const allLabels = spreadLabels([
+      ...originList.map(k2 => {
+        const place = ORIGIN_PORTS[k2], q = P(place.lon, place.lat);
+        const n = source.filter(x => (originKey(x.service || x.origin) || 'ningbo') === k2).length;
+        return { kind: 'port', side: 'l', x: q.x, y: q.y, ly: q.y, label: place.label, n };
+      }),
+      ...moving.map(sh => {
+        const q = laneFor(sh).at(markT(sh));
+        return { kind: 'vessel', side: 'r', sh, x: q.x, y: q.y, ly: q.y + 10 };
+      }),
+      { kind: 'dest', side: 'r', x: dest.x, y: dest.y, ly: dest.y },
+    ]);
+    const portPts = allLabels.filter(x => x.kind === 'port');
+    const portPins = portPts.map(pt => `<g>
+        <circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="7" fill="none" stroke="${MAP_PAL.origin_port}"
                 stroke-width="1.5" class="d2d-sonar"/>
-        <circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="5" fill="${MAP_PAL.origin_port}"
+        <circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="5" fill="${MAP_PAL.origin_port}"
                 stroke="#fff" stroke-width="1.5"/>
-        ${pinLabel(q.x, q.y, place.label, MAP_PAL.origin_port, true, n + (n === 1 ? ' shipment' : ' shipments'))}
-      </g>`;
-    }).join('');
-
-    const destPins = [
-      [dest, PLACES.destination.label, MAP_PAL.clearing, source.filter(x => { const t = markT(x); return t >= 0.82 && t < 0.9; }).length],
-      [cust, PLACES.customs.label, MAP_PAL.customs, source.filter(x => { const t = markT(x); return t >= 0.9 && t < 0.95; }).length],
-      [dc, PLACES.lastmile.label, MAP_PAL.last_mile, source.filter(x => markT(x) >= 1).length],
-    ].map(([q, label, colour, n]) => `<g>
-        ${n ? `<circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="7" fill="none" stroke="${colour}"
-               stroke-width="1.5" class="d2d-sonar"/>` : ''}
-        <circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="${n ? 5 : 3.5}" fill="${colour}"
-                stroke="#fff" stroke-width="1.5" opacity="${n ? 1 : .45}"/>
-        ${pinLabel(q.x, q.y, label, colour, false, n ? n + (n === 1 ? ' shipment' : ' shipments') : '')}
+        ${pinLabel(pt.x, pt.y, pt.label, MAP_PAL.origin_port, true,
+                   pt.n + (pt.n === 1 ? ' shipment' : ' shipments'), pt.ly)}
       </g>`).join('');
 
-    // One vessel per shipment, on its own lane, at its elapsed position.
-    const vessels = source.map(sh => {
-      const t = markT(sh);
-      if (!(t > 0 && t < 1)) return '';
-      const q = laneFor(sh).at(t);
+    // Port Botany, Sydney customs and Eastern Creek are 40km apart: at this scale they are one
+    // dot. They are drawn as a single Sydney arrival point with the breakdown beneath.
+    const atPort = source.filter(x => { const t = markT(x); return t >= 0.82 && t < 0.9; }).length;
+    const atCustoms = source.filter(x => { const t = markT(x); return t >= 0.9 && t < 0.95; }).length;
+    const delivered = source.filter(x => markT(x) >= 1).length;
+    const here = atPort + atCustoms + delivered;
+    const parts = [atPort && atPort + ' at port', atCustoms && atCustoms + ' in customs',
+                   delivered && delivered + ' delivered'].filter(Boolean).join(' · ');
+    const destPins = `<g>
+        ${here ? `<circle cx="${dest.x.toFixed(1)}" cy="${dest.y.toFixed(1)}" r="7" fill="none"
+              stroke="${atCustoms ? MAP_PAL.customs : MAP_PAL.clearing}" stroke-width="1.5" class="d2d-sonar"/>` : ''}
+        <circle cx="${dest.x.toFixed(1)}" cy="${dest.y.toFixed(1)}" r="${here ? 5 : 3.5}"
+                fill="${atCustoms ? MAP_PAL.customs : MAP_PAL.clearing}" stroke="#fff" stroke-width="1.5"
+                opacity="${here ? 1 : .5}"/>
+        ${pinLabel(dest.x, dest.y, 'Sydney', atCustoms ? MAP_PAL.customs : MAP_PAL.clearing, false,
+                   parts || 'Port Botany · Eastern Creek',
+                   (allLabels.find(x => x.kind === 'dest') || {}).ly)}
+      </g>`;
+
+    const vessels = allLabels.filter(x => x.kind === 'vessel').map(({ sh, x, y, ly }) => {
       const look = outlook(sh);
       const air = sh.mode === 'air';
       const colour = air ? MAP_PAL.air : MAP_PAL.transit;
       return `<g class="d2d-vessel" data-open="${esc(sh.id)}" style="cursor:pointer;" role="button"
                  aria-label="${esc(sh.reference || 'shipment')}">
-        <circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="13" fill="transparent"/>
-        ${look.state === 'late' ? `<circle cx="${q.x.toFixed(1)}" cy="${q.y.toFixed(1)}" r="10" fill="${BRAND}"
+        <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="13" fill="transparent"/>
+        ${look.state === 'late' ? `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="10" fill="${BRAND}"
               opacity=".18" class="d2d-sonar"/>` : ''}
-        <g transform="translate(${q.x.toFixed(1)},${q.y.toFixed(1)}) scale(.62)">
+        <g transform="translate(${x.toFixed(1)},${y.toFixed(1)}) scale(.58)">
           ${air
             ? `<path d="${ICON_PLANE}" fill="${colour}"/>`
             : `<path d="M-16,5 L-16,2 L-12,2 L12,2 L17,-1 L18,5 Z" fill="${colour}"/>
                <path d="M-12,2 L-12,-4 L-2,-4 L-2,2 Z" fill="${colour}" opacity=".7"/>
                <path d="M2,2 L2,-7 L8,-7 L8,2 Z" fill="${colour}" opacity=".85"/>`}
         </g>
-        ${pinLabel(q.x + 12, q.y + 12, sh.reference || 'not advised', DARK, false, look.label)}
+        ${pinLabel(x + 9, y, sh.reference || 'not advised', DARK, false, look.label, ly)}
       </g>`;
     }).join('');
 
@@ -963,16 +983,48 @@
     return base;
   }
 
+  // Pins within a few pixels print their names over each other. Labels are pushed apart
+  // vertically and given a leader line back to their dot, which is what a map does when two
+  // places are genuinely close together.
+  function spreadLabels(pins) {
+    // Real box collision rather than column buckets: a left-anchored label and a right-anchored
+    // one can still cross, and bucketing by x never catches that. Each label is placed in turn
+    // and nudged down until its box is clear of everything already placed.
+    const boxOf = (p2) => {
+      const text = String(p2.label || (p2.sh && p2.sh.reference) || 'not advised');
+      const sub = String(p2.n != null ? p2.n + ' shipments' : 'status');
+      const w = Math.max(text.length, sub.length * 0.85) * 5.9 + 20;
+      const x0 = p2.side === 'l' ? p2.x - 11 - w : p2.x + 7;
+      return { x0, x1: x0 + w, y0: p2.ly - 15, y1: p2.ly + 14 };
+    };
+    const hits = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+
+    const placed = [];
+    for (const p2 of [...pins].sort((a, b) => a.y - b.y)) {
+      let box = boxOf(p2), guard = 0;
+      while (placed.some(q => hits(box, q)) && guard++ < 40) {
+        p2.ly += 7;
+        box = boxOf(p2);
+      }
+      placed.push(box);
+    }
+    return pins;
+  }
+
   // A label that can be read over a dot field: white pill, then the text.
-  function pinLabel(x, y, text, colour, left, sub) {
-    const w = text.length * 5.8 + 10;
-    const tx = left ? x - 9 : x + 9;
+  function pinLabel(x, y, text, colour, left, sub, ly) {
+    const w = Math.max(text.length, (sub || '').length * 0.85) * 5.9 + 12;
+    const tx = left ? x - 11 : x + 11;
+    const y2 = (ly == null ? y : ly);
+    const moved = Math.abs(y2 - y) > 2;
     return `
-      <rect x="${(left ? tx - w : tx - 3).toFixed(1)}" y="${(y - (sub ? 15 : 9)).toFixed(1)}"
-            width="${(w + 6).toFixed(1)}" height="${sub ? 26 : 17}" rx="3" fill="#ffffff" opacity=".88"/>
-      <text x="${tx.toFixed(1)}" y="${(y + (sub ? -3 : 4)).toFixed(1)}" text-anchor="${left ? 'end' : 'start'}"
+      ${moved ? `<path d="M${x.toFixed(1)} ${y.toFixed(1)} L${(left ? x - 7 : x + 7).toFixed(1)} ${y2.toFixed(1)}"
+            stroke="${colour}" stroke-width="1" opacity=".45" fill="none"/>` : ''}
+      <rect x="${(left ? tx - w : tx - 4).toFixed(1)}" y="${(y2 - (sub ? 14 : 9)).toFixed(1)}"
+            width="${(w + 8).toFixed(1)}" height="${sub ? 27 : 17}" rx="4" fill="#ffffff" opacity=".9"/>
+      <text x="${tx.toFixed(1)}" y="${(y2 + (sub ? -2 : 4)).toFixed(1)}" text-anchor="${left ? 'end' : 'start'}"
             font-size="11" font-weight="600" fill="${colour}" font-family="inherit">${esc(text)}</text>
-      ${sub ? `<text x="${tx.toFixed(1)}" y="${(y + 9).toFixed(1)}" text-anchor="${left ? 'end' : 'start'}"
+      ${sub ? `<text x="${tx.toFixed(1)}" y="${(y2 + 10).toFixed(1)}" text-anchor="${left ? 'end' : 'start'}"
             font-size="9.5" fill="${MID}" font-family="ui-monospace,monospace">${esc(sub)}</text>` : ''}`;
   }
 
