@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '46';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '47';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -182,11 +182,9 @@
       @keyframes d2d-nextpulse{0%{box-shadow:0 0 0 0 var(--pulse);opacity:1;}
         70%{box-shadow:0 0 0 7px rgba(0,0,0,0);opacity:.85;}100%{box-shadow:0 0 0 0 rgba(0,0,0,0);opacity:1;}}
       .d2d-next{animation:d2d-nextpulse 2.6s ease-out infinite;}
-      /* Where it got to: a filled dot with a softer, slower halo, offset so the two pulses on
-         a row never beat together. */
-      @keyframes d2d-lastpulse{0%{box-shadow:0 0 0 0 var(--pulse);}
-        75%{box-shadow:0 0 0 9px rgba(0,0,0,0);}100%{box-shadow:0 0 0 0 rgba(0,0,0,0);}}
-      .d2d-last{animation:d2d-lastpulse 2.6s ease-out .9s infinite;}
+      /* Where it got to: the same pulse as the one ahead, on the same beat. The dot stays
+         filled because that is what marks it as recorded — the pulse itself is identical. */
+      .d2d-last{animation:d2d-nextpulse 2.6s ease-out infinite;}
       @media (prefers-reduced-motion:reduce){.d2d-next,.d2d-last{animation:none;}}
 
       .d2d-mini{border:.5px solid rgba(0,0,0,.14);background:#fff;color:${DARK};border-radius:7px;
@@ -1900,32 +1898,50 @@
       </div>`;
   }
 
+  // Every week, oldest first, with the week as a heading rather than a filter.
+  function groupByWeek(list) {
+    const by = new Map();
+    for (const x of list) {
+      const k = x.week_start || '';
+      if (!by.has(k)) by.set(k, []);
+      by.get(k).push(x);
+    }
+    return [...by.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  }
+  const weekHead = (ws, n, note) => `
+    <div style="display:flex;align-items:baseline;gap:9px;padding:10px 4px 6px;position:sticky;top:0;
+         background:#F7F8FA;z-index:2;">
+      <span class="d2d-num" style="font-size:11px;font-weight:700;color:${DARK};">WEEK ${esc(String(isoWeek(ws) || '—'))}</span>
+      <span style="font-size:11px;color:${MID};">${esc(day(ws))}</span>
+      <span style="flex:1;height:.5px;background:rgba(0,0,0,.08);"></span>
+      <span style="font-size:10.5px;color:${LIGHT};">${n}${note ? ' · ' + esc(note) : ''}</span>
+    </div>`;
+
   function paintList(d) {
     // Earliest week first, then by container so the order is stable between loads. Both lists
     // arrived in whatever order the server returned them.
     const byWeek = (a, b) => String(a.week_start || '').localeCompare(String(b.week_start || ''))
                           || String(a.reference || '~').localeCompare(String(b.reference || '~'));
-    const rows = (d.shipments || []).slice().sort(byWeek);
-    const other = (d.allShipments || [])
-      .filter(x => !rows.some(y => y.id === x.id) && x.status !== 'delivered')
-      .sort(byWeek);
+    // Every shipment, not just the selected week. The week is a heading now.
+    const pool = (d.allShipments && d.allShipments.length ? d.allShipments : (d.shipments || []));
+    const rows = pool.slice().sort(byWeek);
+    const other = [];
+    const groups = groupByWeek(rows);
     return `
-      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:9px;margin-bottom:10px;flex-wrap:wrap;">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:9px;margin-bottom:6px;flex-wrap:wrap;">
         <span style="display:flex;align-items:baseline;gap:9px;">
-          <span style="font-size:13px;font-weight:600;color:${DARK};">Week of ${esc(day(_week))}</span>
-          <span style="font-size:11px;color:${MID};">every milestone, and what each shipment needs next</span>
+          <span style="font-size:13px;font-weight:600;color:${DARK};">All shipments</span>
+          <span style="font-size:11px;color:${MID};">every week, earliest first &mdash; every milestone, and what each needs next</span>
         </span>
-        <button class="d2d-btn" data-go="week" style="min-height:34px;padding:5px 11px;font-size:11px;">Week summary &rarr;</button>
+        <span style="display:flex;gap:8px;">
+          <button class="d2d-mini" data-go="week">Week summary &rarr;</button>
+        </span>
       </div>
-      ${rows.length ? rows.map(shipmentRow).join('')
-        : `<div class="rounded-2xl border bg-white shadow-sm d2d-empty">Nothing booked for this week yet.</div>`}
-
-      ${other.length ? `
-        <div style="display:flex;align-items:baseline;gap:9px;margin:18px 0 10px;">
-          <span style="font-size:13px;font-weight:600;color:${DARK};">Still in flight from other weeks</span>
-          <span style="font-size:11px;color:${MID};">${other.length} shipment${other.length === 1 ? '' : 's'}</span>
-        </div>
-        ${other.map(shipmentRow).join('')}` : ''}`;
+      ${groups.length ? groups.map(([ws, list]) => `
+          ${weekHead(ws, list.length + (list.length === 1 ? ' shipment' : ' shipments'),
+                     list.filter(x => overdueOf(x)).length ? list.filter(x => overdueOf(x)).length + ' overdue' : '')}
+          ${list.map(shipmentRow).join('')}`).join('')
+        : `<div class="rounded-2xl border bg-white shadow-sm d2d-empty">Nothing booked yet.</div>`}`;
   }
 
   // ── Shared pieces ──
@@ -2410,15 +2426,17 @@
   }
 
   function paintBookings(d) {
+    // Every week. The week still scopes what a NEW request is raised against — that is what
+    // the chips above are for — but a released option should never be hidden behind a week.
     const header = `
       <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:12px;flex-wrap:wrap;">
         <div>
-          <div style="font-size:14px;font-weight:600;color:${DARK};">Week of ${esc(day(_week))}</div>
+          <div style="font-size:14px;font-weight:600;color:${DARK};">Bookings</div>
           <div style="font-size:11px;color:${MID};margin-top:2px;">${_internal
-            ? 'Options quoted for this week. The client approves one, and the plan freezes.'
+            ? 'Every option quoted, all weeks. The client approves one, and the plan freezes.'
             : 'Choose the sailing that suits you. Approving freezes the plan.'}</div>
         </div>
-        ${_internal ? `<button class="d2d-btn dark" data-newbooking="1">New booking</button>` : ''}
+        ${_internal ? `<button class="d2d-btn dark" data-newbooking="1">New booking for week ${esc(String(isoWeek(_week) || day(_week)))}</button>` : ''}
       </div>`;
     const rq = (d.requests || [])[0];
     const cargo = rq ? `
@@ -2462,7 +2480,11 @@
         </div>
       </div>`;
     const order = { released: 0, approved: 1, draft: 2, declined: 3, expired: 4 };
-    const rows = [...d.bookings].sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
+    // Undecided first, then by week — the thing needing a decision should never be below a
+    // month of settled history.
+    const pool = (d.allBookings && d.allBookings.length ? d.allBookings : d.bookings) || [];
+    const rows = [...pool].sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9)
+                                       || String(a.week_start || '').localeCompare(String(b.week_start || '')));
     return header + cargo + `<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;">
       ${rows.map((b, i) => {
         const st = b.status;
@@ -2474,7 +2496,12 @@
         return `<div class="rounded-2xl border bg-white shadow-sm d2d-opt d2d-rise d2d-lift" style="border-top-color:${accent};animation-delay:${i * .05}s">
           <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">
             <div>
-              <div style="font-size:15px;font-weight:700;color:${DARK};letter-spacing:-.01em;">${esc(b.title || 'Option ' + b.option_ref)}</div>
+              <div style="display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;">
+                <span style="font-size:15px;font-weight:700;color:${DARK};letter-spacing:-.01em;">${esc(b.title || 'Option ' + b.option_ref)}</span>
+                <span class="d2d-num" style="font-size:10px;font-weight:700;color:${MID};background:#F2F2F5;
+                      border-radius:5px;padding:2px 7px;">WEEK ${esc(String(isoWeek(b.week_start) || '—'))}</span>
+                <span style="font-size:10px;color:${LIGHT};">${esc(day(b.week_start))}</span>
+              </div>
               <div style="font-size:11px;color:${MID};margin-top:2px;">${esc([b.carrier, b.container_qty ? b.container_qty + ' x ' + (b.container_type || '') : '', b.transhipment ? 'via transhipment' : 'direct'].filter(Boolean).join(' · '))}</div>
               ${laneLine(b)}
             </div>
@@ -2718,10 +2745,15 @@
 
   // ── Pricing: VelOzity only ──
   function paintPricing(d) {
-    const rows = d.bookings.filter(b => ['draft', 'released', 'approved'].includes(b.status));
+    // A work queue, not a week view: an unpriced option from a fortnight ago is exactly the
+    // thing a week filter hides.
+    const pool = (d.allBookings && d.allBookings.length ? d.allBookings : d.bookings) || [];
+    const rows = pool.filter(b => ['draft', 'released', 'approved'].includes(b.status))
+      .sort((a, b) => ({ draft: 0, released: 1, approved: 2 }[a.status] ?? 9) - ({ draft: 0, released: 1, approved: 2 }[b.status] ?? 9)
+                   || String(a.week_start || '').localeCompare(String(b.week_start || '')));
     if (!rows.length) return `
       <div class="rounded-2xl border bg-white shadow-sm" style="padding:22px 24px;">
-        <div style="font-size:14px;font-weight:600;color:${DARK};">Nothing to price for this week</div>
+        <div style="font-size:14px;font-weight:600;color:${DARK};">Nothing to price</div>
         <div style="font-size:12px;color:${MID};margin:6px 0 14px;">Enter the rates the partner quoted and they will appear here.</div>
         <button class="d2d-btn dark" data-newbooking="1">New booking</button>
       </div>`;
@@ -2740,7 +2772,9 @@
           return `<div style="display:grid;grid-template-columns:1fr 110px 110px 104px 116px 128px;gap:0 12px;padding:12px 18px;
                        border-top:.5px solid rgba(0,0,0,.06);align-items:center;">
             <span><span style="display:block;font-size:13px;font-weight:600;color:${DARK};">${esc(b.title || 'Option ' + b.option_ref)}</span>
-              <span style="display:block;font-size:10.5px;color:${MID};">${esc(b.carrier || '')}</span>
+              <span style="display:block;font-size:10.5px;color:${MID};">
+                <span class="d2d-num" style="color:${DARK};font-weight:600;">W${esc(String(isoWeek(b.week_start) || '—'))}</span>
+                ${b.carrier ? '&middot; ' + esc(b.carrier) : ''}</span>
               ${laneLine(b)}</span>
             <span class="d2d-num" style="font-size:12.5px;color:${MID};text-align:right;">${money(b.cost_amount, b.currency)}</span>
             <span class="d2d-num" style="font-size:12.5px;color:${DARK};text-align:right;">${money(ourCost, b.currency)}</span>
