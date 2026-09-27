@@ -325,7 +325,7 @@ module.exports = function mountD2D(deps) {
       const ws = String(req.query.week || '');
       const rows = ws
         ? req.d2d.all(`SELECT * FROM d2d_shipment WHERE client_id = @client AND week_start = @ws ORDER BY reference`, { ws })
-        : req.d2d.all(`SELECT * FROM d2d_shipment WHERE client_id = @client ORDER BY week_start DESC, reference LIMIT 100`);
+        : req.d2d.all(`SELECT * FROM d2d_shipment WHERE client_id = @client ORDER BY week_start DESC, reference LIMIT 400`);
       const ids = rows.map(r => r.id);
       const idParams = {}; ids.forEach((id, i) => { idParams['id' + i] = id; });
       const events = ids.length
@@ -397,7 +397,7 @@ module.exports = function mountD2D(deps) {
         ? req.d2d.all(`SELECT b.*${LANE} FROM d2d_booking b${JOIN}
                        WHERE b.client_id = @client AND b.week_start = @ws ORDER BY b.option_ref`, { ws })
         : req.d2d.all(`SELECT b.*${LANE} FROM d2d_booking b${JOIN}
-                       WHERE b.client_id = @client ORDER BY b.week_start DESC LIMIT 60`);
+                       WHERE b.client_id = @client ORDER BY b.week_start DESC LIMIT 400`);
       // A client sees released options only, and never the cost behind them.
       const visible = internal ? rows : rows.filter(r => r.status !== 'draft').map(forClient);
       res.json({ bookings: visible, pricing_visible: internal });
@@ -923,7 +923,7 @@ module.exports = function mountD2D(deps) {
       const ws = String(req.query.week || '');
       const rows = ws
         ? req.d2d.all(`SELECT * FROM d2d_request WHERE client_id = @client AND week_start = @ws ORDER BY created_at DESC`, { ws })
-        : req.d2d.all(`SELECT * FROM d2d_request WHERE client_id = @client ORDER BY week_start DESC LIMIT 60`);
+        : req.d2d.all(`SELECT * FROM d2d_request WHERE client_id = @client ORDER BY week_start DESC LIMIT 300`);
       const internal = isInternal(req);
       const ids = rows.map(r => r.id);
       const idp = {}; ids.forEach((id, i) => { idp['id' + i] = id; });
