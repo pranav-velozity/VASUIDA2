@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '48';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '49';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -2427,10 +2427,10 @@
     if (!from && !to) return '';
     return `<div style="font-size:10.5px;color:${MID};margin-top:3px;">
       <span style="font-size:8.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">From</span>
-      <b style="color:${DARK};font-weight:600;">${esc(from || '—')}</b>
+      <b style="color:${from ? DARK : LIGHT};font-weight:600;">${esc(from || 'not stated')}</b>
       <span style="color:${LIGHT};">&rarr;</span>
       <span style="font-size:8.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">To</span>
-      <b style="color:${DARK};font-weight:600;">${esc(to || '—')}</b>
+      <b style="color:${to ? DARK : LIGHT};font-weight:600;">${esc(to || 'not stated')}</b>
     </div>`;
   }
 
@@ -2799,10 +2799,15 @@
         }).join('')}
       </div>
       ${drafts.length ? `<div style="display:flex;align-items:center;gap:12px;">
-        <button class="d2d-btn dark" data-release="1">Release ${drafts.length} option${drafts.length === 1 ? '' : 's'} to the client &rarr;</button>
+        ${groupByWeek(drafts).map(([ws, list]) => {
+          const low = list.filter(b => Number(b.margin_pct) < 15).length;
+          return `<button class="d2d-btn dark" data-release="${esc(ws)}">
+            Release ${list.length} option${list.length === 1 ? '' : 's'} &middot; week ${esc(String(isoWeek(ws) || day(ws)))} &rarr;</button>
+          ${low ? `<span style="font-size:11px;color:${BRAND};">${low} below the floor in week ${esc(String(isoWeek(ws) || ''))}</span>` : ''}`;
+        }).join('')}
         <span style="font-size:11px;color:${below.length ? BRAND : MID};">
           ${below.length ? below.length + ' option(s) price below the 15% floor and will be refused.' : 'All options meet the 15% floor.'}</span>
-      </div>` : `<div style="font-size:11px;color:${MID};">Everything for this week has been released.</div>`}`;
+      </div>` : `<div style="font-size:11px;color:${MID};">Everything priced has been released.</div>`}`;
   }
 
   // ── Transit rules ──
@@ -3282,12 +3287,17 @@
       try { await api('/d2d/bookings/' + inp.getAttribute('data-margin') + '/pricing', { method: 'PATCH', body: JSON.stringify({ margin_pct: pct }) }); await load(); }
       catch (e) { alert('Could not save the margin: ' + e.message); }
     });
-    const rel = root.querySelector('[data-release]');
-    if (rel) rel.onclick = async () => {
-      busy(rel, true);
-      try { await api('/d2d/bookings/week/' + encodeURIComponent(_week) + '/release', { method: 'POST', body: JSON.stringify({}) }); await load(); }
-      catch (e) { busy(rel, false); alert('Could not release: ' + e.message); }
-    };
+    // Each button carries its own week, so it releases the options printed above it.
+    root.querySelectorAll('[data-release]').forEach(rel => {
+      rel.onclick = async () => {
+        const ws = rel.getAttribute('data-release');
+        busy(rel, true);
+        try {
+          await api('/d2d/bookings/week/' + encodeURIComponent(ws) + '/release', { method: 'POST', body: JSON.stringify({}) });
+          await load();
+        } catch (e) { busy(rel, false); alert('Could not release: ' + e.message); }
+      };
+    });
   }
 
   // ── Wiring ──
