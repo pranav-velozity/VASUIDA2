@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '42';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '43';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -144,14 +144,16 @@
       .d2d-frow:hover{background:#FAFBFC;}
       .d2d-fhead{cursor:default;border-top:0;padding-top:6px;padding-bottom:2px;}
       .d2d-fhead:hover{background:none;}
-      .d2d-lane{position:relative;height:24px;}
-      .d2d-rail{position:absolute;left:0;right:0;top:10px;height:3px;background:#EDEFF3;border-radius:2px;}
-      .d2d-done{position:absolute;left:0;top:10px;height:3px;border-radius:2px;}
-      .d2d-node{position:absolute;top:6px;width:10px;height:10px;border-radius:50%;background:#fff;
+      .d2d-lane{position:relative;height:30px;}
+      .d2d-rail{position:absolute;left:0;right:0;top:14px;height:3px;background:#EDEFF3;border-radius:2px;}
+      .d2d-done{position:absolute;left:0;top:14px;height:3px;border-radius:2px;}
+      .d2d-node{position:absolute;top:10px;width:10px;height:10px;border-radius:50%;background:#fff;
         border:2px solid #DDE1E7;transform:translateX(-50%);box-sizing:border-box;}
-      .d2d-here{position:absolute;top:1px;transform:translateX(-50%);width:20px;height:20px;border-radius:50%;
+      .d2d-here{position:absolute;top:-3px;transform:translateX(-50%);width:30px;height:30px;border-radius:50%;
         background:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 2px #fff;}
-      .d2d-ends{position:absolute;top:-3px;font-size:8.5px;color:#C2C6CD;}
+      .d2d-ends{position:absolute;top:-4px;font-size:10px;color:${DARK};font-weight:600;
+        white-space:nowrap;background:rgba(255,255,255,.75);padding:0 3px;border-radius:3px;}
+      .d2d-ends .tag{font-size:8px;font-weight:700;color:${MID};text-transform:uppercase;letter-spacing:.06em;}
 
       /* Slow on purpose: a sheen along the leg being travelled and one breath on the marker.
          Anything faster becomes wallpaper on a page left open all day. */
@@ -167,6 +169,21 @@
         transition:background .18s ease,color .18s ease,border-color .18s ease;}
       .d2d-seg:hover{border-color:rgba(0,0,0,.3);}
       .d2d-seg.on{background:${BRAND};border-color:${BRAND};color:#fff;}
+      /* A change announces itself for a moment, then gets out of the way. */
+      @keyframes d2d-flash{0%,25%{background:rgba(254,208,0,.30);}100%{background:transparent;}}
+      .d2d-flash{animation:d2d-flash 3.4s ease-out 1;}
+
+      /* Latest updates drift upward so the panel reads as live. Pauses on hover. */
+      .d2d-ticker{position:relative;overflow:hidden;}
+      @keyframes d2d-roll{from{transform:translateY(0);}to{transform:translateY(var(--roll));}}
+      .d2d-ticker-track.rolling{animation:d2d-roll var(--dur) linear infinite;}
+      .d2d-ticker:hover .d2d-ticker-track.rolling{animation-play-state:paused;}
+      @media (prefers-reduced-motion:reduce){.d2d-flash{animation:none;}
+        .d2d-ticker-track.rolling{animation:none;}}
+
+      .d2d-tile-sm{padding:10px 13px !important;}
+      .d2d-tile-sm .d2d-tv{font-size:21px !important;line-height:1.15 !important;}
+      .d2d-tile-sm .d2d-ts{font-size:10px !important;}
       .d2d-crumb{border:0;background:none;font:inherit;font-size:11.5px;color:${BLUE};cursor:pointer;padding:0;}
       .d2d-crumb:hover{text-decoration:underline;}
       /* Controls, not content: smaller and quieter than the legend, which is what a reader
@@ -345,6 +362,7 @@
   // on a map. They answer the same question two ways, so they share the space and the toggle.
   // The rail keeps its tiles and updates whichever is showing.
   let _main = 'flight';
+  let _changed = null;                 // ids whose milestones moved since the last load
   const go = (view, id) => { _view = view; _openId = id || null; paint(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
 
   async function load() {
@@ -590,6 +608,20 @@
       load();
     });
     wireActions(body);
+    // The roll is only started when the list is genuinely taller than its window — otherwise
+    // a short list would drift away and leave a blank panel.
+    setTimeout(() => {
+      const track = el('d2d-ticker-track'), box = el('d2d-ticker');
+      if (!track || !box) return;
+      const half = track.scrollHeight / 2;              // the list is duplicated for a seamless loop
+      track.classList.remove('rolling');
+      if (half > box.clientHeight + 8) {
+        track.style.setProperty('--roll', (-half).toFixed(1) + 'px');
+        track.style.setProperty('--dur', Math.max(18, half / 14).toFixed(1) + 's');
+        track.classList.add('rolling');
+      }
+    }, 60);
+
     // The map needs the panel to have a size before it can be projected.
     setTimeout(() => { mountMaps(d).catch(e => console.warn('[d2d-hub] map mount', e)); }, 30);
   }
@@ -603,13 +635,14 @@
 
   function flightRow(m, i) {
     const sh = m.sh;
+    const justChanged = _changed && _changed.has(sh.id);
     const look = outlook(sh);
     const pct = Math.round(m.t * 100);
     const moving = m.t > 0 && m.t < 1;
     const eta = sh.plan_arrived;
     const slip = slipOf(sh) || 0;
     return `
-      <button type="button" data-open="${esc(sh.id)}" class="d2d-frow d2d-rise"
+      <button type="button" data-open="${esc(sh.id)}" class="d2d-frow d2d-rise${justChanged ? ' d2d-flash' : ''}"
               style="animation-delay:${(i * 0.035).toFixed(2)}s;">
         <span>
           <span class="d2d-num" style="display:block;font-size:13px;font-weight:600;color:${look.ink};">${eta ? esc(day(eta)) : '—'}</span>
@@ -623,15 +656,15 @@
 
         <span class="d2d-lane">
           ${/* Named, not implied: the destination is whatever was booked. */ ''}
-          <span class="d2d-ends" style="left:0;">
-            <span style="color:${LIGHT};">FROM</span> ${esc(sh.service || sh.origin || 'origin')}</span>
-          <span class="d2d-ends" style="right:0;">
-            <span style="color:${LIGHT};">TO</span> ${esc(destOf(sh).label)}</span>
+          <span class="d2d-ends" style="left:15%;">
+            <span class="tag">From</span> ${esc(sh.service || sh.origin || 'origin')}</span>
+          <span class="d2d-ends" style="right:15%;">
+            <span class="tag">To</span> ${esc(destOf(sh).label)}</span>
           <span class="d2d-rail"></span>
           <span class="d2d-done ${moving ? 'd2d-travel' : ''}" style="width:${pct}%;background:${look.ink};"></span>
           ${LANE_STOPS.map(at => `<span class="d2d-node" style="left:${at};border-color:${parseFloat(at) <= pct ? look.ink : '#DDE1E7'};"></span>`).join('')}
           <span class="d2d-here ${moving ? 'd2d-breathe' : ''}" style="left:${pct}%;">
-            <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="${m.air ? ICON_PLANE_SM : ICON_SHIP_SM}" fill="${look.ink}"/></svg>
+            <svg width="21" height="21" viewBox="0 0 24 24" aria-hidden="true"><path d="${m.air ? ICON_PLANE_SM : ICON_SHIP_SM}" fill="${look.ink}"/></svg>
           </span>
         </span>
 
@@ -648,10 +681,23 @@
     const updates = recentActivity(d);
     const units = source.reduce((n, x) => n + (Number(x.units) || 0), 0);
 
+    // Requests still out with the partner, and options released but not yet decided. These are
+    // the two states before a container exists, which the rail never showed.
+    const requested = (d.requests || []).filter(r => ['sent', 'repricing'].includes(r.state)).length;
+    const pending = (d.bookings || []).filter(b => b.status === 'released').length;
+
+    // Only what is moving — a delivered container is not in transit.
+    const moving2 = source.filter(x => { const t = markT(x); return t > 0 && t < 1; });
+    const unitsMoving = moving2.reduce((n, x) =>
+      n + (Number(x.units) || Number(x.cargo && x.cargo.units) || 0), 0);
+    const cartonsMoving = moving2.reduce((n, x) =>
+      n + (Number(x.cargo && x.cargo.cartons) || 0), 0);
+
     // Soonest arrival first: the order someone actually reads a fleet in.
     const marks = shipmentPositions(source)
       .sort((a, b) => String(a.sh.plan_arrived || '').localeCompare(String(b.sh.plan_arrived || '')));
     const moving = marks.filter(m => m.t > 0 && m.t < 1).length;
+    _changed = changedSince(source);
 
     return `
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start" style="margin-bottom:14px;">
@@ -683,16 +729,50 @@
         </div>
 
         <div style="display:flex;flex-direction:column;gap:12px;min-width:0;">
+          ${/* Four counters, shorter than before so two rows fit where one used to. The two new
+                ones cover the half of the process that happens before a container exists. */ ''}
           <div class="grid grid-cols-2 gap-3">
-            <div class="rounded-2xl border bg-white shadow-sm d2d-tile">
+            <div class="rounded-2xl border bg-white shadow-sm d2d-tile d2d-tile-sm">
               <div class="d2d-tl">In transit</div>
               <div class="d2d-tv">${inTransit}</div>
-              <div class="d2d-ts">${source.length} shown${units ? ' · ' + units.toLocaleString() + ' units' : ''}</div>
+              <div class="d2d-ts">${source.length} shown</div>
             </div>
-            <div class="rounded-2xl border bg-white shadow-sm d2d-tile">
+            <div class="rounded-2xl border bg-white shadow-sm d2d-tile d2d-tile-sm">
               <div class="d2d-tl">Behind plan</div>
               <div class="d2d-tv" style="color:${slips.length ? BRAND : DARK};">${slips.length}</div>
               <div class="d2d-ts">${slips.length ? 'worst ' + Math.max(...slips) + ' days' : 'all on plan'}</div>
+            </div>
+            <button type="button" data-tabgo="bookings"
+                    class="rounded-2xl border bg-white shadow-sm d2d-tile d2d-tile-sm d2d-lift"
+                    style="text-align:left;cursor:pointer;font-family:inherit;">
+              <div class="d2d-tl">Booking requested</div>
+              <div class="d2d-tv" style="color:${requested ? BLUE : DARK};">${requested}</div>
+              <div class="d2d-ts">${requested ? 'with the partner' : 'nothing out'}</div>
+            </button>
+            <button type="button" data-tabgo="bookings"
+                    class="rounded-2xl border bg-white shadow-sm d2d-tile d2d-tile-sm d2d-lift"
+                    style="text-align:left;cursor:pointer;font-family:inherit;">
+              <div class="d2d-tl">Pending approval</div>
+              <div class="d2d-tv" style="color:${pending ? YINK : DARK};">${pending}</div>
+              <div class="d2d-ts">${pending ? 'with the client' : 'all decided'}</div>
+            </button>
+          </div>
+
+          ${/* What is actually aboard this week. Cartons come off the booking, so they show
+                only where a booking stated them. */ ''}
+          <div class="rounded-2xl border bg-white shadow-sm" style="padding:11px 15px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+              <span>
+                <span class="d2d-tl">Units in transit</span>
+                <span class="d2d-num" style="display:block;font-size:19px;font-weight:700;color:${DARK};line-height:1.2;">
+                  ${unitsMoving ? unitsMoving.toLocaleString() : '—'}</span>
+              </span>
+              <span style="width:.5px;align-self:stretch;background:rgba(0,0,0,.08);"></span>
+              <span style="text-align:right;">
+                <span class="d2d-tl">Cartons in transit</span>
+                <span class="d2d-num" style="display:block;font-size:19px;font-weight:700;color:${DARK};line-height:1.2;">
+                  ${cartonsMoving ? cartonsMoving.toLocaleString() : '—'}</span>
+              </span>
             </div>
           </div>
 
@@ -702,20 +782,26 @@
                 <span style="font-size:12px;font-weight:600;color:${DARK};">Latest updates</span>
                 <span style="font-size:10px;color:${LIGHT};">newest first</span>
               </div>
-              ${updates.slice(0, 9).map((r, i2) => `
-                <button type="button" data-open="${esc(r.sh.id)}" class="d2d-rise"
-                        style="display:flex;gap:9px;width:100%;text-align:left;background:none;border:0;
-                               padding:7px 0;cursor:pointer;border-top:.5px solid rgba(0,0,0,.05);
-                               animation-delay:${(i2 * .04).toFixed(2)}s;">
-                  <span style="width:6px;height:6px;border-radius:50%;margin-top:5px;flex-shrink:0;
-                        background:${r.drift > 0 ? BRAND : (r.drift < 0 ? LIME : '#C9CED6')};"></span>
-                  <span style="flex:1;min-width:0;">
-                    <span style="display:block;font-size:11.5px;color:${DARK};line-height:1.3;">${esc(r.label)} &middot;
-                      <span class="d2d-num">${esc(r.sh.reference || 'not advised')}</span></span>
-                    <span style="display:block;font-size:10px;color:${r.meaning.ink};">${esc(r.meaning.text)}</span>
-                  </span>
-                  <span class="d2d-num" style="font-size:10px;color:${LIGHT};flex-shrink:0;">${esc(day(r.at))}</span>
-                </button>`).join('')}
+              <div class="d2d-ticker" id="d2d-ticker" style="max-height:290px;">
+                <div class="d2d-ticker-track" id="d2d-ticker-track">
+                  ${[0, 1].map(copy => updates.slice(0, 12).map((r, i2) => `
+                    <button type="button" data-open="${esc(r.sh.id)}"
+                            ${copy ? 'aria-hidden="true" tabindex="-1"' : ''}
+                            class="${copy ? '' : 'd2d-rise'}${_changed && _changed.has(r.sh.id) && !copy ? ' d2d-flash' : ''}"
+                            style="display:flex;gap:9px;width:100%;text-align:left;background:none;border:0;
+                                   padding:7px 0;cursor:pointer;border-top:.5px solid rgba(0,0,0,.05);
+                                   animation-delay:${(i2 * .04).toFixed(2)}s;">
+                      <span style="width:6px;height:6px;border-radius:50%;margin-top:5px;flex-shrink:0;
+                            background:${r.drift > 0 ? BRAND : (r.drift < 0 ? LIME : '#C9CED6')};"></span>
+                      <span style="flex:1;min-width:0;">
+                        <span style="display:block;font-size:11.5px;color:${DARK};line-height:1.3;">${esc(r.label)} &middot;
+                          <span class="d2d-num">${esc(r.sh.reference || 'not advised')}</span></span>
+                        <span style="display:block;font-size:10px;color:${r.meaning.ink};">${esc(r.meaning.text)}</span>
+                      </span>
+                      <span class="d2d-num" style="font-size:10px;color:${LIGHT};flex-shrink:0;">${esc(day(r.at))}</span>
+                    </button>`).join('')).join('')}
+                </div>
+              </div>
             </div>` : ''}
 
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -2833,6 +2919,23 @@
       if (_tab !== 'shipments') _tab = 'shipments';
       go('container', b.getAttribute('data-open'));
     });
+  }
+
+  let _seen = null;
+  const fingerprint = (sh) => [
+    sh.reference || '',
+    (sh.events || []).map(e => e.stage + '@' + (e.actual_at || '')).sort().join(','),
+    sh.status || '',
+  ].join('|');
+
+  function changedSince(list) {
+    const now = {};
+    for (const sh of list) now[sh.id] = fingerprint(sh);
+    if (_seen === null) { _seen = now; return new Set(); }   // the first load flashes nothing
+    const moved = new Set();
+    for (const id of Object.keys(now)) if (_seen[id] && _seen[id] !== now[id]) moved.add(id);
+    _seen = now;
+    return moved;
   }
 
   // Used by the container screen and by the map's cluster list.
