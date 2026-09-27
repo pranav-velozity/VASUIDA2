@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '45';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '46';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -182,7 +182,12 @@
       @keyframes d2d-nextpulse{0%{box-shadow:0 0 0 0 var(--pulse);opacity:1;}
         70%{box-shadow:0 0 0 7px rgba(0,0,0,0);opacity:.85;}100%{box-shadow:0 0 0 0 rgba(0,0,0,0);opacity:1;}}
       .d2d-next{animation:d2d-nextpulse 2.6s ease-out infinite;}
-      @media (prefers-reduced-motion:reduce){.d2d-next{animation:none;}}
+      /* Where it got to: a filled dot with a softer, slower halo, offset so the two pulses on
+         a row never beat together. */
+      @keyframes d2d-lastpulse{0%{box-shadow:0 0 0 0 var(--pulse);}
+        75%{box-shadow:0 0 0 9px rgba(0,0,0,0);}100%{box-shadow:0 0 0 0 rgba(0,0,0,0);}}
+      .d2d-last{animation:d2d-lastpulse 2.6s ease-out .9s infinite;}
+      @media (prefers-reduced-motion:reduce){.d2d-next,.d2d-last{animation:none;}}
 
       .d2d-mini{border:.5px solid rgba(0,0,0,.14);background:#fff;color:${DARK};border-radius:7px;
         padding:4px 9px;font-family:inherit;font-weight:600;font-size:10.5px;cursor:pointer;
@@ -665,10 +670,13 @@
           ${/* The stage just ahead pulses: it is the one waiting to be recorded. */ ''}
           ${LANE_STOPS.map((at, si) => {
             const done = parseFloat(at) <= pct;
+            const lastDone = done && !LANE_STOPS.some((a2, sj) => sj > si && parseFloat(a2) <= pct);
             const next = !done && LANE_STOPS.findIndex(a2 => parseFloat(a2) > pct) === si;
-            return `<span class="d2d-node${next ? ' d2d-next' : ''}" style="left:${at};
-                     border-color:${done ? look.ink : (next ? look.ink : '#DDE1E7')};
-                     ${next ? '--pulse:' + look.ink + ';' : ''}"></span>`;
+            const cls = lastDone ? ' d2d-last' : (next ? ' d2d-next' : '');
+            return `<span class="d2d-node${cls}" style="left:${at};
+                     border-color:${done || next ? look.ink : '#DDE1E7'};
+                     ${lastDone ? 'background:' + look.ink + ';' : ''}
+                     ${lastDone || next ? '--pulse:' + look.ink + ';' : ''}"></span>`;
           }).join('')}
           <span class="d2d-here ${moving ? 'd2d-breathe' : ''}" style="left:${pct}%;">
             <svg width="21" height="21" viewBox="0 0 24 24" aria-hidden="true"><path d="${m.air ? ICON_PLANE_SM : ICON_SHIP_SM}" fill="${look.ink}"/></svg>
