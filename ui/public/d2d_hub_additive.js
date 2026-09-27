@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '47';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '48';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -837,12 +837,21 @@
                             style="display:flex;gap:9px;width:100%;text-align:left;background:none;border:0;
                                    padding:7px 0;cursor:pointer;border-top:.5px solid rgba(0,0,0,.05);
                                    animation-delay:${(i2 * .04).toFixed(2)}s;">
-                      <span style="width:6px;height:6px;border-radius:50%;margin-top:5px;flex-shrink:0;
+                      <span style="width:6px;height:6px;border-radius:50%;margin-top:6px;flex-shrink:0;
                             background:${r.drift > 0 ? BRAND : (r.drift < 0 ? LIME : '#C9CED6')};"></span>
                       <span style="flex:1;min-width:0;">
-                        <span style="display:block;font-size:11.5px;color:${DARK};line-height:1.3;">${esc(r.label)} &middot;
-                          <span class="d2d-num">${esc(r.sh.reference || 'not advised')}</span></span>
-                        <span style="display:block;font-size:10px;color:${r.meaning.ink};">${esc(r.meaning.text)}</span>
+                        <span style="display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;">
+                          <span class="d2d-num" style="font-size:9px;font-weight:700;color:${MID};background:#F2F2F5;
+                                border-radius:4px;padding:1px 5px;">W${esc(String(isoWeek(r.sh.week_start) || '—'))}</span>
+                          <span style="font-size:11.5px;color:${DARK};line-height:1.3;">${esc(r.label)}</span>
+                          <span class="d2d-num" style="font-size:11px;color:${DARK};">${esc(r.sh.reference || 'not advised')}</span>
+                        </span>
+                        <span style="display:block;font-size:10px;color:${MID};margin-top:1px;">
+                          ${esc(r.sh.service || r.sh.origin || 'origin')}
+                          <span style="color:${LIGHT};">&rarr;</span>
+                          ${esc(destOf(r.sh).label)}
+                          ${r.sh.mode === 'air' ? '<span style="color:' + LIGHT + ';">&middot; air</span>' : ''}</span>
+                        <span style="display:block;font-size:10px;color:${r.meaning.ink};margin-top:1px;">${esc(r.meaning.text)}</span>
                       </span>
                       <span class="d2d-num" style="font-size:10px;color:${LIGHT};flex-shrink:0;">${esc(day(r.at))}</span>
                     </button>`).join('')).join('')}
