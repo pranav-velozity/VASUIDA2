@@ -30,7 +30,7 @@
   // ------------------------- PATCH (v51.1) -------------------------
   // Guardrails to keep other modules from breaking Flow.
   // NOTE: Scripts load order is exec -> receiving -> flow (defer). Some helpers are expected globally.
-  window.__FLOW_BUILD__ = "v63-lastmile-scheduled-table-fix" + new Date().toISOString();
+  window.__FLOW_BUILD__ = "v64-lastmile-booked-for" + new Date().toISOString();
 
   // Receiving module expects this helper; if missing it throws and can interrupt week load flows.
   if (typeof window.computeCartonsOutByPOFromState !== 'function') {
@@ -5003,6 +5003,7 @@ detail.innerHTML = [
           vessel,
           delivery_local: String((rcp && rcp.delivery_local) || '').trim(),
           scheduled_local: String((rcp && rcp.scheduled_local) || '').trim(),
+          scheduled_for: String((rcp && rcp.scheduled_for) || '').trim(),
           status: String((rcp && rcp.status) || '').trim(),
           pod_received: !!((rcp && rcp.pod_received) || false),
           note: String((rcp && rcp.last_mile_note) || ''),
@@ -5618,13 +5619,39 @@ detail.innerHTML = [
 
 
   
+  // An hour either side of the booked time is on time. Held here rather than inline so the
+  // number can change without hunting through the file.
+  const LM_BUFFER_MIN = 60;
+  const lmMins = (m) => (m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`);
+
   function lastMileEditor(ws, tz, r) {
     const scheduledAt = r.scheduled_local ? String(r.scheduled_local).replace('T',' ') : '';
+    const bookedFor = r.scheduled_for ? String(r.scheduled_for).replace('T',' ') : '';
     const deliveredAt = r.delivery_local ? String(r.delivery_local).replace('T',' ') : '';
     const note = String(r.note || '');
     const state = deliveredAt ? 'Delivered' : (scheduledAt ? 'Scheduled' : 'Open');
     const canSchedule = !scheduledAt && !deliveredAt;
     const canReceive = !!scheduledAt && !deliveredAt;
+
+    // Default the picker to tomorrow at 2pm: a sensible slot, and it stops anyone booking a
+    // delivery into the past by accident.
+    const defWhen = (() => {
+      if (r.scheduled_for) return String(r.scheduled_for).slice(0, 16);
+      const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(14, 0, 0, 0);
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    })();
+
+    // Delivered within an hour either side of the booked time counts as on time.
+    const onTime = (() => {
+      if (!bookedFor || !deliveredAt) return null;
+      const a = Date.parse(String(r.scheduled_for).replace(' ', 'T'));
+      const b = Date.parse(String(r.delivery_local).replace(' ', 'T'));
+      if (!isFinite(a) || !isFinite(b)) return null;
+      const mins = Math.round((b - a) / 60000);
+      if (Math.abs(mins) <= LM_BUFFER_MIN) return { ok: true, mins };
+      return { ok: false, mins };
+    })();
 
     return `
       <div class="mt-3 rounded-xl border p-3">
@@ -5638,12 +5665,15 @@ detail.innerHTML = [
 
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-3 text-sm">
           <div class="rounded-lg border p-2">
-            <div class="text-[11px] text-gray-500">Scheduled at</div>
-            <div class="font-medium">${scheduledAt ? escapeHtml(scheduledAt) : '<span class="text-gray-400">—</span>'}</div>
+            <div class="text-[11px] text-gray-500">Booked for</div>
+            <div class="font-medium">${bookedFor ? escapeHtml(bookedFor) : '<span class="text-gray-400">—</span>'}</div>
+            ${scheduledAt ? `<div class="text-[10px] text-gray-400 mt-0.5">entered ${escapeHtml(scheduledAt)}</div>` : ''}
           </div>
           <div class="rounded-lg border p-2">
             <div class="text-[11px] text-gray-500">Delivered at</div>
             <div class="font-medium">${deliveredAt ? escapeHtml(deliveredAt) : '<span class="text-gray-400">—</span>'}</div>
+            ${onTime ? `<div class="text-[10px] mt-0.5 ${onTime.ok ? 'text-emerald-700' : 'text-red-600'}">
+              ${onTime.ok ? 'on time' : (onTime.mins > 0 ? lmMins(onTime.mins) + ' late' : lmMins(-onTime.mins) + ' early')}</div>` : ''}
           </div>
           <div class="rounded-lg border p-2">
             <div class="text-[11px] text-gray-500">POD</div>
@@ -5660,11 +5690,14 @@ detail.innerHTML = [
           <div id="flow-lm-save-msg" class="text-xs text-gray-500"></div>
           <div class="flex items-center gap-2">
             ${canSchedule ? `
+              <label class="text-xs text-gray-500 flex items-center gap-1.5">Deliver at
+                <input id="flow-lm-when" type="datetime-local" value="${escapeAttr(defWhen)}"
+                  class="px-2 py-1 border rounded-lg text-sm"></label>
               <button data-lm-schedule="1"
                 data-ws="${escapeAttr(ws)}"
                 data-cont="${escapeAttr(r.key)}"
                 data-uid="${escapeAttr(r.uid)}"
-                class="px-3 py-1.5 rounded-lg text-sm border bg-sky-50 hover:bg-sky-100">Schedule (now)</button>
+                class="px-3 py-1.5 rounded-lg text-sm border bg-sky-50 hover:bg-sky-100">Schedule</button>
             ` : (canReceive ? `
               <button data-lm-deliver="1"
                 data-ws="${escapeAttr(ws)}"
@@ -5723,8 +5756,18 @@ detail.innerHTML = [
         const now = nowLocalDT();
         const note = String(detail.querySelector('#flow-lm-note')?.value || '');
 
+        // The booked slot comes from the picker; scheduled_local stays what it has always been,
+        // the stamp of when someone entered it. Two different facts.
+        const whenEl = detail.querySelector('#flow-lm-when');
+        const bookedFor = String((whenEl && whenEl.value) || '').trim();
+        if (!bookedFor) {
+          if (msg) { msg.textContent = 'Pick the delivery date and time first'; msg.className = 'text-xs text-red-600'; }
+          return;
+        }
+
         receipts[uid] = {
           ...(receipts[uid] || {}),
+          scheduled_for: bookedFor,
           scheduled_local: now,
           status: 'Scheduled',
           last_mile_note: note,
@@ -5732,7 +5775,7 @@ detail.innerHTML = [
         };
         saveLastMileReceipts(wsNow, receipts);
 
-        if (msg) { msg.textContent = 'Scheduled ✓'; msg.className = 'text-xs text-blue-700'; }
+        if (msg) { msg.textContent = 'Scheduled for ' + bookedFor.replace('T', ' ') + ' ✓'; msg.className = 'text-xs text-blue-700'; }
 
         UI.selection = { node: 'lastmile', sub: contKey };
         refresh();
