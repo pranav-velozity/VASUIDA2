@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '44';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '45';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -178,6 +178,16 @@
       .d2d-ticker-track{will-change:transform;}
       @media (prefers-reduced-motion:reduce){.d2d-flash{animation:none;}}
 
+      /* The next milestone breathes, so the eye lands on what is owed rather than what is done. */
+      @keyframes d2d-nextpulse{0%{box-shadow:0 0 0 0 var(--pulse);opacity:1;}
+        70%{box-shadow:0 0 0 7px rgba(0,0,0,0);opacity:.85;}100%{box-shadow:0 0 0 0 rgba(0,0,0,0);opacity:1;}}
+      .d2d-next{animation:d2d-nextpulse 2.6s ease-out infinite;}
+      @media (prefers-reduced-motion:reduce){.d2d-next{animation:none;}}
+
+      .d2d-mini{border:.5px solid rgba(0,0,0,.14);background:#fff;color:${DARK};border-radius:7px;
+        padding:4px 9px;font-family:inherit;font-weight:600;font-size:10.5px;cursor:pointer;
+        transition:background .18s ease,border-color .18s ease;}
+      .d2d-mini:hover{background:#FAFBFC;border-color:rgba(0,0,0,.3);}
       .d2d-tile-sm{padding:10px 13px !important;}
       .d2d-tile-sm .d2d-tv{font-size:21px !important;line-height:1.15 !important;}
       .d2d-tile-sm .d2d-ts{font-size:10px !important;}
@@ -360,6 +370,7 @@
   // The rail keeps its tiles and updates whichever is showing.
   let _main = 'flight';
   let _changed = null;                 // ids whose milestones moved since the last load
+  const PANEL_H = 620;                 // both columns end on the same line
   const go = (view, id) => { _view = view; _openId = id || null; paint(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
 
   async function load() {
@@ -394,9 +405,13 @@
     allShipments = (await soft('/d2d/shipments', { shipments })).shipments || shipments;
     const po = _week ? await soft('/d2d/po?week=' + encodeURIComponent(_week), { orders: [] }) : { orders: [] };
     const rq = _week ? await soft('/d2d/requests?week=' + encodeURIComponent(_week), { requests: [] }) : { requests: [] };
+    // Across every week: a request raised for a future week is still a request that is out.
+    const allRq = await soft('/d2d/requests', { requests: rq.requests || [] });
+    const allBk = await soft('/d2d/bookings', { bookings: bookings });
 
     _internal = pricingVisible;
-    _data = { weeks, shipments, bookings, allShipments, orders: po.orders || [], requests: rq.requests || [] };
+    _data = { weeks, shipments, bookings, allShipments, orders: po.orders || [], requests: rq.requests || [],
+              allRequests: allRq.requests || [], allBookings: allBk.bookings || [] };
     paint();
   }
 
@@ -641,13 +656,20 @@
 
         <span class="d2d-lane">
           ${/* Named, not implied: the destination is whatever was booked. */ ''}
-          <span class="d2d-ends" style="left:15%;">
+          <span class="d2d-ends" style="left:0;">
             <span class="tag">From</span> ${esc(sh.service || sh.origin || 'origin')}</span>
-          <span class="d2d-ends" style="right:15%;">
+          <span class="d2d-ends" style="right:0;">
             <span class="tag">To</span> ${esc(destOf(sh).label)}</span>
           <span class="d2d-rail"></span>
           <span class="d2d-done ${moving ? 'd2d-travel' : ''}" style="width:${pct}%;background:${look.ink};"></span>
-          ${LANE_STOPS.map(at => `<span class="d2d-node" style="left:${at};border-color:${parseFloat(at) <= pct ? look.ink : '#DDE1E7'};"></span>`).join('')}
+          ${/* The stage just ahead pulses: it is the one waiting to be recorded. */ ''}
+          ${LANE_STOPS.map((at, si) => {
+            const done = parseFloat(at) <= pct;
+            const next = !done && LANE_STOPS.findIndex(a2 => parseFloat(a2) > pct) === si;
+            return `<span class="d2d-node${next ? ' d2d-next' : ''}" style="left:${at};
+                     border-color:${done ? look.ink : (next ? look.ink : '#DDE1E7')};
+                     ${next ? '--pulse:' + look.ink + ';' : ''}"></span>`;
+          }).join('')}
           <span class="d2d-here ${moving ? 'd2d-breathe' : ''}" style="left:${pct}%;">
             <svg width="21" height="21" viewBox="0 0 24 24" aria-hidden="true"><path d="${m.air ? ICON_PLANE_SM : ICON_SHIP_SM}" fill="${look.ink}"/></svg>
           </span>
@@ -668,8 +690,13 @@
 
     // Requests still out with the partner, and options released but not yet decided. These are
     // the two states before a container exists, which the rail never showed.
-    const requested = (d.requests || []).filter(r => ['sent', 'repricing'].includes(r.state)).length;
-    const pending = (d.bookings || []).filter(b => b.status === 'released').length;
+    // Anything raised and not yet settled counts as requested — including a draft that has not
+    // been sent, which is still work someone started.
+    const OPEN_REQ = ['draft', 'sent', 'costed', 'repricing'];
+    const reqPool = (d.allRequests && d.allRequests.length ? d.allRequests : d.requests) || [];
+    const bkPool = (d.allBookings && d.allBookings.length ? d.allBookings : d.bookings) || [];
+    const requested = reqPool.filter(r => OPEN_REQ.includes(r.state)).length;
+    const pending = bkPool.filter(b => b.status === 'released').length;
 
     // Only what is moving — a delivered container is not in transit.
     const moving2 = source.filter(x => { const t = markT(x); return t > 0 && t < 1; });
@@ -701,31 +728,40 @@
         <div class="lg:col-span-2" style="min-width:0;display:flex;flex-direction:column;">
           ${/* A minimum height so the page keeps its shape on a quiet week. Four rows and a
                 short rail used to leave a hole down the middle of the screen. */ ''}
-          <div class="rounded-2xl border bg-white shadow-sm" style="min-height:560px;display:flex;
+          ${/* A fixed height for both columns so the page has one bottom edge instead of two
+                ragged ones, and the list scrolls inside rather than stretching the page. */ ''}
+          <div class="rounded-2xl border bg-white shadow-sm" style="height:${PANEL_H}px;display:flex;
                flex-direction:column;overflow:hidden;">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;
-                 padding:12px 16px;flex-wrap:wrap;">
+                 padding:12px 16px;flex-wrap:wrap;flex-shrink:0;">
               <div style="display:flex;align-items:center;gap:8px;">
                 ${[['flight', 'In flight'], ['map', 'Live map']].map(([k2, l]) =>
                   `<button class="d2d-seg ${_main === k2 ? 'on' : ''}" data-main="${k2}">${l}</button>`).join('')}
               </div>
-              <span style="font-size:10.5px;color:${LIGHT};">
-                ${_main === 'flight' ? 'soonest arrival first' : moving + ' moving · ' + source.length + ' shown'}</span>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <span style="font-size:10.5px;color:${LIGHT};">
+                  ${_main === 'flight' ? 'soonest arrival first' : moving + ' moving · ' + source.length + ' shown'}</span>
+                ${/* The two ways out of this screen, beside the toggle where they are seen. */ ''}
+                <button class="d2d-mini" data-go="week">Week summary &rarr;</button>
+                <button class="d2d-mini" data-tabgo="list">All shipments &rarr;</button>
+              </div>
             </div>
 
             ${_main === 'flight' ? `
-              <div class="d2d-frow d2d-fhead">
+              <div class="d2d-frow d2d-fhead" style="flex-shrink:0;">
                 <span class="d2d-tl">Arriving</span><span class="d2d-tl">Shipment</span>
                 <span class="d2d-tl">Origin &rarr; Sydney</span>
                 <span class="d2d-tl" style="text-align:right;">Units</span><span class="d2d-tl">Outlook</span>
               </div>
-              ${marks.length ? marks.map(flightRow).join('')
-                : `<div class="d2d-empty">Nothing in flight.</div>`}`
+              <div style="flex:1;min-height:0;overflow-y:auto;">
+                ${marks.length ? marks.map(flightRow).join('')
+                  : `<div class="d2d-empty">Nothing in flight.</div>`}
+              </div>`
             : `<div style="flex:1;display:flex;flex-direction:column;min-height:0;">${paintMap(d, { inPanel: true })}</div>`}
           </div>
         </div>
 
-        <div style="display:flex;flex-direction:column;gap:12px;min-width:0;">
+        <div style="display:flex;flex-direction:column;gap:12px;min-width:0;height:${PANEL_H}px;">
           ${/* Four counters, shorter than before so two rows fit where one used to. The two new
                 ones cover the half of the process that happens before a container exists. */ ''}
           <div class="grid grid-cols-2 gap-3">
@@ -744,7 +780,7 @@
                     style="text-align:left;cursor:pointer;font-family:inherit;">
               <div class="d2d-tl">Booking requested</div>
               <div class="d2d-tv" style="color:${requested ? BLUE : DARK};">${requested}</div>
-              <div class="d2d-ts">${requested ? 'with the partner' : 'nothing out'}</div>
+              <div class="d2d-ts">${requested ? 'across all weeks' : 'nothing out'}</div>
             </button>
             <button type="button" data-tabgo="bookings"
                     class="rounded-2xl border bg-white shadow-sm d2d-tile d2d-tile-sm d2d-lift"
@@ -781,17 +817,17 @@
           </div>
 
           ${updates.length ? `
-            <div class="rounded-2xl border bg-white shadow-sm" style="padding:13px 15px;flex:1;min-height:0;">
+            <div class="rounded-2xl border bg-white shadow-sm" style="padding:13px 15px;flex:1;min-height:0;
+                 display:flex;flex-direction:column;overflow:hidden;">
               <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:2px;">
                 <span style="font-size:12px;font-weight:600;color:${DARK};">Latest updates</span>
                 <span style="font-size:10px;color:${LIGHT};">newest first</span>
               </div>
-              <div class="d2d-ticker" id="d2d-ticker" style="max-height:290px;">
+              <div class="d2d-ticker" id="d2d-ticker" style="flex:1;min-height:0;">
                 <div class="d2d-ticker-track" id="d2d-ticker-track">
-                  ${[0, 1].map(copy => updates.slice(0, 12).map((r, i2) => `
+                  ${[0].map(copy => updates.slice(0, 12).map((r, i2) => `
                     <button type="button" data-open="${esc(r.sh.id)}"
-                            ${copy ? 'aria-hidden="true" tabindex="-1"' : ''}
-                            class="${copy ? '' : 'd2d-rise'}${_changed && _changed.has(r.sh.id) && !copy ? ' d2d-flash' : ''}"
+                            class="d2d-rise${_changed && _changed.has(r.sh.id) ? ' d2d-flash' : ''}"
                             style="display:flex;gap:9px;width:100%;text-align:left;background:none;border:0;
                                    padding:7px 0;cursor:pointer;border-top:.5px solid rgba(0,0,0,.05);
                                    animation-delay:${(i2 * .04).toFixed(2)}s;">
@@ -808,10 +844,7 @@
               </div>
             </div>` : ''}
 
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <button class="d2d-btn" data-go="week" style="flex:1;min-width:0;">Week summary &rarr;</button>
-            <button class="d2d-btn" data-tabgo="list" style="flex:1;min-width:0;">All shipments &rarr;</button>
-          </div>
+
         </div>
       </div>
 
@@ -2950,9 +2983,29 @@
     if (_tickerStop) { _tickerStop(); _tickerStop = null; }
     const track = el('d2d-ticker-track'), box = el('d2d-ticker');
     if (!track || !box) return;
-    const half = track.scrollHeight / 2;
-    if (!(half > box.clientHeight + 8)) { track.style.transform = 'none'; return; }
     if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    // One copy of the list is what we wrap on. Enough copies are cloned to cover the window
+    // twice over, so there is never a gap behind the one scrolling away. Six updates in a
+    // 400px panel needs three copies; the old code demanded one copy be taller than the
+    // window, which is why it never moved.
+    const unit = track.scrollHeight;
+    if (!unit) return;
+    const want = box.clientHeight * 2 + unit;
+    track.querySelectorAll('[data-clone]').forEach(n => n.remove());
+    const original = [...track.children];
+    let guard = 0;
+    while (track.scrollHeight < want && guard++ < 12) {
+      for (const node of original) {
+        const copy = node.cloneNode(true);
+        copy.setAttribute('data-clone', '1');
+        copy.setAttribute('aria-hidden', 'true');
+        copy.setAttribute('tabindex', '-1');
+        track.appendChild(copy);
+      }
+    }
+    if (track.scrollHeight <= box.clientHeight + 8) { track.style.transform = 'none'; return; }
+    const half = unit;
 
     const SPEED = 14;                  // pixels per second — slow enough to read while it moves
     let y = 0, last = null, raf = 0, paused = false;
