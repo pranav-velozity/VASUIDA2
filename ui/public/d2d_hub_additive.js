@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '43';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '44';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -140,19 +140,19 @@
       /* One in-flight row: arrival, identity, its own lane, units, outlook. */
       .d2d-frow{display:grid;grid-template-columns:88px 148px minmax(0,1fr) 86px 92px;gap:0 14px;align-items:center;
         width:100%;text-align:left;background:none;border:0;border-top:.5px solid rgba(0,0,0,.05);
-        padding:9px 16px;cursor:pointer;font-family:inherit;transition:background .18s ease;}
+        padding:13px 16px;cursor:pointer;font-family:inherit;transition:background .18s ease;}
       .d2d-frow:hover{background:#FAFBFC;}
       .d2d-fhead{cursor:default;border-top:0;padding-top:6px;padding-bottom:2px;}
       .d2d-fhead:hover{background:none;}
-      .d2d-lane{position:relative;height:30px;}
-      .d2d-rail{position:absolute;left:0;right:0;top:14px;height:3px;background:#EDEFF3;border-radius:2px;}
-      .d2d-done{position:absolute;left:0;top:14px;height:3px;border-radius:2px;}
-      .d2d-node{position:absolute;top:10px;width:10px;height:10px;border-radius:50%;background:#fff;
+      .d2d-lane{position:relative;height:46px;overflow:visible;}
+      .d2d-rail{position:absolute;left:0;right:0;top:30px;height:3px;background:#EDEFF3;border-radius:2px;}
+      .d2d-done{position:absolute;left:0;top:30px;height:3px;border-radius:2px;}
+      .d2d-node{position:absolute;top:26px;width:10px;height:10px;border-radius:50%;background:#fff;
         border:2px solid #DDE1E7;transform:translateX(-50%);box-sizing:border-box;}
-      .d2d-here{position:absolute;top:-3px;transform:translateX(-50%);width:30px;height:30px;border-radius:50%;
+      .d2d-here{position:absolute;top:17px;transform:translateX(-50%);width:30px;height:30px;border-radius:50%;
         background:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 2px #fff;}
-      .d2d-ends{position:absolute;top:-4px;font-size:10px;color:${DARK};font-weight:600;
-        white-space:nowrap;background:rgba(255,255,255,.75);padding:0 3px;border-radius:3px;}
+      .d2d-ends{position:absolute;top:0;font-size:10.5px;color:${DARK};font-weight:600;
+        white-space:nowrap;line-height:1.2;}
       .d2d-ends .tag{font-size:8px;font-weight:700;color:${MID};text-transform:uppercase;letter-spacing:.06em;}
 
       /* Slow on purpose: a sheen along the leg being travelled and one breath on the marker.
@@ -175,11 +175,8 @@
 
       /* Latest updates drift upward so the panel reads as live. Pauses on hover. */
       .d2d-ticker{position:relative;overflow:hidden;}
-      @keyframes d2d-roll{from{transform:translateY(0);}to{transform:translateY(var(--roll));}}
-      .d2d-ticker-track.rolling{animation:d2d-roll var(--dur) linear infinite;}
-      .d2d-ticker:hover .d2d-ticker-track.rolling{animation-play-state:paused;}
-      @media (prefers-reduced-motion:reduce){.d2d-flash{animation:none;}
-        .d2d-ticker-track.rolling{animation:none;}}
+      .d2d-ticker-track{will-change:transform;}
+      @media (prefers-reduced-motion:reduce){.d2d-flash{animation:none;}}
 
       .d2d-tile-sm{padding:10px 13px !important;}
       .d2d-tile-sm .d2d-tv{font-size:21px !important;line-height:1.15 !important;}
@@ -608,19 +605,7 @@
       load();
     });
     wireActions(body);
-    // The roll is only started when the list is genuinely taller than its window — otherwise
-    // a short list would drift away and leave a blank panel.
-    setTimeout(() => {
-      const track = el('d2d-ticker-track'), box = el('d2d-ticker');
-      if (!track || !box) return;
-      const half = track.scrollHeight / 2;              // the list is duplicated for a seamless loop
-      track.classList.remove('rolling');
-      if (half > box.clientHeight + 8) {
-        track.style.setProperty('--roll', (-half).toFixed(1) + 'px');
-        track.style.setProperty('--dur', Math.max(18, half / 14).toFixed(1) + 's');
-        track.classList.add('rolling');
-      }
-    }, 60);
+    setTimeout(startTicker, 80);
 
     // The map needs the panel to have a size before it can be projected.
     setTimeout(() => { mountMaps(d).catch(e => console.warn('[d2d-hub] map mount', e)); }, 30);
@@ -693,6 +678,18 @@
     const cartonsMoving = moving2.reduce((n, x) =>
       n + (Number(x.cargo && x.cargo.cartons) || 0), 0);
 
+    // Collected but not yet delivered — the count of things actually carrying cargo right now,
+    // split by how they are travelling.
+    const underway = source.filter(sh => {
+      const ev = evMap(sh);
+      return !!(ev.pickup && ev.pickup.actual_at) && !(ev.delivered && ev.delivered.actual_at);
+    });
+    const vesselsMoving = {
+      sea: underway.filter(x => x.mode !== 'air').length,
+      air: underway.filter(x => x.mode === 'air').length,
+      total: underway.length,
+    };
+
     // Soonest arrival first: the order someone actually reads a fleet in.
     const marks = shipmentPositions(source)
       .sort((a, b) => String(a.sh.plan_arrived || '').localeCompare(String(b.sh.plan_arrived || '')));
@@ -764,14 +761,21 @@
             <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
               <span>
                 <span class="d2d-tl">Units in transit</span>
-                <span class="d2d-num" style="display:block;font-size:19px;font-weight:700;color:${DARK};line-height:1.2;">
+                <span class="d2d-num" style="display:block;font-size:18px;font-weight:700;color:${DARK};line-height:1.2;">
                   ${unitsMoving ? unitsMoving.toLocaleString() : '—'}</span>
               </span>
               <span style="width:.5px;align-self:stretch;background:rgba(0,0,0,.08);"></span>
-              <span style="text-align:right;">
+              <span style="text-align:center;">
                 <span class="d2d-tl">Cartons in transit</span>
-                <span class="d2d-num" style="display:block;font-size:19px;font-weight:700;color:${DARK};line-height:1.2;">
+                <span class="d2d-num" style="display:block;font-size:18px;font-weight:700;color:${DARK};line-height:1.2;">
                   ${cartonsMoving ? cartonsMoving.toLocaleString() : '—'}</span>
+              </span>
+              <span style="width:.5px;align-self:stretch;background:rgba(0,0,0,.08);"></span>
+              <span style="text-align:right;">
+                <span class="d2d-tl">Vessels in transit</span>
+                <span class="d2d-num" style="display:block;font-size:18px;font-weight:700;color:${DARK};line-height:1.2;">
+                  ${vesselsMoving.total || '—'}</span>
+                <span class="d2d-ts" style="display:block;">${vesselsMoving.sea} sea &middot; ${vesselsMoving.air} air</span>
               </span>
             </div>
           </div>
@@ -2936,6 +2940,48 @@
     for (const id of Object.keys(now)) if (_seen[id] && _seen[id] !== now[id]) moved.add(id);
     _seen = now;
     return moved;
+  }
+
+  // The updates list drifts upward at a readable pace, wrapping at the halfway point — the
+  // list is rendered twice, so the wrap is invisible. Hovering holds it still; leaving the tab
+  // stops the loop rather than letting it run against a hidden page.
+  let _tickerStop = null;
+  function startTicker() {
+    if (_tickerStop) { _tickerStop(); _tickerStop = null; }
+    const track = el('d2d-ticker-track'), box = el('d2d-ticker');
+    if (!track || !box) return;
+    const half = track.scrollHeight / 2;
+    if (!(half > box.clientHeight + 8)) { track.style.transform = 'none'; return; }
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    const SPEED = 14;                  // pixels per second — slow enough to read while it moves
+    let y = 0, last = null, raf = 0, paused = false;
+    const step = (ts) => {
+      if (last == null) last = ts;
+      const dt = (ts - last) / 1000; last = ts;
+      if (!paused && !document.hidden) {
+        y -= SPEED * dt;
+        if (-y >= half) y += half;     // wrap onto the duplicate copy
+        track.style.transform = `translateY(${y.toFixed(1)}px)`;
+      }
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+
+    const hold = () => { paused = true; };
+    const release = () => { paused = false; };
+    box.addEventListener('mouseenter', hold);
+    box.addEventListener('mouseleave', release);
+    box.addEventListener('focusin', hold);
+    box.addEventListener('focusout', release);
+
+    _tickerStop = () => {
+      cancelAnimationFrame(raf);
+      box.removeEventListener('mouseenter', hold);
+      box.removeEventListener('mouseleave', release);
+      box.removeEventListener('focusin', hold);
+      box.removeEventListener('focusout', release);
+    };
   }
 
   // Used by the container screen and by the map's cluster list.
