@@ -164,6 +164,7 @@ module.exports = function mountD2D(deps) {
       cbm            REAL,
       gross_weight_kg REAL,
       notes          TEXT,
+      transit_days_requested INTEGER,                 -- port to port asked for; drives the rate
       state          TEXT NOT NULL DEFAULT 'draft',   -- draft|sent|costed|priced|released|approved|declined|cancelled
       sent_at        TEXT,
       created_at     TEXT NOT NULL DEFAULT (datetime('now')),
@@ -223,6 +224,14 @@ module.exports = function mountD2D(deps) {
       console.warn('[d2d] added d2d_booking.request_id');
     }
   } catch (e) { console.error('[d2d] could not add request_id', e); }
+
+  try {
+    const cols = db.prepare(`PRAGMA table_info(d2d_request)`).all().map(c => c.name);
+    if (!cols.includes('transit_days_requested')) {
+      db.exec(`ALTER TABLE d2d_request ADD COLUMN transit_days_requested INTEGER`);
+      console.warn('[d2d] added d2d_request.transit_days_requested');
+    }
+  } catch (e) { console.error('[d2d] could not add transit_days_requested', e); }
 
   // ── The scoped data layer ──
   // Nothing in this module talks to db directly. Queries must filter on client_id, and the
@@ -351,7 +360,8 @@ module.exports = function mountD2D(deps) {
       const bp = {}; bIds.forEach((id, i) => { bp['b' + i] = id; });
       const reqs = bIds.length
         ? req.d2d.all(`SELECT b.id AS booking_id, r.pack_type, r.pallets, r.cartons, r.units AS req_units,
-                              r.cbm AS req_cbm, r.gross_weight_kg, r.origin, r.destination
+                              r.cbm AS req_cbm, r.gross_weight_kg, r.origin, r.destination,
+                              r.transit_days_requested
                        FROM d2d_booking b JOIN d2d_request r ON r.id = b.request_id AND r.client_id = b.client_id
                        WHERE b.client_id = @client AND b.id IN (${bIds.map((_, i) => '@b' + i).join(',')})`, bp)
         : [];
@@ -375,6 +385,7 @@ module.exports = function mountD2D(deps) {
           destination: r.destination || c.destination || null,
           cargo: c.pack_type || c.pallets || c.cartons || c.req_units || c.req_cbm ? {
             pack_type: c.pack_type || null,
+        transit_days_requested: c.transit_days_requested || null,
             pallets: share(c.pallets), cartons: share(c.cartons),
             units: share(c.req_units), cbm: share(c.req_cbm),
             gross_weight_kg: share(c.gross_weight_kg),
@@ -391,7 +402,8 @@ module.exports = function mountD2D(deps) {
       const internal = isInternal(req);
       // The lane comes off the request the option was quoted against, so a card can say which
       // movement it is pricing rather than just naming the carrier.
-      const LANE = `, r.origin AS origin, r.destination AS destination, r.ref AS request_ref`;
+      const LANE = `, r.origin AS origin, r.destination AS destination, r.ref AS request_ref,
+                     r.transit_days_requested AS transit_days_requested`;
       const JOIN = ` LEFT JOIN d2d_request r ON r.id = b.request_id AND r.client_id = b.client_id`;
       const rows = ws
         ? req.d2d.all(`SELECT b.*${LANE} FROM d2d_booking b${JOIN}
@@ -889,6 +901,7 @@ module.exports = function mountD2D(deps) {
       const vals = {
         pallets: num(b.pallets, true), cartons: num(b.cartons, true), units: num(b.units, true),
         cbm: num(b.cbm), gross_weight_kg: num(b.gross_weight_kg),
+        transit_days_requested: num(b.transit_days_requested, true),
       };
       for (const [k, v] of Object.entries(vals)) {
         if (v === undefined) return res.status(400).json({ error: 'invalid', field: k, message: k + ' must be a number of zero or more.' });
@@ -900,6 +913,16 @@ module.exports = function mountD2D(deps) {
       }
       if (pack === 'pallets' && !vals.pallets) {
         return res.status(400).json({ error: 'contradiction', message: 'Palletised cargo needs a pallet count.' });
+      }
+      // Asia to Australia is a fortnight at best by sea and a day or two by air. A number
+      // outside that is a typo, and the partner would only come back to ask.
+      const tt = vals.transit_days_requested;
+      if (tt != null) {
+        const floor = mode === 'air' ? 1 : 10;
+        if (tt < floor || tt > 90) {
+          return res.status(400).json({ error: 'invalid', field: 'transit_days_requested',
+            message: `A ${mode} transit of ${tt} days is outside what this lane runs (${floor}-90).` });
+        }
       }
 
       const seq = (req.d2d.get(`SELECT COUNT(*) n FROM d2d_request WHERE client_id = @client AND week_start = @ws`, { ws: week }) || {}).n || 0;
