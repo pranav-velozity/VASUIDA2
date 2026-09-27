@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '49';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '51';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -144,7 +144,9 @@
       .d2d-frow:hover{background:#FAFBFC;}
       .d2d-fhead{cursor:default;border-top:0;padding-top:6px;padding-bottom:2px;}
       .d2d-fhead:hover{background:none;}
-      .d2d-lane{position:relative;height:46px;overflow:visible;}
+      .d2d-lane{position:relative;height:62px;overflow:visible;}
+      .d2d-stagename{position:absolute;top:42px;transform:translateX(-50%);font-size:8.5px;
+        white-space:nowrap;letter-spacing:.01em;}
       .d2d-rail{position:absolute;left:0;right:0;top:30px;height:3px;background:#EDEFF3;border-radius:2px;}
       .d2d-done{position:absolute;left:0;top:30px;height:3px;border-radius:2px;}
       .d2d-node{position:absolute;top:26px;width:10px;height:10px;border-radius:50%;background:#fff;
@@ -633,6 +635,8 @@
   // its real position. Two containers on the same sailing get separate rails, so they cannot
   // collide the way map markers do.
   const LANE_STOPS = ['0%', '12%', '22%', '78%', '88%', '100%'];
+  // Short enough to sit under a dot without colliding with its neighbour.
+  const STAGE_SHORT = ['Pickup', 'Cleared', 'Departed', 'Arrived', 'Customs', 'Delivered'];
   const ICON_SHIP_SM = 'M2 14 L22 14 L19.5 19 L4.5 19 Z M6 9 H10 V14 H6 Z M11 6 H15 V14 H11 Z M17 8 H19 V14 H17 Z';
   const ICON_PLANE_SM = 'M12 2 L13.8 8 L22 12.5 L22 14.6 L13.8 12.6 L13.8 18 L16.4 20 L16.4 21.4 L12 20.2 L7.6 21.4 L7.6 20 L10.2 18 L10.2 12.6 L2 14.6 L2 12.5 L10.2 8 Z';
 
@@ -665,6 +669,17 @@
             <span class="tag">To</span> ${esc(destOf(sh).label)}</span>
           <span class="d2d-rail"></span>
           <span class="d2d-done ${moving ? 'd2d-travel' : ''}" style="width:${pct}%;background:${look.ink};"></span>
+          ${/* Named, so a dot on a rail means something without hovering it. */ ''}
+          ${LANE_STOPS.map((at, si) => {
+            const done = parseFloat(at) <= pct;
+            const nx = !done && LANE_STOPS.findIndex(a2 => parseFloat(a2) > pct) === si;
+            const edge = si === 0 ? 'translateX(0)'
+                       : si === LANE_STOPS.length - 1 ? 'translateX(-100%)'
+                       : 'translateX(-50%)';
+            return `<span class="d2d-stagename" style="left:${at};transform:${edge};
+                     color:${done ? MID : (nx ? look.ink : LIGHT)};
+                     font-weight:${nx ? 600 : 500};">${esc(STAGE_SHORT[si])}</span>`;
+          }).join('')}
           ${/* The stage just ahead pulses: it is the one waiting to be recorded. */ ''}
           ${LANE_STOPS.map((at, si) => {
             const done = parseFloat(at) <= pct;
@@ -2424,13 +2439,26 @@
   function laneLine(b) {
     const from = b.origin || b.service || (b.request && b.request.origin);
     const to = b.destination || (b.request && b.request.destination);
-    if (!from && !to) return '';
+    const asked = Number(b.transit_days_requested) || null;
+    const quoted = Number(b.transit_days) || null;
+    const tt = (asked || quoted) ? `
+      <span style="font-size:10.5px;color:${MID};margin-left:8px;">
+        <span style="font-size:8.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">TT</span>
+        ${quoted ? `<b class="d2d-num" style="color:${DARK};">${quoted}d</b>` : '<span style="color:' + LIGHT + ';">not quoted</span>'}
+        ${asked && quoted && quoted > asked
+          ? `<span style="color:${BRAND};">· ${quoted - asked}d slower than the ${asked}d asked for</span>`
+          : asked && quoted && quoted < asked
+            ? `<span style="color:${LINK};">· ${asked - quoted}d faster than asked</span>`
+            : asked ? `<span style="color:${LIGHT};">· as asked (${asked}d)</span>` : ''}
+      </span>` : '';
+    if (!from && !to) return tt ? `<div style="margin-top:3px;">${tt}</div>` : '';
     return `<div style="font-size:10.5px;color:${MID};margin-top:3px;">
       <span style="font-size:8.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">From</span>
       <b style="color:${from ? DARK : LIGHT};font-weight:600;">${esc(from || 'not stated')}</b>
       <span style="color:${LIGHT};">&rarr;</span>
       <span style="font-size:8.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">To</span>
       <b style="color:${to ? DARK : LIGHT};font-weight:600;">${esc(to || 'not stated')}</b>
+      ${tt}
     </div>`;
   }
 
@@ -2636,6 +2664,12 @@
               <label style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Gross kg
                 <input class="d2d-in2 d2d-num" id="d2d-nbkg" type="number" min="0" step="0.1" placeholder="8400"></label>
             </div>
+            <label style="display:block;font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;margin-top:10px;">
+              Transit time requested &mdash; port to port, days
+              <input class="d2d-in2 d2d-num" id="d2d-nbtt" type="number" min="1" step="1" placeholder="26"></label>
+            <div style="font-size:10.5px;color:${MID};margin-top:4px;" id="d2d-nbttnote">
+              What the partner quotes against. Door to door adds the legs either side.</div>
+
             <label style="display:block;font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;margin-top:10px;">Notes for the partner
               <input class="d2d-in2" id="d2d-nbnotes" placeholder="Two suppliers, one collection"></label>
           </div>
@@ -2738,6 +2772,7 @@
           pack_type: el('d2d-nbpack').value || null,
           pallets: numOr('d2d-nbpallets'), cartons: numOr('d2d-nbcartons'), units: numOr('d2d-nbunits'),
           cbm: numOr('d2d-nbcbm'), gross_weight_kg: numOr('d2d-nbkg'),
+          transit_days_requested: numOr('d2d-nbtt'),
           notes: el('d2d-nbnotes').value.trim() || null,
         }) });
         await api('/d2d/bookings', { method: 'POST', body: JSON.stringify({ week_start: week, request_id: rq.id, options }) });
@@ -2821,14 +2856,19 @@
     ['delivered', 'Delivered', 'days after arrival'],
   ];
 
+  // A representative port-to-port for the worked example. The real figure comes off each
+  // booking, so this is labelled as an example rather than presented as a rule.
+  const TT_EXAMPLE = { sea: 26, air: 3 };
+
   function paintBaselines() {
     return `
       <div style="max-width:880px;">
         <div style="font-size:13px;font-weight:600;color:${DARK};">How a plan is built</div>
         <div style="font-size:11.5px;color:${MID};margin:3px 0 14px;line-height:1.5;">
-          Pickup is the cargo-ready date. Arrival is departure plus the transit time quoted on the option that was approved.
-          Everything else comes from the rules below.
-          <b style="color:${DARK};">Changing them affects bookings approved from now on — plans already frozen never move.</b>
+          Pickup is the cargo-ready date. Everything on land comes from the rules below.
+          <b style="color:${DARK};">Port to port is not a rule</b> — it is the transit time asked for on the
+          booking and quoted back by the partner, which is what drives the rate.
+          <b style="color:${DARK};">Changing these affects bookings approved from now on — plans already frozen never move.</b>
         </div>
         <div id="d2d-bl">${`<div class="d2d-empty">Loading&hellip;</div>`}</div>
       </div>`;
@@ -2857,6 +2897,28 @@
               <span style="display:block;font-size:10px;color:${MID};margin-top:3px;">${hint}</span>
             </div>`).join('')}
         </div>
+        ${/* The whole journey, so the rules can be read against what they produce. */ ''}
+        <div style="margin-top:14px;padding-top:13px;border-top:.5px solid rgba(0,0,0,.07);">
+          <div style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">
+            Door to door, for a ${esc(b.mode)} booking</div>
+          <div style="display:flex;align-items:stretch;gap:0;border:.5px solid rgba(0,0,0,.08);border-radius:9px;overflow:hidden;">
+            ${[['Ready to departure', b.departed, 'from the rules', DARK],
+               ['Port to port', TT_EXAMPLE[b.mode], 'asked for on the booking', BLUE],
+               ['Arrival to delivery', b.delivered, 'from the rules', DARK]].map(([l, v, note, ink], i2) => `
+              <span style="flex:1;padding:9px 12px;${i2 ? 'border-left:.5px solid rgba(0,0,0,.07);' : ''}">
+                <span style="display:block;font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">${l}</span>
+                <span class="d2d-num" style="display:block;font-size:16px;font-weight:700;color:${ink};line-height:1.2;">${v} days</span>
+                <span style="display:block;font-size:9.5px;color:${MID};">${note}</span>
+              </span>`).join('')}
+            <span style="flex:1;padding:9px 12px;border-left:.5px solid rgba(0,0,0,.07);background:#FBFBFC;">
+              <span style="display:block;font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;">Door to door</span>
+              <span class="d2d-num" style="display:block;font-size:16px;font-weight:700;color:${DARK};line-height:1.2;">
+                ${Number(b.departed) + TT_EXAMPLE[b.mode] + Number(b.delivered)} days</span>
+              <span style="display:block;font-size:9.5px;color:${MID};">at ${TT_EXAMPLE[b.mode]} days port to port</span>
+            </span>
+          </div>
+        </div>
+
         <div style="display:flex;align-items:center;gap:12px;margin-top:13px;">
           <button class="d2d-btn dark" data-blsave="${esc(b.mode)}">Save ${esc(b.mode)} rules</button>
           <span style="font-size:11px;color:${MID};" id="bl-msg-${esc(b.mode)}"></span>
