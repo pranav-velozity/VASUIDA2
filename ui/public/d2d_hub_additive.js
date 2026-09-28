@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '60';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '61';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -209,6 +209,8 @@
       /* One card rhythm across the page, as on the Executive view. */
       .d2d-card{background:#fff;border:.5px solid rgba(0,0,0,.08);border-radius:14px;padding:20px;margin-bottom:16px;
         box-shadow:0 1px 2px rgba(16,18,27,.04),0 4px 12px rgba(16,18,27,.05);}
+      /* Side by side, the pair share a row and end together. */
+      .grid > .d2d-card{margin-bottom:0;display:flex;flex-direction:column;}
       .d2d-cardh{font-size:13px;font-weight:600;color:${DARK};}
       .d2d-cardm{font-size:10.5px;color:${LIGHT};}
       .d2d-cardsub{font-size:10.5px;color:${LIGHT};margin:3px 0 10px;line-height:1.5;}
@@ -2693,65 +2695,67 @@
     const withData = rows.filter(r => r.now != null || r.prev != null);
     if (!withData.length) return '';
 
-    // The labels sit outside the outer ring, so the box has to be wider than the web. At
-    // R=112 in a 380-wide frame they ran over the spokes.
-    const CX = 234, CY = 186, R = 96;
-    // The scale is set by the worst average, floored at 2 days so a good week does not
-    // magnify a few hours into a crisis.
+    const CX = 240, CY = 196, R = 88;
+    // Worst average in either period sets the floor of the scale, never less than 2 days, so
+    // a good stretch cannot magnify a few hours into a dent.
     const peak = Math.max(2, ...rows.map(r => Math.max(r.now || 0, r.prev || 0)));
-    const at = (i, v) => {
-      const a = (Math.PI * 2 * i / rows.length) - Math.PI / 2;
-      const rad = Math.max(0, Math.min(1, v)) * R;
-      return [CX + Math.cos(a) * rad, CY + Math.sin(a) * rad];
+    // 100 = adds nothing. A stage that claws time back is still 100: it is not a problem.
+    const score = (v) => v == null ? null : Math.max(0, 1 - Math.max(0, v) / peak);
+
+    const at = (i2, v) => {
+      const a = (Math.PI * 2 * i2 / rows.length) - Math.PI / 2;
+      return [CX + Math.cos(a) * R * v, CY + Math.sin(a) * R * v];
     };
-    // A stage that claws time back sits on the centre ring: it is not adding delay. The figure
-    // beside the axis still says it ran early, so nothing is hidden.
-    const poly = (key) => rows.map((r, i) =>
-      at(i, (r[key] == null ? 0 : Math.max(0, r[key])) / peak).map(n => n.toFixed(1)).join(',')).join(' ');
+    const poly = (key) => rows.map((r, i2) => {
+      const v = score(r[key]);
+      return at(i2, v == null ? 0 : v).map(n => n.toFixed(1)).join(',');
+    }).join(' ');
 
     const rings = [0.34, 0.67, 1].map(f => ({
-      pts: rows.map((r, i) => at(i, f).map(n => n.toFixed(1)).join(',')).join(' '),
-      label: (peak * f).toFixed(peak < 4 ? 1 : 0) + 'd',
+      pts: rows.map((r, i2) => at(i2, f).map(n => n.toFixed(1)).join(',')).join(' '),
+      label: (peak * (1 - f)).toFixed(peak < 4 ? 1 : 0) + 'd',
       y: (CY - R * f + 3).toFixed(1),
     }));
 
     return `
-      <svg viewBox="0 0 468 372" style="width:400px;max-width:100%;height:auto;display:block;flex-shrink:0;" role="img"
-           aria-label="Average days added at each milestone">
+      <svg viewBox="0 0 480 400" style="width:400px;max-width:100%;height:auto;display:block;flex-shrink:0;"
+           role="img" aria-label="Average days added at each milestone">
         ${rings.map(g => `<polygon points="${g.pts}" fill="none" stroke="rgba(0,0,0,.08)" stroke-width="1"/>
-          <text x="${CX + 3}" y="${g.y}" font-size="8.5" fill="${LIGHT}" font-family="ui-monospace,monospace">${g.label}</text>`).join('')}
-        ${rows.map((r, i) => { const [x, y] = at(i, 1);
+          <text x="${CX + 4}" y="${g.y}" font-size="8.5" fill="${LIGHT}" font-family="ui-monospace,monospace">${g.label}</text>`).join('')}
+        ${rows.map((r, i2) => { const [x, y] = at(i2, 1);
           return `<line x1="${CX}" y1="${CY}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="rgba(0,0,0,.07)" stroke-width="1"/>`; }).join('')}
 
-        ${/* The period before, so the question is whether it is getting better. */ ''}
-        <polygon points="${poly('prev')}" fill="rgba(110,110,115,.10)" stroke="${MID}" stroke-width="1"
-                 stroke-dasharray="3 3"/>
-        <polygon class="d2d-web" points="${poly('now')}" fill="rgba(153,0,51,.22)" stroke="${BRAND}"
+        ${/* The period before, dashed and behind. */ ''}
+        <polygon points="${poly('prev')}" fill="rgba(110,110,115,.10)" stroke="${MID}" stroke-width="1" stroke-dasharray="3 3"/>
+        <polygon class="d2d-web" points="${poly('now')}" fill="rgba(153,0,51,.20)" stroke="${BRAND}"
                  stroke-width="2" stroke-linejoin="round"/>
 
-        ${rows.map((r, i) => {
-          const v = r.now == null ? null : Math.max(0, r.now);
-          const [x, y] = at(i, (v || 0) / peak);
-          return v == null ? '' : `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3" fill="${BRAND}"/>`;
+        ${rows.map((r, i2) => {
+          const v = score(r.now);
+          if (v == null) return '';
+          const [x, y] = at(i2, v);
+          return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.5" fill="${BRAND}"/>`;
         }).join('')}
 
-        ${rows.map((r, i) => {
-          const [lx, ly] = at(i, 1.34);
-          const anchor = Math.abs(lx - CX) < 18 ? 'middle' : (lx > CX ? 'start' : 'end');
+        ${rows.map((r, i2) => {
+          // Labels sit well clear of the outer ring: at 1.34R the long ones ran over the web.
+          const [lx, ly] = at(i2, 1.52);
+          const anchor = Math.abs(lx - CX) < 20 ? 'middle' : (lx > CX ? 'start' : 'end');
           const none = r.now == null;
+          const behind = !none && r.now > 0.05;
           return `
-            <text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${anchor}" font-size="10"
+            <text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${anchor}" font-size="10.5"
                   font-weight="600" fill="${none ? LIGHT : DARK}" font-family="inherit">${esc(r.label)}</text>
-            <text x="${lx.toFixed(1)}" y="${(ly + 11).toFixed(1)}" text-anchor="${anchor}" font-size="9.5"
-                  fill="${none ? LIGHT : (r.now > 0.05 ? BRAND : LINK)}" font-family="ui-monospace,monospace">
+            <text x="${lx.toFixed(1)}" y="${(ly + 12).toFixed(1)}" text-anchor="${anchor}" font-size="9.5"
+                  fill="${none ? LIGHT : (behind ? BRAND : LINK)}" font-family="ui-monospace,monospace">
               ${none ? 'no data'
-                : (r.now > 0.05 ? '+' + r.now.toFixed(1) + 'd'
+                : (behind ? '+' + r.now.toFixed(1) + 'd'
                   : (r.now < -0.05 ? r.now.toFixed(1) + 'd early' : 'on plan'))}</text>`;
         }).join('')}
       </svg>`;
   }
 
-  // Landed cost per unit, from the option that was approved and the units aboard. Split by
+  // Landed freight per unit, from the option that was approved and the units aboard. Split by
   // mode because air and sea are different products, and averaging them hides both.
   function unitCost(d, list) {
     const bk = {};
@@ -2761,20 +2765,16 @@
       const b = bk[sh.booking_id];
       const units = Number(sh.units) || Number(sh.cargo && sh.cargo.units) || 0;
       const sell = b ? Number(b.sell_amount) || 0 : 0;
-      const cost = b ? Number(b.cost_amount) || 0 : 0;
       if (!units || !sell) continue;
-      rows.push({ mode: sh.mode === 'air' ? 'air' : 'sea', units, sell, cost,
-                  perUnit: sell / units, costPerUnit: cost ? cost / units : null,
-                  currency: (b && b.currency) || 'USD', ref: sh.reference });
+      rows.push({ mode: sh.mode === 'air' ? 'air' : 'sea', units, sell,
+                  perUnit: sell / units, currency: (b && b.currency) || 'USD' });
     }
     const forMode = (m) => {
       const r = rows.filter(x => x.mode === m);
       if (!r.length) return null;
       const units = r.reduce((n, x) => n + x.units, 0);
       const sell = r.reduce((n, x) => n + x.sell, 0);
-      const cost = r.reduce((n, x) => n + x.cost, 0);
-      return { n: r.length, units, perUnit: sell / units, costPerUnit: cost ? cost / units : null,
-               currency: r[0].currency };
+      return { n: r.length, units, perUnit: sell / units, currency: r[0].currency };
     };
     const all = rows.length ? {
       n: rows.length,
@@ -2843,8 +2843,7 @@
       </div>`;
   }
 
-  // Freight per unit week by week, split by mode. The level matters less than whether it is
-  // drifting up.
+  // Freight per unit week by week, split by mode. The level matters less than the drift.
   function unitCostSeries(d, list) {
     const bk = {};
     for (const b of ((d.allBookings && d.allBookings.length ? d.allBookings : d.bookings) || [])) bk[b.id] = b;
@@ -2860,9 +2859,7 @@
       byWeek[ws][m].u += units; byWeek[ws][m].s += sell;
     }
     return Object.values(byWeek).sort((a, b) => String(a.ws).localeCompare(String(b.ws)))
-      .map(w => ({ ws: w.ws,
-                   sea: w.sea.u ? w.sea.s / w.sea.u : null,
-                   air: w.air.u ? w.air.s / w.air.u : null }));
+      .map(w => ({ ws: w.ws, sea: w.sea.u ? w.sea.s / w.sea.u : null, air: w.air.u ? w.air.s / w.air.u : null }));
   }
 
   function unitCostChart(series) {
@@ -3109,7 +3106,8 @@
                No stage has been recorded against a plan in the last 16 weeks.</div>`}
       </div>
 
-      <div class="d2d-card d2d-rise" style="animation-delay:.06s;">
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 items-stretch">
+      <div class="d2d-card d2d-rise"  style="animation-delay:.06s;">
         <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;">
           <span class="d2d-cardh">Utilisation by box type</span>
           <span class="d2d-cardm">filled against capacity, drawn to scale</span>
@@ -3144,6 +3142,8 @@
           : `<div style="font-size:11.5px;color:${MID};padding:16px 0;">
                ${costSeries.length ? 'One week priced so far — the line starts once there are two.'
                  : 'Nothing approved with both a rate and a unit count yet.'}</div>`}
+      </div>
+
       </div>
 
       ${gains.length ? `
