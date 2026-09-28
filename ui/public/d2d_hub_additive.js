@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '51';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '52';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -375,6 +375,8 @@
   // The rail keeps its tiles and updates whichever is showing.
   let _main = 'flight';
   let _changed = null;                 // ids whose milestones moved since the last load
+  let _aboardOpen = '';                // which PO is expanded on the container screen
+  let _poQuery = '';                   // the PO / SKU / container search
   const PANEL_H = 620;                 // both columns end on the same line
   const go = (view, id) => { _view = view; _openId = id || null; paint(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
 
@@ -411,12 +413,14 @@
     const po = _week ? await soft('/d2d/po?week=' + encodeURIComponent(_week), { orders: [] }) : { orders: [] };
     const rq = _week ? await soft('/d2d/requests?week=' + encodeURIComponent(_week), { requests: [] }) : { requests: [] };
     // Across every week: a request raised for a future week is still a request that is out.
+    const allPo = await soft('/d2d/po', { orders: po.orders || [] });
     const allRq = await soft('/d2d/requests', { requests: rq.requests || [] });
     const allBk = await soft('/d2d/bookings', { bookings: bookings });
 
     _internal = pricingVisible;
     _data = { weeks, shipments, bookings, allShipments, orders: po.orders || [], requests: rq.requests || [],
-              allRequests: allRq.requests || [], allBookings: allBk.bookings || [] };
+              allRequests: allRq.requests || [], allBookings: allBk.bookings || [],
+              allOrders: allPo.orders || [] };
     paint();
   }
 
@@ -2169,8 +2173,186 @@
           }).join('') || `<div style="font-size:11.5px;color:${MID};">No dates recorded yet.</div>`}
         </div>
 
-        ${pending('Orders and lines aboard',
-          'POs, SKUs and unit counts appear here once GRBA&rsquo;s purchase order file is connected. Nothing is shown until then rather than a placeholder that could be mistaken for cargo.')}
+        ${aboardCard(d, sh)}
+      </div>`;
+  }
+
+  // Where a container has got to, in a phrase. The answer to "where is my stock".
+  function whereIs(sh) {
+    if (!sh) return { text: 'not on a container yet', ink: '#AEAEB2' };
+    const ev = evMap(sh);
+    let last = null;
+    for (const [k2, label] of STAGES) if (ev[k2] && ev[k2].actual_at) last = { k: k2, label, at: ev[k2].actual_at };
+    const look = outlook(sh);
+    if (!last) return { text: 'booked, nothing recorded yet', ink: '#AEAEB2', eta: sh.plan_arrived };
+    if (last.k === 'delivered') return { text: 'delivered ' + day(last.at), ink: LINK };
+    return { text: last.label + ' ' + day(last.at), ink: look.ink, eta: sh.plan_arrived, look };
+  }
+
+  // One row per match. A PO can sit on more than one container, and each is a different answer.
+  function searchOrders(d, q) {
+    const term = String(q || '').trim().toLowerCase();
+    if (term.length < 2) return null;
+    const pool = (d.allOrders && d.allOrders.length ? d.allOrders : (d.orders || []));
+    const ships = (d.allShipments && d.allShipments.length ? d.allShipments : (d.shipments || []));
+    const shipById = {}; ships.forEach(x => { shipById[x.id] = x; });
+
+    const out = [];
+    for (const o2 of pool) {
+      const lines = o2.lines || [];
+      const hitPo = String(o2.po_number || '').toLowerCase().includes(term);
+      const hitSupplier = String(o2.supplier || '').toLowerCase().includes(term);
+      const hitSkus = lines.filter(l =>
+        String(l.sku_code || '').toLowerCase().includes(term) ||
+        String(l.sku_desc || '').toLowerCase().includes(term));
+      const conts = o2.containers || [];
+      const hitCont = conts.filter(c => String(c.reference || '').toLowerCase().includes(term));
+
+      if (!hitPo && !hitSupplier && !hitSkus.length && !hitCont.length) continue;
+
+      // Matching on a container narrows the answer to that container; anything else shows all
+      // of them, because the PO may be split.
+      const show = hitCont.length ? hitCont : conts;
+      const why = hitPo ? 'PO' : hitCont.length ? 'container' : hitSkus.length ? 'SKU' : 'supplier';
+      if (!show.length) {
+        out.push({ o: o2, sh: null, why, skus: hitSkus });
+      } else {
+        for (const c of show) out.push({ o: o2, sh: shipById[c.shipment_id] || { reference: c.reference }, why, skus: hitSkus });
+      }
+      if (out.length > 60) break;                 // a search that wide is not a search
+    }
+    return out;
+  }
+
+  function searchPanel(d) {
+    const res = searchOrders(d, _poQuery);
+    const header = `
+      <div class="rounded-2xl border bg-white shadow-sm" style="padding:13px 16px;margin-bottom:12px;">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span style="font-size:12.5px;font-weight:600;color:${DARK};white-space:nowrap;">Find a PO, SKU or container</span>
+          <input id="d2d-posearch" value="${esc(_poQuery)}" placeholder="40117, SKU-8891, MAERSK1221, D&amp;J&hellip;"
+                 style="flex:1;min-width:220px;padding:8px 11px;border:.5px solid rgba(0,0,0,.16);border-radius:9px;
+                        font-size:12.5px;font-family:inherit;">
+          ${_poQuery ? `<button class="d2d-mini" data-poclear="1">Clear</button>` : ''}
+        </div>
+        ${res ? `<div style="font-size:10.5px;color:${MID};margin-top:7px;">
+          ${res.length ? res.length + ' match' + (res.length === 1 ? '' : 'es') + ' across every week' : 'Nothing matches that.'}</div>` : ''}
+      </div>`;
+
+    if (!res || !res.length) return header;
+
+    return header + `
+      <div class="rounded-2xl border bg-white shadow-sm" style="padding:0;overflow:hidden;margin-bottom:14px;">
+        <div style="display:grid;grid-template-columns:104px 1fr 140px 1fr 96px;gap:0 12px;padding:10px 18px 8px;
+             background:#FBFBFC;font-size:9.5px;font-weight:700;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">
+          <span>PO</span><span>Supplier</span><span>Container</span><span>Where it is</span><span style="text-align:right;">Units</span>
+        </div>
+        ${res.map(r => {
+          const w = whereIs(r.sh);
+          const units = (r.o.lines || []).reduce((n, l) => n + (Number(l.units) || 0), 0);
+          return `
+            <div style="display:grid;grid-template-columns:104px 1fr 140px 1fr 96px;gap:0 12px;padding:11px 18px;
+                 border-top:.5px solid rgba(0,0,0,.06);align-items:center;">
+              <span>
+                <span class="d2d-num" style="display:block;font-size:12.5px;color:${DARK};">${esc(r.o.po_number)}</span>
+                <span style="display:block;font-size:9.5px;color:${LIGHT};">W${esc(String(isoWeek(r.o.week_start) || '—'))} · matched on ${esc(r.why)}</span>
+              </span>
+              <span style="font-size:11.5px;color:${MID};min-width:0;overflow:hidden;text-overflow:ellipsis;">${esc(r.o.supplier || '—')}</span>
+              <span>
+                ${r.sh && r.sh.id
+                  ? `<button type="button" data-open="${esc(r.sh.id)}" class="d2d-num"
+                       style="background:none;border:0;padding:0;font-size:12px;color:${DARK};cursor:pointer;
+                              border-bottom:1px dashed rgba(0,0,0,.25);font-family:ui-monospace,monospace;">${esc(r.sh.reference || 'not advised')}</button>`
+                  : `<span style="font-size:11.5px;color:${LIGHT};">not assigned</span>`}
+              </span>
+              <span>
+                <span style="display:block;font-size:11.5px;color:${w.ink};">${esc(w.text)}</span>
+                ${w.eta ? `<span style="display:block;font-size:9.5px;color:${LIGHT};">due ${esc(day(w.eta))}</span>` : ''}
+              </span>
+              <span class="d2d-num" style="font-size:12px;color:${DARK};text-align:right;">${units.toLocaleString()}</span>
+            </div>
+            ${r.skus && r.skus.length ? `
+              <div style="padding:0 18px 10px 122px;display:flex;flex-wrap:wrap;gap:6px;">
+                ${r.skus.slice(0, 8).map(l => `<span class="d2d-num" style="font-size:10.5px;color:${MID};
+                     background:#F2F2F5;border-radius:6px;padding:2px 7px;">${esc(l.sku_code || '')} · ${Number(l.units || 0).toLocaleString()}u</span>`).join('')}
+                ${r.skus.length > 8 ? `<span style="font-size:10.5px;color:${LIGHT};">+${r.skus.length - 8} more</span>` : ''}
+              </div>` : ''}`;
+        }).join('')}
+      </div>`;
+  }
+
+  // Orders carried by one container. Everything is one click from closed: the summary always
+  // shows, a PO opens its SKU lines, and nothing is printed until asked for.
+  function ordersAboard(d, sh) {
+    const pool = (d.allOrders && d.allOrders.length ? d.allOrders : (d.orders || []));
+    return pool.filter(o2 => (o2.containers || []).some(c =>
+      c.shipment_id === sh.id || (c.reference && sh.reference && c.reference === sh.reference)));
+  }
+
+  function aboardCard(d, sh) {
+    const orders = ordersAboard(d, sh);
+    if (!orders.length) {
+      return pending('Orders and lines aboard',
+        'POs, SKUs and unit counts appear here once an order file names this container. Nothing is shown until then rather than a placeholder that could be mistaken for cargo.');
+    }
+    const lines = orders.reduce((n, o2) => n + (o2.lines || []).length, 0);
+    const units = orders.reduce((n, o2) => n + (o2.lines || []).reduce((m, l) => m + (Number(l.units) || 0), 0), 0);
+    const suppliers = [...new Set(orders.map(o2 => o2.supplier).filter(Boolean))];
+    const open = _aboardOpen || '';
+
+    return `
+      <div class="rounded-2xl border bg-white shadow-sm" style="padding:15px 17px;">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+          <span style="font-size:13px;font-weight:600;color:${DARK};">Orders and lines aboard</span>
+          <span style="font-size:11px;color:${MID};">
+            <b class="d2d-num" style="color:${DARK};">${orders.length}</b> order${orders.length === 1 ? '' : 's'} &middot;
+            <b class="d2d-num" style="color:${DARK};">${lines}</b> SKU line${lines === 1 ? '' : 's'} &middot;
+            <b class="d2d-num" style="color:${DARK};">${units.toLocaleString()}</b> units${suppliers.length ? ' &middot; ' + suppliers.length + ' supplier' + (suppliers.length === 1 ? '' : 's') : ''}</span>
+        </div>
+
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:11px;">
+          ${orders.map(o2 => {
+            const u = (o2.lines || []).reduce((m, l) => m + (Number(l.units) || 0), 0);
+            const on = open === o2.id;
+            return `<button type="button" data-aboard="${esc(o2.id)}"
+              style="display:inline-flex;align-items:baseline;gap:6px;border:.5px solid ${on ? DARK : 'rgba(0,0,0,.14)'};
+                     background:${on ? DARK : '#fff'};color:${on ? '#fff' : DARK};border-radius:8px;padding:5px 10px;
+                     font-family:inherit;font-size:11.5px;cursor:pointer;">
+              <span class="d2d-num" style="font-weight:600;">${esc(o2.po_number)}</span>
+              <span style="font-size:10px;opacity:.7;">${(o2.lines || []).length} SKU${(o2.lines || []).length === 1 ? '' : 's'} · ${u.toLocaleString()}u</span>
+            </button>`;
+          }).join('')}
+        </div>
+
+        ${open && orders.some(o2 => o2.id === open) ? (() => {
+          const o2 = orders.find(x => x.id === open);
+          const ls = o2.lines || [];
+          return `
+            <div style="margin-top:12px;border-top:.5px solid rgba(0,0,0,.07);padding-top:11px;">
+              <div style="display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;margin-bottom:7px;">
+                <span class="d2d-num" style="font-size:12.5px;font-weight:600;color:${DARK};">${esc(o2.po_number)}</span>
+                ${o2.supplier ? `<span style="font-size:11px;color:${MID};">${esc(o2.supplier)}</span>` : ''}
+                ${o2.cargo_ready_date ? `<span style="font-size:11px;color:${LIGHT};">ready ${esc(day(o2.cargo_ready_date))}</span>` : ''}
+              </div>
+              ${ls.length ? `
+                <table style="width:100%;border-collapse:collapse;">
+                  <thead><tr>
+                    ${['SKU', 'Description', 'Units', 'CBM'].map((h, i2) =>
+                      `<th style="text-align:${i2 > 1 ? 'right' : 'left'};padding:4px 6px;font-size:9px;color:${LIGHT};
+                           text-transform:uppercase;letter-spacing:.06em;font-weight:700;">${h}</th>`).join('')}
+                  </tr></thead>
+                  <tbody>
+                    ${ls.map(l => `<tr style="border-top:.5px solid rgba(0,0,0,.05);">
+                      <td class="d2d-num" style="padding:5px 6px;font-size:11.5px;color:${DARK};">${esc(l.sku_code || '—')}</td>
+                      <td style="padding:5px 6px;font-size:11.5px;color:${MID};">${esc(l.sku_desc || '')}</td>
+                      <td class="d2d-num" style="padding:5px 6px;font-size:11.5px;color:${DARK};text-align:right;">${Number(l.units || 0).toLocaleString()}</td>
+                      <td class="d2d-num" style="padding:5px 6px;font-size:11.5px;color:${MID};text-align:right;">${l.cbm != null ? Number(l.cbm).toFixed(1) : '—'}</td>
+                    </tr>`).join('')}
+                  </tbody>
+                </table>`
+                : `<div style="font-size:11.5px;color:${MID};">No SKU lines on this order.</div>`}
+            </div>`;
+        })() : `<div style="font-size:10.5px;color:${LIGHT};margin-top:9px;">Open an order to see its SKUs.</div>`}
       </div>`;
   }
 
@@ -2199,6 +2381,8 @@
       </div>
 
       ${orders.length ? `
+        ${searchPanel(d)}
+
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-3" style="margin-bottom:12px;">
           <div class="rounded-2xl border bg-white shadow-sm d2d-tile"><div class="d2d-tl">Orders</div>
             <div class="d2d-tv">${orders.length}</div><div class="d2d-ts">this week</div></div>
@@ -3278,6 +3462,29 @@
     root.querySelectorAll('[data-filt]').forEach(b => b.onclick = () => { _mapFilter = b.getAttribute('data-filt'); paint(); });
     root.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { _mapScope = b.getAttribute('data-scope'); paint(); });
     root.querySelectorAll('[data-main]').forEach(b => b.onclick = () => { _main = b.getAttribute('data-main'); paint(); });
+    const psearch = root.querySelector('#d2d-posearch');
+    if (psearch) {
+      let t = null;
+      psearch.oninput = () => {
+        clearTimeout(t);
+        // A short pause, so a four-character PO does not repaint four times.
+        t = setTimeout(() => {
+          const pos = psearch.selectionStart;
+          _poQuery = psearch.value;
+          paint();
+          const again = document.getElementById('d2d-posearch');
+          if (again) { again.focus(); try { again.setSelectionRange(pos, pos); } catch (_) {} }
+        }, 180);
+      };
+    }
+    const pclear = root.querySelector('[data-poclear]');
+    if (pclear) pclear.onclick = () => { _poQuery = ''; paint(); };
+
+    root.querySelectorAll('[data-aboard]').forEach(b => b.onclick = () => {
+      const id = b.getAttribute('data-aboard');
+      _aboardOpen = (_aboardOpen === id) ? '' : id;       // clicking the open one closes it
+      paint();
+    });
     const rfq = root.querySelector('[data-rfq]');
     if (rfq) rfq.onclick = async () => {
       const msg = el('d2d-rfqmsg');
