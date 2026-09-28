@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '54';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '55';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -183,7 +183,7 @@
       /* The next milestone breathes, so the eye lands on what is owed rather than what is done. */
       @keyframes d2d-nextpulse{0%{box-shadow:0 0 0 0 var(--pulse);opacity:1;}
         70%{box-shadow:0 0 0 7px rgba(0,0,0,0);opacity:.85;}100%{box-shadow:0 0 0 0 rgba(0,0,0,0);opacity:1;}}
-      .d2d-next{animation:d2d-nextpulse 2.6s ease-out infinite;}
+      .d2d-next{animation:d2d-nextpulse 2.6s ease-out infinite;box-sizing:border-box;}
       /* Where it got to: the same pulse as the one ahead, on the same beat. The dot stays
          filled because that is what marks it as recorded — the pulse itself is identical. */
       .d2d-last{animation:d2d-nextpulse 2.6s ease-out infinite;}
@@ -2243,6 +2243,66 @@
     return out;
   }
 
+  // The voyage behind an order, drawn small: mode, the two dates that matter, and the stage
+  // that is next with a pulse on it.
+  function journeyCell(d, x) {
+    const ships = (d.allShipments && d.allShipments.length ? d.allShipments : (d.shipments || []));
+    const conts = x.containers || [];
+    if (!conts.length) return `<span style="font-size:11px;color:${YINK};">not yet assigned</span>`;
+
+    return conts.map(c => {
+      const sh = ships.find(z => z.id === c.shipment_id) || null;
+      const ref = esc(c.reference || (sh && sh.reference) || 'container');
+      if (!sh) {
+        return `<button class="d2d-btn d2d-num" data-open="${esc(c.shipment_id)}"
+                  style="min-height:28px;padding:2px 8px;font-size:10.5px;">${ref}</button>`;
+      }
+      const air = sh.mode === 'air';
+      const look = outlook(sh);
+      const ev = evMap(sh);
+
+      // Actual where recorded, plan where not — and said which it is, because a planned date
+      // and a real one carry different weight.
+      const dep = (ev.departed && ev.departed.actual_at) || sh.plan_departed;
+      const depReal = !!(ev.departed && ev.departed.actual_at);
+      const arr = (ev.arrived && ev.arrived.actual_at) || sh.plan_arrived;
+      const arrReal = !!(ev.arrived && ev.arrived.actual_at);
+
+      let next = null;
+      for (const [k2, label] of STAGES) {
+        if (!(ev[k2] && ev[k2].actual_at)) { next = { k: k2, label, plan: sh['plan_' + k2] }; break; }
+      }
+
+      return `
+        <span style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <button class="d2d-btn d2d-num" data-open="${esc(sh.id)}"
+                  style="min-height:28px;padding:2px 8px;font-size:10.5px;display:inline-flex;align-items:center;gap:6px;">
+            <svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="${air ? ICON_PLANE_SM : ICON_SHIP_SM}" fill="${air ? MAP_PAL.air : MAP_PAL.transit}"/></svg>
+            ${ref}
+          </button>
+
+          <span style="display:flex;align-items:center;gap:8px;">
+            ${[['ETD', dep, depReal], ['ETA', arr, arrReal]].map(([l, v, real]) => `
+              <span style="text-align:left;">
+                <span style="display:block;font-size:8.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">${real ? l.replace('E', 'A') : l}</span>
+                <span class="d2d-num" style="display:block;font-size:11px;color:${real ? DARK : MID};">${v ? esc(day(v)) : '—'}</span>
+              </span>`).join('')}
+          </span>
+
+          ${next ? `
+            <span style="display:inline-flex;align-items:center;gap:6px;border-radius:7px;padding:3px 9px;
+                  background:${look.state === 'late' ? 'rgba(153,0,51,.08)' : look.state === 'watch' ? 'rgba(254,208,0,.16)' : 'rgba(155,171,21,.14)'};">
+              <span class="d2d-next" style="width:7px;height:7px;border-radius:50%;background:${look.ink};
+                    --pulse:${look.ink};display:inline-block;"></span>
+              <span style="font-size:10.5px;color:${look.ink};font-weight:600;">${esc(next.label)}</span>
+              ${next.plan ? `<span class="d2d-num" style="font-size:10px;color:${MID};">${esc(day(next.plan))}</span>` : ''}
+            </span>`
+            : `<span style="font-size:10.5px;color:${LINK};font-weight:600;">Delivered</span>`}
+        </span>`;
+    }).join('');
+  }
+
   function searchPanel(d) {
     const res = searchOrders(d, _poQuery);
     const header = `
@@ -2384,7 +2444,12 @@
   let _rfqNote = '';
 
   function paintPO(d) {
-    const orders = d.orders || [];
+    // Every week, earliest first, with the week as a heading. Filtering by week only hid the
+    // PO someone came here to find.
+    const pool = (d.allOrders && d.allOrders.length ? d.allOrders : (d.orders || []));
+    const orders = pool.slice().sort((a, b) =>
+      String(a.week_start || '').localeCompare(String(b.week_start || '')) ||
+      String(a.po_number || '').localeCompare(String(b.po_number || '')));
     const units = orders.reduce((n, x) => n + (Number(x.units) || 0), 0);
     const assigned = orders.filter(x => (x.containers || []).length).length;
 
@@ -2392,9 +2457,10 @@
       <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:12px;flex-wrap:wrap;">
         <div>
           <div style="font-size:16px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Orders</div>
-          <div style="font-size:11.5px;color:${MID};margin-top:2px;">Week of ${esc(day(_week))} &middot; purchase orders, their SKUs, and the containers carrying them</div>
+          <div style="font-size:11.5px;color:${MID};margin-top:2px;">Every week &middot; purchase orders, their SKUs, and the containers carrying them</div>
         </div>
         ${_internal ? `<span style="display:flex;gap:8px;">
+          <span style="font-size:10.5px;color:${LIGHT};align-self:center;">uploads land in week ${esc(String(isoWeek(_week) || day(_week)))}</span>
           <button class="d2d-btn" data-potemplate="1">Download the format</button>
           <button class="d2d-btn dark" data-poupload="1">Upload order file</button></span>` : ''}
       </div>
@@ -2404,7 +2470,7 @@
 
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-3" style="margin-bottom:12px;">
           <div class="rounded-2xl border bg-white shadow-sm d2d-tile"><div class="d2d-tl">Orders</div>
-            <div class="d2d-tv">${orders.length}</div><div class="d2d-ts">this week</div></div>
+            <div class="d2d-tv">${orders.length}</div><div class="d2d-ts">across all weeks</div></div>
           <div class="rounded-2xl border bg-white shadow-sm d2d-tile"><div class="d2d-tl">Units</div>
             <div class="d2d-tv">${units.toLocaleString()}</div><div class="d2d-ts">across all SKUs</div></div>
           <div class="rounded-2xl border bg-white shadow-sm d2d-tile"><div class="d2d-tl">On a container</div>
@@ -2416,25 +2482,28 @@
         </div>
 
         <div class="rounded-2xl border bg-white shadow-sm" style="padding:0;overflow:hidden;">
-          <div style="display:grid;grid-template-columns:110px 1fr 120px 92px 92px 1fr;gap:0 12px;padding:11px 18px 8px;
+          <div style="display:grid;grid-template-columns:96px minmax(0,1fr) 104px 80px 64px minmax(0,2.2fr);gap:0 12px;padding:11px 18px 8px;
                background:#FBFBFC;font-size:9.5px;font-weight:700;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">
             <span>PO</span><span>Supplier</span><span>Cargo ready</span>
             <span style="text-align:right;">Units</span><span style="text-align:right;">SKUs</span><span>On board</span>
           </div>
-          ${orders.map(x => `
-            <div style="display:grid;grid-template-columns:110px 1fr 120px 92px 92px 1fr;gap:0 12px;padding:11px 18px;
+          ${groupByWeek(orders).map(([ws, list]) => `
+            <div style="display:flex;align-items:baseline;gap:9px;padding:9px 18px 6px;background:#FBFBFC;
+                 border-top:.5px solid rgba(0,0,0,.06);">
+              <span class="d2d-num" style="font-size:10.5px;font-weight:700;color:${DARK};">WEEK ${esc(String(isoWeek(ws) || '—'))}</span>
+              <span style="font-size:10.5px;color:${MID};">${esc(day(ws))}</span>
+              <span style="flex:1;"></span>
+              <span style="font-size:10px;color:${LIGHT};">${list.length} order${list.length === 1 ? '' : 's'}</span>
+            </div>
+            ${list.map(x => `
+            <div style="display:grid;grid-template-columns:96px minmax(0,1fr) 104px 80px 64px minmax(0,2.2fr);gap:0 12px;padding:11px 18px;
                  border-top:.5px solid rgba(0,0,0,.06);align-items:center;">
               <span class="d2d-num" style="font-size:12.5px;color:${DARK};">${esc(x.po_number)}</span>
               <span style="font-size:12px;color:${DARK};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(x.supplier || '—')}</span>
               <span class="d2d-num" style="font-size:11.5px;color:${MID};">${x.cargo_ready_date ? esc(day(x.cargo_ready_date)) : '—'}</span>
               <span class="d2d-num" style="font-size:12.5px;color:${DARK};text-align:right;">${Number(x.units || 0).toLocaleString()}</span>
               <span class="d2d-num" style="font-size:12px;color:${MID};text-align:right;">${(x.lines || []).length}</span>
-              <span style="display:flex;gap:6px;flex-wrap:wrap;">
-                ${(x.containers || []).length
-                  ? x.containers.map(c => `<button class="d2d-btn d2d-num" data-open="${esc(c.shipment_id)}"
-                       style="min-height:28px;padding:2px 8px;font-size:10.5px;">${esc(c.reference || 'container')}</button>`).join('')
-                  : `<span style="font-size:11px;color:${YINK};">not yet assigned</span>`}
-              </span>
+              <span style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">${journeyCell(d, x)}</span>
             </div>
             ${(x.lines || []).length ? `
               <div style="padding:0 18px 11px 128px;display:flex;flex-wrap:wrap;gap:6px;">
@@ -2442,10 +2511,10 @@
                     <b class="d2d-num" style="color:${DARK};">${esc(l.sku_code)}</b>
                     ${l.units != null ? ` · ${Number(l.units).toLocaleString()}` : ''}</span>`).join('')}
               </div>` : ''}
-          `).join('')}
+          `).join('')}`).join('')}
         </div>`
       : `<div class="rounded-2xl border bg-white shadow-sm" style="padding:22px 24px;">
-          <div style="font-size:14px;font-weight:600;color:${DARK};">No orders loaded for this week</div>
+          <div style="font-size:14px;font-weight:600;color:${DARK};">No orders loaded yet</div>
           <div style="font-size:12px;color:${MID};line-height:1.6;margin-top:6px;max-width:620px;">
             Upload GRBA&rsquo;s order file and the chain fills in: each PO, the SKUs and units inside it, and which
             container carries it. An order can span several containers and a container carries many orders, so both
