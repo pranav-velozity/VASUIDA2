@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '55';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '56';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -2274,7 +2274,7 @@
       }
 
       return `
-        <span style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <span style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%;">
           <button class="d2d-btn d2d-num" data-open="${esc(sh.id)}"
                   style="min-height:28px;padding:2px 8px;font-size:10.5px;display:inline-flex;align-items:center;gap:6px;">
             <svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
@@ -2282,16 +2282,18 @@
             ${ref}
           </button>
 
-          <span style="display:flex;align-items:center;gap:8px;">
+          <span style="flex:1;min-width:8px;"></span>
+
+          <span style="display:flex;align-items:center;gap:14px;">
             ${[['ETD', dep, depReal], ['ETA', arr, arrReal]].map(([l, v, real]) => `
-              <span style="text-align:left;">
+              <span style="text-align:right;min-width:52px;">
                 <span style="display:block;font-size:8.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">${real ? l.replace('E', 'A') : l}</span>
                 <span class="d2d-num" style="display:block;font-size:11px;color:${real ? DARK : MID};">${v ? esc(day(v)) : '—'}</span>
               </span>`).join('')}
           </span>
 
           ${next ? `
-            <span style="display:inline-flex;align-items:center;gap:6px;border-radius:7px;padding:3px 9px;
+            <span style="display:inline-flex;align-items:center;gap:6px;border-radius:7px;padding:3px 9px;min-width:132px;
                   background:${look.state === 'late' ? 'rgba(153,0,51,.08)' : look.state === 'watch' ? 'rgba(254,208,0,.16)' : 'rgba(155,171,21,.14)'};">
               <span class="d2d-next" style="width:7px;height:7px;border-radius:50%;background:${look.ink};
                     --pulse:${look.ink};display:inline-block;"></span>
