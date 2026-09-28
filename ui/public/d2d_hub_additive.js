@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '52';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '53';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -193,6 +193,10 @@
         padding:4px 9px;font-family:inherit;font-weight:600;font-size:10.5px;cursor:pointer;
         transition:background .18s ease,border-color .18s ease;}
       .d2d-mini:hover{background:#FAFBFC;border-color:rgba(0,0,0,.3);}
+      /* Two lines, then an ellipsis: one wordy exception should not set the row's height. */
+      .d2d-clamp2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+      .d2d-nba{display:flex;flex-direction:column;gap:3px;}
+      .d2d-nba > span:last-child{margin-top:auto;}
       .d2d-tile-sm{padding:10px 13px !important;}
       .d2d-tile-sm .d2d-tv{font-size:21px !important;line-height:1.15 !important;}
       .d2d-tile-sm .d2d-ts{font-size:10px !important;}
@@ -888,7 +892,7 @@
         ${acts.length && acts[0].kind !== 'Clear'
           ? `<span class="d2d-num" style="font-size:11px;color:${BRAND};font-weight:700;">${acts.length}</span>` : ''}
       </div>
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3" style="margin-bottom:18px;">
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3" style="margin-bottom:18px;">
         ${acts.map((a, i2) => {
           const tag = (a.id || a.tab) ? 'button' : 'div';
           const attrs = a.id ? ` type="button" data-open="${esc(a.id)}" style="text-align:left;width:100%;cursor:pointer;`
@@ -896,18 +900,18 @@
             : ' style="';
           return `
           <${tag} class="rounded-2xl border bg-white shadow-sm d2d-nba d2d-rise d2d-lift"${attrs}
-               border-left:3px solid ${a.accent};padding:13px 15px;animation-delay:${i2 * .05}s;">
+               border-left:3px solid ${a.accent};padding:12px 14px;min-height:132px;
+               animation-delay:${i2 * .05}s;">
             <span style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;">
               <span class="d2d-kind" style="color:${a.ink};">${esc(a.kind)}</span>
               ${a.where ? `<span class="d2d-num" style="font-size:9.5px;color:${LIGHT};">${esc(a.where)}</span>` : ''}
             </span>
-            <span style="font-size:12.5px;font-weight:600;color:${DARK};line-height:1.35;">${esc(a.what)}</span>
-            <span style="font-size:11px;color:${MID};line-height:1.4;">${esc(a.effect)}</span>
+            <span style="font-size:12.5px;font-weight:600;color:${DARK};line-height:1.32;">${esc(a.what)}</span>
+            <span class="d2d-clamp2" style="font-size:10.5px;color:${MID};line-height:1.4;">${esc(a.effect)}</span>
             ${a.next ? `<span style="display:flex;align-items:baseline;gap:6px;margin-top:7px;padding-top:7px;
                   border-top:.5px solid rgba(0,0,0,.06);">
-                 <span style="font-size:9px;font-weight:700;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">Next</span>
-                 <span style="font-size:11px;color:${DARK};line-height:1.4;">${esc(a.next)}</span>
-                 ${a.who ? `<span style="font-size:10px;color:${LIGHT};white-space:nowrap;">· ${esc(a.who)}</span>` : ''}
+                 <span style="font-size:8.5px;font-weight:700;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;">Next</span>
+                 <span class="d2d-clamp2" style="font-size:10.5px;color:${DARK};line-height:1.38;">${esc(a.next)}${a.who ? ` <span style="color:${LIGHT};">· ${esc(a.who)}</span>` : ''}</span>
                </span>` : ''}
           </${tag}>`;
         }).join('')}
