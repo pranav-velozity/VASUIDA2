@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '61';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '62';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -2696,49 +2696,60 @@
     if (!withData.length) return '';
 
     const CX = 240, CY = 196, R = 88;
-    // Worst average in either period sets the floor of the scale, never less than 2 days, so
-    // a good stretch cannot magnify a few hours into a dent.
-    const peak = Math.max(2, ...rows.map(r => Math.max(r.now || 0, r.prev || 0)));
-    // 100 = adds nothing. A stage that claws time back is still 100: it is not a problem.
-    const score = (v) => v == null ? null : Math.max(0, 1 - Math.max(0, v) / peak);
+
+    // The axis carries the WHOLE range, delay and recovery alike. Flooring it at zero made
+    // every early stage score full marks, so a fleet running ahead drew a perfect heptagon
+    // and said nothing — which is exactly what the numbers beside it contradicted.
+    // Further out = more time added. Inside the dashed ring = ahead of plan.
+    const vals = rows.flatMap(r => [r.now, r.prev]).filter(v => v != null);
+    const hi = Math.max(0.5, ...vals);              // always leave room above the on-plan ring
+    const lo = Math.min(-0.5, ...vals);
+    const norm = (v) => v == null ? null : Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
+    const onPlan = norm(0);
 
     const at = (i2, v) => {
       const a = (Math.PI * 2 * i2 / rows.length) - Math.PI / 2;
       return [CX + Math.cos(a) * R * v, CY + Math.sin(a) * R * v];
     };
     const poly = (key) => rows.map((r, i2) => {
-      const v = score(r[key]);
-      return at(i2, v == null ? 0 : v).map(n => n.toFixed(1)).join(',');
+      const v = norm(r[key]);
+      return at(i2, v == null ? onPlan : v).map(n => n.toFixed(1)).join(',');
     }).join(' ');
+    const ringPts = (f) => rows.map((r, i2) => at(i2, f).map(n => n.toFixed(1)).join(',')).join(' ');
 
-    const rings = [0.34, 0.67, 1].map(f => ({
-      pts: rows.map((r, i2) => at(i2, f).map(n => n.toFixed(1)).join(',')).join(' '),
-      label: (peak * (1 - f)).toFixed(peak < 4 ? 1 : 0) + 'd',
+    // Gridlines in days, so the distance from the centre still means something.
+    const gridAt = [0.25, 0.5, 0.75, 1].map(f => ({
+      pts: ringPts(f), label: (lo + (hi - lo) * f).toFixed(1) + 'd',
       y: (CY - R * f + 3).toFixed(1),
     }));
+
+    const anyLate = rows.some(r => r.now != null && r.now > 0.05);
 
     return `
       <svg viewBox="0 0 480 400" style="width:400px;max-width:100%;height:auto;display:block;flex-shrink:0;"
            role="img" aria-label="Average days added at each milestone">
-        ${rings.map(g => `<polygon points="${g.pts}" fill="none" stroke="rgba(0,0,0,.08)" stroke-width="1"/>
+        ${gridAt.map(g => `<polygon points="${g.pts}" fill="none" stroke="rgba(0,0,0,.07)" stroke-width="1"/>
           <text x="${CX + 4}" y="${g.y}" font-size="8.5" fill="${LIGHT}" font-family="ui-monospace,monospace">${g.label}</text>`).join('')}
         ${rows.map((r, i2) => { const [x, y] = at(i2, 1);
           return `<line x1="${CX}" y1="${CY}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="rgba(0,0,0,.07)" stroke-width="1"/>`; }).join('')}
 
-        ${/* The period before, dashed and behind. */ ''}
-        <polygon points="${poly('prev')}" fill="rgba(110,110,115,.10)" stroke="${MID}" stroke-width="1" stroke-dasharray="3 3"/>
-        <polygon class="d2d-web" points="${poly('now')}" fill="rgba(153,0,51,.20)" stroke="${BRAND}"
-                 stroke-width="2" stroke-linejoin="round"/>
+        ${/* On plan. Anything inside this ring is running ahead. */ ''}
+        <polygon points="${ringPts(onPlan)}" fill="none" stroke="${LINK}" stroke-width="1.4" stroke-dasharray="5 4"/>
+        <text x="${(CX + R * onPlan + 6).toFixed(1)}" y="${(CY - 4).toFixed(1)}" font-size="9"
+              fill="${LINK}" font-family="inherit">on plan</text>
+
+        <polygon points="${poly('prev')}" fill="rgba(110,110,115,.09)" stroke="${MID}" stroke-width="1" stroke-dasharray="3 3"/>
+        <polygon class="d2d-web" points="${poly('now')}" fill="${anyLate ? 'rgba(153,0,51,.20)' : 'rgba(95,107,13,.18)'}"
+                 stroke="${anyLate ? BRAND : LINK}" stroke-width="2" stroke-linejoin="round"/>
 
         ${rows.map((r, i2) => {
-          const v = score(r.now);
-          if (v == null) return '';
+          const v = norm(r.now); if (v == null) return '';
           const [x, y] = at(i2, v);
-          return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.5" fill="${BRAND}"/>`;
+          return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.5"
+                   fill="${r.now > 0.05 ? BRAND : LINK}"/>`;
         }).join('')}
 
         ${rows.map((r, i2) => {
-          // Labels sit well clear of the outer ring: at 1.34R the long ones ran over the web.
           const [lx, ly] = at(i2, 1.52);
           const anchor = Math.abs(lx - CX) < 20 ? 'middle' : (lx > CX ? 'start' : 'end');
           const none = r.now == null;
