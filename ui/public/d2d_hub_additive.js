@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '59';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '60';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -205,6 +205,13 @@
       .d2d-web{transform-origin:center;transform-box:fill-box;animation:d2d-web .7s cubic-bezier(.22,1,.36,1) both;}
       @media (prefers-reduced-motion:reduce){.d2d-fillx,.d2d-draw,.d2d-web{animation:none;}
         .d2d-draw{stroke-dasharray:none;}}
+
+      /* One card rhythm across the page, as on the Executive view. */
+      .d2d-card{background:#fff;border:.5px solid rgba(0,0,0,.08);border-radius:14px;padding:20px;margin-bottom:16px;
+        box-shadow:0 1px 2px rgba(16,18,27,.04),0 4px 12px rgba(16,18,27,.05);}
+      .d2d-cardh{font-size:13px;font-weight:600;color:${DARK};}
+      .d2d-cardm{font-size:10.5px;color:${LIGHT};}
+      .d2d-cardsub{font-size:10.5px;color:${LIGHT};margin:3px 0 10px;line-height:1.5;}
 
       .d2d-tile-sm{padding:10px 13px !important;}
       .d2d-tile-sm .d2d-tv{font-size:21px !important;line-height:1.15 !important;}
@@ -2709,7 +2716,7 @@
     }));
 
     return `
-      <svg viewBox="0 0 468 372" style="width:100%;display:block;" role="img"
+      <svg viewBox="0 0 468 372" style="width:400px;max-width:100%;height:auto;display:block;flex-shrink:0;" role="img"
            aria-label="Average days added at each milestone">
         ${rings.map(g => `<polygon points="${g.pts}" fill="none" stroke="rgba(0,0,0,.08)" stroke-width="1"/>
           <text x="${CX + 3}" y="${g.y}" font-size="8.5" fill="${LIGHT}" font-family="ui-monospace,monospace">${g.label}</text>`).join('')}
@@ -2902,6 +2909,38 @@
     'Blind spot': 'M12 5 C6 5 2 12 2 12 s4 7 10 7 10-7 10-7 -4-7-10-7 Z M12 9 a3 3 0 1 0 0 6 a3 3 0 1 0 0-6 M4 4 L20 20',
   };
 
+  // The radar says the shape; these say the size. Worst first, so the eye lands on the stage
+  // that costs the most.
+  function driftBars(rows) {
+    const live = rows.filter(r => r.now != null).sort((a, b) => (b.now || 0) - (a.now || 0));
+    if (!live.length) return '';
+    const peak = Math.max(1, ...live.map(r => Math.abs(r.now)));
+    return live.map((r, i) => {
+      const behind = r.now > 0.05;
+      const ink = behind ? BRAND : LINK;
+      const w = Math.round(Math.min(1, Math.abs(r.now) / peak) * 100);
+      const move = (r.prev == null || r.now == null) ? null : r.now - r.prev;
+      return `
+        <div style="display:flex;flex-direction:column;gap:3px;">
+          <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;">
+            <span style="font-size:12px;font-weight:600;color:${DARK};">${esc(r.label)}</span>
+            <span style="display:flex;align-items:baseline;gap:9px;">
+              ${move == null ? '' : `<span style="font-size:10px;color:${Math.abs(move) < 0.25 ? LIGHT : (move > 0 ? BRAND : LINK)};">
+                ${Math.abs(move) < 0.25 ? 'steady' : (move > 0 ? '▲ ' + move.toFixed(1) + 'd worse' : '▼ ' + Math.abs(move).toFixed(1) + 'd better')}</span>`}
+              <span class="d2d-num" style="font-size:13px;font-weight:700;color:${ink};">
+                ${behind ? '+' + r.now.toFixed(1) + 'd' : (r.now < -0.05 ? r.now.toFixed(1) + 'd' : 'on plan')}</span>
+            </span>
+          </div>
+          <div style="height:6px;background:#EFF1F4;border-radius:3px;overflow:hidden;">
+            <div class="d2d-fillx" style="height:6px;width:${w}%;border-radius:3px;background:${ink};
+                 opacity:${behind ? .85 : .45};animation-delay:${(i * .06).toFixed(2)}s;"></div>
+          </div>
+          <div style="font-size:9.5px;color:${LIGHT};">
+            seen ${r.nowN}${r.worst ? ` · worst ${esc(r.worst.ref)} at ${r.worst.days}d` : ''}</div>
+        </div>`;
+    }).join('');
+  }
+
   function paintPerformance(d) {
     const all = (d.allShipments || []).slice();
     const done = all.filter(x => x.status === 'delivered');
@@ -3042,45 +3081,52 @@
                uc.all ? `${uc.all.units.toLocaleString()} units across ${uc.all.n} box${uc.all.n === 1 ? '' : 'es'}` : 'needs an approved rate and units')}
       </div>
 
-      ${/* Where time is lost, and how full the boxes are. */ ''}
-      <div class="grid grid-cols-1 lg:grid-cols-5 gap-3 items-start" style="margin-bottom:12px;">
-        <div class="lg:col-span-3 rounded-2xl border bg-white shadow-sm d2d-rise" style="padding:16px 18px;">
-          <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-            <span style="font-size:13px;font-weight:600;color:${DARK};">Where it consistently falls behind</span>
-            <span style="font-size:10.5px;color:${LIGHT};">last 8 weeks vs the 8 before</span>
-          </div>
-          <div style="font-size:11px;color:${MID};margin:3px 0 2px;">
-            Average days each stage <b style="color:${DARK};">adds</b> — not the delay it inherits. A stage on the
-            centre is on plan or ahead.</div>
-          ${drift.some(r => r.now != null) ? `
-            ${driftRadar(drift)}
-            <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
-              <span style="font-size:10.5px;color:${MID};">
-                <span style="display:inline-block;width:14px;height:2px;background:${BRAND};vertical-align:middle;margin-right:5px;"></span>last 8 weeks</span>
-              <span style="font-size:10.5px;color:${MID};">
-                <span style="display:inline-block;width:14px;border-top:2px dashed ${MID};vertical-align:middle;margin-right:5px;"></span>the 8 before</span>
-              ${topStage ? `<span style="font-size:10.5px;color:${BRAND};">${esc(topStage.label)} costs the most, ${topStage.now.toFixed(1)}d a container</span>` : ''}
-            </div>`
-            : `<div style="font-size:11.5px;color:${MID};padding:14px 0;">No stage has been recorded against a plan in the last 16 weeks.</div>`}
+      ${/* One full-width card per idea, in the order someone reads them. */ ''}
+      <div class="d2d-card d2d-rise">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+          <span class="d2d-cardh">Where it consistently falls behind</span>
+          <span class="d2d-cardm">last 8 weeks vs the 8 before</span>
         </div>
+        <div class="d2d-cardsub">Average days each stage <b style="color:${DARK};">adds</b> — not the delay it
+          inherits. A stage sitting on the centre is on plan or ahead.</div>
 
-        <div class="lg:col-span-2 rounded-2xl border bg-white shadow-sm d2d-rise" style="padding:16px 18px;animation-delay:.06s;">
-          <div style="font-size:13px;font-weight:600;color:${DARK};">Utilisation by box type</div>
-          <div style="font-size:11px;color:${MID};margin:3px 0 14px;">Filled against capacity, drawn to scale.</div>
-          <div style="display:flex;flex-direction:column;gap:16px;">
-            ${util.byType.map((b, i2) => boxGraphic(b, i2)).join('')}
-          </div>
-          ${util.pct != null && util.pct < 80 ? `
-            <div style="margin-top:14px;padding-top:11px;border-top:.5px solid rgba(0,0,0,.06);font-size:11px;color:${DARK};">
-              Averaging ${util.pct}% full — the remainder is freight paid for air.</div>` : ''}
-        </div>
+        ${drift.some(r => r.now != null) ? `
+          <div style="display:flex;align-items:center;gap:28px;flex-wrap:wrap;margin-top:6px;">
+            <div style="flex-shrink:0;">
+              ${driftRadar(drift)}
+              <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-top:2px;">
+                <span style="font-size:10.5px;color:${MID};">
+                  <span style="display:inline-block;width:14px;height:2px;background:${BRAND};vertical-align:middle;margin-right:5px;"></span>last 8 weeks</span>
+                <span style="font-size:10.5px;color:${MID};">
+                  <span style="display:inline-block;width:14px;border-top:2px dashed ${MID};vertical-align:middle;margin-right:5px;"></span>the 8 before</span>
+              </div>
+            </div>
+            <div style="flex:1;min-width:280px;display:flex;flex-direction:column;gap:13px;">
+              ${driftBars(drift)}
+            </div>
+          </div>`
+          : `<div style="font-size:11.5px;color:${MID};padding:14px 0;">
+               No stage has been recorded against a plan in the last 16 weeks.</div>`}
       </div>
 
-      ${/* What a unit costs to move, and whether that is drifting. */ ''}
-      <div class="rounded-2xl border bg-white shadow-sm d2d-rise" style="padding:16px 18px;margin-bottom:12px;animation-delay:.12s;">
+      <div class="d2d-card d2d-rise" style="animation-delay:.06s;">
         <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-          <span style="font-size:13px;font-weight:600;color:${DARK};">Freight per unit, by mode</span>
-          <span style="display:flex;align-items:center;gap:14px;">
+          <span class="d2d-cardh">Utilisation by box type</span>
+          <span class="d2d-cardm">filled against capacity, drawn to scale</span>
+        </div>
+        <div class="d2d-cardsub">Only counted where the order file gives a real volume for the box.</div>
+        <div style="display:flex;flex-direction:column;gap:18px;margin-top:10px;max-width:560px;">
+          ${util.byType.map((b, i2) => boxGraphic(b, i2)).join('')}
+        </div>
+        ${util.pct != null && util.pct < 80 ? `
+          <div style="margin-top:14px;padding-top:11px;border-top:.5px solid rgba(0,0,0,.06);font-size:11.5px;color:${DARK};">
+            Averaging ${util.pct}% full — the remainder is freight paid for air.</div>` : ''}
+      </div>
+
+      <div class="d2d-card d2d-rise" style="animation-delay:.12s;">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+          <span class="d2d-cardh">Freight per unit, by mode</span>
+          <span style="display:flex;align-items:center;gap:16px;">
             <span style="font-size:10.5px;color:${MID};">
               <span style="display:inline-block;width:14px;height:2px;background:${MAP_PAL.transit};vertical-align:middle;margin-right:5px;"></span>sea
               ${uc.sea ? `<b class="d2d-num" style="color:${DARK};">${money(uc.sea.perUnit, uc.sea.currency, 2)}</b>` : ''}</span>
@@ -3089,9 +3135,10 @@
               ${uc.air ? `<b class="d2d-num" style="color:${DARK};">${money(uc.air.perUnit, uc.air.currency, 2)}</b>` : ''}</span>
           </span>
         </div>
+        <div class="d2d-cardsub">What a unit costs to move, week by week. The level matters less than the drift.</div>
         ${costChart
-          ? `${costChart}
-             ${uc.sea && uc.air ? `<div style="font-size:11px;color:${MID};margin-top:2px;">
+          ? `<div style="max-width:720px;">${costChart}</div>
+             ${uc.sea && uc.air ? `<div style="font-size:11.5px;color:${MID};margin-top:4px;">
                Air is running ${(uc.air.perUnit / uc.sea.perUnit).toFixed(1)}× sea per unit. Every air booking that
                could have sailed is that difference times the units aboard.</div>` : ''}`
           : `<div style="font-size:11.5px;color:${MID};padding:16px 0;">
