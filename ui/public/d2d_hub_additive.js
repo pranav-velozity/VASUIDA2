@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '62';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '63';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -2723,8 +2723,6 @@
       y: (CY - R * f + 3).toFixed(1),
     }));
 
-    const anyLate = rows.some(r => r.now != null && r.now > 0.05);
-
     return `
       <svg viewBox="0 0 480 400" style="width:400px;max-width:100%;height:auto;display:block;flex-shrink:0;"
            role="img" aria-label="Average days added at each milestone">
@@ -2739,14 +2737,13 @@
               fill="${LINK}" font-family="inherit">on plan</text>
 
         <polygon points="${poly('prev')}" fill="rgba(110,110,115,.09)" stroke="${MID}" stroke-width="1" stroke-dasharray="3 3"/>
-        <polygon class="d2d-web" points="${poly('now')}" fill="${anyLate ? 'rgba(153,0,51,.20)' : 'rgba(95,107,13,.18)'}"
-                 stroke="${anyLate ? BRAND : LINK}" stroke-width="2" stroke-linejoin="round"/>
+        <polygon class="d2d-web" points="${poly('now')}" fill="rgba(153,0,51,.5)"
+                 stroke="${BRAND}" stroke-width="2" stroke-linejoin="round"/>
 
         ${rows.map((r, i2) => {
           const v = norm(r.now); if (v == null) return '';
           const [x, y] = at(i2, v);
-          return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.5"
-                   fill="${r.now > 0.05 ? BRAND : LINK}"/>`;
+          return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.5" fill="${BRAND}"/>`;
         }).join('')}
 
         ${rows.map((r, i2) => {
@@ -2940,8 +2937,8 @@
             </span>
           </div>
           <div style="height:6px;background:#EFF1F4;border-radius:3px;overflow:hidden;">
-            <div class="d2d-fillx" style="height:6px;width:${w}%;border-radius:3px;background:${ink};
-                 opacity:${behind ? .85 : .45};animation-delay:${(i * .06).toFixed(2)}s;"></div>
+            <div class="d2d-fillx" style="height:6px;width:${w}%;border-radius:3px;
+                 background:rgba(153,0,51,.5);animation-delay:${(i * .06).toFixed(2)}s;"></div>
           </div>
           <div style="font-size:9.5px;color:${LIGHT};">
             seen ${r.nowN}${r.worst ? ` · worst ${esc(r.worst.ref)} at ${r.worst.days}d` : ''}</div>
