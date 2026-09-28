@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '57';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '58';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -2686,6 +2686,8 @@
       const rad = Math.max(0, Math.min(1, v)) * R;
       return [CX + Math.cos(a) * rad, CY + Math.sin(a) * rad];
     };
+    // A stage that claws time back sits on the centre ring: it is not adding delay. The figure
+    // beside the axis still says it ran early, so nothing is hidden.
     const poly = (key) => rows.map((r, i) =>
       at(i, (r[key] == null ? 0 : Math.max(0, r[key])) / peak).map(n => n.toFixed(1)).join(',')).join(' ');
 
@@ -2722,10 +2724,62 @@
             <text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${anchor}" font-size="10"
                   font-weight="600" fill="${none ? LIGHT : DARK}" font-family="inherit">${esc(r.label)}</text>
             <text x="${lx.toFixed(1)}" y="${(ly + 11).toFixed(1)}" text-anchor="${anchor}" font-size="9.5"
-                  fill="${none ? LIGHT : (r.now > 0 ? BRAND : LINK)}" font-family="ui-monospace,monospace">
-              ${none ? 'no data' : (r.now > 0 ? '+' + r.now.toFixed(1) + 'd' : r.now.toFixed(1) + 'd')}</text>`;
+                  fill="${none ? LIGHT : (r.now > 0.05 ? BRAND : LINK)}" font-family="ui-monospace,monospace">
+              ${none ? 'no data'
+                : (r.now > 0.05 ? '+' + r.now.toFixed(1) + 'd'
+                  : (r.now < -0.05 ? r.now.toFixed(1) + 'd early' : 'on plan'))}</text>`;
         }).join('')}
       </svg>`;
+  }
+
+  // Landed cost per unit, from the option that was approved and the units aboard. Split by
+  // mode because air and sea are different products, and averaging them hides both.
+  function unitCost(d, list) {
+    const bk = {};
+    for (const b of ((d.allBookings && d.allBookings.length ? d.allBookings : d.bookings) || [])) bk[b.id] = b;
+    const rows = [];
+    for (const sh of list) {
+      const b = bk[sh.booking_id];
+      const units = Number(sh.units) || Number(sh.cargo && sh.cargo.units) || 0;
+      const sell = b ? Number(b.sell_amount) || 0 : 0;
+      const cost = b ? Number(b.cost_amount) || 0 : 0;
+      if (!units || !sell) continue;
+      rows.push({ mode: sh.mode === 'air' ? 'air' : 'sea', units, sell, cost,
+                  perUnit: sell / units, costPerUnit: cost ? cost / units : null,
+                  currency: (b && b.currency) || 'USD', ref: sh.reference });
+    }
+    const forMode = (m) => {
+      const r = rows.filter(x => x.mode === m);
+      if (!r.length) return null;
+      const units = r.reduce((n, x) => n + x.units, 0);
+      const sell = r.reduce((n, x) => n + x.sell, 0);
+      const cost = r.reduce((n, x) => n + x.cost, 0);
+      return { n: r.length, units, perUnit: sell / units, costPerUnit: cost ? cost / units : null,
+               currency: r[0].currency };
+    };
+    const all = rows.length ? {
+      n: rows.length,
+      units: rows.reduce((n, x) => n + x.units, 0),
+      perUnit: rows.reduce((n, x) => n + x.sell, 0) / rows.reduce((n, x) => n + x.units, 0),
+      currency: rows[0].currency,
+    } : null;
+    return { rows, all, sea: forMode('sea'), air: forMode('air') };
+  }
+
+  // Door to door, measured separately per mode — a 30-day sailing and a 5-day flight averaged
+  // together describe neither.
+  function doorToDoorBy(list) {
+    const of = (m) => {
+      const ds = list.filter(x => (x.mode === 'air' ? 'air' : 'sea') === m).map(x => {
+        const ev = evMap(x);
+        return daysBetween(ev.pickup && ev.pickup.actual_at, ev.delivered && ev.delivered.actual_at);
+      }).filter(v => v != null && v > 0).sort((a, b) => a - b);
+      if (!ds.length) return null;
+      return { n: ds.length, median: ds[Math.floor(ds.length / 2)],
+               p90: ds[Math.min(ds.length - 1, Math.floor(ds.length * 0.9))],
+               min: ds[0], max: ds[ds.length - 1], all: ds };
+    };
+    return { sea: of('sea'), air: of('air') };
   }
 
   function paintPerformance(d) {
@@ -2799,105 +2853,194 @@
         <div class="d2d-ts">${sub}</div>
       </div>`;
 
+    const dtd = doorToDoorBy(done);
+    const uc = unitCost(d, all);
+
+    const gains = [];
+    const topStage = drift.filter(r => r.now != null && r.now > 0.25).sort((a, b) => b.now - a.now)[0];
+    if (topStage) gains.push({ kind: 'Biggest loss', accent: BRAND, ink: BRAND,
+      what: `${topStage.label} adds ${topStage.now.toFixed(1)} days`,
+      effect: `Across ${topStage.nowN} shipment${topStage.nowN === 1 ? '' : 's'} in the last 8 weeks${topStage.worst ? `, worst ${topStage.worst.ref} at ${topStage.worst.days}d` : ''}. Taking half of it back is ${(topStage.now / 2).toFixed(1)} days off every container.` });
+
+    if (util.pct != null && util.pct < 80) gains.push({ kind: 'Empty space', accent: YELL, ink: YINK,
+      what: `Boxes average ${util.pct}% full`,
+      effect: `${(100 - util.pct)}% of every box booked is paid-for air. Consolidating two under-filled boxes removes one booking.` });
+
+    const worsening = drift.filter(r => r.now != null && r.prev != null && r.now > r.prev + 0.5)
+      .sort((a, b) => (b.now - b.prev) - (a.now - a.prev))[0];
+    if (worsening) gains.push({ kind: 'Getting worse', accent: BRAND, ink: BRAND,
+      what: `${worsening.label} slipped ${(worsening.now - worsening.prev).toFixed(1)} days`,
+      effect: `It added ${worsening.prev.toFixed(1)}d in the 8 weeks before and ${worsening.now.toFixed(1)}d since. Worth asking the partner what changed.` });
+
+    if (uc.sea && uc.air && uc.air.perUnit > uc.sea.perUnit * 2) gains.push({ kind: 'Mode mix', accent: BLUE, ink: BLUE,
+      what: `Air costs ${(uc.air.perUnit / uc.sea.perUnit).toFixed(1)}× sea per unit`,
+      effect: `${money(uc.air.perUnit, uc.air.currency, 2)} against ${money(uc.sea.perUnit, uc.sea.currency, 2)}. Every air booking that could have sailed is that difference times the units aboard.` });
+
+    const noPlan = all.filter(x => !x.plan_delivered).length;
+    if (noPlan && gains.length < 4) gains.push({ kind: 'Blind spot', accent: YELL, ink: YINK,
+      what: `${noPlan} shipment${noPlan === 1 ? '' : 's'} with no frozen plan`,
+      effect: 'Nothing can be measured against a plan that does not exist, so these sit outside every figure above.' });
+
+    // Bands for the distribution, per mode, so the spread can be read at a glance.
+    const bandsFor = (m) => {
+      const src = dtd[m];
+      if (!src || src.n < 2) return null;
+      const lo = Math.floor(src.min / 5) * 5, hi = Math.ceil(src.max / 5) * 5;
+      const step = Math.max(5, Math.round((hi - lo) / 5 / 5) * 5) || 5;
+      const out = [];
+      for (let a = lo; a < hi; a += step) {
+        const n = src.all.filter(v => v >= a && v < a + step).length;
+        out.push({ label: `${a}–${a + step}d`, n });
+      }
+      const most = Math.max(1, ...out.map(b => b.n));
+      return out.map(b => ({ ...b, pct: Math.round(b.n / most * 100) }));
+    };
+
     return `
       <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:12px;flex-wrap:wrap;">
         <div>
           <div style="font-size:16px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Performance</div>
-          <div style="font-size:11.5px;color:${MID};margin-top:2px;">Every measure from recorded dates. Costed figures wait on the rates and the order file.</div>
+          <div style="font-size:11.5px;color:${MID};margin-top:2px;">Every measure from recorded dates. Air and sea are kept apart, because they are different products.</div>
         </div>
-        <span style="font-size:11px;color:${MID};">${all.length} shipment${all.length === 1 ? '' : 's'} &middot; ${done.length} completed</span>
+        <span style="font-size:11px;color:${MID};">${all.length} shipment${all.length === 1 ? '' : 's'} &middot; ${done.length} completed &middot; last 8 weeks vs the 8 before</span>
       </div>
 
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-3" style="margin-bottom:12px;">
-        ${tile('Door to door', median != null ? median + 'd' : '&ndash;',
-               p90 != null ? '90% within ' + p90 + 'd' : 'needs completed shipments')}
+        ${tile('Door to door · sea', dtd.sea ? dtd.sea.median + 'd' : '&ndash;',
+               dtd.sea ? `${dtd.sea.n} completed · 90% within ${dtd.sea.p90}d` : 'no sea delivery yet')}
+        ${tile('Door to door · air', dtd.air ? dtd.air.median + 'd' : '&ndash;',
+               dtd.air ? `${dtd.air.n} completed · 90% within ${dtd.air.p90}d` : 'no air delivery yet')}
         ${tile('On plan', onPlan != null ? onPlan + '%' : '&ndash;',
                slipAll.length ? slipAll.length + ' behind plan' : 'all on plan', onPlan != null && onPlan < 80 ? BRAND : DARK)}
-        ${tile('Days lost', stages.reduce((n, x) => n + x[1], 0) || 0, stages.length ? 'across ' + stages.length + ' stages' : 'none recorded', stages.length ? BRAND : DARK)}
-        ${tile('Container utilisation', util.pct != null ? util.pct + '%' : '&ndash;',
-               util.pct != null ? util.n + ' box' + (util.n === 1 ? '' : 'es') + ' with CBM loaded' : 'needs CBM on the order file',
-               util.pct != null && util.pct < 70 ? YINK : DARK)}
+        ${tile('Freight per unit', uc.all ? money(uc.all.perUnit, uc.all.currency, 2) : '&ndash;',
+               uc.all ? `${uc.all.units.toLocaleString()} units across ${uc.all.n} box${uc.all.n === 1 ? '' : 'es'}` : 'needs an approved rate and units')}
       </div>
 
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 items-start">
-        <div class="rounded-2xl border bg-white shadow-sm" style="padding:16px 18px;">
-          <div style="font-size:13px;font-weight:600;color:${DARK};">Where the days are lost</div>
-          <div style="font-size:11px;color:${MID};margin-bottom:12px;">every stage that has run past its plan</div>
-          ${stages.length ? stages.map(([label, days]) => `
-            <div style="display:flex;align-items:center;gap:10px;padding:6px 0;">
-              <span style="font-size:11.5px;color:${DARK};width:118px;flex-shrink:0;">${esc(label)}</span>
-              <span style="flex:1;height:10px;background:#F0F0F3;border-radius:5px;overflow:hidden;">
-                <span style="display:block;height:10px;width:${Math.round(days / maxStage * 100)}%;background:${BRAND};border-radius:5px;"></span></span>
-              <span class="d2d-num" style="font-size:11.5px;color:${BRAND};width:44px;text-align:right;">${days}d</span>
-            </div>`).join('')
-            : `<div style="font-size:11.5px;color:${LINK};">Nothing has run late yet.</div>`}
-          <div style="font-size:11px;color:${MID};margin-top:10px;padding-top:9px;border-top:.5px solid rgba(0,0,0,.06);line-height:1.45;">
-            This is the one performance figure that is real today, because it comes from the dates being recorded.
-          </div>
-        </div>
-
-        <div style="display:flex;flex-direction:column;gap:12px;">
-          <div class="rounded-2xl border bg-white shadow-sm" style="padding:16px 18px;">
+      ${/* Row one of the mockup: the spread, then how full the boxes are. */ ''}
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start" style="margin-bottom:12px;">
+        <div class="lg:col-span-2 rounded-2xl border bg-white shadow-sm" style="padding:16px 18px;">
           <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-            <span style="font-size:13px;font-weight:600;color:${DARK};">Where it consistently falls behind</span>
-            <span style="font-size:10.5px;color:${LIGHT};">last 8 weeks vs the 8 before</span>
+            <span style="font-size:13px;font-weight:600;color:${DARK};">How long door to door actually takes</span>
+            <span style="font-size:10.5px;color:${LIGHT};">bar weight is how many shipments sit in each band</span>
           </div>
-          <div style="font-size:11px;color:${MID};margin:3px 0 4px;">
-            Average days each stage <b style="color:${DARK};">adds</b> — not the delay it inherits, so one late
-            pickup does not make every stage look late.</div>
-
-          ${drift.some(r => r.now != null) ? `
-            ${driftRadar(drift)}
-            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:4px;">
-              <span style="font-size:10.5px;color:${MID};">
-                <span style="display:inline-block;width:14px;height:2px;background:${BRAND};vertical-align:middle;margin-right:5px;"></span>last 8 weeks</span>
-              <span style="font-size:10.5px;color:${MID};">
-                <span style="display:inline-block;width:14px;border-top:2px dashed ${MID};vertical-align:middle;margin-right:5px;"></span>the 8 before</span>
-            </div>
-            ${worstStage ? `
-              <div style="margin-top:10px;padding-top:10px;border-top:.5px solid rgba(0,0,0,.06);font-size:11.5px;color:${DARK};line-height:1.5;">
-                <b>${esc(worstStage.label)}</b> adds the most — ${worstStage.now.toFixed(1)} days on average
-                across ${worstStage.nowN} shipment${worstStage.nowN === 1 ? '' : 's'}${worstStage.worst
-                  ? `, worst <span class="d2d-num">${esc(worstStage.worst.ref)}</span> at ${worstStage.worst.days}d` : ''}.
-                ${worsened.length ? `Getting worse at ${worsened.map(r => esc(r.label.toLowerCase())).join(', ')}.` : ''}
-                ${improved.length ? `Better at ${improved.map(r => esc(r.label.toLowerCase())).join(', ')}.` : ''}
-              </div>` : ''}`
-            : `<div style="font-size:11.5px;color:${MID};padding:14px 0;">
-                 No stage has been recorded against a plan in the last 16 weeks.</div>`}
+          ${['sea', 'air'].map(m => {
+            const src = dtd[m], bands = bandsFor(m);
+            return `
+              <div style="margin-top:12px;">
+                <div style="display:flex;align-items:baseline;gap:9px;">
+                  <span style="font-size:11.5px;font-weight:600;color:${DARK};text-transform:capitalize;">${m}</span>
+                  ${src ? `<span class="d2d-num" style="font-size:11px;color:${MID};">median ${src.median}d · ${src.min}–${src.max}d across ${src.n}</span>`
+                        : `<span style="font-size:11px;color:${LIGHT};">nothing delivered yet</span>`}
+                </div>
+                ${bands ? bands.map(b => `
+                  <div style="display:grid;grid-template-columns:78px 1fr 34px;gap:0 10px;align-items:center;padding:3px 0;">
+                    <span class="d2d-num" style="font-size:10.5px;color:${MID};">${esc(b.label)}</span>
+                    <span style="height:9px;background:#EFF1F4;border-radius:5px;overflow:hidden;">
+                      <span style="display:block;height:9px;width:${b.pct}%;border-radius:5px;background:${m === 'air' ? MAP_PAL.air : MAP_PAL.transit};opacity:.75;"></span></span>
+                    <span class="d2d-num" style="font-size:10.5px;color:${DARK};text-align:right;">${b.n || ''}</span>
+                  </div>`).join('')
+                  : `<div style="font-size:10.5px;color:${LIGHT};margin-top:4px;">
+                       ${src ? 'One delivery so far — a spread needs a few.' : 'The curve fills in as containers are delivered.'}</div>`}
+              </div>`;
+          }).join('')}
         </div>
 
         <div class="rounded-2xl border bg-white shadow-sm" style="padding:16px 18px;">
           <div style="font-size:13px;font-weight:600;color:${DARK};">Utilisation by box type</div>
-          <div style="font-size:11px;color:${MID};margin:3px 0 10px;">
-            CBM aboard against the capacity of the box booked. Only counted where the order file gives a real volume.</div>
+          <div style="font-size:11px;color:${MID};margin:3px 0 10px;">CBM aboard against the capacity of the box booked.</div>
           ${util.byType.length ? util.byType.map(b => `
             <div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-top:.5px solid rgba(0,0,0,.05);">
-              <span style="font-size:11.5px;color:${DARK};width:46px;">${esc(b.type)}</span>
+              <span style="font-size:11.5px;color:${DARK};width:42px;">${esc(b.type)}</span>
               <span style="flex:1;height:9px;background:#EFF1F4;border-radius:5px;overflow:hidden;">
                 <span style="display:block;height:9px;width:${Math.min(100, b.pct)}%;border-radius:5px;
                       background:${b.pct < 70 ? YELL : LIME};"></span></span>
-              <span class="d2d-num" style="font-size:12.5px;color:${DARK};width:44px;text-align:right;">${b.pct}%</span>
-              <span style="font-size:10.5px;color:${LIGHT};width:64px;">${b.n} box${b.n === 1 ? '' : 'es'}</span>
+              <span class="d2d-num" style="font-size:12.5px;color:${DARK};width:42px;text-align:right;">${b.pct}%</span>
             </div>`).join('')
-            : `<div style="font-size:11.5px;color:${MID};">No container has a CBM figure yet. Load an order file and this fills in.</div>`}
+            : `<div style="font-size:11.5px;color:${MID};">No container has a CBM figure yet.</div>`}
           ${util.pct != null && util.pct < 70 ? `
-            <div style="margin-top:10px;padding-top:10px;border-top:.5px solid rgba(0,0,0,.06);font-size:11.5px;color:${DARK};">
-              Averaging ${util.pct}% full. Every under-filled box is freight paid for air.</div>` : ''}
+            <div style="margin-top:9px;font-size:11px;color:${DARK};">Averaging ${util.pct}% full — the rest is freight paid for air.</div>` : ''}
+          ${uc.sea || uc.air ? `
+            <div style="margin-top:11px;padding-top:10px;border-top:.5px solid rgba(0,0,0,.06);">
+              <div style="font-size:10px;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px;">Freight per unit</div>
+              ${['sea', 'air'].map(m => uc[m] ? `
+                <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:3px 0;">
+                  <span style="font-size:11.5px;color:${MID};text-transform:capitalize;">${m}</span>
+                  <span class="d2d-num" style="font-size:12.5px;color:${DARK};">${money(uc[m].perUnit, uc[m].currency, 2)}</span>
+                </div>` : '').join('')}
+              ${uc.sea && uc.air ? `<div style="font-size:10.5px;color:${MID};margin-top:4px;">
+                Air costs ${(uc.air.perUnit / uc.sea.perUnit).toFixed(1)}&times; sea per unit.</div>` : ''}
+            </div>` : ''}
+        </div>
+      </div>
+
+      ${/* Row two: the radar, and the same thing as a table for anyone who prefers numbers. */ ''}
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 items-start" style="margin-bottom:12px;">
+        <div class="rounded-2xl border bg-white shadow-sm" style="padding:16px 18px;">
+          <div style="font-size:13px;font-weight:600;color:${DARK};">Where it consistently falls behind</div>
+          <div style="font-size:11px;color:${MID};margin:3px 0 4px;">
+            Average days each stage <b style="color:${DARK};">adds</b> — not the delay it inherits. A stage sitting on
+            the centre is on plan or ahead.</div>
+          ${drift.some(r => r.now != null) ? `
+            ${driftRadar(drift)}
+            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+              <span style="font-size:10.5px;color:${MID};">
+                <span style="display:inline-block;width:14px;height:2px;background:${BRAND};vertical-align:middle;margin-right:5px;"></span>last 8 weeks</span>
+              <span style="font-size:10.5px;color:${MID};">
+                <span style="display:inline-block;width:14px;border-top:2px dashed ${MID};vertical-align:middle;margin-right:5px;"></span>the 8 before</span>
+            </div>`
+            : `<div style="font-size:11.5px;color:${MID};padding:14px 0;">No stage has been recorded against a plan in the last 16 weeks.</div>`}
         </div>
 
-        ${pending('Transit distribution by lane',
-            'The spread matters more than the average, and a distribution needs a few months of completed shipments. With ' + done.length + ' so far, any curve would be noise.', 150)}
-          ${pending('Container utilisation and cost of empty space',
-            'Needs CBM and weight per PO from the order file, plus your contracted rate per container.', 150)}
-          ${pending('Cash in transit and landed cost per unit',
-            'Needs the commercial invoice value per PO. Until then these are the CFO figures we cannot honestly show.', 150)}
+        <div class="rounded-2xl border bg-white shadow-sm" style="padding:16px 18px;">
+          <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;">
+            <span style="font-size:13px;font-weight:600;color:${DARK};">Recurring hurdles</span>
+            <span style="font-size:10.5px;color:${LIGHT};">worst first</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 46px 74px 74px;gap:0 10px;padding:9px 0 5px;">
+            ${['Stage', 'Seen', 'Adds', 'Before'].map((h, i2) =>
+              `<span style="font-size:9px;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;font-weight:700;
+                   text-align:${i2 ? 'right' : 'left'};">${h}</span>`).join('')}
+          </div>
+          ${drift.filter(r => r.now != null).sort((a, b) => (b.now || 0) - (a.now || 0)).map(r => `
+            <div style="display:grid;grid-template-columns:1fr 46px 74px 74px;gap:0 10px;padding:7px 0;
+                 border-top:.5px solid rgba(0,0,0,.05);align-items:baseline;">
+              <span style="font-size:11.5px;color:${DARK};">${esc(r.label)}
+                ${r.worst ? `<span style="display:block;font-size:9.5px;color:${LIGHT};">worst <span class="d2d-num">${esc(r.worst.ref)}</span> ${r.worst.days}d</span>` : ''}</span>
+              <span class="d2d-num" style="font-size:11.5px;color:${MID};text-align:right;">${r.nowN}</span>
+              <span class="d2d-num" style="font-size:12px;text-align:right;color:${r.now > 0.05 ? BRAND : LINK};">
+                ${r.now > 0.05 ? '+' + r.now.toFixed(1) + 'd' : (r.now < -0.05 ? r.now.toFixed(1) + 'd' : 'on plan')}</span>
+              <span class="d2d-num" style="font-size:11.5px;text-align:right;color:${MID};">
+                ${r.prev == null ? '—' : (r.prev > 0 ? '+' : '') + r.prev.toFixed(1) + 'd'}</span>
+            </div>`).join('') || `<div style="font-size:11.5px;color:${MID};padding:10px 0;">Nothing recorded against a plan yet.</div>`}
         </div>
+      </div>
+
+      ${/* Row three: what to do about it. */ ''}
+      ${gains.length ? `
+        <div style="display:flex;align-items:baseline;gap:9px;margin:2px 0 8px;">
+          <span style="font-size:12.5px;font-weight:600;color:${DARK};">Where the next gain is</span>
+          <span style="font-size:11px;color:${MID};">largest effect first</span>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3" style="margin-bottom:14px;">
+          ${gains.map((g, i2) => `
+            <div class="rounded-2xl border bg-white shadow-sm d2d-rise" style="border-left:3px solid ${g.accent};
+                 padding:12px 14px;display:flex;flex-direction:column;gap:4px;animation-delay:${i2 * .05}s;">
+              <span style="font-size:9.5px;font-weight:700;color:${g.ink};text-transform:uppercase;letter-spacing:.06em;">${esc(g.kind)}</span>
+              <span style="font-size:12px;font-weight:600;color:${DARK};line-height:1.35;">${esc(g.what)}</span>
+              <span class="d2d-clamp2" style="font-size:10.5px;color:${MID};line-height:1.4;">${esc(g.effect)}</span>
+            </div>`).join('')}
+        </div>` : ''}
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 items-start">
+        ${pending('Transit distribution by lane',
+          'Per-lane curves need a few months of completed shipments on each lane. The overall spread above fills in first.')}
+        ${pending('Cash in transit and landed cost per unit',
+          'Freight per unit is above. Landed cost also needs the commercial invoice value per PO, which the order file does not carry yet.')}
       </div>`;
   }
 
-  // ── Bookings: what the client decides ──
-  // From and to, on anything that represents a booked movement. It reads off the option first
-  // and falls back to the request it belongs to.
+  // From and to on anything that represents a booked movement, with the transit time quoted
+  // against what was asked for.
   function laneLine(b) {
     const from = b.origin || b.service || (b.request && b.request.origin);
     const to = b.destination || (b.request && b.request.destination);
@@ -3405,10 +3548,12 @@
     });
   }
 
-  function money(v, cur) {
+  function money(v, cur, dp) {
     if (v == null || v === '') return '&ndash;';
     const n = Number(v); if (!isFinite(n)) return '&ndash;';
-    return (cur && cur !== 'USD' ? cur + ' ' : '$') + n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+    const places = dp == null ? 0 : dp;
+    return (cur && cur !== 'USD' ? cur + ' ' : '$') +
+      n.toLocaleString(undefined, { minimumFractionDigits: places, maximumFractionDigits: places });
   }
 
   // Truly full screen: the map fills the viewport with the controls floating over it. The
