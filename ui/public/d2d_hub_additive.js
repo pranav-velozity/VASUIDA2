@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '53';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '54';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -484,33 +484,48 @@
         id: sh.id, sort: 60 });
     }
 
-    const released = d.bookings.filter(b => b.status === 'released');
+    // The same pools the counters above use. Reading one week here while the tiles read every
+    // week meant a card could disappear the moment you changed week, with the count beside it
+    // still saying two.
+    const bkPool = (d.allBookings && d.allBookings.length ? d.allBookings : d.bookings) || [];
+    const reqPool = (d.allRequests && d.allRequests.length ? d.allRequests : d.requests) || [];
+    const poPool = (d.allOrders && d.allOrders.length ? d.allOrders : d.orders) || [];
+
+    // Where a set of things spans weeks, name the weeks rather than the one on screen.
+    const weeksOf = (list) => {
+      const ws = [...new Set(list.map(x => x.week_start).filter(Boolean))].sort();
+      if (!ws.length) return '';
+      if (ws.length === 1) return 'week ' + (isoWeek(ws[0]) || day(ws[0]));
+      return `weeks ${isoWeek(ws[0]) || day(ws[0])}–${isoWeek(ws[ws.length - 1]) || day(ws[ws.length - 1])}`;
+    };
+
+    const released = bkPool.filter(b => b.status === 'released');
     if (released.length) out.push({ kind: 'Undecided', accent: BLUE, ink: BLUE, who: 'the client',
       what: `${released.length} option${released.length === 1 ? '' : 's'} awaiting a decision`,
-      where: 'week ' + (isoWeek(_week) || day(_week)),
+      where: weeksOf(released),
       effect: 'Space is held until the cut-off',
       next: 'Nudge the client — the rate expires with the sailing', tab: 'bookings', sort: 90 });
 
-    const drafts = d.bookings.filter(b => b.status === 'draft');
+    const drafts = bkPool.filter(b => b.status === 'draft');
     if (drafts.length && _internal) out.push({ kind: 'Unpriced', accent: YELL, ink: YINK, who: 'you',
       what: `${drafts.length} option${drafts.length === 1 ? '' : 's'} not yet released`,
-      where: 'week ' + (isoWeek(_week) || day(_week)),
+      where: weeksOf(drafts),
       effect: 'The client cannot see them until they are released',
       next: 'Set the margin on Pricing, then release', tab: 'pricing', sort: 80 });
 
     // Waiting on somebody is an exception too — it was in its own panel answering the same
     // question, so neither list was complete.
-    const awaitingPartner = (d.requests || []).filter(r => ['sent', 'repricing'].includes(r.state)).length;
-    if (awaitingPartner) out.push({ kind: 'Awaiting rates', accent: BLUE, ink: BLUE, who: 'the partner',
-      what: `${awaitingPartner} rate request${awaitingPartner === 1 ? '' : 's'} out`,
-      where: 'week ' + (isoWeek(_week) || day(_week)),
+    const awaiting = reqPool.filter(r => ['sent', 'repricing'].includes(r.state));
+    if (awaiting.length) out.push({ kind: 'Awaiting rates', accent: BLUE, ink: BLUE, who: 'the partner',
+      what: `${awaiting.length} rate request${awaiting.length === 1 ? '' : 's'} out`,
+      where: weeksOf(awaiting),
       effect: 'Nothing can be priced until they come back',
       next: 'Chase the partner, or resend the link', tab: 'bookings', sort: 85 });
 
-    const unassigned = (d.orders || []).filter(x => !(x.containers || []).length).length;
-    if (unassigned && _internal) out.push({ kind: 'Unassigned', accent: YELL, ink: YINK, who: 'you',
-      what: `${unassigned} order${unassigned === 1 ? '' : 's'} not on a container`,
-      where: 'week ' + (isoWeek(_week) || day(_week)),
+    const unassigned = poPool.filter(x => !(x.containers || []).length);
+    if (unassigned.length && _internal) out.push({ kind: 'Unassigned', accent: YELL, ink: YINK, who: 'you',
+      what: `${unassigned.length} order${unassigned.length === 1 ? '' : 's'} not on a container`,
+      where: weeksOf(unassigned),
       effect: 'They will not appear against any shipment',
       next: 'Name the container in the order file, or assign it here', tab: 'po', sort: 50 });
 
@@ -535,7 +550,7 @@
       g.id = null;                                          // a group opens the list, not one shipment
       g.tab = 'list';
     }
-    return grouped.slice(0, 6);
+    return grouped.slice(0, 8);
   }
 
   function tickerLines(d) {
