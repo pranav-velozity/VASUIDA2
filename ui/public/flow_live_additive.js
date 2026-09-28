@@ -30,7 +30,7 @@
   // ------------------------- PATCH (v51.1) -------------------------
   // Guardrails to keep other modules from breaking Flow.
   // NOTE: Scripts load order is exec -> receiving -> flow (defer). Some helpers are expected globally.
-  window.__FLOW_BUILD__ = "v64-lastmile-booked-for" + new Date().toISOString();
+  window.__FLOW_BUILD__ = "v65-lastmile-schedule-dialog" + new Date().toISOString();
 
   // Receiving module expects this helper; if missing it throws and can interrupt week load flows.
   if (typeof window.computeCartonsOutByPOFromState !== 'function') {
@@ -5059,7 +5059,7 @@ detail.innerHTML = [
             ? '<span class="text-gray-400">—</span>'
             : (r.scheduled_local
               ? `<button data-lm-deliver="1" data-ws="${escapeAttr(ws)}" data-cont="${escapeAttr(r.key)}" data-uid="${escapeAttr(r.uid)}" class="px-2 py-1 rounded-lg text-xs border bg-emerald-50 hover:bg-emerald-100">Receive</button>`
-              : `<button data-lm-schedule="1" data-ws="${escapeAttr(ws)}" data-cont="${escapeAttr(r.key)}" data-uid="${escapeAttr(r.uid)}" class="px-2 py-1 rounded-lg text-xs border bg-sky-50 hover:bg-sky-100">Schedule</button>`),
+              : `<button data-lm-schedule="1" data-ws="${escapeAttr(ws)}" data-cont="${escapeAttr(r.key)}" data-uid="${escapeAttr(r.uid)}" class="px-2 py-1 rounded-lg text-xs border bg-sky-50 hover:bg-sky-100">${r.scheduled_local && !r.scheduled_for ? 'Set time' : 'Schedule'}</button>`),
         ];
       });
 
@@ -5619,6 +5619,56 @@ detail.innerHTML = [
 
 
   
+  // Asks for the delivery date and time. Used by every Schedule button, so a row in the table
+  // and the detail panel behave identically.
+  function lmAskWhen(current) {
+    return new Promise((resolve) => {
+      const pad = (n) => String(n).padStart(2, '0');
+      const def = (() => {
+        if (current) return String(current).slice(0, 16);
+        const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(14, 0, 0, 0);
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      })();
+
+      const ov = document.createElement('div');
+      ov.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(16,18,27,.35);display:flex;align-items:center;justify-content:center;padding:20px;';
+      ov.innerHTML = `
+        <div style="background:#fff;border-radius:14px;padding:18px 20px;width:340px;box-shadow:0 20px 50px rgba(16,18,27,.25);font-family:inherit;">
+          <div style="font-size:14px;font-weight:600;color:#1C1C1E;">Book the delivery</div>
+          <div style="font-size:11.5px;color:#6E6E73;margin:4px 0 12px;">
+            The date and time the container is due on site. Delivered within an hour of it counts as on time.</div>
+          <input id="lm-when-input" type="datetime-local" value="${def}"
+                 style="width:100%;padding:9px 10px;border:1px solid rgba(0,0,0,.18);border-radius:9px;font-size:13px;font-family:inherit;">
+          <div id="lm-when-err" style="font-size:11px;color:#B33F40;margin-top:6px;min-height:14px;"></div>
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;">
+            <button id="lm-when-cancel" style="background:#fff;border:.5px solid rgba(0,0,0,.16);border-radius:9px;padding:8px 14px;font-size:12px;cursor:pointer;font-family:inherit;">Cancel</button>
+            <button id="lm-when-ok" style="background:#1C1C1E;color:#fff;border:0;border-radius:9px;padding:8px 16px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Schedule</button>
+          </div>
+        </div>`;
+      document.body.appendChild(ov);
+
+      const input = ov.querySelector('#lm-when-input');
+      const err = ov.querySelector('#lm-when-err');
+      const done = (v) => { ov.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+      const onKey = (e) => { if (e.key === 'Escape') done(null); };
+      document.addEventListener('keydown', onKey);
+      ov.addEventListener('click', (e) => { if (e.target === ov) done(null); });
+      ov.querySelector('#lm-when-cancel').onclick = () => done(null);
+      ov.querySelector('#lm-when-ok').onclick = () => {
+        const v = String(input.value || '').trim();
+        if (!v) { err.textContent = 'Pick a date and time.'; return; }
+        // A delivery booked into the past is almost always a typo in the date.
+        const t = Date.parse(v);
+        if (isFinite(t) && t < Date.now() - 12 * 3600000) {
+          err.textContent = 'That is in the past — check the date.';
+          return;
+        }
+        done(v);
+      };
+      try { input.focus(); } catch (_) {}
+    });
+  }
+
   // An hour either side of the booked time is on time. Held here rather than inline so the
   // number can change without hunting through the file.
   const LM_BUFFER_MIN = 60;
@@ -5630,17 +5680,9 @@ detail.innerHTML = [
     const deliveredAt = r.delivery_local ? String(r.delivery_local).replace('T',' ') : '';
     const note = String(r.note || '');
     const state = deliveredAt ? 'Delivered' : (scheduledAt ? 'Scheduled' : 'Open');
-    const canSchedule = !scheduledAt && !deliveredAt;
+    const canSchedule = !deliveredAt;                 // book it, or correct the booked time
     const canReceive = !!scheduledAt && !deliveredAt;
-
-    // Default the picker to tomorrow at 2pm: a sensible slot, and it stops anyone booking a
-    // delivery into the past by accident.
-    const defWhen = (() => {
-      if (r.scheduled_for) return String(r.scheduled_for).slice(0, 16);
-      const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(14, 0, 0, 0);
-      const pad = (n) => String(n).padStart(2, '0');
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-    })();
+    const rebooking = !!scheduledAt;
 
     // Delivered within an hour either side of the booked time counts as on time.
     const onTime = (() => {
@@ -5690,23 +5732,22 @@ detail.innerHTML = [
           <div id="flow-lm-save-msg" class="text-xs text-gray-500"></div>
           <div class="flex items-center gap-2">
             ${canSchedule ? `
-              <label class="text-xs text-gray-500 flex items-center gap-1.5">Deliver at
-                <input id="flow-lm-when" type="datetime-local" value="${escapeAttr(defWhen)}"
-                  class="px-2 py-1 border rounded-lg text-sm"></label>
               <button data-lm-schedule="1"
                 data-ws="${escapeAttr(ws)}"
                 data-cont="${escapeAttr(r.key)}"
                 data-uid="${escapeAttr(r.uid)}"
-                class="px-3 py-1.5 rounded-lg text-sm border bg-sky-50 hover:bg-sky-100">Schedule</button>
-            ` : (canReceive ? `
+                class="px-3 py-1.5 rounded-lg text-sm border bg-sky-50 hover:bg-sky-100">${rebooking ? (bookedFor ? 'Change delivery time' : 'Set delivery time') : 'Schedule'}</button>
+            ` : ''}
+            ${canReceive ? `
               <button data-lm-deliver="1"
                 data-ws="${escapeAttr(ws)}"
                 data-cont="${escapeAttr(r.key)}"
                 data-uid="${escapeAttr(r.uid)}"
                 class="px-3 py-1.5 rounded-lg text-sm border bg-emerald-50 hover:bg-emerald-100">Receive (now)</button>
-            ` : `
+            ` : ''}
+            ${deliveredAt ? `
               <button disabled class="px-3 py-1.5 rounded-lg text-sm border bg-gray-50 text-gray-400 cursor-not-allowed">Delivered</button>
-            `)}
+            ` : ''}
             <button data-lm-note-save="1"
               data-ws="${escapeAttr(ws)}"
               data-cont="${escapeAttr(r.key)}"
@@ -5753,32 +5794,38 @@ detail.innerHTML = [
         }
 
         const receipts = loadLastMileReceipts(wsNow);
-        const now = nowLocalDT();
-        const note = String(detail.querySelector('#flow-lm-note')?.value || '');
+        const existing = receipts[uid] || {};
 
-        // The booked slot comes from the picker; scheduled_local stays what it has always been,
-        // the stamp of when someone entered it. Two different facts.
-        const whenEl = detail.querySelector('#flow-lm-when');
-        const bookedFor = String((whenEl && whenEl.value) || '').trim();
-        if (!bookedFor) {
-          if (msg) { msg.textContent = 'Pick the delivery date and time first'; msg.className = 'text-xs text-red-600'; }
-          return;
-        }
+        // The note belongs to whichever container the panel is showing. A Schedule button on a
+        // table row is often a different container, so the note is left alone there.
+        const showingThis = String(selectedKey || '') === String(contKey);
+        const note = showingThis
+          ? String(detail.querySelector('#flow-lm-note')?.value || '')
+          : String(existing.last_mile_note || '');
 
-        receipts[uid] = {
-          ...(receipts[uid] || {}),
-          scheduled_for: bookedFor,
-          scheduled_local: now,
-          status: 'Scheduled',
-          last_mile_note: note,
-          _updatedAt: new Date().toISOString(),
-        };
-        saveLastMileReceipts(wsNow, receipts);
+        // Asked for in a dialog, so every Schedule button behaves the same wherever it sits.
+        lmAskWhen(existing.scheduled_for || '').then((bookedFor) => {
+          if (!bookedFor) return;                       // cancelled, nothing changes
 
-        if (msg) { msg.textContent = 'Scheduled for ' + bookedFor.replace('T', ' ') + ' ✓'; msg.className = 'text-xs text-blue-700'; }
+          const now = nowLocalDT();
+          receipts[uid] = {
+            ...existing,
+            scheduled_for: bookedFor,
+            scheduled_local: existing.scheduled_local || now,   // first entry stamp is kept
+            rescheduled_local: existing.scheduled_for ? now : undefined,
+            status: 'Scheduled',
+            last_mile_note: note,
+            _updatedAt: new Date().toISOString(),
+          };
+          saveLastMileReceipts(wsNow, receipts);
 
-        UI.selection = { node: 'lastmile', sub: contKey };
-        refresh();
+          if (msg) {
+            msg.textContent = (existing.scheduled_for ? 'Rebooked for ' : 'Scheduled for ') + bookedFor.replace('T', ' ') + ' ✓';
+            msg.className = 'text-xs text-blue-700';
+          }
+          UI.selection = { node: 'lastmile', sub: contKey };
+          refresh();
+        });
       });
     };
 
