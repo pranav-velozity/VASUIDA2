@@ -256,10 +256,13 @@
       return;
     }
 
-    // The same ten weeks the history report walks, oldest last.
-    let ws = A.toMonday ? A.toMonday(new Date()) : null;
+    // The same ten weeks the history report walks, and the same way of finding the first one.
+    // toMonday parses `${ws}T00:00:00Z`, so it needs a YYYY-MM-DD string: handing it a Date
+    // returns the Date untouched and every week after that is nonsense.
+    const pick = (window._reportsWeek || (window.state && window.state.weekStart) || new Date().toISOString().slice(0, 10));
+    const start = A.toMonday ? A.toMonday(pick) : pick;
     const list = [];
-    for (let i = 0; i < WEEKS && ws; i++) { list.push(ws); ws = A.shiftWeek ? A.shiftWeek(ws, -1) : null; }
+    for (let i = 0; i < WEEKS; i++) list.push(A.shiftWeek ? A.shiftWeek(start, -i) : start);
 
     const weeks = [];
     for (let i = 0; i < list.length; i += PARALLEL) {
@@ -273,7 +276,15 @@
     for (const wk of weeks) all.push(...rowsFor(wk));
 
     if (!all.length) {
-      body.innerHTML = `<div style="font-size:12px;color:${MID};">No containers recorded in the last ${WEEKS} weeks.</div>`;
+      body.innerHTML = `
+        <div style="background:#fff;border:.5px solid rgba(0,0,0,.08);border-radius:12px;padding:16px 18px;">
+          <div style="font-size:13px;font-weight:600;color:${DARK};">No containers recorded in these weeks</div>
+          <div style="font-size:11.5px;color:${MID};margin-top:6px;line-height:1.5;">
+            Read ${list.length} weeks, ${esc(list[list.length - 1])} to ${esc(list[0])}.
+            Containers appear here once they are on an international lane for the week.</div>
+          <div style="font-size:10.5px;color:${LIGHT};margin-top:8px;font-family:ui-monospace,monospace;">
+            ${list.map(x => esc(x)).join(' · ')}</div>
+        </div>`;
       return;
     }
 
@@ -322,5 +333,5 @@
   if (document.body) startObserving(); else document.addEventListener('DOMContentLoaded', startObserving);
 
   window.__openLastMileHistory = open;
-  console.log('[last-mile] v1 loaded');
+  console.log('[last-mile] v2 loaded');
 })();
