@@ -7,7 +7,7 @@
    Capability-gated twice over: the nav item only appears when the active client has
    freight_d2d, and every endpoint behind it 404s for anyone else. The nav gate is convenience;
    the server gate is the security. */
-;const D2D_BUILD = '56';    // bump with the ?v= in index.html — they must match
+;const D2D_BUILD = '57';    // bump with the ?v= in index.html — they must match
 
 (function () {
   'use strict';
@@ -2629,6 +2629,105 @@
   // ── Performance ──
   // Mockup 5. The shapes are here and honest about their inputs: distribution needs a few
   // months of completed shipments, and anything costed needs the rates and the order file.
+  // ── Where time is actually lost ──
+  // Scored on the delay each stage ADDS, not the delay it inherits. A container picked up a
+  // week late and then run perfectly would otherwise show every stage a week late, and the
+  // chart would say everything is broken when one thing is. A stage that claws time back
+  // scores negative, because that is what it did.
+  function stageDrift(list, weeks) {
+    const now = Date.now();
+    const cut = now - weeks * 7 * 86400000;          // current window starts here
+    const prevCut = now - weeks * 2 * 7 * 86400000;  // and the one before it
+
+    const bucket = () => STAGES.map(([k, label]) => ({ k, label, added: [], worst: null }));
+    const cur = bucket(), prev = bucket();
+
+    for (const sh of list) {
+      const ev = evMap(sh);
+      let inherited = 0;
+      STAGES.forEach(([k], i) => {
+        const at = ev[k] && ev[k].actual_at;
+        const plan = sh['plan_' + k];
+        if (!at || !plan) return;
+        const total = daysBetween(plan, at);
+        if (total == null) return;
+        const added = total - inherited;
+        inherited = total;
+
+        const t = Date.parse(String(at) + 'T00:00:00Z');
+        const into = !isFinite(t) ? null : (t >= cut ? cur : (t >= prevCut ? prev : null));
+        if (!into) return;
+        into[i].added.push(added);
+        if (added > 0 && (!into[i].worst || added > into[i].worst.days)) {
+          into[i].worst = { days: added, ref: sh.reference || 'not advised', id: sh.id };
+        }
+      });
+    }
+
+    const mean = (a) => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+    return STAGES.map(([k, label], i) => ({
+      k, label,
+      now: mean(cur[i].added), nowN: cur[i].added.length, worst: cur[i].worst,
+      prev: mean(prev[i].added), prevN: prev[i].added.length,
+    }));
+  }
+
+  // The web itself. Seven axes, one per milestone, radius by average days added.
+  function driftRadar(rows) {
+    const withData = rows.filter(r => r.now != null || r.prev != null);
+    if (!withData.length) return '';
+
+    const CX = 190, CY = 168, R = 112;
+    // The scale is set by the worst average, floored at 2 days so a good week does not
+    // magnify a few hours into a crisis.
+    const peak = Math.max(2, ...rows.map(r => Math.max(r.now || 0, r.prev || 0)));
+    const at = (i, v) => {
+      const a = (Math.PI * 2 * i / rows.length) - Math.PI / 2;
+      const rad = Math.max(0, Math.min(1, v)) * R;
+      return [CX + Math.cos(a) * rad, CY + Math.sin(a) * rad];
+    };
+    const poly = (key) => rows.map((r, i) =>
+      at(i, (r[key] == null ? 0 : Math.max(0, r[key])) / peak).map(n => n.toFixed(1)).join(',')).join(' ');
+
+    const rings = [0.34, 0.67, 1].map(f => ({
+      pts: rows.map((r, i) => at(i, f).map(n => n.toFixed(1)).join(',')).join(' '),
+      label: (peak * f).toFixed(peak < 4 ? 1 : 0) + 'd',
+      y: (CY - R * f + 3).toFixed(1),
+    }));
+
+    return `
+      <svg viewBox="0 0 380 340" style="width:100%;max-width:380px;display:block;" role="img"
+           aria-label="Average days added at each milestone">
+        ${rings.map(g => `<polygon points="${g.pts}" fill="none" stroke="rgba(0,0,0,.08)" stroke-width="1"/>
+          <text x="${CX + 3}" y="${g.y}" font-size="8.5" fill="${LIGHT}" font-family="ui-monospace,monospace">${g.label}</text>`).join('')}
+        ${rows.map((r, i) => { const [x, y] = at(i, 1);
+          return `<line x1="${CX}" y1="${CY}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="rgba(0,0,0,.07)" stroke-width="1"/>`; }).join('')}
+
+        ${/* The period before, so the question is whether it is getting better. */ ''}
+        <polygon points="${poly('prev')}" fill="rgba(110,110,115,.10)" stroke="${MID}" stroke-width="1"
+                 stroke-dasharray="3 3"/>
+        <polygon points="${poly('now')}" fill="rgba(153,0,51,.13)" stroke="${BRAND}" stroke-width="1.8"/>
+
+        ${rows.map((r, i) => {
+          const v = r.now == null ? null : Math.max(0, r.now);
+          const [x, y] = at(i, (v || 0) / peak);
+          return v == null ? '' : `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3" fill="${BRAND}"/>`;
+        }).join('')}
+
+        ${rows.map((r, i) => {
+          const [lx, ly] = at(i, 1.2);
+          const anchor = Math.abs(lx - CX) < 12 ? 'middle' : (lx > CX ? 'start' : 'end');
+          const none = r.now == null;
+          return `
+            <text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${anchor}" font-size="10"
+                  font-weight="600" fill="${none ? LIGHT : DARK}" font-family="inherit">${esc(r.label)}</text>
+            <text x="${lx.toFixed(1)}" y="${(ly + 11).toFixed(1)}" text-anchor="${anchor}" font-size="9.5"
+                  fill="${none ? LIGHT : (r.now > 0 ? BRAND : LINK)}" font-family="ui-monospace,monospace">
+              ${none ? 'no data' : (r.now > 0 ? '+' + r.now.toFixed(1) + 'd' : r.now.toFixed(1) + 'd')}</text>`;
+        }).join('')}
+      </svg>`;
+  }
+
   function paintPerformance(d) {
     const all = (d.allShipments || []).slice();
     const done = all.filter(x => x.status === 'delivered');
@@ -2643,15 +2742,54 @@
     const onPlan = all.length ? Math.round((all.length - slipAll.length) / all.length * 100) : null;
 
     // Where lost days actually come from, from the dates we hold.
+    // Days lost, counted the same way as the radar: what each stage ADDED. Summing the raw
+    // variance counted an inherited delay once per stage and produced a figure several times
+    // the real one.
     const byStage = {};
     for (const sh of all) {
       const ev = evMap(sh);
+      let inherited = 0;
       for (const [kk, label] of STAGES) {
-        const dd = daysBetween(sh['plan_' + kk], ev[kk] && ev[kk].actual_at);
-        if (dd != null && dd > 0) byStage[label] = (byStage[label] || 0) + dd;
+        const at2 = ev[kk] && ev[kk].actual_at;
+        if (!at2 || !sh['plan_' + kk]) continue;
+        const total = daysBetween(sh['plan_' + kk], at2);
+        if (total == null) continue;
+        const added = total - inherited;
+        inherited = total;
+        if (added > 0) byStage[label] = (byStage[label] || 0) + added;
       }
     }
     const stages = Object.entries(byStage).sort((a, b) => b[1] - a[1]);
+
+    // Where the time is added, this eight weeks against the eight before.
+    const drift = stageDrift(all, 8);
+    const worstStage = drift.filter(r => r.now != null && r.now > 0).sort((a, b) => b.now - a.now)[0];
+    const improved = drift.filter(r => r.now != null && r.prev != null && r.now < r.prev - 0.25);
+    const worsened = drift.filter(r => r.now != null && r.prev != null && r.now > r.prev + 0.25);
+
+    // Utilisation: CBM aboard against the capacity of the box that was booked. Only counted
+    // where the CBM is real, so an empty order file reads as unknown rather than as empty.
+    const CAP = { '40': 67, '40HQ': 67, '40HC': 67, '20': 33, '20GP': 33 };
+    const capOf = (t) => {
+      const key = String(t || '').toUpperCase().replace(/[^0-9A-Z]/g, '');
+      if (CAP[key]) return CAP[key];
+      return /40/.test(key) ? 67 : (/20/.test(key) ? 33 : null);
+    };
+    const utilRows = all.map(sh => {
+      const cap = capOf(sh.container_type);
+      const cbm = Number(sh.cbm != null ? sh.cbm : (sh.cargo && sh.cargo.cbm)) || 0;
+      return (cap && cbm > 0) ? { type: /40/.test(String(sh.container_type || '')) ? '40ft' : '20ft',
+                                  pct: Math.round(cbm / cap * 100), cbm, cap, ref: sh.reference } : null;
+    }).filter(Boolean);
+    const util = {
+      n: utilRows.length,
+      pct: utilRows.length ? Math.round(utilRows.reduce((n, x) => n + x.pct, 0) / utilRows.length) : null,
+      byType: ['40ft', '20ft'].map(t => {
+        const rows2 = utilRows.filter(x => x.type === t);
+        return { type: t, n: rows2.length,
+                 pct: rows2.length ? Math.round(rows2.reduce((n, x) => n + x.pct, 0) / rows2.length) : null };
+      }).filter(x => x.n),
+    };
     const maxStage = Math.max(1, ...stages.map(x => x[1]));
 
     const tile = (label, value, sub, colour) => `
@@ -2676,7 +2814,9 @@
         ${tile('On plan', onPlan != null ? onPlan + '%' : '&ndash;',
                slipAll.length ? slipAll.length + ' behind plan' : 'all on plan', onPlan != null && onPlan < 80 ? BRAND : DARK)}
         ${tile('Days lost', stages.reduce((n, x) => n + x[1], 0) || 0, stages.length ? 'across ' + stages.length + ' stages' : 'none recorded', stages.length ? BRAND : DARK)}
-        ${tile('Container utilisation', '&ndash;', 'needs CBM per PO', LIGHT)}
+        ${tile('Container utilisation', util.pct != null ? util.pct + '%' : '&ndash;',
+               util.pct != null ? util.n + ' box' + (util.n === 1 ? '' : 'es') + ' with CBM loaded' : 'needs CBM on the order file',
+               util.pct != null && util.pct < 70 ? YINK : DARK)}
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 items-start">
@@ -2697,7 +2837,55 @@
         </div>
 
         <div style="display:flex;flex-direction:column;gap:12px;">
-          ${pending('Transit distribution by lane',
+          <div class="rounded-2xl border bg-white shadow-sm" style="padding:16px 18px;">
+          <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+            <span style="font-size:13px;font-weight:600;color:${DARK};">Where it consistently falls behind</span>
+            <span style="font-size:10.5px;color:${LIGHT};">last 8 weeks vs the 8 before</span>
+          </div>
+          <div style="font-size:11px;color:${MID};margin:3px 0 4px;">
+            Average days each stage <b style="color:${DARK};">adds</b> — not the delay it inherits, so one late
+            pickup does not make every stage look late.</div>
+
+          ${drift.some(r => r.now != null) ? `
+            ${driftRadar(drift)}
+            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:4px;">
+              <span style="font-size:10.5px;color:${MID};">
+                <span style="display:inline-block;width:14px;height:2px;background:${BRAND};vertical-align:middle;margin-right:5px;"></span>last 8 weeks</span>
+              <span style="font-size:10.5px;color:${MID};">
+                <span style="display:inline-block;width:14px;border-top:2px dashed ${MID};vertical-align:middle;margin-right:5px;"></span>the 8 before</span>
+            </div>
+            ${worstStage ? `
+              <div style="margin-top:10px;padding-top:10px;border-top:.5px solid rgba(0,0,0,.06);font-size:11.5px;color:${DARK};line-height:1.5;">
+                <b>${esc(worstStage.label)}</b> adds the most — ${worstStage.now.toFixed(1)} days on average
+                across ${worstStage.nowN} shipment${worstStage.nowN === 1 ? '' : 's'}${worstStage.worst
+                  ? `, worst <span class="d2d-num">${esc(worstStage.worst.ref)}</span> at ${worstStage.worst.days}d` : ''}.
+                ${worsened.length ? `Getting worse at ${worsened.map(r => esc(r.label.toLowerCase())).join(', ')}.` : ''}
+                ${improved.length ? `Better at ${improved.map(r => esc(r.label.toLowerCase())).join(', ')}.` : ''}
+              </div>` : ''}`
+            : `<div style="font-size:11.5px;color:${MID};padding:14px 0;">
+                 No stage has been recorded against a plan in the last 16 weeks.</div>`}
+        </div>
+
+        <div class="rounded-2xl border bg-white shadow-sm" style="padding:16px 18px;">
+          <div style="font-size:13px;font-weight:600;color:${DARK};">Utilisation by box type</div>
+          <div style="font-size:11px;color:${MID};margin:3px 0 10px;">
+            CBM aboard against the capacity of the box booked. Only counted where the order file gives a real volume.</div>
+          ${util.byType.length ? util.byType.map(b => `
+            <div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-top:.5px solid rgba(0,0,0,.05);">
+              <span style="font-size:11.5px;color:${DARK};width:46px;">${esc(b.type)}</span>
+              <span style="flex:1;height:9px;background:#EFF1F4;border-radius:5px;overflow:hidden;">
+                <span style="display:block;height:9px;width:${Math.min(100, b.pct)}%;border-radius:5px;
+                      background:${b.pct < 70 ? YELL : LIME};"></span></span>
+              <span class="d2d-num" style="font-size:12.5px;color:${DARK};width:44px;text-align:right;">${b.pct}%</span>
+              <span style="font-size:10.5px;color:${LIGHT};width:64px;">${b.n} box${b.n === 1 ? '' : 'es'}</span>
+            </div>`).join('')
+            : `<div style="font-size:11.5px;color:${MID};">No container has a CBM figure yet. Load an order file and this fills in.</div>`}
+          ${util.pct != null && util.pct < 70 ? `
+            <div style="margin-top:10px;padding-top:10px;border-top:.5px solid rgba(0,0,0,.06);font-size:11.5px;color:${DARK};">
+              Averaging ${util.pct}% full. Every under-filled box is freight paid for air.</div>` : ''}
+        </div>
+
+        ${pending('Transit distribution by lane',
             'The spread matters more than the average, and a distribution needs a few months of completed shipments. With ' + done.length + ' so far, any curve would be noise.', 150)}
           ${pending('Container utilisation and cost of empty space',
             'Needs CBM and weight per PO from the order file, plus your contracted rate per container.', 150)}
