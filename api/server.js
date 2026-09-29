@@ -11921,6 +11921,11 @@ async function _iconicAlert(filename, errMsg) {
 // The Monday attachments the server can now produce for itself. Both call the same code the
 // screens call, so a downloaded file and an emailed one cannot differ.
 const stockStatusReport = require('./stock_status_report');
+// Read-only: where transit time is actually lost, before anything is bought to fix it.
+app.use('/lanes', require('./lane_slip_report')({
+  express, db, authenticateRequest, auditLog, curClient,
+}));
+
 const receivingSummary = require('./receiving_summary')({
   express, db, authenticateRequest, auditLog, curClient, ExcelJS,
 });
