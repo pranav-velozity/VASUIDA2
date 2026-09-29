@@ -21364,6 +21364,40 @@ app.listen(PORT, () => {
       });
 
       const job = require('./weekly_report_job')(wiring);
+
+      // GET /weekly/preview?week=YYYY-MM-DD
+      // Builds everything for the week and returns what WOULD be sent. Never sends, never
+      // publishes — dryRun is hardcoded, not taken from the request.
+      app.get('/weekly/preview', authenticateRequest, requireRole(['admin']),
+        auditLog('weekly_preview'), async (req, res) => {
+        try {
+          const wk = String(req.query.week || '').trim();
+          const out = await job.run({
+            weekStart: wk || undefined,
+            to: to.length ? to : ['preview@velozity.au'],
+            cc, ops,
+            dryRun: true,
+            trigger: 'preview',
+          });
+          res.json({
+            ok: true,
+            week_start: out.weekStart,
+            subject: out.subject,
+            attachments: out.attachments.map(a => ({
+              name: a.name,
+              size: a.bytes >= 1048576 ? (a.bytes / 1048576).toFixed(2) + ' MB'
+                  : (a.bytes / 1024).toFixed(0) + ' KB',
+              bytes: a.bytes,
+            })),
+            advanced_po: out.push,
+            narrative_source: out.narrative_source,
+            text: out.text,
+            html: out.html,
+          });
+        } catch (e) {
+          res.status(500).json({ ok: false, error: String(e.message || e) });
+        }
+      });
       job.start({ to, cc, ops, dryRun: String(process.env.WEEKLY_REPORT_DRY_RUN || '').toLowerCase() === 'true' });
       global.__weeklyJob = job;      // so a run can be triggered by hand from the console
     } catch (e) {
