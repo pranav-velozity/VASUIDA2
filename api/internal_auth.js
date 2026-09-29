@@ -73,6 +73,11 @@ module.exports = function createInternalAuth(options) {
       log.warn('[internal-auth] token mismatch from loopback — refused');
       return false;
     }
+    if (!opts.orgId) {
+      log.warn('[internal-auth] no internal organisation resolved — tenancy-guarded routes will refuse this call');
+    }
+    // Borrows VelOzity's own internal org, so the job is treated exactly as a VelOzity admin
+    // would be: same tenancy, same capabilities, nothing invented for it.
     req.auth = { userId, orgRole, orgId: opts.orgId || null, internal: true };
     return true;
   }
@@ -98,6 +103,8 @@ module.exports = function createInternalAuth(options) {
   return {
     accept, call, json, buffer,
     setPort: (p) => { opts.port = p; },
+    setOrgId: (id) => { opts.orgId = id || null; },
+    get orgId() { return opts.orgId || null; },
     headerName,
   };
 };

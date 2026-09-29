@@ -21331,6 +21331,21 @@ app.listen(PORT, () => {
   // with none configured it stays off and says so.
   internalAuth.setPort(PORT);
 
+  // The job calls a couple of tenancy-guarded routes, so it needs a real organisation rather
+  // than a bare admin role — without one tenancyResolve reports 'no_active_org' and the
+  // routes refuse it. It borrows VelOzity's own internal org: same tenancy, same
+  // capabilities, nothing invented.
+  try {
+    const org = process.env.WEEKLY_REPORT_ORG_ID
+      || (db.prepare(`SELECT clerk_org_id FROM org_map
+                       WHERE org_type = 'internal' AND active = 1
+                       ORDER BY clerk_org_id LIMIT 1`).get() || {}).clerk_org_id;
+    if (org) { internalAuth.setOrgId(org); console.log('[weekly] internal calls run as org ' + org); }
+    else console.warn('[weekly] no internal organisation found — stock status and discrepancy will be refused');
+  } catch (e) {
+    console.warn('[weekly] could not resolve an internal organisation:', e.message);
+  }
+
   const parseList = (v) => String(v || '').split(/[,;]/).map(x => x.trim()).filter(Boolean);
   const to  = parseList(process.env.WEEKLY_REPORT_TO);
   const cc  = parseList(process.env.WEEKLY_REPORT_CC);
