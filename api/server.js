@@ -11878,14 +11878,6 @@ const _iconicLog = db.prepare(`
 `);
 function _iconicLogSafe(args) { try { _iconicLog.run(...args); } catch (e) { console.error('[iconic] log insert failed:', e.message || e); } }
 
-// Filenames must be a single safe segment ending in .csv — no path traversal
-function _iconicSafeFilename(name) {
-  const s = String(name || '').trim();
-  if (s.includes('..') || s.includes('/') || s.includes('\\')) return null;
-  if (!/^[A-Za-z0-9._-]+\.csv$/.test(s)) return null;
-  return s;
-}
-
 async function _iconicAlert(filename, errMsg) {
   try {
     const from = process.env.EXCEPTION_EMAIL_FROM;
@@ -11908,102 +11900,34 @@ async function _iconicAlert(filename, errMsg) {
 }
 
 // POST /iconic/publish — push a generated PO CSV to THE ICONIC's SFTP /upload
+// One publisher, used by the route below and by the weekly job. Extracting it rather than
+// copying it keeps a single implementation of a write into THE ICONIC's production WMS.
+const iconicPublisher = require('./iconic_sftp')({
+  fs, ICONIC_SFTP, r2Client, PutObjectCommand, R2_BUCKET,
+  logPush: _iconicLogSafe, alert: _iconicAlert,
+});
+
 app.post('/iconic/publish',
   authenticateRequest,
   requireRole(['admin']),
   writeOpLimiter,
   auditLog('iconic_publish'),
   async (req, res) => {
-    const filename  = _iconicSafeFilename(req.body && req.body.filename);
-    const csv       = (req.body && typeof req.body.csv === 'string') ? req.body.csv : '';
-    const weekStart = String((req.body && req.body.week_start) || '').trim() || null;
-    const userId    = (req.auth && req.auth.userId) || null;
+    // The upload itself lives in ./iconic_sftp so the weekly job can perform the same
+    // transfer without a second implementation. Validation, auth, logging and the response
+    // shape are unchanged.
+    const r = await iconicPublisher.publish({
+      filename:  req.body && req.body.filename,
+      csv:       (req.body && typeof req.body.csv === 'string') ? req.body.csv : '',
+      weekStart: String((req.body && req.body.week_start) || '').trim() || null,
+      userId:    (req.auth && req.auth.userId) || null,
+    });
 
-    if (!filename) return res.status(400).json({ ok: false, error: 'Invalid or missing filename (expected a single *.csv name with no path).' });
-    if (!csv.trim()) return res.status(400).json({ ok: false, error: 'Empty CSV — nothing to publish.' });
-
-    const buffer      = Buffer.from(csv, 'utf8');
-    const remoteFinal = `${ICONIC_SFTP.remoteDir}/${filename}`;
-    const remoteTmp   = `${remoteFinal}.tmp`;
-
-    // Read the SSH key from the read-only Render Secret File and pass the
-    // CONTENTS to ssh2 — avoids the 0600-permission problem of a key path.
-    let privateKey;
-    try {
-      privateKey = fs.readFileSync(ICONIC_SFTP.keyPath);
-    } catch (e) {
-      const msg = `SFTP private key not readable at ${ICONIC_SFTP.keyPath}: ${e.message || e}`;
-      console.error('[iconic/publish]', msg);
-      _iconicLogSafe([filename, buffer.length, weekStart, remoteFinal, null, 'failed', msg, userId]);
-      _iconicAlert(filename, msg);
-      return res.status(500).json({ ok: false, error: msg });
-    }
-
-    let SftpClient;
-    try { SftpClient = require('ssh2-sftp-client'); }
-    catch (e) {
-      const msg = 'ssh2-sftp-client is not installed on the server.';
-      console.error('[iconic/publish]', msg, e.message || e);
-      _iconicLogSafe([filename, buffer.length, weekStart, remoteFinal, null, 'failed', msg, userId]);
-      return res.status(500).json({ ok: false, error: msg });
-    }
-
-    const connectCfg = {
-      host: ICONIC_SFTP.host,
-      port: ICONIC_SFTP.port,
-      username: ICONIC_SFTP.username,
-      privateKey,
-      readyTimeout: 20000,
-    };
-    // Optional host-key pinning. Until Rohit provides the fingerprint we connect
-    // without verification (logged). When set, expect an sha256 hex fingerprint;
-    // confirm the format once received and adjust normalisation if needed.
-    if (ICONIC_SFTP.fingerprint) {
-      connectCfg.hostHash = 'sha256';
-      const norm = s => String(s || '').replace(/^sha256:/i, '').replace(/[:\s]/g, '').toLowerCase();
-      const want = norm(ICONIC_SFTP.fingerprint);
-      connectCfg.hostVerifier = (hashedKey) => norm(hashedKey) === want;
-    } else {
-      console.warn('[iconic/publish] connecting WITHOUT host-key verification — set ICONIC_SFTP_HOST_FINGERPRINT to harden.');
-    }
-
-    const sftp = new SftpClient();
-    try {
-      await sftp.connect(connectCfg);
-      // .tmp then rename so THE ICONIC never ingests a half-written file
-      await sftp.put(buffer, remoteTmp);
-      try { if (await sftp.exists(remoteFinal)) await sftp.delete(remoteFinal); } catch (_) {}
-      await sftp.rename(remoteTmp, remoteFinal);
-      await sftp.end();
-    } catch (e) {
-      try { await sftp.end(); } catch (_) {}
-      const msg = `SFTP push failed: ${e.message || e}`;
-      console.error('[iconic/publish]', msg);
-      _iconicLogSafe([filename, buffer.length, weekStart, remoteFinal, null, 'failed', msg, userId]);
-      _iconicAlert(filename, msg);
-      return res.status(502).json({ ok: false, error: msg });
-    }
-
-    // Durable archive to R2 (best-effort — the push already succeeded)
-    let r2Key = null;
-    try {
-      const ts = new Date().toISOString().replace(/[:.]/g, '-');
-      r2Key = `iconic-outbox/${weekStart || 'unknown-week'}/${ts}-${filename}`;
-      await r2Client.send(new PutObjectCommand({
-        Bucket: R2_BUCKET, Key: r2Key, Body: buffer, ContentType: 'text/csv',
-      }));
-    } catch (e) {
-      console.error('[iconic/publish] R2 archive failed (push still succeeded):', e.message || e);
-      r2Key = null;
-    }
-
-    _iconicLogSafe([filename, buffer.length, weekStart, remoteFinal, r2Key, 'success', null, userId]);
-    console.log(`[iconic/publish] OK ${remoteFinal} (${buffer.length} bytes) by ${userId}`);
-    return res.json({ ok: true, remotePath: remoteFinal, bytes: buffer.length, r2Key });
+    if (!r.ok) return res.status(r.status || 500).json({ ok: false, error: r.error });
+    return res.json({ ok: true, remotePath: r.remotePath, bytes: r.bytes, r2Key: r.r2Key });
   }
 );
 
-// GET /iconic/publish/log — recent publish attempts (admin)
 app.get('/iconic/publish/log',
   authenticateRequest,
   requireRole(['admin']),
