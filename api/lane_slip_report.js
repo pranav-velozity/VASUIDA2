@@ -168,10 +168,31 @@ module.exports = function mountLaneSlip(deps) {
         },
         stages,
         by_owner: ownerSplit,
-        verdict: !carrier || real.length < 40 ? null
-          : (carrier.share_of_delay >= 50
+        // Readable without unfolding the arrays.
+        readout: [
+          `${real.length} real dates, ${(bySource.auto_filled || 0)} autofilled and ignored`,
+          `${lanesWithAny} lanes have at least one real date, ${lanesComplete} have all ${STAGES.length}`,
+          `${(real.length && lanesWithAny) ? (real.length / lanesWithAny).toFixed(1) : 0} stages recorded per lane, of ${STAGES.length}`,
+          ...stages.filter(x => x.observations).map(x =>
+            `${x.label}: ${x.observations} obs, ${x.mean_days_added > 0 ? '+' : ''}${x.mean_days_added}d mean (${x.owner})`),
+          ...stages.filter(x => !x.observations).map(x => `${x.label}: no paired plan and actual (${x.owner})`),
+        ],
+        verdict: (() => {
+          if (real.length < 40) {
+            return 'Not enough manually recorded dates to say where the time goes.';
+          }
+          if (!lanesComplete) {
+            return `No lane has all ${STAGES.length} stages recorded, so no consignment can be `
+              + 'followed end to end. Where the delay sits cannot be established from this data.';
+          }
+          if (!carrier || carrier.share_of_delay == null) {
+            return 'The carrier legs have no measured slip in this window — not enough paired '
+              + 'plan and actual dates on those stages to judge.';
+          }
+          return carrier.share_of_delay >= 50
             ? `The carrier legs account for ${carrier.share_of_delay}% of the delay — event tracking would address the majority of it.`
-            : `The carrier legs account for ${carrier.share_of_delay}% of the delay — most of the time is lost landside, where an aggregator would not help.`),
+            : `The carrier legs account for ${carrier.share_of_delay}% of the delay — most of the time is lost landside, where an aggregator would not help.`;
+        })(),
       });
     } catch (e) {
       console.error('[lanes/slip] failed:', e);
