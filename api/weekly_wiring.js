@@ -162,11 +162,15 @@ module.exports = function createWiring(deps) {
         const laneKeys = Array.isArray(c.lane_keys) ? c.lane_keys : [];
         // A container can sit on more than one lane; the earliest departure and the latest
         // arrival describe the consignment as a whole.
+        // lane_actual_dates stores a timestamp; the email wants a day. Trimmed here so every
+        // consumer gets the same shape rather than each one guessing.
+        const dayOf = (v) => v ? String(v).trim().slice(0, 10) : null;
         let etd = null, eta = null;
         for (const k of laneKeys) {
           const a = actuals.get(k) || {};
-          if (a.departed && (!etd || a.departed < etd)) etd = a.departed;
-          if (a.arrived && (!eta || a.arrived > eta)) eta = a.arrived;
+          const dep = dayOf(a.departed), arr = dayOf(a.arrived);
+          if (dep && (!etd || dep < etd)) etd = dep;
+          if (arr && (!eta || arr > eta)) eta = arr;
         }
         const pos = String(c.pos || '').split(',').map(x => x.trim()).filter(Boolean);
         const air = /air|awb/i.test(ref) || String(c.size_ft || '').toLowerCase() === 'air';

@@ -74,11 +74,13 @@ module.exports = function createWeeklyReportJob(deps) {
     return 1 + Math.round((t - f) / (7 * 86400000));
   }
 
-  const fmtDay = (ymd) => {
-    try {
-      return new Date(ymd + 'T00:00:00Z')
-        .toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' });
-    } catch (e) { return ymd; }
+  const fmtDay = (value) => {
+    const raw = String(value == null ? '' : value).trim();
+    if (!raw) return '';
+    const datePart = raw.slice(0, 10);              // 'YYYY-MM-DD' out of a date or a timestamp
+    const d = new Date(datePart + 'T00:00:00Z');
+    if (isNaN(d.getTime())) return raw;             // show what we were given, never 'Invalid Date'
+    return d.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' });
   };
 
   // ── Validation ──
