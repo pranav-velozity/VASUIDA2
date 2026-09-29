@@ -6948,6 +6948,16 @@ app.use('/d2d', require('./d2d_routes')({
   parseEmailList, sendPartnerMail: aqMail,
 }));
 
+// The Advanced PO, buildable on the server as well as in the browser. Both call the same
+// builder (./apo_builder), so the file a person reviews on the Reports screen and the file
+// the weekly job publishes to THE ICONIC are the same bytes rather than two implementations
+// that happen to agree. Records carry no client_id, so the module scopes them through
+// scopeSql/tenantReadIds exactly as /records does.
+app.use('/apo', require('./apo_routes')({
+  express, db, authenticateRequest, requireRole, auditLog,
+  curClient, scopeSql, tenantReadIds,
+}));
+
 const receivingRouter = express.Router();
 
 function normalizeReceivingArray(body, ws) {
