@@ -6482,6 +6482,7 @@ window.__openPrebookModal = function(){
   <script src="/public/supplier_invoices_additive.js?v=4" defer></script>
   <script src="/public/dept_owners_additive.js?v=1" defer></script>
   <script src="/public/tile_polish_additive.js?v=3" defer></script>
+    <script src="/public/apo_builder.js?v=1"></script>
   <script src="/public/weekly_history_additive.js?v=3" defer></script>
     <script src="/public/lastmile_history_additive.js?v=2" defer></script>
   <script src="/public/d2d_hub_additive.js?v=63" defer></script>
@@ -8157,17 +8158,8 @@ function renderReportsPage(container){
   'use strict';
 
   // Exact column order required by THE ICONIC OWMS (Advance_PO_-_Required_Headers).
-  const APO_OUTPUT_COLUMNS = [
-    'supplier','shipping_type','agreement','po_number','grand_total','tax_amount',
-    'shipping_cost','note','reverse','logistic_type','logistic_method','logistic_date',
-    'logistic_eta','inbound_tracking','supplier_contact_name','supplier_contact_phone',
-    'supplier_contact_email','po_type','contract_type','payment_term','payment_type',
-    'vendor_order_number','sku','cost','estimated_landed_cost','item_tax_amount',
-    'quantity','production','po_currency','initiator','measurement','po_master',
-    'qty_tolerance','id_excess','import_type','country_quantity','volumes_to_collect',
-    'pickup_info','source_supplier_cost','source_supplier_currency','uid',
-    'invoice_nr','master_carton_number'
-  ];
+  // The column order lives with the builder now — the preview and the file cannot disagree.
+  const APO_OUTPUT_COLUMNS = (window.APO_BUILDER && window.APO_BUILDER.APO_OUTPUT_COLUMNS) || [];
 
   let _apoCsv = null;
   let _apoWeek = null;
@@ -8176,34 +8168,7 @@ function renderReportsPage(container){
 
   function apoNorm(v){ return String(v ?? '').trim(); }
 
-  function apoSkuCore(val){
-    const s = apoNorm(val);
-    if (!s) return '';
-    const parts = s.split('-');
-    return parts[parts.length - 1].trim();
-  }
-
-  function apoParseUid(cell){
-    // UID cell format: "STYLE-SKUNUM;UIDTOKEN"
-    const s = apoNorm(cell);
-    if (!s) return { skuFull: '', uidToken: '' };
-    const parts = s.split(';');
-    if (parts.length >= 2) return { skuFull: parts[0].trim(), uidToken: parts[1].trim() };
-    return { skuFull: '', uidToken: s };
-  }
-
-  function apoToCsv(rows, columns){
-    const esc = (x) => {
-      const s = (x === null || x === undefined) ? '' : String(x);
-      if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
-      return s;
-    };
-    const header = columns.map(esc).join(',');
-    const body = rows.map(r => columns.map(c => esc(r[c])).join(',')).join('\n');
-    return header + '\n' + body + '\n';
-  }
-
-  function apoSetStatus(msg, color){
+        function apoSetStatus(msg, color){
     const el = apoEl('apo-status');
     if (el){ el.textContent = msg; el.style.color = color || '#6E6E73'; }
   }
@@ -8361,251 +8326,38 @@ function renderReportsPage(container){
 
       apoSetStatus('Generating…', '#6E6E73');
 
-      // ── Defaults ──
-      const dflt = {
-        shipping_type:  apoNorm(apoEl('apo_shipping_type')?.value  || 'Warehouse'),
-        logistic_type:  apoNorm(apoEl('apo_logistic_type')?.value  || 'Delivered to Warehouse'),
-        import_type:    apoNorm(apoEl('apo_import_type')?.value    || 'China import'),
-        po_currency:    apoNorm(apoEl('apo_po_currency')?.value    || 'AUD'),
-        payment_term:   Number(apoEl('apo_payment_term')?.value    || 30),
-        note:           apoNorm(apoEl('apo_note')?.value           || 'China_3PL'),
-        po_type:        apoNorm(apoEl('apo_po_type')?.value        || 'Supply'),
-        contract_type:  apoNorm(apoEl('apo_contract_type')?.value  || 'Outright'),
-        payment_type:   apoNorm(apoEl('apo_payment_type')?.value   || 'Relabel'),
-        qty_tolerance:  Number(apoEl('apo_qty_tolerance')?.value   || 5),
-        tax_rate:       Number(apoEl('apo_tax_rate')?.value        || 10) / 100,
-        shipping_cost:  Number(apoEl('apo_shipping_cost')?.value   || 1.1),
-        // Time of day, not a date — logistic_eta is the expected arrival TIME and is the
-        // same for every line. Blank clears the column rather than substituting a default
-        // nobody chose.
-        logistic_eta:   String(apoEl('apo_logistic_eta')?.value ?? '11:00').trim(),
-        air_lead_days:  Number(apoEl('apo_air_lead_days')?.value   || 12),
-        sea_lead_days:  Number(apoEl('apo_sea_lead_days')?.value   || 30),
+      // ── Settings from the form ──
+      // Read here and passed in, so this screen stays the place a person changes them.
+      const settings = {
+        shipping_type: apoNorm(apoEl('apo_shipping_type')?.value || ''),
+        logistic_type: apoNorm(apoEl('apo_logistic_type')?.value || ''),
+        import_type:   apoNorm(apoEl('apo_import_type')?.value   || ''),
+        po_currency:   apoNorm(apoEl('apo_po_currency')?.value   || ''),
+        payment_term:  apoEl('apo_payment_term')?.value,
+        note:          apoNorm(apoEl('apo_note')?.value          || ''),
+        po_type:       apoNorm(apoEl('apo_po_type')?.value       || ''),
+        contract_type: apoNorm(apoEl('apo_contract_type')?.value || ''),
+        payment_type:  apoNorm(apoEl('apo_payment_type')?.value  || ''),
+        qty_tolerance: apoEl('apo_qty_tolerance')?.value,
+        tax_rate:      apoEl('apo_tax_rate')?.value,
+        shipping_cost: apoEl('apo_shipping_cost')?.value,
+        logistic_eta:  apoEl('apo_logistic_eta')?.value,
+        air_lead_days: apoEl('apo_air_lead_days')?.value,
+        sea_lead_days: apoEl('apo_sea_lead_days')?.value,
       };
 
-      // ── Build plan map: key = PO||sku_code_numeric ──
-      // Pinpoint plan stores: po_number, sku_code (numeric), style, vendor_item_no,
-      //   supplier_name, supplier_contact, supplier_contact_email, supplier_contact_phone,
-      //   brand_name, cost, vendor_sku
-      const planMap = new Map();
-      let planSkipped = 0;
-
-      for (const p of planRows){
-        const po      = apoNorm(p.po_number || p.po || '');
-        const core    = apoNorm(p.sku_code || '');   // numeric — e.g. "11989208"
-        const style   = apoNorm(p.style || '');       // e.g. "AE897AA02XO"
-        if (!po || !core){ planSkipped++; continue; }
-
-        const key = po + '||' + core;
-        if (!planMap.has(key)){
-          planMap.set(key, {
-            supplier:               apoNorm(p.supplier_name  || ''),
-            supplier_contact_name:  apoNorm(p.supplier_contact || p.supplier_name || ''),
-            supplier_contact_email: apoNorm(p.supplier_contact_email || ''),
-            supplier_contact_phone: apoNorm(p.supplier_contact_phone || ''),
-            vendor_order_number:    apoNorm(p.vendor_code     || ''),
-            initiator:              apoNorm(p.brand_name      || ''),
-            cost:                   p.cost,
-            freight_type:           apoNorm(p.freight_type    || ''),
-            zendesk_ticket:         apoNorm(p.zendesk_ticket  || ''),
-            sku_full:               style ? (style + '-' + core) : core,
-          });
-        }
+      if (!window.APO_BUILDER || typeof window.APO_BUILDER.build !== 'function') {
+        throw new Error('The Advanced PO builder did not load. Reload the page and try again.');
       }
 
-      // ── Normalize UID records ──
-      // Pinpoint records: po_number, sku_code (numeric), mobile_bin, uid ("STYLE-SKUNUM;TOKEN")
-      let rawCount = records.length;
-      let droppedMissingUID = 0;
-      let droppedMissingBin = 0;
-      const normalized = [];
-
-      for (const r of records){
-        const po  = apoNorm(r.po_number || r.po || '');
-        const bin = apoNorm(r.mobile_bin || r.mobileBin || r.bin || '');
-        const parsed = apoParseUid(r.uid || '');
-        const uidToken = apoNorm(parsed.uidToken);
-        // sku_core: prefer sku_code field, fallback to parsing uid
-        const core = apoNorm(r.sku_code || '') || apoSkuCore(parsed.skuFull);
-
-        if (!uidToken){ droppedMissingUID++; continue; }
-        if (!bin)     { droppedMissingBin++; continue; }
-
-        normalized.push({
-          po_key:              po,
-          sku_core:            core,
-          sku_full:            parsed.skuFull,
-          uid_token:           uidToken,
-          master_carton_number: bin,
-        });
-      }
-
-      const inputUidUnique = new Set(normalized.map(x => x.uid_token)).size;
-      const inputBinUnique = new Set(normalized.map(x => x.master_carton_number)).size;
-
-      // ── Group by PO + SKU + Mobile Bin, dedup UIDs ──
-      const groups = new Map();
-      let unmatched = 0;
-      let dupRemoved = 0;
-
-      for (const s of normalized){
-        const planKey  = s.po_key + '||' + s.sku_core;
-        const pl       = planMap.get(planKey);
-        if (!pl) unmatched++;
-
-        const groupKey = s.po_key + '||' + s.sku_core + '||' + s.master_carton_number;
-        if (!groups.has(groupKey)){
-          groups.set(groupKey, {
-            po_number:             s.po_key,
-            sku_core:              s.sku_core,
-            master_carton_number:  s.master_carton_number,
-            uidSet:  new Set(),
-            uidList: [],
-            supplier:               pl?.supplier              ?? '',
-            supplier_contact_name:  pl?.supplier_contact_name ?? '',
-            supplier_contact_email: pl?.supplier_contact_email ?? '',
-            supplier_contact_phone: pl?.supplier_contact_phone ?? '',
-            vendor_order_number:    pl?.vendor_order_number    ?? '',
-            initiator:              pl?.initiator              ?? '',
-            cost:                   pl?.cost                   ?? '',
-            freight_type:           pl?.freight_type           ?? '',
-            zendesk_ticket:         pl?.zendesk_ticket         ?? '',
-            matched:                !!pl,
-            sku_full_plan:          pl?.sku_full               ?? '',
-            sku_full_ship:          s.sku_full                 ?? '',
-          });
-        }
-
-        const g = groups.get(groupKey);
-        if (g.uidSet.has(s.uid_token)) dupRemoved++;
-        else { g.uidSet.add(s.uid_token); g.uidList.push(s.uid_token); }
-      }
-
-      // Global UID uniqueness check
-      const outputUidSet = new Set();
-      for (const g of groups.values()) for (const u of g.uidList) outputUidSet.add(u);
-
-      // ── Build output rows ──
-      const rowsOut = [];
-      let mappedUidTotal = 0;
-      let excludedUnmatched = 0;
-      let rowsMissingCost = 0;
-      let rowsTbd = 0;
-
-      // Friday of the processing week (Monday + 4), in UTC
-      const friday = new Date(ws + 'T00:00:00Z');
-      friday.setUTCDate(friday.getUTCDate() + 4);
-      const fmtYmd = (d) => '' + d.getUTCFullYear()
-        + String(d.getUTCMonth() + 1).padStart(2, '0')
-        + String(d.getUTCDate()).padStart(2, '0');
-      const methodFor = (ft) => {
-        const f = String(ft || '').trim().toLowerCase();
-        if (f === 'air') return 'AIR';
-        if (f === 'sea') return 'SHIP';
-        return 'TBD';
-      };
-      const logisticDateFor = (method) => {
-        let off = null;
-        if (method === 'AIR') off = dflt.air_lead_days;
-        else if (method === 'SHIP') off = dflt.sea_lead_days;
-        if (off == null || !Number.isFinite(off)) return ''; // TBD → blank
-        const d = new Date(friday.getTime());
-        d.setUTCDate(d.getUTCDate() + off);
-        return fmtYmd(d);
-      };
-      const cleanTicket = (t) => {
-        const s = String(t || '').trim();
-        if (!s) return '';
-        if (/^#?n\/?a$/i.test(s) || /^#(ref|value|name|null|num|div)/i.test(s)) return '';
-        return s;
-      };
-
-      for (const g of groups.values()){
-        if (!g.matched){ excludedUnmatched++; continue; }   // exclude unmatched UID rows
-
-        const costNum = Number.isFinite(Number(g.cost)) ? Number(g.cost) : NaN;
-        const hasCost = Number.isFinite(costNum);
-        if (!hasCost) rowsMissingCost++;
-        const qty     = g.uidList.length;
-        mappedUidTotal += qty;
-        const skuOut  = g.sku_full_plan || g.sku_full_ship || g.sku_core;
-        const method  = methodFor(g.freight_type);
-        if (method === 'TBD') rowsTbd++;
-
-        const row = {};
-        for (const c of APO_OUTPUT_COLUMNS) row[c] = '';
-
-        row['supplier']               = g.supplier;
-        row['shipping_type']          = dflt.shipping_type;
-        row['po_number']              = g.po_number;
-        row['shipping_cost']          = dflt.shipping_cost;
-        row['note']                   = dflt.note;
-        row['logistic_type']          = dflt.logistic_type;
-        row['logistic_method']        = method;                 // SHIP / AIR / TBD
-        row['logistic_date']          = logisticDateFor(method);// Friday + offset (yyyymmdd)
-        // The expected arrival TIME, constant across the file. It was declared in the column
-        // list but never assigned, so every published APO carried it empty.
-        row['logistic_eta']           = dflt.logistic_eta;
-        row['inbound_tracking']       = cleanTicket(g.zendesk_ticket);
-        row['supplier_contact_name']  = g.supplier_contact_name;
-        row['supplier_contact_phone'] = g.supplier_contact_phone;
-        row['supplier_contact_email'] = g.supplier_contact_email;
-        row['po_type']                = dflt.po_type;
-        row['contract_type']          = dflt.contract_type;
-        row['payment_term']           = dflt.payment_term;
-        row['payment_type']           = dflt.payment_type;
-        row['vendor_order_number']    = g.vendor_order_number;  // = plan vendor_code
-        row['sku']                    = skuOut;
-        row['cost']                   = hasCost ? costNum : '';                       // unit cost (pass-through)
-        row['estimated_landed_cost']  = hasCost ? (costNum + dflt.shipping_cost) : ''; // unit cost + shipping
-        row['item_tax_amount']        = hasCost ? (costNum * dflt.tax_rate) : '';     // per-unit tax
-        row['quantity']               = qty;
-        row['po_currency']            = dflt.po_currency;
-        row['initiator']              = '';                     // blank per spec
-        row['po_master']              = g.po_number;            // = PO number
-        row['qty_tolerance']          = dflt.qty_tolerance;
-        row['import_type']            = dflt.import_type;
-        row['country_quantity']       = '';                     // blank per spec
-        row['source_supplier_cost']   = hasCost ? costNum : ''; // unit cost
-        row['source_supplier_currency'] = dflt.po_currency;
-        row['uid']                    = g.uidList.join(';');
-        row['master_carton_number']   = g.master_carton_number;
-
-        rowsOut.push(row);
-      }
-
-      // Sort: PO → SKU → Bin
-      rowsOut.sort((a, b) =>
-        (a.po_number + '||' + a.sku + '||' + a.master_carton_number)
-          .localeCompare(b.po_number + '||' + b.sku + '||' + b.master_carton_number)
-      );
-
-      const outputBinUnique = new Set(rowsOut.map(r => r.master_carton_number)).size;
-
-      const metrics = {
-        'Plan rows loaded':                     planRows.length,
-        'Plan rows skipped (missing PO/SKU)':   planSkipped,
-        'UID records (raw)':                    rawCount,
-        'UID records (used)':                   normalized.length,
-        'Unique UIDs in input':                 inputUidUnique,
-        'Unique Mobile Bins in input':          inputBinUnique,
-        'Dropped missing UID':                  droppedMissingUID,
-        'Dropped missing Mobile Bin':           droppedMissingBin,
-        'Unmatched UID rows (no Plan match)':   unmatched,
-        'Rows excluded (unmatched, dropped)':   excludedUnmatched,
-        'Rows missing cost (cost left blank)':  rowsMissingCost,
-        'Logistic method = TBD (no mode)':      rowsTbd,
-        'Duplicate UID occurrences removed':    dupRemoved,
-        'Grouped output rows':                  rowsOut.length,
-        'Total mapped UIDs in output':          mappedUidTotal,
-        'Unique UIDs in output':                outputUidSet.size,
-        'Unique Mobile Bins in output':         outputBinUnique,
-      };
+      const built = window.APO_BUILDER.build({ weekStart: ws, planRows, records, settings });
+      const rowsOut = built.rows;
+      const metrics = built.metrics;
 
       apoSetMetrics(metrics);
       apoSetPreview(rowsOut);
 
-      _apoCsv = apoToCsv(rowsOut, APO_OUTPUT_COLUMNS);
+      _apoCsv = built.csv;
 
       // Enable download
       if (dlBtn){
@@ -8624,13 +8376,17 @@ function renderReportsPage(container){
       }
 
       const warn = [];
-      if (rowsMissingCost)  warn.push(rowsMissingCost + ' missing cost');
-      if (rowsTbd)          warn.push(rowsTbd + ' TBD mode');
-      if (excludedUnmatched) warn.push(excludedUnmatched + ' unmatched excluded');
+      const mMissingCost = metrics['Rows with no cost'] || 0;
+      const mTbd         = metrics['Rows with freight TBD'] || 0;
+      const mExcluded    = metrics['Groups excluded — unmatched'] || 0;
+      const mMappedUids  = metrics['Total mapped UIDs in output'] || 0;
+      if (mMissingCost) warn.push(mMissingCost + ' missing cost');
+      if (mTbd)         warn.push(mTbd + ' TBD mode');
+      if (mExcluded)    warn.push(mExcluded + ' unmatched excluded');
       if (warn.length){
-        apoSetStatus('⚠ Generated ' + rowsOut.length + ' rows · ' + mappedUidTotal + ' UIDs · week ' + ws + ' — review: ' + warn.join(', '), '#B45309');
+        apoSetStatus('⚠ Generated ' + rowsOut.length + ' rows · ' + mMappedUids + ' UIDs · week ' + ws + ' — review: ' + warn.join(', '), '#B45309');
       } else {
-        apoSetStatus('✓ Generated ' + rowsOut.length + ' rows · ' + mappedUidTotal + ' UIDs · week ' + ws, '#16a34a');
+        apoSetStatus('✓ Generated ' + rowsOut.length + ' rows · ' + mMappedUids + ' UIDs · week ' + ws, '#16a34a');
       }
 
     } catch(err){
