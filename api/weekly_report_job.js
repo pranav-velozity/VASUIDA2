@@ -165,11 +165,16 @@ module.exports = function createWeeklyReportJob(deps) {
             bad: false }
         : { title: 'Advanced PO — transfer failed', detail: push.error || 'Unknown error.', bad: true };
 
+    // One line per consignment: what it is, what is aboard, when it moved. `detail` carries
+    // whatever identifies the box for this client — size and vessel, or the flight.
     const freightLines = (freight || []).map(f =>
-      `${f.reference} · ${f.mode} · ${f.supplier}` +
-      (f.zendesk ? ` · Zendesk ${f.zendesk}` : '') +
-      (f.etd ? ` · ETD ${fmtDay(f.etd)}` : '') +
-      (f.eta ? ` · ETA ${fmtDay(f.eta)}` : ''));
+      [`${f.reference} · ${f.mode}`,
+       f.detail || null,
+       f.poCount ? `${f.poCount} PO${f.poCount === 1 ? '' : 's'}` : null,
+       f.zendesk ? `Zendesk ${f.zendesk}` : null,
+       f.etd ? `ETD ${fmtDay(f.etd)}` : null,
+       f.eta ? `ETA ${fmtDay(f.eta)}` : null,
+      ].filter(Boolean).join(' · '));
 
     const text = [
       `Week ${wk} — Reports and Data`,
@@ -260,13 +265,17 @@ module.exports = function createWeeklyReportJob(deps) {
       { name: apo.filename, content: Buffer.from(apo.csv, 'utf8'), label: 'Advanced PO' },
     ];
 
+    // A builder that is not offered is skipped rather than attached empty. The discrepancy
+    // report has no PDF generator, so it goes out once as a workbook.
     for (const [fn, label] of [
-      [() => buildStockStatus(weekStart), 'Stock status'],
-      [() => buildSupplierSummary(weekStart), 'Receiving supplier summary'],
-      [() => buildDiscrepancyPdf(weekStart, { cost: true }), 'Supplier discrepancy (PDF)'],
-      [() => buildDiscrepancyXlsx(weekStart, { cost: true }), 'Supplier discrepancy (Excel)'],
+      [buildStockStatus && (() => buildStockStatus(weekStart)), 'Stock status'],
+      [buildSupplierSummary && (() => buildSupplierSummary(weekStart)), 'Receiving supplier summary'],
+      [buildDiscrepancyPdf && (() => buildDiscrepancyPdf(weekStart, { cost: true })), 'Supplier discrepancy (PDF)'],
+      [buildDiscrepancyXlsx && (() => buildDiscrepancyXlsx(weekStart, { cost: true })), 'Supplier discrepancy'],
     ]) {
+      if (!fn) continue;
       const out = await fn();
+      if (attachments.some(a => a.name === out.filename)) continue;   // never the same file twice
       attachments.push({ name: out.filename, content: out.buffer, label });
     }
 

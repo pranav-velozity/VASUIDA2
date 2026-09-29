@@ -124,12 +124,63 @@ module.exports = function createWiring(deps) {
     return { buffer: buf, filename: `Supplier_Discrepancy_${ws}${cost ? '_costed' : ''}.xlsx` };
   }
 
-  // The discrepancy report has no PDF generator — the printed version has always been the
-  // browser printing an HTML page. Rather than add a headless renderer, the same workbook
-  // goes out once; the job's attachment list names it plainly.
-  const buildDiscrepancyPdf = async (ws, opts) => buildDiscrepancyXlsx(ws, opts);
+  // No PDF builder is offered. The report has never had one — the printed copy was always
+  // somebody printing an HTML page — and returning the workbook under a PDF label attached
+  // the same bytes to the email twice.
+  const buildDiscrepancyPdf = null;
 
   const buildSupplierSummary = (ws) => receivingSummary.buildWorkbook(ws);
+
+  // The consignments for the week, with the dates actually recorded against each lane.
+  // This is the section that was typed by hand every Monday — container, what is aboard,
+  // when it left and when it is due.
+  function freightFor(ws) {
+    let rows = [];
+    try {
+      rows = db.prepare('SELECT facility, data FROM flow_week WHERE week_start = ?').all(ws);
+    } catch (_) { return []; }
+
+    // Dates come from the lane actuals, keyed by the lane the container sits on.
+    let actuals = new Map();
+    try {
+      for (const a of db.prepare(`SELECT lane_key, stage, actual_at FROM lane_actual_dates
+                                   WHERE week_start = ?`).all(ws)) {
+        if (!actuals.has(a.lane_key)) actuals.set(a.lane_key, {});
+        actuals.get(a.lane_key)[a.stage] = a.actual_at;
+      }
+    } catch (_) { /* a week with nothing recorded simply has no dates */ }
+
+    const out = [];
+    for (const r of rows) {
+      let data;
+      try { data = JSON.parse(r.data); } catch (_) { continue; }
+      const wc = data && data.intl_weekcontainers;
+      const list = Array.isArray(wc) ? wc : (Array.isArray(wc && wc.containers) ? wc.containers : []);
+      for (const c of list) {
+        const ref = String(c.container_id || c.container || '').trim();
+        if (!ref) continue;
+        const laneKeys = Array.isArray(c.lane_keys) ? c.lane_keys : [];
+        // A container can sit on more than one lane; the earliest departure and the latest
+        // arrival describe the consignment as a whole.
+        let etd = null, eta = null;
+        for (const k of laneKeys) {
+          const a = actuals.get(k) || {};
+          if (a.departed && (!etd || a.departed < etd)) etd = a.departed;
+          if (a.arrived && (!eta || a.arrived > eta)) eta = a.arrived;
+        }
+        const pos = String(c.pos || '').split(',').map(x => x.trim()).filter(Boolean);
+        const air = /air|awb/i.test(ref) || String(c.size_ft || '').toLowerCase() === 'air';
+        // An air consignment has no box size, so it is described by its flight rather than
+        // labelled "AIRft", which is what happens when a size field is used for both.
+        const detail = air
+          ? (c.vessel ? String(c.vessel) : 'Air freight')
+          : String(c.size_ft || '40') + 'ft' + (c.vessel ? ' · ' + c.vessel : '');
+        out.push({ reference: ref, mode: air ? 'Air' : 'Sea', detail, poCount: pos.length, etd, eta });
+      }
+    }
+    out.sort((a, b) => String(a.reference).localeCompare(String(b.reference)));
+    return out;
+  }
 
   // ── the numbers the summary is written from ──
   async function weekFigures(ws) {
@@ -157,17 +208,7 @@ module.exports = function createWiring(deps) {
       discrepancySuppliers = (row && row.n) || 0;
     } catch (_) { /* the table may not exist for every client */ }
 
-    // Consignments in flight, and their dates, for the freight block.
-    let freight = [];
-    try {
-      freight = db.prepare(`
-        SELECT reference, mode, service, carrier, plan_departed, plan_arrived
-          FROM d2d_shipment WHERE client_id = ? AND status NOT IN ('delivered','cancelled')
-          ORDER BY plan_arrived LIMIT 20`).all(curClient())
-        .map(s => ({ reference: s.reference || 'not advised', mode: s.mode === 'air' ? 'Air' : 'Sea',
-                     supplier: s.service || s.carrier || '', zendesk: '',
-                     etd: s.plan_departed, eta: s.plan_arrived }));
-    } catch (_) { /* clients without door-to-door have no such table */ }
+    const freight = freightFor(ws);
 
     return {
       plannedUnits,
@@ -217,7 +258,7 @@ module.exports = function createWiring(deps) {
 
   return {
     buildWorkbook, buildApo, buildStockStatus, buildSupplierSummary,
-    buildDiscrepancyPdf, buildDiscrepancyXlsx,
+    buildDiscrepancyXlsx,
     weekFigures, sendMail, recentApoRowCounts,
     publishToIconic: (x) => iconicPublisher.publish(x),
     logEmail, pulseNarrative,
