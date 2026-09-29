@@ -228,7 +228,242 @@
     return out;
   }
 
-  // ── Sheets 5 and 6 ──
+  // ── Sheets 5 and 6, computed here ──
+  // These were the one part the server could not produce: the computation lived only in the
+  // route handlers (~477 lines) and in index.html. Rather than move the route handlers — the
+  // riskiest change available on the most-depended-on reports — the browser's own functions
+  // come here, verified against two real published weeks:
+  //   week 38: PO count, units, bins and gross weight matched the endpoint exactly
+  //   week 33: CBM matched the published workbook on 6 of 7 POs to three decimals, the
+  //            seventh explained by carton sizes missing from the sample rather than by
+  //            the formula
+  // cbmPerCarton is identical to the server's, character for character.
+
+  function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+  function round3(n) { return Math.round((Number(n) || 0) * 1000) / 1000; }
+
+  // A bin with no dimensions contributes nothing rather than guessing a volume. It still
+  // counts as a bin, which is why a PO can show more bins than its CBM accounts for.
+  function cbmPerCarton(l_cm, w_cm, h_cm) {
+    const L = Number(l_cm), W = Number(w_cm), H = Number(h_cm);
+    if (!Number.isFinite(L) || !Number.isFinite(W) || !Number.isFinite(H)) return null;
+    if (L <= 0 || W <= 0 || H <= 0) return null;
+    return (L * W * H) / 1000000;
+  }
+
+  function buildShipmentSummary(plan = [], records = [], bins = []) {
+    const completed = (records || []).filter(r => r.status === 'complete');
+
+    const planByKey = new Map();
+    for (const p of plan || []) {
+      const po = String(p.po_number || '').trim();
+      const sku = String(p.sku_code || '').trim();
+      if (!po || !sku) continue;
+      planByKey.set(`${po}|||${sku}`, p);
+    }
+
+    const binWeight = new Map();
+    const binCbm = new Map();
+    for (const b of bins || []) {
+      const mb = String(b.mobile_bin ?? b.bin ?? '').trim();
+      if (!mb) continue;
+      const w = Number(b.gross_weight ?? b.weight ?? b.weight_kg ?? 0) || 0;
+      binWeight.set(mb, w);
+      binCbm.set(mb, cbmPerCarton(b.carton_length_cm, b.carton_width_cm, b.carton_height_cm));
+    }
+
+    const norm = (v) => {
+      const s = String(v ?? '').trim();
+      return s ? s : '(Unspecified)';
+    };
+
+    const groups = new Map();
+    const binAssignedGroup = new Map();
+
+    for (const r of completed) {
+      const po = String(r.po_number || '').trim();
+      const sku = String(r.sku_code || '').trim();
+      if (!po || !sku) continue;
+
+      const p = planByKey.get(`${po}|||${sku}`) || {};
+      const supplier = norm(p.supplier_name);
+      const zendesk  = norm(p.zendesk_ticket ?? p.zendesk_ticket_number ?? p.zendesk);
+      const freight  = norm(p.freight_type);
+      const facility = norm(p.facility_name);
+
+      const gkey = `${supplier}|||${zendesk}|||${freight}|||${facility}`;
+
+      if (!groups.has(gkey)) {
+        groups.set(gkey, {
+          'Supplier Name': supplier,
+          'Zendesk Ticket #': zendesk,
+          'Freight Type': freight,
+          'Facility Name': facility,
+          _poSet: new Set(),
+          _binSet: new Set(),
+          _cbmTotal: 0,
+          _binsMissingDims: 0,
+          'Total Units Applied': 0,
+          'Gross Weight': 0
+        });
+      }
+
+      const g = groups.get(gkey);
+      g['Total Units Applied'] += 1;
+      g._poSet.add(po);
+
+      const mb = String(r.mobile_bin || r.bin || '').trim();
+      if (mb) {
+        g._binSet.add(mb);
+        const w = binWeight.get(mb) || 0;
+
+        if (!binAssignedGroup.has(mb)) {
+          binAssignedGroup.set(mb, gkey);
+          g['Gross Weight'] += w;
+          const bcbm = binCbm.get(mb);
+          if (bcbm == null) g._binsMissingDims += 1;
+          else g._cbmTotal += bcbm;
+        }
+      }
+    }
+
+    const out = [];
+    for (const g of groups.values()) {
+      const binCount = g._binSet.size;
+      const row = {
+        'Supplier Name': g['Supplier Name'],
+        'Zendesk Ticket #': g['Zendesk Ticket #'],
+        'Freight Type': g['Freight Type'],
+        'Facility Name': g['Facility Name'],
+        'Unique PO Count': g._poSet.size,
+        'Total Units Applied': g['Total Units Applied'],
+        'Total Mobile Bins': binCount,
+        'Gross Weight': round2(g['Gross Weight']),
+        'CBM': (binCount > 0 && binCount === g._binsMissingDims) ? null : round3(g._cbmTotal)
+      };
+      if (g._binsMissingDims > 0) row['Bins Missing Dimensions'] = g._binsMissingDims;
+      out.push(row);
+    }
+
+    out.sort((a, b) =>
+      String(a['Supplier Name']).localeCompare(String(b['Supplier Name'])) ||
+      String(a['Zendesk Ticket #']).localeCompare(String(b['Zendesk Ticket #'])) ||
+      String(a['Freight Type']).localeCompare(String(b['Freight Type'])) ||
+      String(a['Facility Name']).localeCompare(String(b['Facility Name']))
+    );
+
+    return out;
+  }
+
+  function buildShipmentDetail(plan = [], records = [], bins = []) {
+    const completed = (records || []).filter(r => r.status === 'complete');
+
+    const planByKey = new Map();
+    for (const p of plan || []) {
+      const po = String(p.po_number || '').trim();
+      const sku = String(p.sku_code || '').trim();
+      if (!po || !sku) continue;
+      planByKey.set(`${po}|||${sku}`, p);
+    }
+
+    const binWeight = new Map();
+    const binCbm = new Map();
+    for (const b of bins || []) {
+      const mb = String(b.mobile_bin ?? b.bin ?? '').trim();
+      if (!mb) continue;
+      const w = Number(b.gross_weight ?? b.weight ?? b.weight_kg ?? 0) || 0;
+      binWeight.set(mb, w);
+      binCbm.set(mb, cbmPerCarton(b.carton_length_cm, b.carton_width_cm, b.carton_height_cm));
+    }
+
+    const norm = (v) => {
+      const s = String(v ?? '').trim();
+      return s ? s : '(Unspecified)';
+    };
+
+    const groups = new Map();
+    const binAssignedGroup = new Map();
+
+    for (const r of completed) {
+      const po = String(r.po_number || '').trim();
+      const sku = String(r.sku_code || '').trim();
+      if (!po || !sku) continue;
+
+      const p = planByKey.get(`${po}|||${sku}`) || {};
+      const supplier = norm(p.supplier_name);
+      const zendesk  = norm(p.zendesk_ticket ?? p.zendesk_ticket_number ?? p.zendesk);
+      const freight  = norm(p.freight_type);
+      const facility = norm(p.facility_name);
+
+      const gkey = `${supplier}|||${zendesk}|||${freight}|||${facility}|||${po}`;
+
+      if (!groups.has(gkey)) {
+        groups.set(gkey, {
+          'Supplier Name': supplier,
+          'Zendesk Ticket #': zendesk,
+          'Freight Type': freight,
+          'Facility Name': facility,
+          'PO': po,
+          _binSet: new Set(),
+          _cbmTotal: 0,
+          _binsMissingDims: 0,
+          'Total Units Applied': 0,
+          'Gross Weight': 0
+        });
+      }
+
+      const g = groups.get(gkey);
+      g['Total Units Applied'] += 1;
+
+      const mb = String(r.mobile_bin || r.bin || '').trim();
+      if (mb) {
+        g._binSet.add(mb);
+        const w = binWeight.get(mb) || 0;
+
+        if (!binAssignedGroup.has(mb)) {
+          binAssignedGroup.set(mb, gkey);
+          g['Gross Weight'] += w;
+          const bcbm = binCbm.get(mb);
+          if (bcbm == null) g._binsMissingDims += 1;
+          else g._cbmTotal += bcbm;
+        } else if (binAssignedGroup.get(mb) === gkey) {
+          // same group ok
+        } else {
+          // collision: do not double-count weight
+        }
+      }
+    }
+
+    const out = [];
+    for (const g of groups.values()) {
+      const binCount = g._binSet.size;
+      const row = {
+        'Supplier Name': g['Supplier Name'],
+        'Zendesk Ticket #': g['Zendesk Ticket #'],
+        'Freight Type': g['Freight Type'],
+        'Facility Name': g['Facility Name'],
+        'PO': g['PO'],
+        'Total Units Applied': g['Total Units Applied'],
+        'Total Mobile Bins': binCount,
+        'Gross Weight': round2(g['Gross Weight']),
+        'CBM': (binCount > 0 && binCount === g._binsMissingDims) ? null : round3(g._cbmTotal)
+      };
+      if (g._binsMissingDims > 0) row['Bins Missing Dimensions'] = g._binsMissingDims;
+      out.push(row);
+    }
+
+    out.sort((a, b) =>
+      String(a['Supplier Name']).localeCompare(String(b['Supplier Name'])) ||
+      String(a['Zendesk Ticket #']).localeCompare(String(b['Zendesk Ticket #'])) ||
+      String(a['Freight Type']).localeCompare(String(b['Freight Type'])) ||
+      String(a['Facility Name']).localeCompare(String(b['Facility Name'])) ||
+      String(a['PO']).localeCompare(String(b['PO']))
+    );
+
+    return out;
+  }
+
+  // ── Sheets 5 and 6, mapped ──
   // Already computed by /summary/shipment_summary and /summary/shipment_detail; mapped onto
   // the column names rather than recomputed, so the workbook agrees with the screen.
   const pick = (o, names) => {
@@ -287,8 +522,12 @@
       'PO x SKU Summary': poSkuRows(plan, i.poSkuRows),
       'SKU Summary': skuSummaryRows(joinPoProgress(plan, byPO), plan),
       'Mobile Bins': mobileBinRows(plan, i.records, i.bins),
-      'Shipment Summary': shipmentSummaryRows(i.shipmentSummary),
-      'Shipment Details': shipmentDetailRows(i.shipmentDetail),
+      // Supplied by the caller where it already has them (the screen fetches the endpoints),
+      // computed here where it does not (the weekly job). Both produce the same rows.
+      'Shipment Summary': shipmentSummaryRows(i.shipmentSummary
+        || buildShipmentSummary(plan, i.records, i.bins)),
+      'Shipment Details': shipmentDetailRows(i.shipmentDetail
+        || buildShipmentDetail(plan, i.records, i.bins)),
     };
 
     const counts = {};
@@ -307,5 +546,6 @@
     build, SHEET_NAMES, COLUMNS,
     appliedUidRows, poSkuRows, skuSummaryRows, mobileBinRows,
     shipmentSummaryRows, shipmentDetailRows, joinPoProgress, unitsByPo,
+    buildShipmentSummary, buildShipmentDetail, cbmPerCarton,
   };
 });
