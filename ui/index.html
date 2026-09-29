@@ -6482,6 +6482,7 @@ window.__openPrebookModal = function(){
   <script src="/public/supplier_invoices_additive.js?v=4" defer></script>
   <script src="/public/dept_owners_additive.js?v=1" defer></script>
   <script src="/public/tile_polish_additive.js?v=3" defer></script>
+    <script src="/public/report_builder.js?v=1"></script>
     <script src="/public/apo_builder.js?v=1"></script>
   <script src="/public/weekly_history_additive.js?v=3" defer></script>
     <script src="/public/lastmile_history_additive.js?v=2" defer></script>
@@ -7263,105 +7264,75 @@ async function downloadConsolidatedReport() {
   if(btn){ btn.textContent = 'Preparing...'; btn.disabled = true; }
 
   try {
-    const wb = XLSX.utils.book_new();
+    if (!window.REPORT_BUILDER || typeof window.REPORT_BUILDER.build !== 'function') {
+      throw new Error('The report builder did not load. Reload the page and try again.');
+    }
+
     const plan = Array.isArray(state.plan) ? state.plan : [];
 
-    // ── Sheet 1: Applied UIDs — same as individual download ──
-    try {
-      const token = window.Clerk?.session ? await window.Clerk.session.getToken() : null;
+    // ── Fetch what the six sheets are built from ──
+    // A failure here is reported rather than swallowed: the old code caught each sheet
+    // separately and carried on, which produced a workbook that looked complete and was not.
+    const token = window.Clerk?.session ? await window.Clerk.session.getToken() : null;
+    const authHeaders = Object.assign({ 'Content-Type': 'application/json' },
+      token ? { 'Authorization': 'Bearer ' + token } : {});
+
+    const appliedUids = await (async () => {
       const url = `${apiBase}/export/applied?from=${encodeURIComponent(ws)}&to=${encodeURIComponent(we)}&status=complete`;
-      const res = await fetch(url, { headers: Object.assign({'Content-Type':'application/json'}, token ? {'Authorization':'Bearer '+token} : {}) });
-      if(res.ok){
-        const text = await res.text();
-        const lines = text.trim().split('\n');
-        const headers = (lines[0]||'').split(',').map(c=>c.replace(/^"|"$/g,''));
-        const data = lines.slice(1).map(r => {
-          const cols = r.split(',').map(c=>c.replace(/^"|"$/g,''));
-          const o={}; headers.forEach((h,i)=>o[h]=cols[i]||''); return o;
-        });
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(data, {header:headers}), 'Applied UIDs');
-      }
-    } catch(e){ console.warn('Applied UIDs sheet failed', e); }
+      const res = await fetch(url, { headers: authHeaders });
+      if (!res.ok) throw new Error('Applied UIDs could not be read (' + res.status + ')');
+      const text = await res.text();
+      const lines = text.trim().split('\n');
+      const headers = (lines[0] || '').split(',').map(c => c.replace(/^"|"$/g, ''));
+      return lines.slice(1).map(r => {
+        const cols = r.split(',').map(c => c.replace(/^"|"$/g, ''));
+        const o = {}; headers.forEach((h, i) => o[h] = cols[i] || ''); return o;
+      });
+    })();
 
-    // ── Sheet 2: PO × SKU Summary — same API as individual download ──
-    try {
-      const p = new URLSearchParams({ from: ws, to: we, status: 'complete' });
-      const resp = await api(`/summary/po_sku?${p.toString()}`).catch(()=>({}));
-      const rows = buildDiscrepancyPOSKU(plan, resp?.rows || []);
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'PO x SKU Summary');
-    } catch(e){ console.warn('PO×SKU sheet failed', e); }
+    const q = new URLSearchParams({ from: ws, to: we, status: 'complete' });
+    const poSkuResp = await api(`/summary/po_sku?${q.toString()}`);
+    const poSkuRows = (poSkuResp && poSkuResp.rows) || [];
 
-    // ── Sheet 3: SKU Summary — same as individual download ──
-    try {
-      const p = new URLSearchParams({ from: ws, to: we, status: 'complete' });
-      const resp = await api(`/summary/po_sku?${p.toString()}`).catch(()=>({}));
-      // joinPOProgress expects Map<po, number> — aggregate units by PO
-      const byPO = new Map();
-      for(const r of resp?.rows||[]){
-        const po = String(r.po||'').trim();
-        if(!po) continue;
-        byPO.set(po, (byPO.get(po)||0) + (Number(r.units)||0));
-      }
-      const poRows = joinPOProgress(plan, byPO);
-      const rows = buildDiscrepancyPO(poRows, plan);
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'SKU Summary');
-    } catch(e){ console.warn('SKU sheet failed', e); }
+    const recFrom = `${ws}T00:00:00.000Z`;
+    const weD = new Date(ws); weD.setDate(weD.getDate() + 6);
+    const recTo = `${weD.toISOString().slice(0, 10)}T23:59:59.999Z`;
+    const recResp = await api(`/records?from=${encodeURIComponent(recFrom)}&to=${encodeURIComponent(recTo)}&status=complete&limit=65000`);
+    const records = Array.isArray(recResp) ? recResp : (recResp.records || recResp.data || recResp.rows || []);
 
-    // ── Sheet 4: Mobile Bins — unique bins from records (all scanned bins) ──
-    try {
-      // Fetch raw records to get all unique mobile_bin values with po_number
-      const from = `${ws}T00:00:00.000Z`;
-      const weD = new Date(ws); weD.setDate(weD.getDate()+6);
-      const to = `${weD.toISOString().slice(0,10)}T23:59:59.999Z`;
-      let rawRecs = [];
-      try {
-        const r = await api(`/records?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&status=complete&limit=65000`);
-        rawRecs = Array.isArray(r) ? r : (r.records || r.data || r.rows || []);
-      } catch(e){ console.warn('records fetch failed', e); }
+    let bins = Array.isArray(state.bins) ? state.bins : [];
+    if (!bins.length) {
+      const r = await api(`/bins/weeks/${encodeURIComponent(ws)}`);
+      bins = Array.isArray(r) ? r : (r.bins || []);
+    }
 
-      // Also get bin manifest for weight data
-      let binManifest = Array.isArray(state.bins) ? state.bins : [];
-      if(!binManifest.length){
-        try{ const r = await api(`/bins/weeks/${encodeURIComponent(ws)}`); binManifest = Array.isArray(r)?r:(r.bins||[]); }catch{}
-      }
-      const weightByBin = new Map(binManifest.map(b=>[String(b.mobile_bin||'').trim(), Number(b.weight_kg||0)]));
-      const unitsByBin = new Map(binManifest.map(b=>[String(b.mobile_bin||'').trim(), Number(b.total_units||0)]));
+    const shipSumResp = await api(`/summary/shipment_summary?weekStart=${encodeURIComponent(ws)}`);
+    const shipDetResp = await api(`/summary/shipment_detail?weekStart=${encodeURIComponent(ws)}`);
 
-      const poToSup = new Map(plan.map(p=>[String(p.po_number||'').trim(), String(p.supplier_name||'').trim()]));
+    // ── Build ──
+    const built = window.REPORT_BUILDER.build({
+      weekStart: ws,
+      appliedUids, plan, poSkuRows, records, bins,
+      shipmentSummary: (shipSumResp && shipSumResp.rows) || [],
+      shipmentDetail: (shipDetResp && shipDetResp.rows) || [],
+    });
 
-      // Deduplicate by mobile_bin — one row per unique bin
-      const seen = new Map(); // mobile_bin -> {po, supplier}
-      for(const r of rawRecs){
-        const mb = String(r.mobile_bin||r.bin||'').trim();
-        const po = String(r.po_number||r.po||'').trim();
-        if(!mb) continue;
-        if(!seen.has(mb)) seen.set(mb, { po, supplier: poToSup.get(po)||'' });
-      }
+    // An empty sheet can be legitimate — a week with no air freight — so it is surfaced
+    // rather than blocked, and the person decides whether that looks right.
+    if (built.missing.length) {
+      const ok = confirm('These sheets came back empty:\n\n  ' + built.missing.join('\n  ')
+        + '\n\nDownload anyway?');
+      if (!ok) { if (btn) { btn.textContent = 'Download All'; btn.disabled = false; } return; }
+    }
 
-      const binRows = Array.from(seen.entries()).map(([mb, meta]) => ({
-        Supplier: meta.supplier,
-        PO: meta.po,
-        Mobile_Bin: mb,
-        Weight_kg: weightByBin.get(mb) || 0,
-        Units: unitsByBin.get(mb) || 0
-      }));
-      binRows.sort((a,b)=>(a.Supplier||'').localeCompare(b.Supplier||'')||(a.PO||'').localeCompare(b.PO||''));
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(binRows), 'Mobile Bins');
-    } catch(e){ console.warn('Mobile bins sheet failed', e); }
-
-    // ── Sheet 5: Shipment Summary — same API as individual download ──
-    try {
-      const resp = await api(`/summary/shipment_summary?weekStart=${encodeURIComponent(ws)}`).catch(()=>({}));
-      const rows = (resp && resp.rows) ? resp.rows : [];
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Shipment Summary');
-    } catch(e){ console.warn('Shipment summary sheet failed', e); }
-
-    // ── Sheet 6: Shipment Details — same API as individual download ──
-    try {
-      const resp = await api(`/summary/shipment_detail?weekStart=${encodeURIComponent(ws)}`).catch(()=>({}));
-      const rows = (resp && resp.rows) ? resp.rows : [];
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Shipment Details');
-    } catch(e){ console.warn('Shipment details sheet failed', e); }
+    const wb = XLSX.utils.book_new();
+    for (const name of built.sheetNames) {
+      XLSX.utils.book_append_sheet(
+        wb,
+        XLSX.utils.json_to_sheet(built.sheets[name], { header: built.columns[name] }),
+        name
+      );
+    }
 
     // ── Write file ──
     XLSX.writeFile(wb, `Pinpoint_Report_${ws}.xlsx`);
