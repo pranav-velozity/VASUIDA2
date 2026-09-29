@@ -83,11 +83,19 @@ const PARTNER_ALLOW_PREFIX = [
 
 // Endpoints over the single-tenant operational tables. Everything here reads plans, records,
 // receiving, bins, lanes or flow_week, none of which carry a client_id.
+// Ephemeral, in-memory, loopback-only. Nothing is persisted and it dies with the process.
+const internalAuth = require('./internal_auth')({ logger: console });
+
 const LEGACY_OPS_PREFIXES = [
   '/plan', '/records', '/receiving', '/flow', '/lanes', '/bins', '/intake',
   '/noncompliance', '/apo', '/exec/',
 ];
 function authenticateRequest(req, res, next) {
+  // The weekly job calls a couple of this server's own endpoints, because their computation
+  // lives inside the route handlers. Loopback socket + a boot-generated secret + no proxy
+  // headers; see ./internal_auth for why each of those is there.
+  if (internalAuth.accept(req)) return next();
+
   return _authRaw(req, res, (err) => {
     if (err) return next(err);
     try {
@@ -11912,9 +11920,16 @@ async function _iconicAlert(filename, errMsg) {
 // The Monday attachments the server can now produce for itself. Both call the same code the
 // screens call, so a downloaded file and an emailed one cannot differ.
 const stockStatusReport = require('./stock_status_report');
-app.use('/report', require('./receiving_summary')({
+const receivingSummary = require('./receiving_summary')({
   express, db, authenticateRequest, auditLog, curClient, ExcelJS,
-}));
+});
+app.use('/report', receivingSummary);
+
+const discrepancyReport = require('./discrepancy_report')({
+  express, db, authenticateRequest, auditLog, curClient, ExcelJS,
+  ncIncidentCost, ncRemedyRate, NC_REMEDY,
+});
+app.use('/report', discrepancyReport);
 
 // ./iconic_publish, not ./iconic_sftp — the SSH key lives in this folder under the latter
 // name with no extension, and Node would resolve to the key and fail to parse it.
@@ -21309,5 +21324,51 @@ app.listen(PORT, () => {
   console.log(`UID Ops backend listening on http://localhost:${PORT}`);
   console.log(`DB file: ${DB_FILE}`);
   console.log(`CORS origin(s): ${allowList.join(', ')}`);
+
+  // ── The Monday reporting email ──
+  // Off unless WEEKLY_REPORT_ENABLED is 'true', so deploying this does not start sending
+  // mail or pushing files to THE ICONIC on its own. Recipients come from the environment;
+  // with none configured it stays off and says so.
+  internalAuth.setPort(PORT);
+
+  const parseList = (v) => String(v || '').split(/[,;]/).map(x => x.trim()).filter(Boolean);
+  const to  = parseList(process.env.WEEKLY_REPORT_TO);
+  const cc  = parseList(process.env.WEEKLY_REPORT_CC);
+  const ops = parseList(process.env.WEEKLY_REPORT_OPS || 'operations@velozity.au');
+
+  if (String(process.env.WEEKLY_REPORT_ENABLED || '').toLowerCase() !== 'true') {
+    console.log('[weekly] disabled — set WEEKLY_REPORT_ENABLED=true to schedule it');
+  } else if (!to.length) {
+    console.log('[weekly] no WEEKLY_REPORT_TO configured — not scheduling');
+  } else {
+    try {
+      const wiring = require('./weekly_wiring')({
+        db, ExcelJS, curClient, scopeSql, tenantReadIds,
+        REPORT_BUILDER: require('./report_builder'),
+        APO_BUILDER: require('./apo_builder'),
+        receivingSummary, discrepancyReport, internal: internalAuth,
+        iconicPublisher,
+        logEmail: (row) => {
+          try {
+            db.prepare(`INSERT INTO email_send_log
+              (kind, week_start, subject, recipients, narrative_source, trigger_source, message_id, sent_at)
+              VALUES (?,?,?,?,?,?,?,?)`).run(
+              row.kind, row.week_start, row.subject,
+              [row.to, row.cc].filter(Boolean).join(','),
+              row.narrative_source, row.trigger_source, row.message_id || null,
+              new Date().toISOString());
+          } catch (e) { console.warn('[weekly] could not log the send:', e.message); }
+        },
+        pulseNarrative: null,        // wired once the client-facing prompt is agreed
+        logger: console,
+      });
+
+      const job = require('./weekly_report_job')(wiring);
+      job.start({ to, cc, ops, dryRun: String(process.env.WEEKLY_REPORT_DRY_RUN || '').toLowerCase() === 'true' });
+      global.__weeklyJob = job;      // so a run can be triggered by hand from the console
+    } catch (e) {
+      console.error('[weekly] could not schedule:', e.message);
+    }
+  }
 });
 
