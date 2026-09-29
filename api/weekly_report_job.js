@@ -39,9 +39,10 @@ module.exports = function createWeeklyReportJob(deps) {
   } = deps;
 
   const log = logger || console;
-  const TZ = 'America/Chicago';
-  const SEND_HOUR = 13;                    // 1pm Chicago
-  const SEND_DOW = 0;                      // Sunday
+  // Configurable so a change of hour does not need a deploy.
+  const TZ = deps.tz || 'America/Chicago';
+  const SEND_HOUR = Number.isFinite(deps.sendHour) ? deps.sendHour : 13;   // 1pm Chicago
+  const SEND_DOW = Number.isFinite(deps.sendDow) ? deps.sendDow : 0;       // Sunday
 
   // ── The reporting week ──
   // Derived from the week that just closed, never from "today" in a timezone. At the send
@@ -122,20 +123,26 @@ module.exports = function createWeeklyReportJob(deps) {
   // Pulse writes from figures already computed, not from raw tables, so it cannot contradict
   // the attachments beneath it. If it is slow or unavailable the deterministic version goes
   // instead — the email is never held up for it.
+  // Said plainly under the summary, so nobody has to wonder whether a person wrote it.
+  const CREDIT_PULSE = 'Summary by Pulse AI \u2014 Powered by Anthropic Claude';
+  const CREDIT_TEMPLATE = 'Summary generated from this week\u2019s recorded figures';
+
   async function narrativeFor(figures) {
     const fallback = templateNarrative(figures);
-    if (typeof pulseNarrative !== 'function') return { text: fallback, source: 'template' };
+    if (typeof pulseNarrative !== 'function') {
+      return { text: fallback, source: 'template', credit: CREDIT_TEMPLATE };
+    }
     try {
       const out = await Promise.race([
         pulseNarrative(figures),
         new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 10000)),
       ]);
       const text = String(out || '').trim();
-      if (!text) return { text: fallback, source: 'template' };
-      return { text, source: 'pulse' };
+      if (!text) return { text: fallback, source: 'template', credit: CREDIT_TEMPLATE };
+      return { text, source: 'pulse', credit: CREDIT_PULSE };
     } catch (e) {
       log.warn('[weekly] pulse narrative unavailable:', e.message);
-      return { text: fallback, source: 'template_after_pulse_error' };
+      return { text: fallback, source: 'template_after_pulse_error', credit: CREDIT_TEMPLATE };
     }
   }
 
@@ -183,6 +190,7 @@ module.exports = function createWeeklyReportJob(deps) {
       `${fmtDay(weekStart)} to ${fmtDay(addDays(weekStart, 6))}`,
       '',
       narrative.text,
+      narrative.credit || '',
       '',
       'THIS WEEK',
       `  Planned units      ${(figures.plannedUnits || 0).toLocaleString()}`,
@@ -209,7 +217,8 @@ module.exports = function createWeeklyReportJob(deps) {
   <div style="font-size:17px;font-weight:700;">Week ${wk} — Reports and Data</div>
   <div style="font-size:12px;color:#6E6E73;margin-top:2px;">${esc(fmtDay(weekStart))} to ${esc(fmtDay(addDays(weekStart, 6)))}</div>
 
-  <p style="font-size:14px;line-height:1.6;margin:16px 0;">${esc(narrative.text)}</p>
+  <p style="font-size:14px;line-height:1.6;margin:16px 0 4px;">${esc(narrative.text)}</p>
+  <div style="font-size:11px;color:#8E8E93;margin:0 0 14px;">${esc(narrative.credit || '')}</div>
 
   <table style="border-collapse:collapse;margin:16px 0;font-size:13px;">
     ${[['Planned units', (figures.plannedUnits || 0).toLocaleString()],
@@ -324,6 +333,7 @@ module.exports = function createWeeklyReportJob(deps) {
     const ops = opts.ops || [];
 
     const result = { weekStart, subject, push, narrative_source: narrative.source,
+                     workbook_counts: workbook.counts || null,
                      attachments: attachments.map(a => ({ name: a.name, bytes: a.content.length })) };
 
     if (dryRun) {
@@ -377,18 +387,38 @@ module.exports = function createWeeklyReportJob(deps) {
     const wd = parts.find(p => p.type === 'weekday').value;
     const hr = Number(parts.find(p => p.type === 'hour').value);
     const dowMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-    if (dowMap[wd] !== SEND_DOW || hr !== SEND_HOUR) return false;
+    // On or after the window rather than exactly inside it. A process that was down at 1pm
+    // used to skip the week in silence; now it sends when it comes back.
+    const dow = dowMap[wd];
+    const past = dow === SEND_DOW ? hr >= SEND_HOUR : dow > SEND_DOW;
+    if (!past) return false;
     return reportingWeek(at) !== lastRunWeek;      // one send per reporting week
   }
 
   function start(options) {
     const opts = options || {};
+    // Seeded from the send log, not from memory. A restart inside the send window used to
+    // begin with no history and send the week a second time.
     let lastRunWeek = null;
+    if (typeof deps.lastSentWeek === 'function') {
+      try {
+        lastRunWeek = deps.lastSentWeek() || null;
+        if (lastRunWeek) log.log('[weekly] last sent week on record: ' + lastRunWeek);
+      } catch (e) { log.warn('[weekly] could not read the send log:', e.message); }
+    }
     const tick = async () => {
       try {
         const at = now();
         if (!shouldRunAt(at, lastRunWeek)) return;
-        lastRunWeek = reportingWeek(at);
+
+        // Checked again against the log rather than trusting memory alone.
+        const wk = reportingWeek(at);
+        if (typeof deps.lastSentWeek === 'function') {
+          try {
+            if (deps.lastSentWeek() === wk) { lastRunWeek = wk; return; }
+          } catch (_) { /* if the log cannot be read, memory is the fallback */ }
+        }
+        lastRunWeek = wk;
         await run(Object.assign({}, opts, { trigger: 'cron', at }));
       } catch (e) {
         log.error('[weekly] run failed:', e.message);

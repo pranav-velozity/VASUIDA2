@@ -260,12 +260,73 @@ module.exports = function createWiring(deps) {
     return out;
   }
 
+  // ── The Pulse summary ──
+  // Deliberately NOT routed through /pulse/context. That path reads `records` without a
+  // client filter, so a narrative built from it could describe another client's units in
+  // ICONIC's email. This gets only the figures already computed for this week — the ones
+  // printed in the table beneath it — so the sentences cannot contradict the numbers or
+  // reach data they should not.
+  async function pulseNarrativeFor(figures) {
+    const key = process.env.ANTHROPIC_API_KEY;
+    if (!key) { log.warn('[weekly] ANTHROPIC_API_KEY not set — using the plain summary'); return null; }
+
+    const facts = {
+      planned_units: figures.plannedUnits,
+      applied_units: figures.appliedUnits,
+      pos_received: figures.posReceived,
+      pos_late: figures.posLate,
+      mobile_bins: figures.bins,
+      suppliers_with_discrepancies: figures.discrepancySuppliers,
+      consignments_in_transit: figures.containersInTransit,
+      freight: (figures.freight || []).map(f => ({
+        reference: f.reference, mode: f.mode, pos: f.poCount, etd: f.etd, eta: f.eta })),
+    };
+
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: process.env.WEEKLY_REPORT_MODEL || 'claude-sonnet-4-6',
+        max_tokens: 300,
+        system: [
+          'You write the opening summary of a weekly logistics report sent to a retail client.',
+          'Use ONLY the figures provided. Never invent a number, a supplier, a container or a cause.',
+          'Two or three sentences. Plain, factual, no greeting, no sign-off, no bullet points.',
+          'Lead with what happened to the week\u2019s volume, then whatever most needs attention.',
+          'Do not speculate about why something happened \u2014 the data does not say why.',
+          'Do not recommend actions. Do not use the words "I" or "we".',
+        ].join(' '),
+        messages: [{ role: 'user', content: 'Week figures:\n' + JSON.stringify(facts, null, 2) }],
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`Claude refused the request (${res.status}): ${body.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join(' ').trim();
+    return text || null;
+  }
+
+  // The last week already sent, so a restart cannot send it twice.
+  function lastSentWeek() {
+    try {
+      const row = db.prepare(`SELECT week_start FROM email_send_log
+                               WHERE kind = 'weekly_general' AND status = 'success'
+                               ORDER BY sent_at DESC LIMIT 1`).get();
+      return (row && row.week_start) || null;
+    } catch (_) { return null; }
+  }
+
   return {
+    pulseNarrative: pulseNarrativeFor,
+    lastSentWeek,
     buildWorkbook, buildApo, buildStockStatus, buildSupplierSummary,
     buildDiscrepancyXlsx,
     weekFigures, sendMail, recentApoRowCounts,
     publishToIconic: (x) => iconicPublisher.publish(x),
-    logEmail, pulseNarrative,
+    logEmail,
     now: () => new Date(),
     logger: log,
   };

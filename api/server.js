@@ -6769,6 +6769,7 @@ CREATE TABLE IF NOT EXISTS bins (
 );
 CREATE INDEX IF NOT EXISTS idx_bins_week ON bins(week_start);
 `);
+_addColumnIfMissing('email_send_log', 'week_start', 'TEXT');   // the weekly report dedupes on it
 _addColumnIfMissing('bins', 'carton_length_cm', 'REAL');
 _addColumnIfMissing('bins', 'carton_width_cm',  'REAL');
 _addColumnIfMissing('bins', 'carton_height_cm', 'REAL');
@@ -21340,7 +21341,13 @@ app.listen(PORT, () => {
       || (db.prepare(`SELECT clerk_org_id FROM org_map
                        WHERE org_type = 'internal' AND active = 1
                        ORDER BY clerk_org_id LIMIT 1`).get() || {}).clerk_org_id;
-    if (org) { internalAuth.setOrgId(org); console.log('[weekly] internal calls run as org ' + org); }
+    if (org) {
+      internalAuth.setOrgId(org);
+      const t = tenancyResolve(org, 'org:admin_auth');
+      console.log(`[weekly] internal calls run as org ${org} — type ${t && t.org_type}, `
+        + `clients ${(t && t.client_ids || []).join('/') || 'none'}`
+        + (t && t.denied_reason ? `, DENIED: ${t.denied_reason}` : ''));
+    }
     else console.warn('[weekly] no internal organisation found — stock status and discrepancy will be refused');
   } catch (e) {
     console.warn('[weekly] could not resolve an internal organisation:', e.message);
@@ -21366,19 +21373,23 @@ app.listen(PORT, () => {
         logEmail: (row) => {
           try {
             db.prepare(`INSERT INTO email_send_log
-              (kind, week_start, subject, recipients, narrative_source, trigger_source, message_id, sent_at)
-              VALUES (?,?,?,?,?,?,?,?)`).run(
+              (kind, week_start, subject, to_client, to_internal, narrative_source,
+               trigger_source, resend_message_id, status, sent_at)
+              VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
               row.kind, row.week_start, row.subject,
-              [row.to, row.cc].filter(Boolean).join(','),
+              row.to || '', row.cc || '',
               row.narrative_source, row.trigger_source, row.message_id || null,
-              new Date().toISOString());
+              'success', new Date().toISOString());
           } catch (e) { console.warn('[weekly] could not log the send:', e.message); }
         },
-        pulseNarrative: null,        // wired once the client-facing prompt is agreed
         logger: console,
       });
 
-      const job = require('./weekly_report_job')(wiring);
+      const job = require('./weekly_report_job')(Object.assign({}, wiring, {
+        tz: process.env.WEEKLY_REPORT_TZ || 'America/Chicago',
+        sendHour: Number(process.env.WEEKLY_REPORT_HOUR || 13),
+        sendDow: Number(process.env.WEEKLY_REPORT_DOW || 0),
+      }));
 
       // GET /weekly/preview?week=YYYY-MM-DD
       // Builds everything for the week and returns what WOULD be sent. Never sends, never
@@ -21405,12 +21416,25 @@ app.listen(PORT, () => {
               bytes: a.bytes,
             })),
             advanced_po: out.push,
+            workbook_counts: out.workbook_counts,
             narrative_source: out.narrative_source,
             text: out.text,
             html: out.html,
           });
         } catch (e) {
-          res.status(500).json({ ok: false, error: String(e.message || e) });
+          res.status(500).json({
+            ok: false,
+            error: String(e.message || e),
+            diagnostics: {
+              internal_org: internalAuth.orgId || null,
+              env_org: process.env.WEEKLY_REPORT_ORG_ID || null,
+              client: (() => { try { return curClient(); } catch (_) { return null; } })(),
+              tenancy: (() => {
+                try { return tenancyResolve(internalAuth.orgId, 'org:admin_auth'); }
+                catch (err) { return { error: String(err.message || err) }; }
+              })(),
+            },
+          });
         }
       });
       job.start({ to, cc, ops, dryRun: String(process.env.WEEKLY_REPORT_DRY_RUN || '').toLowerCase() === 'true' });
