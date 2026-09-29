@@ -6053,7 +6053,7 @@ app.get('/report/stock-status',
   requireClientOrInternal,     // the client's own stock; not the warehouse operator's business
   autoFilterResponse,
   auditLog('view_stock_status'),
-  (req, res) => {
+  async (req, res) => {
   try {
     const { from, to } = req.query;
     if (!from) return res.status(400).json({ error: 'from (week_start) is required' });
@@ -6232,6 +6232,13 @@ app.get('/report/stock-status',
       (a.po.localeCompare(b.po)) ||
       (a.sku.localeCompare(b.sku))
     );
+
+    if (String(req.query.format || '').toLowerCase() === 'xlsx') {
+      const built = await stockStatusReport.writeWorkbook(ExcelJS, rows, fromWS, toWS);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename="' + built.filename + '"');
+      return res.send(built.buffer);
+    }
 
     return res.json({ from: fromWS, to: toWS, rows });
   } catch (e) {
@@ -11902,6 +11909,13 @@ async function _iconicAlert(filename, errMsg) {
 // POST /iconic/publish — push a generated PO CSV to THE ICONIC's SFTP /upload
 // One publisher, used by the route below and by the weekly job. Extracting it rather than
 // copying it keeps a single implementation of a write into THE ICONIC's production WMS.
+// The Monday attachments the server can now produce for itself. Both call the same code the
+// screens call, so a downloaded file and an emailed one cannot differ.
+const stockStatusReport = require('./stock_status_report');
+app.use('/report', require('./receiving_summary')({
+  express, db, authenticateRequest, auditLog, curClient, ExcelJS,
+}));
+
 // ./iconic_publish, not ./iconic_sftp — the SSH key lives in this folder under the latter
 // name with no extension, and Node would resolve to the key and fail to parse it.
 const iconicPublisher = require('./iconic_publish')({
