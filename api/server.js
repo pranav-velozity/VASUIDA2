@@ -21343,7 +21343,7 @@ app.listen(PORT, () => {
   } else {
     try {
       const wiring = require('./weekly_wiring')({
-        db, ExcelJS, curClient, scopeSql, tenantReadIds,
+        db, ExcelJS, curClient,
         REPORT_BUILDER: require('./report_builder'),
         APO_BUILDER: require('./apo_builder'),
         receivingSummary, discrepancyReport, internal: internalAuth,

@@ -12,7 +12,7 @@
 
 module.exports = function createWiring(deps) {
   const {
-    db, ExcelJS, curClient, scopeSql, tenantReadIds,
+    db, ExcelJS, curClient,
     REPORT_BUILDER, APO_BUILDER,
     receivingSummary, discrepancyReport, internal,
     iconicPublisher, logEmail, pulseNarrative, logger,
@@ -35,30 +35,29 @@ module.exports = function createWiring(deps) {
     catch (e) { throw new Error(`The plan for ${ws} could not be read: ${e.message}`); }
   }
 
-  // records carries no client_id of its own, so it is scoped the way /records scopes it.
-  function recordsFor(req, ws) {
-    const params = [];
-    let sql = `SELECT date_local, mobile_bin, sscc_label, po_number, sku_code, uid, status
-                 FROM records WHERE 1=1`;
-    const sc = scopeSql(tenantReadIds(req));
-    sql += sc.clause;
-    params.push(...sc.params);
-    sql += ` AND date_local >= ? AND date_local <= ? AND status = 'complete'
-             ORDER BY date_local, mobile_bin, po_number, sku_code`;
-    params.push(ws, addDays(ws, 6));
-    return db.prepare(sql).all(...params);
+  // records carries a client_id, so the job filters on it directly. The request-based helpers
+  // are not usable here: tenantReadIds reads a header off the request object, and the job has
+  // no request to read one from.
+  function recordsFor(ws) {
+    return db.prepare(`
+      SELECT date_local, mobile_bin, sscc_label, po_number, sku_code, uid, status
+        FROM records
+       WHERE client_id = ? AND date_local >= ? AND date_local <= ? AND status = 'complete'
+       ORDER BY date_local, mobile_bin, po_number, sku_code
+    `).all(curClient(), ws, addDays(ws, 6));
   }
 
-  const binsFor = (ws) =>
-    db.prepare('SELECT * FROM bins WHERE week_start = ? AND client_id = ?').all(ws, curClient());
-
-  // The job runs with no HTTP request, so tenancy is resolved from the configured client.
-  const jobReq = () => ({ auth: { userId: 'weekly-report-job', orgRole: 'org:admin_auth' } });
+  // bins has no client_id column at all — it is keyed by week and mobile bin, and the server's
+  // own _getBinsForWeek reads it by week alone. Filtering on a column that does not exist
+  // threw, which is how four sheets ended up empty.
+  const binsFor = (ws) => db.prepare(`
+    SELECT week_start, mobile_bin, total_units, weight_kg, date_local,
+           carton_length_cm, carton_width_cm, carton_height_cm
+      FROM bins WHERE week_start = ?`).all(ws);
 
   async function buildWorkbook(ws) {
-    const req = jobReq();
     const plan = planFor(ws);
-    const records = recordsFor(req, ws);
+    const records = recordsFor(ws);
     const bins = binsFor(ws);
 
     // PO x SKU rollup, the same shape /summary/po_sku returns.
@@ -96,9 +95,8 @@ module.exports = function createWiring(deps) {
   }
 
   async function buildApo(ws) {
-    const req = jobReq();
     const plan = planFor(ws);
-    const records = recordsFor(req, ws);
+    const records = recordsFor(ws);
 
     let settings = {};
     try {
@@ -135,9 +133,8 @@ module.exports = function createWiring(deps) {
 
   // ── the numbers the summary is written from ──
   async function weekFigures(ws) {
-    const req = jobReq();
     const plan = planFor(ws);
-    const records = recordsFor(req, ws);
+    const records = recordsFor(ws);
     const bins = binsFor(ws);
 
     const plannedUnits = plan.reduce((n, p) => n + (Number(p.target_qty) || 0), 0);
