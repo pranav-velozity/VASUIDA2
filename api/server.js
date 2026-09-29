@@ -11902,7 +11902,9 @@ async function _iconicAlert(filename, errMsg) {
 // POST /iconic/publish — push a generated PO CSV to THE ICONIC's SFTP /upload
 // One publisher, used by the route below and by the weekly job. Extracting it rather than
 // copying it keeps a single implementation of a write into THE ICONIC's production WMS.
-const iconicPublisher = require('./iconic_sftp')({
+// ./iconic_publish, not ./iconic_sftp — the SSH key lives in this folder under the latter
+// name with no extension, and Node would resolve to the key and fail to parse it.
+const iconicPublisher = require('./iconic_publish')({
   fs, ICONIC_SFTP, r2Client, PutObjectCommand, R2_BUCKET,
   logPush: _iconicLogSafe, alert: _iconicAlert,
 });
