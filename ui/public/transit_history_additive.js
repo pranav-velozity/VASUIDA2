@@ -119,93 +119,67 @@
     return s.length % 2 ? s[m] : Math.round(((s[m - 1] + s[m]) / 2) * 10) / 10;
   };
 
-  function stageCell(cell) {
-    const measured = cell.onTime + cell.late + cell.early;
-    if (!measured && !cell.unconfirmed) {
-      return `<td class="th-cell"><span class="th-none">—</span></td>`;
-    }
-    if (!measured) {
-      // Nothing recorded, so nothing can be claimed. Grey, and it says why.
-      return `<td class="th-cell"><span class="th-pill" style="background:#F2F2F5;color:${LIGHT};"
-        title="${cell.unconfirmed} stage(s) past their date with nobody confirming">${cell.unconfirmed} unconfirmed</span></td>`;
-    }
-    const pct = Math.round((cell.onTime + cell.early) / measured * 100);
-    const med = median(cell.slip) || 0;
-    const ink = pct >= 90 ? GREEN : (pct >= 70 ? AMBER : RED);
-    const bg = pct >= 90 ? 'rgba(27,127,59,.12)' : (pct >= 70 ? 'rgba(183,121,31,.12)' : 'rgba(153,0,51,.10)');
-    return `<td class="th-cell">
-      <span class="th-pill" style="background:${bg};color:${ink};">${pct}%</span>
-      <span class="th-sub">${med > 0 ? '+' + med + 'd' : (med < 0 ? med + 'd' : 'on plan')}${
-        cell.unconfirmed ? ` · ${cell.unconfirmed} unconf` : ''}</span>
-    </td>`;
-  }
-
-  function weekRow(ws, s) {
-    const wk = isoWeek(ws);
-    const varMed = median(s.transit.variance);
-    const drift = median(s.fcDrift);
-    return `
-      <tr class="th-row" data-ws="${esc(ws)}">
-        <td class="th-week">
-          <button class="th-wk" data-week="${esc(ws)}">W${wk}</button>
-          <span class="th-sub">${esc(day(ws))}</span>
-        </td>
-        <td class="th-cell">
-          <span class="th-num">${s.movements}</span>
-          <span class="th-sub">${s.lanes} lane${s.lanes === 1 ? '' : 's'}</span>
-        </td>
-        ${STAGES.map(st => stageCell(s.stages[st.key])).join('')}
-        <td class="th-cell">
-          ${varMed == null
-            ? `<span class="th-none">—</span>`
-            : `<span class="th-pill" style="background:${varMed > 1 ? 'rgba(153,0,51,.10)' : 'rgba(27,127,59,.12)'};
-                 color:${varMed > 1 ? RED : GREEN};">${varMed > 0 ? '+' : ''}${varMed}d</span>`}
-          <span class="th-sub">${s.requoted ? `${s.requoted} re-quoted +${s.requoteDays}d` : 'no re-quotes'}</span>
-        </td>
-        <td class="th-cell">
-          ${drift == null ? `<span class="th-none">—</span>`
-            : `<span class="th-pill" style="background:${drift > 1 ? 'rgba(153,0,51,.10)' : 'rgba(27,127,59,.12)'};
-                 color:${drift > 1 ? RED : GREEN};">${drift > 0 ? '+' : ''}${drift}d</span>`}
-          <span class="th-sub">${s.unverified ? `${s.unverified} unverified` : 'all quoted'}</span>
-        </td>
-        <td class="th-cell">
-          <button class="th-link" data-lastmile="${esc(ws)}">Last mile &rarr;</button>
-        </td>
-      </tr>`;
-  }
+  // Who owns each leg. The point of the report is not that things were late, but which party
+  // the lateness belongs to — that is the difference between a complaint and a conversation.
+  const OWNER_LABEL = { supplier: 'Supplier', origin: 'Origin landside',
+                        carrier: 'Carrier', destination: 'Destination landside' };
+  const OWNER_INK = { supplier: '#7C5CBF', origin: '#B7791F',
+                      carrier: '#990033', destination: '#1E9BD7' };
 
   function styles() {
     if (el('th-css')) return;
     const st = document.createElement('style');
     st.id = 'th-css';
     st.textContent = `
-      #th-ov{position:fixed;inset:0;z-index:9998;background:rgba(16,18,27,.45);
-        display:flex;align-items:flex-start;justify-content:center;padding:24px 16px;overflow-y:auto;}
-      #th-card{background:#fff;border-radius:16px;width:100%;max-width:1440px;padding:26px 30px;}
-      .th-h{font-size:17px;font-weight:700;color:${DARK};letter-spacing:-.01em;}
-      .th-sub{display:block;font-size:10px;color:${LIGHT};margin-top:1px;}
-      .th-tbl{width:100%;border-collapse:collapse;margin-top:14px;}
-      .th-tbl th{text-align:left;padding:8px 9px;font-size:9px;color:${LIGHT};font-weight:700;
-        text-transform:uppercase;letter-spacing:.06em;border-bottom:.5px solid rgba(0,0,0,.08);}
-      .th-cell{padding:9px;border-top:.5px solid rgba(0,0,0,.05);vertical-align:top;}
-      .th-week{padding:9px;border-top:.5px solid rgba(0,0,0,.05);white-space:nowrap;}
-      .th-row:hover{background:#FBFBFC;}
-      .th-pill{display:inline-block;font-size:11px;font-weight:600;border-radius:6px;padding:2px 7px;}
-      .th-num{font-family:ui-monospace,monospace;font-size:13px;color:${DARK};}
+      /* A full page, not a dialog. Ten weeks of six stages does not fit in a box in the
+         middle of the screen, and shrinking it to fit is what made it look like a export. */
+      #th-page{position:fixed;inset:0;z-index:9998;background:#F7F7F9;overflow-y:auto;}
+      #th-inner{max-width:1180px;margin:0 auto;padding:30px 28px 60px;}
+      .th-top{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;flex-wrap:wrap;}
+      .th-h{font-size:24px;font-weight:700;color:${DARK};letter-spacing:-.02em;}
+      .th-lede{font-size:13px;color:${MID};margin-top:4px;max-width:620px;line-height:1.55;}
+      .th-card{background:#fff;border:.5px solid rgba(0,0,0,.07);border-radius:14px;padding:20px 22px;
+        margin-top:16px;box-shadow:0 1px 2px rgba(16,18,27,.04),0 6px 18px rgba(16,18,27,.05);}
+      .th-ch{font-size:13px;font-weight:600;color:${DARK};}
+      .th-cs{font-size:11px;color:${LIGHT};margin-top:2px;line-height:1.5;}
+
+      .th-heads{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:16px;}
+      .th-stat{background:#fff;border:.5px solid rgba(0,0,0,.07);border-radius:14px;padding:16px 18px;}
+      .th-sl{font-size:9.5px;color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;}
+      .th-sv{font-size:26px;font-weight:600;letter-spacing:-.02em;margin-top:3px;}
+      .th-ss{font-size:11px;color:${MID};margin-top:2px;line-height:1.45;}
+
+      /* Where time is lost: one bar per stage, coloured by who owns it. */
+      .th-bar{display:grid;grid-template-columns:130px 1fr 92px;gap:12px;align-items:center;padding:7px 0;}
+      .th-bname{font-size:12px;color:${DARK};}
+      .th-bown{display:block;font-size:9.5px;color:${LIGHT};}
+      .th-btrack{height:10px;background:#F1F1F4;border-radius:5px;overflow:hidden;position:relative;}
+      .th-bfill{display:block;height:10px;border-radius:5px;}
+      .th-bval{font-family:ui-monospace,monospace;font-size:12px;text-align:right;}
+
+      /* Week by week: a strip per week, not a spreadsheet row. */
+      .th-week{display:grid;grid-template-columns:96px 1fr 128px 104px 92px;gap:14px;align-items:center;
+        padding:11px 10px;border-radius:10px;cursor:pointer;transition:background .15s;}
+      .th-week:hover{background:#FAFAFB;}
+      .th-wk{font-family:ui-monospace,monospace;font-size:14px;font-weight:700;color:${DARK};}
+      .th-wd{display:block;font-size:10px;color:${LIGHT};}
+      .th-dots{display:flex;gap:4px;align-items:center;}
+      .th-dot{width:100%;height:22px;border-radius:5px;position:relative;flex:1;min-width:0;}
+      .th-dlabel{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+        font-size:9px;font-weight:700;}
       .th-none{color:#D1D1D6;font-size:12px;}
-      .th-wk{background:none;border:0;padding:0;font-family:ui-monospace,monospace;font-size:13px;
-        font-weight:700;color:${DARK};cursor:pointer;border-bottom:1px dashed rgba(0,0,0,.25);}
       .th-link{background:none;border:0;padding:0;font-size:11px;color:${BRAND};cursor:pointer;}
-      .th-btn{background:${DARK};color:#fff;border:0;border-radius:8px;padding:7px 14px;
+      .th-btn{background:${DARK};color:#fff;border:0;border-radius:9px;padding:8px 15px;
         font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;}
       .th-btn.ghost{background:#fff;color:${DARK};border:.5px solid rgba(0,0,0,.16);font-weight:500;}
-      .th-note{font-size:11px;color:${MID};line-height:1.55;margin-top:12px;
-        border-top:.5px solid rgba(0,0,0,.06);padding-top:11px;}
+      .th-note{font-size:11.5px;color:${MID};line-height:1.6;}
+      .th-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:10.5px;color:${MID};margin-top:10px;}
+      @media (max-width:820px){ .th-week{grid-template-columns:1fr;gap:6px;} }
     `;
     document.head.appendChild(st);
   }
 
-  let _rows = [];   // [{ ws, summary, consignments }]
+  let _rows = [];
 
   function download() {
     const head = ['Week', 'Week start', 'Movements', 'Lanes',
@@ -251,106 +225,275 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 
+  // ── The reading ──
+  // A sentence before the numbers. Somebody opening this wants to know what it says, not to
+  // derive it from a grid.
+  function headline(all) {
+    const measured = [];
+    for (const st of STAGES) {
+      const c = all.stages[st.key];
+      const n = c.onTime + c.late + c.early;
+      if (n) measured.push({ st, n, med: median(c.slip) || 0, late: c.late });
+    }
+    if (!measured.length) {
+      return all.unconfirmed
+        ? `Nothing has been confirmed yet. ${all.unconfirmed} stage${all.unconfirmed === 1 ? '' : 's'} `
+          + `across ${all.movements} movement${all.movements === 1 ? '' : 's'} are waiting on somebody, `
+          + `so where the time goes cannot be established.`
+        : 'No consignments recorded in these weeks.';
+    }
+    const worst = measured.slice().sort((a, b) => b.med - a.med)[0];
+    if (worst.med <= 0) {
+      return `Across ${all.movements} movements, no stage is adding time against the plan as entered.`;
+    }
+    const owner = OWNER_LABEL[worst.st.owner] || worst.st.owner;
+    return `${worst.st.label} adds the most time — a median of ${worst.med} day${worst.med === 1 ? '' : 's'} `
+      + `past plan across ${worst.n} recorded, which sits with ${owner.toLowerCase()}.`
+      + (all.unconfirmed ? ` ${all.unconfirmed} stages remain unconfirmed and are excluded.` : '');
+  }
+
+  function stageBars(all) {
+    const rows = STAGES.map(st => {
+      const c = all.stages[st.key];
+      const n = c.onTime + c.late + c.early;
+      return { st, n, med: n ? (median(c.slip) || 0) : null, unconf: c.unconfirmed,
+               pct: n ? Math.round((c.onTime + c.early) / n * 100) : null };
+    });
+    const peak = Math.max(1, ...rows.map(r => Math.abs(r.med || 0)));
+    return rows.map(r => `
+      <div class="th-bar">
+        <span>
+          <span class="th-bname">${esc(r.st.label)}</span>
+          <span class="th-bown">${esc(OWNER_LABEL[r.st.owner])}</span>
+        </span>
+        <span class="th-btrack">
+          ${r.med == null ? '' : `<span class="th-bfill" style="width:${Math.round(Math.max(0, r.med) / peak * 100)}%;
+            background:${OWNER_INK[r.st.owner]};opacity:${r.med > 0 ? .85 : .25};"></span>`}
+        </span>
+        <span class="th-bval" style="color:${r.med == null ? '#D1D1D6' : (r.med > 0 ? RED : GREEN)};">
+          ${r.med == null ? (r.unconf ? r.unconf + ' unconf' : '—')
+            : (r.med > 0 ? '+' + r.med + 'd' : (r.med < 0 ? r.med + 'd' : 'on plan'))}
+        </span>
+      </div>`).join('');
+  }
+
+  function weekStrip(r) {
+    const s = r.summary;
+    const wk = isoWeek(r.ws);
+    if (!s.movements) {
+      return `<div class="th-week" data-week="${esc(r.ws)}">
+        <span><span class="th-wk" style="color:#C7C7CC;">W${wk}</span>
+          <span class="th-wd">${esc(day(r.ws))}</span></span>
+        <span class="th-none">No consignments recorded</span>
+        <span></span><span></span><span></span>
+      </div>`;
+    }
+    const varMed = median(s.transit.variance), drift = median(s.fcDrift);
+    return `
+      <div class="th-week" data-week="${esc(r.ws)}">
+        <span><span class="th-wk">W${wk}</span><span class="th-wd">${esc(day(r.ws))}</span></span>
+        <span class="th-dots">
+          ${STAGES.map(st => {
+            const c = s.stages[st.key];
+            const n = c.onTime + c.late + c.early;
+            if (!n) return `<span class="th-dot" style="background:#F1F1F4;" title="${esc(st.label)} — ${c.unconfirmed} unconfirmed">
+              <span class="th-dlabel" style="color:#C7C7CC;">${c.unconfirmed || ''}</span></span>`;
+            const pct = Math.round((c.onTime + c.early) / n * 100);
+            const ink = pct >= 90 ? GREEN : (pct >= 70 ? AMBER : RED);
+            const bg = pct >= 90 ? 'rgba(27,127,59,.15)' : (pct >= 70 ? 'rgba(183,121,31,.16)' : 'rgba(153,0,51,.13)');
+            return `<span class="th-dot" style="background:${bg};"
+              title="${esc(st.label)} — ${pct}% on plan, ${n} recorded${c.unconfirmed ? ', ' + c.unconfirmed + ' unconfirmed' : ''}">
+              <span class="th-dlabel" style="color:${ink};">${pct}</span></span>`;
+          }).join('')}
+        </span>
+        <span style="font-size:11.5px;color:${MID};">
+          ${varMed == null ? '<span class="th-none">no transit measured</span>'
+            : `<b style="color:${varMed > 1 ? RED : GREEN};">${varMed > 0 ? '+' : ''}${varMed}d</b> vs quote`}
+          ${s.requoted ? `<span class="th-wd">${s.requoted} re-quoted +${s.requoteDays}d</span>` : ''}
+        </span>
+        <span style="font-size:11.5px;color:${MID};">
+          ${drift == null ? '<span class="th-none">—</span>'
+            : `<b style="color:${drift > 1 ? RED : GREEN};">${drift > 0 ? '+' : ''}${drift}d</b> FC drift`}
+          ${s.unverified ? `<span class="th-wd" style="color:${RED};">${s.unverified} unverified</span>` : ''}
+        </span>
+        <span style="text-align:right;">
+          <button class="th-link" data-lastmile="${esc(r.ws)}">Last mile &rarr;</button>
+        </span>
+      </div>`;
+  }
+
   async function open(opts) {
     styles();
-    if (el('th-ov')) return;
+    if (el('th-page')) return;
 
     const base = (opts && opts.week) || window.state?.weekStart || mondayOf(new Date());
     const weeks = [];
     for (let i = 0; i < WEEKS; i++) weeks.push(shiftWeek(base, -i));
 
-    const ov = document.createElement('div');
-    ov.id = 'th-ov';
-    ov.innerHTML = `
-      <div id="th-card">
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;">
+    const page = document.createElement('div');
+    page.id = 'th-page';
+    page.innerHTML = `
+      <div id="th-inner">
+        <div class="th-top">
           <div>
             <div class="th-h">Transit performance</div>
-            <div style="font-size:11.5px;color:${MID};margin-top:2px;">
-              Last ${WEEKS} weeks &middot; measured against the plan as entered, not a default</div>
+            <div class="th-lede">The ten weeks from ${esc(day(weeks[weeks.length - 1]))} to
+              ${esc(day(weeks[0]))}. Every figure is measured against the plan as your team
+              entered it — the transit time quoted for that sailing, not a default.</div>
           </div>
           <div style="display:flex;gap:8px;">
             <button class="th-btn ghost" id="th-dl">Download</button>
-            <button class="th-btn ghost" id="th-close">Close</button>
+            <button class="th-btn" id="th-close">Close</button>
           </div>
         </div>
-        <div id="th-body"><div style="font-size:11.5px;color:${LIGHT};padding:16px 0;">Loading ${WEEKS} weeks…</div></div>
+        <div id="th-body" class="th-card">
+          <div class="th-cs">Reading ${WEEKS} weeks…</div>
+        </div>
       </div>`;
-    document.body.appendChild(ov);
-    ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+    document.body.appendChild(page);
     el('th-close').onclick = close;
+    document.addEventListener('keydown', onKey);
 
-    // Fetched a few at a time: ten sequential round trips is a long wait, ten at once is a
-    // burst the API does not need.
     _rows = [];
     for (let i = 0; i < weeks.length; i += 3) {
-      const batch = weeks.slice(i, i + 3);
-      const got = await Promise.all(batch.map(async ws => {
+      const got = await Promise.all(weeks.slice(i, i + 3).map(async ws => {
         try {
           const r = await api('/consignments?week=' + encodeURIComponent(ws));
           const list = (r && r.consignments) || [];
           return { ws, consignments: list, summary: summarise(list) };
         } catch (e) {
-          return { ws, consignments: [], summary: summarise([]), error: String(e.message || e) };
+          return { ws, consignments: [], summary: summarise([]) };
         }
       }));
       _rows.push(...got);
     }
 
-    const anyData = _rows.some(r => r.summary.movements);
-    el('th-body').innerHTML = `
-      <table class="th-tbl">
-        <thead><tr>
-          <th>Week</th><th>Movements</th>
-          ${STAGES.map(s => `<th>${esc(s.label)}</th>`).join('')}
-          <th>Transit vs quote</th><th>FC drift</th><th></th>
-        </tr></thead>
-        <tbody>${_rows.map(r => weekRow(r.ws, r.summary)).join('')}</tbody>
-      </table>
-      ${anyData ? '' : `<div class="th-note">No consignments recorded in these weeks yet.
-        Bring a week across from the Transit &amp; Clearing panel and the rows fill in.</div>`}
-      <div class="th-note">
-        On-time counts a stage that happened on or before its planned date. A stage nobody
-        confirmed is not counted as on-time — it is shown as unconfirmed, because an
-        unrecorded date is not evidence of anything.
-        Transit is measured against the first quote entered; a later re-quote moves the plan
-        but is reported as a deviation rather than replacing the promise.
+    // Everything, pooled, for the headline and the stage bars. A ten-week view of where time
+    // goes is more use than ten separate weekly views of the same thing.
+    const all = summarise(_rows.flatMap(r => r.consignments));
+    const onTimeAll = (() => {
+      let ok = 0, n = 0;
+      for (const st of STAGES) { const c = all.stages[st.key];
+        ok += c.onTime + c.early; n += c.onTime + c.late + c.early; }
+      return n ? Math.round(ok / n * 100) : null;
+    })();
+    const varAll = median(all.transit.variance);
+    const driftAll = median(all.fcDrift);
+
+    el('th-body').outerHTML = `
+      <div class="th-card" style="margin-top:18px;">
+        <div class="th-ch">What this says</div>
+        <div class="th-note" style="margin-top:6px;">${esc(headline(all))}</div>
+      </div>
+
+      <div class="th-heads">
+        <div class="th-stat">
+          <div class="th-sl">Movements</div>
+          <div class="th-sv" style="color:${DARK};">${all.movements}</div>
+          <div class="th-ss">${all.lanes} lanes carried</div>
+        </div>
+        <div class="th-stat">
+          <div class="th-sl">Stages on plan</div>
+          <div class="th-sv" style="color:${onTimeAll == null ? LIGHT : (onTimeAll >= 90 ? GREEN : onTimeAll >= 70 ? AMBER : RED)};">
+            ${onTimeAll == null ? '—' : onTimeAll + '%'}</div>
+          <div class="th-ss">${all.recorded} recorded${all.unconfirmed ? ` · ${all.unconfirmed} never confirmed` : ''}</div>
+        </div>
+        <div class="th-stat">
+          <div class="th-sl">Transit vs quote</div>
+          <div class="th-sv" style="color:${varAll == null ? LIGHT : (varAll > 1 ? RED : GREEN)};">
+            ${varAll == null ? '—' : (varAll > 0 ? '+' : '') + varAll + 'd'}</div>
+          <div class="th-ss">${all.requoted ? `${all.requoted} re-quoted, +${all.requoteDays}d added to plan` : 'no re-quotes'}</div>
+        </div>
+        <div class="th-stat">
+          <div class="th-sl">FC date movement</div>
+          <div class="th-sv" style="color:${driftAll == null ? LIGHT : (driftAll > 1 ? RED : GREEN)};">
+            ${driftAll == null ? '—' : (driftAll > 0 ? '+' : '') + driftAll + 'd'}</div>
+          <div class="th-ss">${all.unverified ? `${all.unverified} without a carrier quote` : 'all quoted'}</div>
+        </div>
+      </div>
+
+      <div class="th-card">
+        <div class="th-ch">Where the time goes</div>
+        <div class="th-cs">Median days past plan at each stage, and who owns that leg. Stages
+          nobody confirmed are excluded rather than counted as on time.</div>
+        <div style="margin-top:12px;">${stageBars(all)}</div>
+        <div class="th-legend">
+          ${Object.entries(OWNER_LABEL).map(([k, v]) =>
+            `<span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;
+              background:${OWNER_INK[k]};margin-right:5px;"></span>${esc(v)}</span>`).join('')}
+        </div>
+      </div>
+
+      <div class="th-card">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+          <div>
+            <div class="th-ch">Week by week</div>
+            <div class="th-cs">Each block is a stage, left to right: packing list through FC
+              receipt. The number is the percentage that happened on plan.</div>
+          </div>
+          <span class="th-cs">Click a week to open its consignments</span>
+        </div>
+        <div style="margin-top:10px;">${_rows.map(weekStrip).join('')}</div>
+      </div>
+
+      <div class="th-card">
+        <div class="th-ch">How to read it</div>
+        <div class="th-note" style="margin-top:6px;">
+          A stage counts as on plan if it happened on or before the date the plan gave it.
+          A stage nobody confirmed is not on time and not late — it is unconfirmed, and it is
+          left out of the percentages rather than flattering them.
+          Transit is judged against the first quote entered for that sailing; a later re-quote
+          moves the plan but is reported separately, so a carrier cannot erase a slip by
+          revising it.
+        </div>
       </div>`;
 
     el('th-dl').onclick = download;
-    el('th-body').querySelectorAll('[data-week]').forEach(b => b.onclick = () => {
-      // Into that week's consignments, where the tiles live.
+    document.querySelectorAll('#th-page [data-week]').forEach(b => b.onclick = (e) => {
+      if (e.target.closest('[data-lastmile]')) return;
+      const ws = b.getAttribute('data-week');
       close();
       if (window.__consignments && typeof window.__consignments.setWeek === 'function') {
-        window.__consignments.setWeek(b.getAttribute('data-week'));
+        window.__consignments.setWeek(ws);
       }
       const t = document.getElementById('cg-root');
       if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
-    el('th-body').querySelectorAll('[data-lastmile]').forEach(b => b.onclick = () => {
-      // Forward into the last mile: the same week, the next link in the chain.
+    document.querySelectorAll('#th-page [data-lastmile]').forEach(b => b.onclick = (e) => {
+      e.stopPropagation();
       if (typeof window.__openLastMileHistory === 'function') { close(); window.__openLastMileHistory(); }
       else alert('The Last Mile report is not loaded on this page.');
     });
   }
 
-  function close() { const o = el('th-ov'); if (o) o.remove(); }
+  function onKey(e) { if (e.key === 'Escape') close(); }
+
+  function close() {
+    const o = el('th-page');
+    if (o) o.remove();
+    document.removeEventListener('keydown', onKey);
+  }
 
   // ── Getting in ──
-  // Injected beside the other report buttons rather than wired into the weekly report's
-  // markup, so this file can be deployed on its own and does not depend on another module's
-  // internals staying where they are.
+  // Beside the other report buttons on Reports & Downloads, styled as they are: a secondary
+  // action next to Download All, not a second primary competing with it. Copying the anchor's
+  // styling made it black and it read as a duplicate of the download.
   function injectButton() {
-    if (el('th-btn-open')) return;
-    const anchor = el('btn-consolidated-download') || el('lm-hist-btn') || el('wh-hist-btn');
-    if (!anchor || !anchor.parentElement) return;
+    const anchor = el('btn-consolidated-download');
+    if (!anchor || el('th-hist-btn')) return;
     const b = document.createElement('button');
-    b.id = 'th-btn-open';
-    b.textContent = 'Transit';
-    b.className = anchor.className || '';
-    b.style.cssText = anchor.style.cssText || '';
+    b.id = 'th-hist-btn';
+    b.type = 'button';
+    b.style.cssText = `display:flex;align-items:center;gap:8px;background:#fff;color:${DARK};`
+      + `border:.5px solid rgba(0,0,0,.14);border-radius:9px;padding:10px 16px;font-size:12px;`
+      + `font-weight:500;cursor:pointer;font-family:inherit;margin-right:8px;`;
+    b.innerHTML = `<svg width="13" height="13" viewBox="0 0 12 12" fill="none" aria-hidden="true">`
+      + `<path d="M1 9l3-3 2.5 2.5L11 3" stroke="${BRAND}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`
+      + `</svg>Transit performance`;
     b.onclick = (e) => { e.preventDefault(); open(); };
-    anchor.parentElement.insertBefore(b, anchor.nextSibling);
+    // Before Download All, after Last Mile if it is there, so the reports read as a set.
+    const lm = el('lm-hist-btn');
+    anchor.parentElement.insertBefore(b, lm ? lm.nextSibling : anchor);
   }
 
   const obs = new MutationObserver(() => injectButton());
