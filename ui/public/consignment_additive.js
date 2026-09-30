@@ -278,9 +278,11 @@
     });
   }
 
+  const currentWeek = () => _week || window.state?.weekStart || window._reportsWeek || null;
+
   async function load(root) {
     try {
-      const ws = _week || window.state?.weekStart || window._reportsWeek;
+      const ws = currentWeek();
       const r = await call(`/consignments?week=${encodeURIComponent(ws || '')}`);
       _data = (r && r.consignments) || [];
       _week = ws;
@@ -300,22 +302,76 @@
       || document.querySelector('[data-node="transit"]')
       || document.querySelector('main');
     if (!host) return;
-    if (document.getElementById('cg-root')) return;
+    const existing = document.getElementById('cg-root');
+    // A root left behind in a host that is no longer on the page is not a reason to skip:
+    // that is exactly the case where the panel silently disappears.
+    if (existing && existing.isConnected && host.contains(existing)) return;
+    if (existing) existing.remove();
     const root = document.createElement('div');
     root.id = 'cg-root';
     root.style.marginTop = '14px';
     host.appendChild(root);
     load(root);
+    watchWeek();
+  }
+
+  // The Week Hub changes weeks without a page load and emits no event, so the panel watches
+  // for the value to change rather than being told. Cheap, and it means the panel can never
+  // be showing one week's consignments under another week's heading.
+  let _watching = null;
+  function watchWeek() {
+    if (_watching) clearInterval(_watching);
+    let last = window.state?.weekStart || null;
+    _watching = setInterval(() => {
+      const now = window.state?.weekStart || null;
+      if (now && now !== last) {
+        last = now;
+        _week = null;                       // follow the page again after a manual setWeek
+        const r = document.getElementById('cg-root');
+        if (r) load(r);
+      }
+    }, 1200);
+    if (_watching.unref) _watching.unref();
   }
 
   window.__consignments = {
     mount,
     reload: () => { const r = document.getElementById('cg-root'); if (r) load(r); },
-    setWeek: (ws) => { _week = ws; const r = document.getElementById('cg-root'); if (r) load(r); },
+    setWeek: (ws) => {
+      _week = ws;
+      const r = document.getElementById('cg-root');
+      if (!r) { console.warn('[consignments] not mounted yet — run window.__consignments.mount()'); return; }
+      return load(r);                       // returns the promise, so `await` actually waits
+    },
+    week: () => currentWeek(),
   };
 
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount);
-  else setTimeout(mount, 800);
+  // The transit section renders after its data arrives, so a fixed delay either fires too
+  // early or waits longer than it needs to. Watch for it instead, and give up after a while
+  // rather than polling forever on a page that will never have one.
+  function findHost() {
+    return document.getElementById('flow-transit-panel')
+        || document.getElementById('page-flow')
+        || document.querySelector('[data-node="transit"]');
+  }
+
+  function whenReady() {
+    if (findHost()) mount();                                 // already rendered: mount now
+
+    // And watch regardless. The Week Hub swaps its content in and out as the user moves
+    // between sections, so a panel that mounted once is not a panel that stays mounted.
+    if (window.__consignmentsObserver) return;
+    const obs = new MutationObserver(() => {
+      const root = document.getElementById('cg-root');
+      if (root && root.isConnected) return;                  // still on the page, nothing to do
+      if (findHost()) mount();
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+    window.__consignmentsObserver = obs;
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', whenReady);
+  else whenReady();
 
   console.log('[consignments] panel v1 loaded — window.__consignments.mount()');
 })();
