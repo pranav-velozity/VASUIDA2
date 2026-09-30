@@ -598,8 +598,13 @@
     if (existing) existing.remove();
     const root = document.createElement('div');
     root.id = 'cg-root';
-    root.style.marginTop = '14px';
-    host.appendChild(root);
+    root.style.marginBottom = '14px';
+
+    // Inserted before the Transit & Clearing card rather than appended after it.
+    const anchor = document.getElementById('flow-containers-btn');
+    const card = anchor && (anchor.closest('.rounded-2xl') || anchor.closest('.rounded-xl'));
+    if (card && card.parentElement === host) host.insertBefore(root, card);
+    else host.insertBefore(root, host.firstChild);
     load(root);
     watchWeek();
   }
