@@ -109,6 +109,16 @@
       .cg-tfoot{display:flex;align-items:center;gap:8px;font-size:10px;color:${LIGHT};}
       .cg-bar{flex:1;height:3px;background:#EFF1F4;border-radius:2px;overflow:hidden;}
       .cg-barfill{display:block;height:3px;background:${OK};border-radius:2px;transition:width .4s;}
+      .cg-eta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+      .cg-etad{font-family:ui-monospace,monospace;font-size:13px;font-weight:600;color:${DARK};}
+      .cg-conf{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
+        border-radius:5px;padding:2px 7px;cursor:default;}
+      .cg-duebox{display:flex;flex-direction:column;gap:5px;align-items:flex-start;
+        background:rgba(153,0,51,.04);border-radius:9px;padding:9px 11px;width:100%;}
+      .cg-dues{font-size:12px;color:${DARK};}
+      .cg-lock{font-size:11px;color:${MID};background:#FAFAFB;border:.5px dashed rgba(0,0,0,.14);
+        border-radius:9px;padding:10px 11px;line-height:1.5;width:100%;}
+      .cg-lock .cg-btn{margin-top:7px;}
       .cg-tquote{display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:10.5px;color:${MID};
         border-top:.5px solid rgba(0,0,0,.05);padding-top:9px;}
 
@@ -202,13 +212,15 @@
   };
   const STATE_INK = { done: OK, amended: WARN, due: LATE, future: '#C7C7CC' };
 
-  // The stage the tile is about: the first thing that is due, or failing that the first
-  // thing still to come.
-  function nextStage(c) {
-    const due = c.milestones.find(ms => stageState(ms) === 'due');
-    if (due) return { ms: due, overdue: true };
-    const future = c.milestones.find(ms => stageState(ms) === 'future');
-    return future ? { ms: future, overdue: false } : null;
+  // Where it has actually got to. The last stage recorded, not the next one pending: a tile
+  // should say what is true before it says what is expected.
+  function lastAchieved(c) {
+    let last = null;
+    for (const ms of c.milestones) if (ms.state !== 'assumed') last = ms;
+    return last;
+  }
+  function firstDue(c) {
+    return c.milestones.find(ms => stageState(ms) === 'due') || null;
   }
 
   // The vertical column, top right. Same dot vocabulary as the expanded view, so the two
@@ -230,32 +242,27 @@
       </div>`;
   }
 
+  const CONF = {
+    'on plan':    { ink: OK,    bg: 'rgba(95,107,13,.12)' },
+    'ahead':      { ink: OK,    bg: 'rgba(95,107,13,.12)' },
+    'slipping':   { ink: WARN,  bg: 'rgba(184,134,11,.14)' },
+    'at risk':    { ink: LATE,  bg: 'rgba(153,0,51,.10)' },
+    'unverified': { ink: LIGHT, bg: '#F2F2F5' },
+    'unknown':    { ink: LIGHT, bg: '#F2F2F5' },
+  };
+
   function tile(c) {
     const t = c.transit || {};
-    const quoteUnset = c.needs.includes('transit_days') || c.transit_defaulted;
-    const nx = nextStage(c);
+    const conf = c.confidence || { level: 'unknown', why: '' };
+    const cf = CONF[conf.level] || CONF.unknown;
+    const last = lastAchieved(c);
+    const due = firstDue(c);
     const done = c.milestones.filter(ms => ms.state !== 'assumed').length;
-    const open = _open[c.consignment_uid] || null;
     const pct = Math.round((done / c.milestones.length) * 100);
-
-    const headline = nx
-      ? `<div class="cg-tnext" style="color:${nx.overdue ? LATE : DARK};">
-           <span class="cg-tnlabel">${nx.overdue ? 'Waiting on' : 'Next'}</span>
-           <span class="cg-tnstage">${esc(STAGE_LABEL[nx.ms.stage])}</span>
-           <span class="cg-tndate">${esc(day(nx.ms.planned_at))}</span>
-         </div>
-         ${nx.overdue ? `<button class="cg-btn cg-tconfirm" data-ok="${esc(c.consignment_uid)}"
-              data-stage="${esc(nx.ms.stage)}">Happened on plan</button>
-            <button class="cg-tick" data-open="${esc(c.consignment_uid)}"
-              data-stage="${esc(nx.ms.stage)}">different date</button>`
-           : `<div class="cg-sub">Nothing due yet.</div>`}`
-      : `<div class="cg-tnext" style="color:${OK};">
-           <span class="cg-tnlabel">Complete</span>
-           <span class="cg-tnstage">All six recorded</span>
-         </div>`;
+    const locked = !c.transit_confirmed;
 
     return `
-      <div class="cg-tile ${nx && nx.overdue ? 'is-late' : ''}" data-row="${esc(c.consignment_uid)}">
+      <div class="cg-tile ${due ? 'is-late' : ''}" data-row="${esc(c.consignment_uid)}">
         <div class="cg-thead">
           <div style="min-width:0;">
             <div class="cg-ref">${esc(c.reference || 'not advised')}</div>
@@ -266,10 +273,43 @@
               ${c.vessel ? `<span class="cg-ell">${esc(c.vessel)}</span>` : ''}
             </div>
           </div>
-          ${spine(c, open)}
+          ${spine(c, _open[c.consignment_uid] || null)}
         </div>
 
-        <div class="cg-tbody">${headline}</div>
+        <div class="cg-tbody">
+          <div class="cg-tnext">
+            <span class="cg-tnlabel">Current status</span>
+            <span class="cg-tnstage" style="color:${last ? DARK : LIGHT};">
+              ${last ? esc(STAGE_LABEL[last.stage]) : 'Nothing recorded yet'}</span>
+            <span class="cg-tndate">${last ? esc(day(last.actual_at)) : 'no milestone achieved'}</span>
+          </div>
+
+          ${/* The date everyone downstream is planning around, and how much it has moved. */ ''}
+          <div class="cg-eta">
+            <span class="cg-tnlabel">ETA FC</span>
+            <span class="cg-etad">${esc(day(c.eta_fc))}</span>
+            <span class="cg-conf" style="background:${cf.bg};color:${cf.ink};"
+                  title="${esc(conf.why || '')}">${esc(conf.level)}${
+                    conf.drift ? ` ${conf.drift > 0 ? '+' : ''}${conf.drift}d` : ''}</span>
+          </div>
+
+          ${locked
+            ? `<div class="cg-lock">Enter this shipment&rsquo;s details before recording anything —
+                 the dates are computed from a default transit time, not the carrier&rsquo;s quote.
+                 <button class="cg-btn cg-tconfirm" data-edit="${esc(c.consignment_uid)}">Add details</button></div>`
+            : due
+              ? `<div class="cg-duebox">
+                   <span class="cg-tnlabel" style="color:${LATE};">Awaiting confirmation</span>
+                   <span class="cg-dues">${esc(STAGE_LABEL[due.stage])} &middot; planned ${esc(day(due.planned_at))}</span>
+                   <span class="cg-act">
+                     <button class="cg-btn cg-tconfirm" data-ok="${esc(c.consignment_uid)}"
+                             data-stage="${esc(due.stage)}">Happened on plan</button>
+                     <button class="cg-tick" data-open="${esc(c.consignment_uid)}"
+                             data-stage="${esc(due.stage)}">different date</button>
+                   </span>
+                 </div>`
+              : `<div class="cg-sub">Nothing due. ${done === c.milestones.length ? 'All six recorded.' : ''}</div>`}
+        </div>
 
         <div class="cg-tfoot">
           <span>${done}/${c.milestones.length} recorded</span>
@@ -278,7 +318,7 @@
         </div>
 
         <div class="cg-tquote">
-          ${quoteUnset
+          ${locked
             ? `<span style="color:${LATE};">transit not confirmed${t.quoted != null ? ` — using ${t.quoted}d` : ''}</span>`
             : `quoted ${t.quoted}d${t.achieved != null ? ` · achieved ${t.achieved}d` : ''}${
                 t.variance == null ? '' : ` · <b style="color:${t.variance > 0 ? LATE : OK};">${t.variance > 0 ? '+' : ''}${t.variance}d</b>`}`}
@@ -434,7 +474,14 @@
       if (_busy) return;
       _busy = true;
       try { await fn(); await load(root); }
-      catch (e) { alert('Could not save: ' + (e.message || e)); }
+      catch (e) {
+        const msg = String(e.message || e);
+        alert(/details_required/.test(msg)
+          ? 'Enter this shipment\u2019s details first — the carrier\u2019s quoted transit time and the '
+            + 'shipment references. Until those are in, the planned dates are a guess and confirming '
+            + 'one would record a date nobody promised.'
+          : 'Could not save: ' + msg);
+      }
       finally { _busy = false; }
     };
 
