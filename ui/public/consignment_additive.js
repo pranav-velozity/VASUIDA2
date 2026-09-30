@@ -76,7 +76,53 @@
       .cg-btn.ghost{background:#fff;color:${DARK};border:.5px solid rgba(0,0,0,.16);font-weight:500;}
       .cg-field{border:.5px solid rgba(0,0,0,.16);border-radius:8px;padding:6px 9px;
         font-size:12px;font-family:inherit;width:100%;}
-      @media (max-width:1100px){ .cg-row{grid-template-columns:1fr;} }
+      .cg-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+
+      /* The worklist: one line per consignment, and the actions sit next to the content
+         rather than pinned to the far edge with a corridor of white between. */
+      .cg-wrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+        padding:9px 0;border-top:.5px solid rgba(0,0,0,.05);}
+      .cg-wstages{display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:0;}
+      .cg-chip{display:inline-flex;align-items:baseline;gap:6px;border:.5px solid rgba(153,0,51,.25);
+        background:rgba(153,0,51,.05);color:${DARK};border-radius:8px;padding:3px 9px;
+        font-size:11px;font-family:inherit;cursor:pointer;}
+      .cg-chip:hover{background:rgba(153,0,51,.10);}
+      .cg-chipd{font-family:ui-monospace,monospace;font-size:10px;color:${MID};}
+      .cg-wage{font-family:ui-monospace,monospace;font-size:11.5px;min-width:34px;text-align:right;}
+      .cg-wall{padding:4px 10px;font-size:11px;}
+
+      /* The rail: the journey, left to right. */
+      .cg-item{padding:14px 0 6px;border-top:.5px solid rgba(0,0,0,.06);}
+      .cg-itop{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:12px;}
+      .cg-tag{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
+        border-radius:5px;padding:2px 6px;}
+      .cg-dim{font-size:10.5px;color:${MID};}
+      .cg-need{font-size:10.5px;color:${LATE};}
+      .cg-rail{display:flex;justify-content:space-between;align-items:flex-start;
+        position:relative;padding:2px 0 4px;}
+      .cg-line{position:absolute;left:6px;right:6px;top:5px;height:1.5px;background:#ECECEF;}
+      .cg-node{position:relative;background:none;border:0;padding:0 4px;cursor:pointer;
+        display:flex;flex-direction:column;align-items:center;gap:3px;flex:1;min-width:0;
+        font-family:inherit;}
+      .cg-dot{width:11px;height:11px;border-radius:50%;border:2px solid;display:block;
+        position:relative;z-index:1;transition:box-shadow .2s;}
+      .cg-nlabel{font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;text-align:center;}
+      .cg-ndate{font-family:ui-monospace,monospace;font-size:11px;}
+      .cg-ndue{font-size:8.5px;font-weight:700;color:${LATE};text-transform:uppercase;letter-spacing:.05em;}
+      .cg-namend{font-size:8.5px;font-weight:700;color:${WARN};text-transform:uppercase;letter-spacing:.05em;}
+      .cg-node:hover .cg-dot{box-shadow:0 0 0 5px rgba(28,28,30,.07);}
+
+      .cg-pop{margin-top:10px;background:#FAFAFB;border:.5px solid rgba(0,0,0,.08);
+        border-radius:10px;padding:12px 14px;}
+      .cg-poph{font-size:12px;font-weight:600;color:${DARK};}
+      .cg-pops{font-size:11.5px;color:${MID};margin:3px 0 10px;}
+      .cg-popact{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+      .cg-or{font-size:10.5px;color:${LIGHT};}
+
+      @media (max-width:900px){
+        .cg-rail{flex-wrap:wrap;gap:12px;} .cg-line{display:none;}
+        .cg-node{flex:0 0 30%;}
+      }
     `;
     document.head.appendChild(el);
   }
@@ -102,59 +148,89 @@
     if (!res.ok) throw new Error((json && json.error) || text.slice(0, 200));
     return json;
   }
-
-  function stageCell(c, ms) {
-    const due = ms.planned_at && ms.planned_at <= today();
-    const confirmed = ms.state === 'confirmed' || ms.state === 'amended' || ms.state === 'carrier';
-
-    // The distinction the whole model rests on: a planned date and a recorded one never look
-    // the same, and an untouched stage is never dressed up as a fact.
-    const ink = confirmed ? (ms.state === 'amended' ? WARN : OK) : (due ? LATE : MID);
-    const shown = confirmed ? ms.actual_at : ms.planned_at;
-    const badge = confirmed
-      ? `<span class="cg-pill" style="background:${ms.state === 'amended' ? 'rgba(184,134,11,.12)' : 'rgba(95,107,13,.12)'};color:${ink};">${esc(ms.state)}</span>`
-      : (due ? `<span class="cg-pill" style="background:rgba(153,0,51,.10);color:${LATE};">due</span>`
-             : `<span class="cg-pill" style="background:#F2F2F5;color:${LIGHT};">planned</span>`);
-
+  // ── A consignment reads as a journey, not a spreadsheet row ──
+  // Six date inputs across six columns is the thing we are trying to leave behind. A rail with
+  // a node per stage says the same in a glance: how far along, what is next, what is late.
+  function rail(c) {
+    const n = c.milestones.length;
     return `
-      <div class="cg-stage">
-        <div class="cg-slabel">${esc(STAGE_LABEL[ms.stage] || ms.stage)}</div>
-        <div class="cg-date" style="color:${ink};">${esc(day(shown))}</div>
-        <div style="margin-top:2px;">${badge}</div>
-        <div class="cg-act">
-          ${confirmed
-            ? `<button class="cg-tick" data-clear="${esc(c.consignment_uid)}" data-stage="${esc(ms.stage)}">undo</button>`
-            : `<button class="cg-tick" data-ok="${esc(c.consignment_uid)}" data-stage="${esc(ms.stage)}"
-                 ${ms.planned_at ? '' : 'disabled'} title="Confirm it happened on the planned date">✓</button>
+      <div class="cg-rail">
+        <div class="cg-line"></div>
+        ${c.milestones.map((ms, i) => {
+          const done = ms.state !== 'assumed';
+          const due = !done && ms.planned_at && ms.planned_at <= today();
+          const amended = ms.state === 'amended';
+          const ink = done ? (amended ? WARN : OK) : (due ? LATE : '#C7C7CC');
+          const shown = done ? ms.actual_at : ms.planned_at;
+          return `
+            <button class="cg-node" data-open="${esc(c.consignment_uid)}" data-stage="${esc(ms.stage)}"
+                    title="${esc(STAGE_LABEL[ms.stage])} — ${esc(day(shown))}">
+              <span class="cg-dot" style="background:${done ? ink : '#fff'};border-color:${ink};
+                    ${due ? 'box-shadow:0 0 0 4px rgba(153,0,51,.12);' : ''}"></span>
+              <span class="cg-nlabel" style="color:${done || due ? DARK : LIGHT};">${esc(STAGE_LABEL[ms.stage])}</span>
+              <span class="cg-ndate" style="color:${ink};">${esc(day(shown))}</span>
+              ${due ? '<span class="cg-ndue">due</span>' : ''}
+              ${amended ? '<span class="cg-namend">amended</span>' : ''}
+            </button>`;
+        }).join('')}
+      </div>`;
+  }
+
+  // Opened from a node rather than sitting on screen for every stage at once. Thirty date
+  // inputs competing for attention when one or two need anything is how the old screen taught
+  // people to stop looking.
+  function stagePopover(c, ms) {
+    const done = ms.state !== 'assumed';
+    return `
+      <div class="cg-pop">
+        <div class="cg-poph">${esc(STAGE_LABEL[ms.stage])} &middot; ${esc(c.reference || 'not advised')}</div>
+        <div class="cg-pops">${done
+          ? `Recorded as <b>${esc(day(ms.actual_at))}</b> (${esc(ms.state)}). Planned ${esc(day(ms.planned_at))}.`
+          : `Planned for <b>${esc(day(ms.planned_at))}</b>. Nothing recorded yet.`}</div>
+        <div class="cg-popact">
+          ${done
+            ? `<button class="cg-btn ghost" data-clear="${esc(c.consignment_uid)}" data-stage="${esc(ms.stage)}">Undo</button>`
+            : `<button class="cg-btn" data-ok="${esc(c.consignment_uid)}" data-stage="${esc(ms.stage)}"
+                 ${ms.planned_at ? '' : 'disabled'}>Happened on plan</button>
+               <span class="cg-or">or</span>
                <input class="cg-when" type="date" data-amend="${esc(c.consignment_uid)}"
-                 data-stage="${esc(ms.stage)}" title="Or enter the date it actually happened">`}
+                      data-stage="${esc(ms.stage)}" value="${esc(ms.planned_at || '')}">`}
+          <span style="flex:1;"></span>
+          <button class="cg-btn ghost" data-popclose="1">Close</button>
         </div>
       </div>`;
   }
 
   function consignmentRow(c) {
     const t = c.transit || {};
+    // A defaulted transit is not a quote. Until the carrier's figure is in, every date after
+    // departure is a guess, and the row says so rather than looking complete.
+    const quoteUnset = c.needs.includes('transit_days') || c.transit_defaulted;
     const variance = t.variance == null ? '' :
-      `<span style="color:${t.variance > 0 ? LATE : OK};">${t.variance > 0 ? '+' : ''}${t.variance}d vs quote</span>`;
+      ` · <b style="color:${t.variance > 0 ? LATE : OK};">${t.variance > 0 ? '+' : ''}${t.variance}d vs quote</b>`;
+
     return `
-      <div class="cg-row">
-        <div>
-          <div class="cg-ref">${esc(c.reference || 'not advised')}</div>
-          <div class="cg-meta">
-            ${esc(c.mode)}${c.size_ft ? ' · ' + esc(c.size_ft) : ''}${c.vessel ? ' · ' + esc(c.vessel) : ''}<br>
-            ${c.lanes.length} lane${c.lanes.length === 1 ? '' : 's'}
-            ${t.quoted != null ? ' · quoted ' + t.quoted + 'd' : ''}
-            ${t.achieved != null ? ' · achieved ' + t.achieved + 'd ' : ''}${variance}
-          </div>
-          ${c.split_lanes && c.split_lanes.length
-            ? `<div class="cg-meta" style="color:${WARN};">a lane on this also rides another consignment</div>` : ''}
-          ${c.needs.length
-            ? `<div class="cg-meta" style="color:${LATE};">needs ${c.needs.map(esc).join(', ')}</div>` : ''}
-          <button class="cg-tick" data-edit="${esc(c.consignment_uid)}" style="margin-top:5px;">details</button>
+      <div class="cg-item" data-row="${esc(c.consignment_uid)}">
+        <div class="cg-itop">
+          <span class="cg-ref">${esc(c.reference || 'not advised')}</span>
+          <span class="cg-tag" style="background:${c.mode === 'Air' ? 'rgba(30,155,215,.12)' : 'rgba(153,0,51,.10)'};
+                color:${c.mode === 'Air' ? '#15618F' : BRAND};">${esc(c.mode)}</span>
+          ${c.size_ft ? `<span class="cg-dim">${esc(c.size_ft)}</span>` : ''}
+          ${c.vessel ? `<span class="cg-dim">${esc(c.vessel)}</span>` : ''}
+          <span class="cg-dim">${c.lanes.length} lane${c.lanes.length === 1 ? '' : 's'}</span>
+          <span class="cg-dim">${quoteUnset
+            ? `<span style="color:${LATE};">transit not confirmed${t.quoted != null ? ` (using ${t.quoted}d)` : ''}</span>`
+            : `quoted ${t.quoted}d${t.achieved != null ? ` · achieved ${t.achieved}d` : ''}${variance}`}</span>
+          <span style="flex:1;"></span>
+          ${c.needs.filter(x => x !== 'transit_days').length
+            ? `<span class="cg-need">needs ${c.needs.filter(x => x !== 'transit_days').map(esc).join(', ')}</span>` : ''}
+          <button class="cg-tick" data-edit="${esc(c.consignment_uid)}">details</button>
         </div>
-        ${c.milestones.map(ms => stageCell(c, ms)).join('')}
+        ${rail(c)}
+        <div class="cg-popslot" data-slot="${esc(c.consignment_uid)}"></div>
       </div>`;
   }
+
 
   function editor(c) {
     const f = (label, key, val, ph) => `
@@ -189,44 +265,53 @@
   }
 
   function render(root) {
-    const late = [];
+    // Grouped by consignment. Twenty-four separate rows is a list nobody reads; four rows
+    // saying "this box needs three things" is a morning's work.
+    const groups = [];
     for (const c of _data) {
-      for (const ms of c.milestones) {
-        if (ms.state !== 'assumed' || !ms.planned_at || ms.planned_at > today()) continue;
-        const over = Math.round((new Date(today() + 'T00:00:00Z') - new Date(ms.planned_at + 'T00:00:00Z')) / 86400000);
-        late.push({ c, ms, over });
-      }
+      const dueStages = c.milestones.filter(ms =>
+        ms.state === 'assumed' && ms.planned_at && ms.planned_at <= today());
+      if (!dueStages.length) continue;
+      const worst = Math.max(...dueStages.map(ms =>
+        Math.round((new Date(today() + 'T00:00:00Z') - new Date(ms.planned_at + 'T00:00:00Z')) / 86400000)));
+      groups.push({ c, dueStages, worst });
     }
-    late.sort((a, b) => b.over - a.over);
+    groups.sort((a, b) => b.worst - a.worst);
+    const totalDue = groups.reduce((n, g) => n + g.dueStages.length, 0);
 
     root.innerHTML = `
       <div class="cg-wrap">
         <div class="cg-card">
-          <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+          <div class="cg-head">
             <span class="cg-h">Needs an update</span>
-            <span class="cg-sub">${late.length ? late.length + ' stage' + (late.length === 1 ? '' : 's') + ' past their planned date with nobody confirming'
+            <span class="cg-sub">${totalDue
+              ? `${totalDue} stage${totalDue === 1 ? '' : 's'} across ${groups.length} consignment${groups.length === 1 ? '' : 's'}`
               : 'Nothing is waiting on you'}</span>
           </div>
-          ${late.length ? late.slice(0, 12).map(x => `
-            <div class="cg-work">
-              <span class="cg-ref" style="font-size:11.5px;">${esc(x.c.reference || 'not advised')}</span>
-              <span style="color:${MID};">${esc(STAGE_LABEL[x.ms.stage])} &middot; planned ${esc(day(x.ms.planned_at))}</span>
-              <span style="color:${x.over >= 3 ? LATE : WARN};">${x.over}d ago</span>
-              <span style="text-align:right;">
-                <button class="cg-tick" data-ok="${esc(x.c.consignment_uid)}" data-stage="${esc(x.ms.stage)}">✓ on plan</button>
+          ${groups.length ? groups.map(g => `
+            <div class="cg-wrow">
+              <span class="cg-ref" style="font-size:12px;">${esc(g.c.reference || 'not advised')}</span>
+              <span class="cg-wstages">
+                ${g.dueStages.map(ms => `
+                  <button class="cg-chip" data-ok="${esc(g.c.consignment_uid)}" data-stage="${esc(ms.stage)}"
+                          title="Confirm it happened on ${esc(day(ms.planned_at))}">
+                    ${esc(STAGE_LABEL[ms.stage])}<span class="cg-chipd">${esc(day(ms.planned_at))}</span>
+                  </button>`).join('')}
               </span>
+              <span class="cg-wage" style="color:${g.worst >= 3 ? LATE : WARN};">${g.worst}d</span>
+              <button class="cg-btn ghost cg-wall" data-allok="${esc(g.c.consignment_uid)}">all on plan</button>
             </div>`).join('')
-            : `<div class="cg-sub" style="padding:10px 0 2px;">Every stage that has come due has been confirmed or amended.</div>`}
+            : `<div class="cg-sub" style="padding:8px 0 0;">Every stage that has come due has been confirmed or amended.</div>`}
         </div>
 
         <div class="cg-card">
-          <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+          <div class="cg-head">
             <span class="cg-h">Consignments</span>
-            <span class="cg-sub">${_data.length} movement${_data.length === 1 ? '' : 's'} this week &middot;
+            <span class="cg-sub">${_data.length} movement${_data.length === 1 ? '' : 's'} &middot;
               dates belong to the movement, lanes inherit them</span>
           </div>
           ${_data.length ? _data.map(consignmentRow).join('')
-            : `<div class="cg-sub" style="padding:12px 0;">No consignments for this week yet.
+            : `<div class="cg-sub" style="padding:10px 0 0;">No consignments for this week yet.
                  Assign containers in Container Manager, then migrate the week.</div>`}
         </div>
         <div id="cg-editor-slot"></div>
@@ -234,6 +319,7 @@
 
     wire(root);
   }
+
 
   function wire(root) {
     const act = async (fn) => {
@@ -243,6 +329,39 @@
       catch (e) { alert('Could not save: ' + (e.message || e)); }
       finally { _busy = false; }
     };
+
+    // A node opens its stage rather than the row carrying six inputs at all times.
+    root.querySelectorAll('[data-open]').forEach(b => b.onclick = () => {
+      const uid = b.getAttribute('data-open'), stage = b.getAttribute('data-stage');
+      const c = _data.find(x => x.consignment_uid === uid);
+      const ms = c && c.milestones.find(m => m.stage === stage);
+      if (!ms) return;
+      root.querySelectorAll('.cg-popslot').forEach(el => { if (el.getAttribute('data-slot') !== uid) el.innerHTML = ''; });
+      const slot = root.querySelector(`.cg-popslot[data-slot="${uid}"]`);
+      if (!slot) return;
+      const already = slot.getAttribute('data-stage') === stage && slot.innerHTML.trim();
+      slot.innerHTML = already ? '' : stagePopover(c, ms);
+      slot.setAttribute('data-stage', already ? '' : stage);
+      if (!already) wire(root);
+    });
+
+    root.querySelectorAll('[data-popclose]').forEach(b => b.onclick = () => {
+      const slot = b.closest('.cg-popslot');
+      if (slot) { slot.innerHTML = ''; slot.setAttribute('data-stage', ''); }
+    });
+
+    // One action for a consignment whose stages all ran to plan, which is the common case and
+    // was four separate clicks.
+    root.querySelectorAll('[data-allok]').forEach(b => b.onclick = () => act(async () => {
+      const uid = b.getAttribute('data-allok');
+      const c = _data.find(x => x.consignment_uid === uid);
+      if (!c) return;
+      const due = c.milestones.filter(ms =>
+        ms.state === 'assumed' && ms.planned_at && ms.planned_at <= today());
+      for (const ms of due) {
+        await post(`/consignments/${uid}/milestone`, { stage: ms.stage });
+      }
+    }));
 
     root.querySelectorAll('[data-ok]').forEach(b => b.onclick = () => act(() =>
       post(`/consignments/${b.getAttribute('data-ok')}/milestone`, { stage: b.getAttribute('data-stage') })));
