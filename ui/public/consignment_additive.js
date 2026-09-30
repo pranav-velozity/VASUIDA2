@@ -109,6 +109,13 @@
       .cg-tfoot{display:flex;align-items:center;gap:8px;font-size:10px;color:${LIGHT};}
       .cg-bar{flex:1;height:3px;background:#EFF1F4;border-radius:2px;overflow:hidden;}
       .cg-barfill{display:block;height:3px;background:${OK};border-radius:2px;transition:width .4s;}
+      .cg-empty{display:flex;flex-direction:column;gap:9px;align-items:flex-start;padding:10px 0 2px;}
+      .cg-report{background:#FAFAFB;border:.5px solid rgba(0,0,0,.08);border-radius:11px;
+        padding:14px 16px;margin-top:12px;display:flex;flex-direction:column;gap:10px;}
+      .cg-mlist{display:flex;flex-direction:column;gap:6px;}
+      .cg-mrow{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+      .cg-warn{font-size:11px;color:${DARK};background:rgba(184,134,11,.10);border-radius:8px;
+        padding:8px 10px;line-height:1.5;}
       .cg-eta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
       .cg-etad{font-family:ui-monospace,monospace;font-size:13px;font-weight:600;color:${DARK};}
       .cg-conf{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
@@ -411,6 +418,47 @@
       </div>`;
   }
 
+  // What the dry run found, in the order it matters: what would be created, then what would
+  // be left behind. A lane no container claims would silently get no dates at all, so it is
+  // named here rather than discovered three weeks later.
+  function migrationReport(r) {
+    const made = r.consignments || [];
+    if (!made.length) {
+      return `<div class="cg-report">
+        <div class="cg-h">Nothing to bring across</div>
+        <div class="cg-sub">No containers are assigned for this week. Assign them in Container
+          Manager first.</div>
+        <button class="cg-btn ghost" data-migrate-cancel="1">Close</button>
+      </div>`;
+    }
+    return `<div class="cg-report">
+      <div class="cg-h">${made.length} movement${made.length === 1 ? '' : 's'} would be created</div>
+      <div class="cg-mlist">
+        ${made.map(c => `<div class="cg-mrow">
+          <span class="cg-ref" style="font-size:11.5px;">${esc(c.reference)}</span>
+          <span class="cg-dim">${esc(c.mode)} &middot; ${c.lanes} lane${c.lanes === 1 ? '' : 's'}</span>
+          <span class="cg-dim" style="color:${LATE};">transit defaults to ${c.transit_days_defaulted}d
+            until a quote is entered</span>
+        </div>`).join('')}
+      </div>
+      ${r.unassigned_lanes && r.unassigned_lanes.length ? `
+        <div class="cg-warn">
+          <b>${r.unassigned_lanes.length} lane${r.unassigned_lanes.length === 1 ? '' : 's'} on no container.</b>
+          They will have no dates until assigned:
+          ${r.unassigned_lanes.slice(0, 4).map(k => esc(String(k).split('||')[0])).join(', ')}${
+            r.unassigned_lanes.length > 4 ? ` +${r.unassigned_lanes.length - 4} more` : ''}
+        </div>` : ''}
+      ${r.split_lanes && r.split_lanes.length ? `
+        <div class="cg-warn">${r.split_lanes.length} lane${r.split_lanes.length === 1 ? '' : 's'}
+          ride more than one consignment — allowed, but worth a look.</div>` : ''}
+      <div class="cg-sub">${esc(r.note || '')}</div>
+      <div style="display:flex;gap:8px;">
+        <button class="cg-btn" data-migrate-go="1">Bring them across</button>
+        <button class="cg-btn ghost" data-migrate-cancel="1">Cancel</button>
+      </div>
+    </div>`;
+  }
+
   function render(root) {
     // Grouped by consignment. Twenty-four separate rows is a list nobody reads; four rows
     // saying "this box needs three things" is a morning's work.
@@ -435,8 +483,12 @@
               dates belong to the movement, lanes inherit them</span>
           </div>
           ${_data.length ? `<div class="cg-grid">${_data.map(tile).join('')}</div>`
-            : `<div class="cg-sub" style="padding:10px 0 0;">No consignments for this week yet.
-                 Assign containers in Container Manager, then migrate the week.</div>`}
+            : `<div class="cg-empty">
+                 <div class="cg-sub">No consignments for this week. If containers are assigned in
+                   Container Manager, bring them across — dates start unconfirmed either way.</div>
+                 <button class="cg-btn" data-migrate="1">Check this week</button>
+               </div>`}
+          <div id="cg-admin"></div>
         </div>
         <div class="cg-card">
           <div class="cg-head">
@@ -497,6 +549,30 @@
       _open[uid] = already ? null : stage;
       if (!already) wire(root);
     });
+
+    // ── Bring a week across ──
+    const admin = root.querySelector('#cg-admin');
+    const mig = root.querySelector('[data-migrate]');
+    if (mig) mig.onclick = async () => {
+      mig.disabled = true; mig.textContent = 'Checking…';
+      try {
+        const dry = await post('/consignments/migrate', { week_start: currentWeek(), dry_run: true });
+        admin.innerHTML = migrationReport(dry);
+        const go = admin.querySelector('[data-migrate-go]');
+        if (go) go.onclick = async () => {
+          go.disabled = true; go.textContent = 'Bringing across…';
+          try {
+            await post('/consignments/migrate', { week_start: currentWeek(), dry_run: false });
+            await load(root);
+          } catch (e) { alert('Could not migrate: ' + (e.message || e)); go.disabled = false; }
+        };
+        const cancel = admin.querySelector('[data-migrate-cancel]');
+        if (cancel) cancel.onclick = () => { admin.innerHTML = ''; };
+      } catch (e) {
+        admin.innerHTML = `<div class="cg-sub" style="color:${LATE};">${esc(e.message || e)}</div>`;
+      }
+      mig.disabled = false; mig.textContent = 'Check this week';
+    };
 
     root.querySelectorAll('[data-expand]').forEach(b => b.onclick = () => {
       const uid = b.getAttribute('data-expand');
