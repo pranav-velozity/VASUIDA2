@@ -4274,6 +4274,91 @@ async function renderOpsInsights(view){
   }
 
   // Special carton view (kept)
+  if(view==='transit'){
+    const ws = state.weekStart || window._reportsWeek || '';
+    root.innerHTML = '<div style="font-size:11.5px;color:#8E8E93;padding:10px 0;">Loading consignments…</div>';
+
+    (async () => {
+      let data = [];
+      try {
+        const r = await api('/consignments?week=' + encodeURIComponent(ws));
+        data = (r && r.consignments) || [];
+      } catch (e) {
+        root.innerHTML = '<div style="font-size:11.5px;color:#8E8E93;padding:10px 0;">'
+          + 'Consignments are not available for this week. ' + esc(e.message || e) + '</div>';
+        return;
+      }
+
+      if (!data.length) {
+        root.innerHTML = '<div style="font-size:11.5px;color:#8E8E93;padding:10px 0;">'
+          + 'No consignments recorded for this week yet. Assign containers, then migrate the week '
+          + 'on the Transit &amp; Clearing panel.</div>';
+        return;
+      }
+
+      const STAGE = { packing_list_ready:'Packing list', origin_cleared:'Origin cleared',
+                      departed:'Departed', arrived:'Arrived', dest_cleared:'Dest cleared',
+                      fc_receipt:'FC receipt' };
+      const day = (d) => { if(!d) return '—';
+        const x = new Date(String(d).slice(0,10)+'T00:00:00Z');
+        return isNaN(x) ? String(d) : x.toLocaleDateString('en-AU',{day:'numeric',month:'short',timeZone:'UTC'}); };
+      const CONF = { 'on plan':'#5F6B0D','ahead':'#5F6B0D','slipping':'#B8860B',
+                     'at risk':'#990033','unverified':'#8E8E93','unknown':'#8E8E93' };
+
+      const lastOf = (c) => { let l=null; for(const m of c.milestones) if(m.state!=='assumed') l=m; return l; };
+      const dueOf  = (c) => c.milestones.find(m => m.state==='assumed' && m.planned_at
+                          && m.planned_at <= new Date().toISOString().slice(0,10)) || null;
+
+      const totalLanes = data.reduce((n,c)=>n+(c.lanes||[]).length,0);
+      const unverified = data.filter(c=>!c.transit_confirmed).length;
+      const atRisk = data.filter(c=>(c.confidence||{}).level==='at risk').length;
+      const awaiting = data.filter(c=>dueOf(c)).length;
+
+      const tile = (label, value, note, ink) =>
+        '<div style="background:#fff;border:.5px solid rgba(0,0,0,.08);border-radius:12px;padding:12px 14px;">'
+        + '<div style="font-size:9.5px;color:#8E8E93;text-transform:uppercase;letter-spacing:.06em;">'+esc(label)+'</div>'
+        + '<div style="font-size:20px;font-weight:600;color:'+(ink||'#1C1C1E')+';margin-top:2px;">'+esc(value)+'</div>'
+        + (note ? '<div style="font-size:10px;color:#8E8E93;margin-top:1px;">'+esc(note)+'</div>' : '')
+        + '</div>';
+
+      const rows = data.map(c => {
+        const last = lastOf(c), due = dueOf(c);
+        const conf = (c.confidence||{});
+        const ink = CONF[conf.level] || '#8E8E93';
+        const t = c.transit || {};
+        return '<tr style="border-top:.5px solid rgba(0,0,0,.06);">'
+          + '<td style="padding:8px 10px;font-family:ui-monospace,monospace;font-size:11.5px;">'+esc(c.reference||'not advised')+'</td>'
+          + '<td style="padding:8px 10px;font-size:11.5px;">'+esc(c.mode)+(c.size_ft?' · '+esc(c.size_ft):'')+'</td>'
+          + '<td style="padding:8px 10px;font-size:11.5px;">'+((c.lanes||[]).length)+'</td>'
+          + '<td style="padding:8px 10px;font-size:11.5px;">'+(last?esc(STAGE[last.stage])+' · '+esc(day(last.actual_at)):'<span style="color:#8E8E93;">nothing recorded</span>')+'</td>'
+          + '<td style="padding:8px 10px;font-size:11.5px;color:'+(due?'#990033':'#8E8E93')+';">'+(due?esc(STAGE[due.stage])+' · '+esc(day(due.planned_at)):'—')+'</td>'
+          + '<td style="padding:8px 10px;font-family:ui-monospace,monospace;font-size:11.5px;">'+esc(day(c.eta_fc))+'</td>'
+          + '<td style="padding:8px 10px;"><span style="font-size:9.5px;font-weight:700;text-transform:uppercase;'
+            + 'letter-spacing:.05em;color:'+ink+';">'+esc(conf.level||'—')+(conf.drift?' '+(conf.drift>0?'+':'')+conf.drift+'d':'')+'</span></td>'
+          + '<td style="padding:8px 10px;font-size:11.5px;">'+(c.transit_confirmed
+              ? 'quoted '+t.quoted+'d'+(t.achieved!=null?' · achieved '+t.achieved+'d':'')
+              : '<span style="color:#990033;">not confirmed</span>')+'</td>'
+          + '</tr>';
+      }).join('');
+
+      root.innerHTML =
+          '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px;">'
+        + tile('Movements', data.length, totalLanes + ' lanes aboard')
+        + tile('Awaiting confirmation', awaiting, awaiting ? 'stages past their planned date' : 'nothing overdue', awaiting?'#990033':'#1C1C1E')
+        + tile('At risk', atRisk, 'FC date has moved materially', atRisk?'#990033':'#1C1C1E')
+        + tile('Transit unverified', unverified, unverified ? 'still on a default, not a quote' : 'all quoted', unverified?'#990033':'#1C1C1E')
+        + '</div>'
+        + '<div style="background:#fff;border:.5px solid rgba(0,0,0,.08);border-radius:12px;overflow:hidden;">'
+        + '<table style="width:100%;border-collapse:collapse;">'
+        + '<thead><tr style="background:#FBFBFC;">'
+        + ['Container / AWB','Mode','Lanes','Last achieved','Awaiting','ETA FC','Confidence','Transit']
+            .map(h=>'<th style="text-align:left;padding:9px 10px;font-size:9.5px;color:#8E8E93;'
+              + 'text-transform:uppercase;letter-spacing:.06em;font-weight:700;">'+h+'</th>').join('')
+        + '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+    })();
+    return;
+  }
+
   if(view==='carton'){
     const ci = Number(state.weekCartonsIn||0)||0;
     const co = Number(state.weekCartonsOut||0)||0;
@@ -6204,7 +6289,8 @@ window.__openPrebookModal = function(){
             {v:'facility', l:'Facility'},
             {v:'zendesk',  l:'Zendesk'},
             {v:'freight',  l:'Freight'},
-            {v:'carton',   l:'Carton'}
+            {v:'carton',   l:'Carton'},
+            {v:'transit',  l:'Transit'}
           ].map(function(p){
             var cur = window._lastOpsView || 'overview';
             var active = (p.v === cur) ? ' ops-pill--active' : '';
@@ -6245,7 +6331,7 @@ window.__openPrebookModal = function(){
       card.style.cssText = 'background:#fff;border-radius:14px;width:100%;max-width:1400px;padding:28px 32px;position:relative;min-height:600px;';
       // Pills row
       var pillsHTML = '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:16px;" id="wh-modal-pills">'
-        + [{v:'overview',l:'Overview'},{v:'supplier',l:'Supplier'},{v:'facility',l:'Facility'},{v:'zendesk',l:'Zendesk'},{v:'freight',l:'Freight'},{v:'carton',l:'Carton'}].map(function(p){
+        + [{v:'overview',l:'Overview'},{v:'supplier',l:'Supplier'},{v:'facility',l:'Facility'},{v:'zendesk',l:'Zendesk'},{v:'freight',l:'Freight'},{v:'carton',l:'Carton'},{v:'transit',l:'Transit'}].map(function(p){
             var cur = window._lastOpsView||'overview';
             var active = (p.v===cur) ? ' ops-pill--active' : '';
             return '<button class="ops-pill wh-modal-pill' + active + '" data-opsview="' + p.v + '" style="height:28px;font-size:11px;">' + p.l + '</button>';
@@ -6448,7 +6534,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=127" defer></script>
+<script src="/public/flow_live_additive.js?v=128" defer></script>
 <script src="/public/lane_snapshot_additive.js?v=1" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 <script src="/public/map_live_additive.js?v=1" defer></script>
@@ -6482,7 +6568,7 @@ window.__openPrebookModal = function(){
   <script src="/public/supplier_invoices_additive.js?v=4" defer></script>
   <script src="/public/dept_owners_additive.js?v=1" defer></script>
   <script src="/public/tile_polish_additive.js?v=3" defer></script>
-    <script src="/public/consignment_additive.js?v=6"></script>
+    <script src="/public/consignment_additive.js?v=7"></script>
     <script src="/public/report_builder.js?v=1"></script>
     <script src="/public/apo_builder.js?v=1"></script>
   <script src="/public/weekly_history_additive.js?v=3" defer></script>
