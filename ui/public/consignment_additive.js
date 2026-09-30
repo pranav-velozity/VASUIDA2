@@ -109,6 +109,11 @@
       .cg-tfoot{display:flex;align-items:center;gap:8px;font-size:10px;color:${LIGHT};}
       .cg-bar{flex:1;height:3px;background:#EFF1F4;border-radius:2px;overflow:hidden;}
       .cg-barfill{display:block;height:3px;background:${OK};border-radius:2px;transition:width .4s;}
+      .cg-alert{display:flex;align-items:flex-start;gap:12px;padding:10px 0;
+        border-top:.5px solid rgba(0,0,0,.05);}
+      .cg-aheadline{font-size:12.5px;font-weight:600;color:${DARK};line-height:1.35;}
+      .cg-adetail{font-size:10.5px;color:${MID};margin-top:2px;}
+      .cg-aaction{font-size:11px;margin-top:3px;}
       .cg-empty{display:flex;flex-direction:column;gap:9px;align-items:flex-start;padding:10px 0 2px;}
       .cg-report{background:#FAFAFB;border:.5px solid rgba(0,0,0,.08);border-radius:11px;
         padding:14px 16px;margin-top:12px;display:flex;flex-direction:column;gap:10px;}
@@ -476,6 +481,7 @@
 
     root.innerHTML = `
       <div class="cg-wrap">
+        ${alertCard()}
         <div class="cg-card">
           <div class="cg-head">
             <span class="cg-h">Consignments</span>
@@ -574,6 +580,11 @@
       mig.disabled = false; mig.textContent = 'Check this week';
     };
 
+    root.querySelectorAll('[data-ack]').forEach(b => b.onclick = () => act(() =>
+      post('/alerts/ack', { consignment_uid: b.getAttribute('data-ack'),
+                            kind: b.getAttribute('data-kind'),
+                            signature: b.getAttribute('data-sig') })));
+
     root.querySelectorAll('[data-expand]').forEach(b => b.onclick = () => {
       const uid = b.getAttribute('data-expand');
       _expanded[uid] = !_expanded[uid];
@@ -634,6 +645,32 @@
 
   const currentWeek = () => _week || window.state?.weekStart || window._reportsWeek || null;
 
+  let _alerts = [];
+
+  function alertCard() {
+    const open = _alerts.filter(a => !a.acknowledged_at && a.kind === 'fc_moved');
+    if (!open.length) return '';
+    return `
+      <div class="cg-card" style="border-left:3px solid ${LATE};">
+        <div class="cg-head">
+          <span class="cg-h">Delivery dates have moved</span>
+          <span class="cg-sub">${open.length} consignment${open.length === 1 ? '' : 's'} &middot;
+            dock bookings may need changing</span>
+        </div>
+        ${open.map(a => `
+          <div class="cg-alert">
+            <div style="min-width:0;flex:1;">
+              <div class="cg-aheadline">${esc(a.headline)}</div>
+              <div class="cg-adetail">${esc(a.detail)}</div>
+              <div class="cg-aaction" style="color:${a.severity === 'high' ? LATE : WARN};">${esc(a.action)}</div>
+            </div>
+            <button class="cg-tick" data-ack="${esc(a.consignment_uid)}"
+                    data-kind="${esc(a.kind)}" data-sig="${esc(a.signature)}"
+                    title="Silence this until the date moves again">Seen</button>
+          </div>`).join('')}
+      </div>`;
+  }
+
   async function load(root) {
     try {
       const ws = currentWeek();
@@ -643,6 +680,14 @@
       // Shared with the Control Tower exception strip, which would otherwise repeat the fetch.
       window.__cgConsignments = _data;
       window.__cgWeek = ws;
+
+      // Alerts are a separate reading of the same data. A failure here must not take the
+      // panel down with it — the tiles are useful on their own.
+      try {
+        const al = await call(`/alerts?week=${encodeURIComponent(ws || '')}`);
+        _alerts = (al && al.alerts) || [];
+      } catch (_) { _alerts = []; }
+      window.__cgAlerts = _alerts;
       render(root);
     } catch (e) {
       root.innerHTML = `<div class="cg-card"><div class="cg-h">Consignments unavailable</div>

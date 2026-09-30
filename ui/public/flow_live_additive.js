@@ -3421,6 +3421,22 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
         });
       });
       var unverified = cg.filter(function(c){ return !c.transit_confirmed; });
+
+      // A delivery date that moved after the dock was booked is the expensive one, so it goes
+      // on the strip ahead of the housekeeping. Read from the alert engine so the strip and
+      // the panel cannot disagree about what counts as moved.
+      var al = Array.isArray(window.__cgAlerts) ? window.__cgAlerts : [];
+      var moved = al.filter(function(a){ return a.kind === 'fc_moved' && !a.acknowledged_at; });
+      if (moved.length) {
+        var worstMoved = moved.filter(function(a){ return a.severity === 'high'; });
+        actions.push({
+          level: worstMoved.length ? 'red' : 'yellow',
+          icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg>',
+          text: fmtInt(moved.length) + ' delivery date' + (moved.length > 1 ? 's' : '') + ' moved',
+          sub: moved.slice(0,1).map(function(a){ return a.action; })[0]
+             + (moved.length > 1 ? ' · +' + (moved.length - 1) + ' more' : '')
+        });
+      }
       if(waiting.length){
         var worst = waiting.slice().sort(function(a,b){ return a.planned < b.planned ? -1 : 1; })[0];
         var overdue = Math.round((new Date(todayISO+'T00:00:00Z') - new Date(worst.planned+'T00:00:00Z'))/86400000);
