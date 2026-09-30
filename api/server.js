@@ -11921,6 +11921,11 @@ async function _iconicAlert(filename, errMsg) {
 // The Monday attachments the server can now produce for itself. Both call the same code the
 // screens call, so a downloaded file and an emailed one cannot differ.
 const stockStatusReport = require('./stock_status_report');
+// Dates belong to the movement, not to each lane. See ./consignment_routes for why.
+app.use('/consignments', require('./consignment_routes')({
+  express, db, authenticateRequest, requireRole, auditLog, curClient,
+}));
+
 // Read-only: where transit time is actually lost, before anything is bought to fix it.
 app.use('/lanes', require('./lane_slip_report')({
   express, db, authenticateRequest, auditLog, curClient,

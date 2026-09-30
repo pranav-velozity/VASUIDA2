@@ -1,0 +1,697 @@
+/* ── VelOzity Pinpoint — consignments v1 ──
+   Dates move from the lane to the movement that actually carries it.
+
+   Why this exists. Today every lane holds its own six dates, so twelve lanes sitting in three
+   containers means the same departure is typed twelve times. Nobody does that honestly — they
+   accept the pre-filled value and save. The result is 157 recorded departures with zero
+   variance: every "actual" equal to the plan, and no way to see the ETD slips that are the
+   whole operational problem.
+
+   One consignment is one movement: a 20ft, a 40ft, a Tuesday flight, a Thursday flight. Four
+   in a week, not twelve. Lanes attach to one and inherit its dates.
+
+   Three things this model insists on:
+
+     · a stage is `assumed` until a person or a carrier says otherwise. Assumed is visible,
+       never silently promoted to actual. That single distinction is what makes planned-versus-
+       actual reporting mean anything.
+
+     · transit time belongs to the sailing, not the facility. Two carriers on the same lane in
+       the same week differ; so does the same carrier week to week. Arrival is computed from
+       THIS consignment's departure plus ITS OWN transit days.
+
+     · the origin rhythm is a rule, not an estimate. Packing Friday, cleared Monday, departs
+       Wednesday is a schedule you run to. Stored as configurable offsets per mode rather than
+       hardcoded, because air does not keep sea's rhythm.
+
+   Lanes are not split across consignments, by convention rather than by constraint: the rare
+   air part-shipment is allowed and flagged, because blocking it is what drives people to
+   invent a second lane and falsify the record.
+*/
+'use strict';
+
+const { randomUUID } = require('crypto');
+
+module.exports = function mountConsignments(deps) {
+  const { express, db, authenticateRequest, requireRole, auditLog, curClient } = deps;
+  const router = express.Router();
+
+  // ── Schema ──
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS consignment (
+      consignment_uid TEXT PRIMARY KEY,          -- surrogate: container numbers are reused,
+                                                 -- reallocated, and sometimes not yet advised
+      client_id       TEXT NOT NULL,
+      week_start      TEXT NOT NULL,
+      facility        TEXT,
+      mode            TEXT NOT NULL CHECK(mode IN ('Sea','Air')),
+      reference       TEXT,                      -- container number or AWB, as people read it
+      size_ft         TEXT,                      -- 20 / 40 / 40HQ, blank for air
+      carrier         TEXT,
+      vessel          TEXT,                      -- vessel and voyage, or flight
+      transit_days    REAL,                      -- carrier-quoted, THIS sailing, port to port
+      departure_planned TEXT,                    -- air: the flight date, when not in the reference
+      shipment_ref    TEXT,
+      hbl             TEXT,
+      mbl             TEXT,                      -- what an aggregator subscribes with
+      status          TEXT NOT NULL DEFAULT 'planned',  -- planned | booked | closed
+      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at      TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_consignment_week ON consignment(client_id, week_start);
+    CREATE INDEX IF NOT EXISTS idx_consignment_ref  ON consignment(reference);
+
+    -- A lane rides exactly one consignment. Not enforced as a hard constraint: the rare air
+    -- part-shipment is recorded and flagged rather than refused.
+    CREATE TABLE IF NOT EXISTS consignment_lane (
+      consignment_uid TEXT NOT NULL,
+      lane_key        TEXT NOT NULL,
+      week_start      TEXT NOT NULL,
+      client_id       TEXT NOT NULL,
+      PRIMARY KEY (consignment_uid, lane_key, week_start)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cl_lane ON consignment_lane(lane_key, week_start);
+
+    -- One row per stage per consignment. The state is the point: an assumed date and a
+    -- confirmed one look the same on screen and mean entirely different things in a report.
+    CREATE TABLE IF NOT EXISTS consignment_milestone (
+      consignment_uid TEXT NOT NULL,
+      stage           TEXT NOT NULL CHECK(stage IN (
+                        'packing_list_ready','origin_cleared','departed',
+                        'arrived','dest_cleared','fc_receipt')),
+      planned_at      TEXT,
+      actual_at       TEXT,
+      state           TEXT NOT NULL DEFAULT 'assumed' CHECK(state IN (
+                        'assumed',       -- the plan says so; nobody has looked
+                        'confirmed',     -- a person agreed it happened on the planned day
+                        'amended',       -- a person gave a different date
+                        'carrier')),     -- an aggregator event said so
+      source_user     TEXT,
+      source_detail   TEXT,              -- carrier event id, or a note
+      recorded_at     TEXT,
+      PRIMARY KEY (consignment_uid, stage)
+    );
+
+    -- The origin rhythm, per facility and mode. Offsets in days from the Monday of the
+    -- execution week: Friday is 4, the Monday after is 7, Wednesday after is 9.
+    CREATE TABLE IF NOT EXISTS consignment_rules (
+      client_id                 TEXT NOT NULL,
+      facility                  TEXT NOT NULL,
+      mode                      TEXT NOT NULL CHECK(mode IN ('Sea','Air')),
+      packing_list_offset_days  REAL NOT NULL,
+      origin_cleared_offset_days REAL NOT NULL,
+      departed_offset_days      REAL NOT NULL,
+      arrived_to_dest_cleared_days REAL NOT NULL,
+      dest_cleared_to_fc_days   REAL NOT NULL,
+      default_transit_days      REAL,            -- a starting point only; never an actual
+      before_departure          TEXT,            -- air: JSON {cleared, packing} days before the flight
+      updated_at                TEXT,
+      PRIMARY KEY (client_id, facility, mode)
+    );
+  `);
+
+  const STAGES = ['packing_list_ready', 'origin_cleared', 'departed', 'arrived', 'dest_cleared', 'fc_receipt'];
+
+  // Sea reflects the rhythm as described: packing Friday (+4), cleared the Monday after (+7),
+  // departs Wednesday (+9). Air is seeded from the same shape and is meant to be corrected —
+  // a flight cut-off is not Wednesday. Seeded rather than guessed silently.
+  const DEFAULT_RULES = {
+    // Sea: offsets forward from the Monday of the execution week. Packing Friday (+4),
+    // cleared the Monday after (+7), departs Wednesday (+9). A rhythm, not an estimate.
+    Sea: { packing: 4, cleared: 7, departed: 9, arrDest: 2, destFc: 1, transit: 28 },
+    // Air: offsets BACKWARD from the flight. Cleared the day before, packing list the day
+    // before that. Departure is entered rather than derived, because it moves.
+    Air: { beforeDeparture: { cleared: 1, packing: 2 }, arrDest: 1, destFc: 1, transit: 2 },
+  };
+
+  // CA1306/25SEP, SQ7823/23SEP — the flight date is in the reference. Read rather than asked
+  // for again, since re-typing something already on screen is how it ends up wrong.
+  function departureFromReference(ref, weekStart) {
+    const m = String(ref || '').match(/\/(\d{1,2})\s*([A-Za-z]{3})/);
+    if (!m) return null;
+    const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+                     jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+    const mon = MONTHS[m[2].toLowerCase()];
+    if (mon == null) return null;
+    const day = Number(m[1]);
+    // The year is not in the reference. Take the week's year, and roll forward if that puts
+    // the flight before the week — a late-December week flying in January.
+    const base = new Date(String(weekStart) + 'T00:00:00Z');
+    let year = base.getUTCFullYear();
+    let d = new Date(Date.UTC(year, mon, day));
+    if (d < base) d = new Date(Date.UTC(year + 1, mon, day));
+    return d.toISOString().slice(0, 10);
+  }
+
+  const addDays = (ymd, n) => {
+    if (!ymd || n == null) return null;
+    const d = new Date(String(ymd).slice(0, 10) + 'T00:00:00Z');
+    if (isNaN(d)) return null;
+    d.setUTCDate(d.getUTCDate() + Math.round(n));
+    return d.toISOString().slice(0, 10);
+  };
+
+  function rulesFor(client, facility, mode) {
+    const row = db.prepare(`SELECT * FROM consignment_rules
+                             WHERE client_id = ? AND facility = ? AND mode = ?`)
+      .get(client, facility || '', mode);
+    if (row) {
+      if (row.before_departure) {
+        try { row.before_departure = JSON.parse(row.before_departure); } catch (_) { row.before_departure = null; }
+      }
+      return row;
+    }
+    const d = DEFAULT_RULES[mode] || DEFAULT_RULES.Sea;
+    if (mode === 'Air') {
+      return {
+        before_departure: d.beforeDeparture,
+        arrived_to_dest_cleared_days: d.arrDest,
+        dest_cleared_to_fc_days: d.destFc,
+        default_transit_days: d.transit,
+        _default: true,
+      };
+    }
+    return {
+      packing_list_offset_days: d.packing,
+      origin_cleared_offset_days: d.cleared,
+      departed_offset_days: d.departed,
+      arrived_to_dest_cleared_days: d.arrDest,
+      dest_cleared_to_fc_days: d.destFc,
+      default_transit_days: d.transit,
+      _default: true,
+    };
+  }
+
+  /**
+   * Planned dates for a consignment. The origin three come from the rhythm; arrival comes
+   * from THIS sailing's departure plus ITS transit; the landside two follow arrival.
+   *
+   * Departure is taken from the actual where one has been recorded — a ship that left three
+   * days late arrives three days late unless someone says otherwise, and a plan that ignores
+   * that is worse than no plan.
+   */
+  function computePlanned(c, milestones) {
+    const r = rulesFor(c.client_id, c.facility, c.mode);
+    const ws = c.week_start;
+    const m = milestones || {};
+
+    const planned = {};
+    const air = c.mode === 'Air';
+
+    if (air) {
+      // Anchored on the flight: whatever was entered, or whatever the reference says.
+      const flight = (m.departed && m.departed.actual_at)
+        || c.departure_planned || departureFromReference(c.reference, ws);
+      planned.departed = flight || null;
+      const back = (r.before_departure && typeof r.before_departure === 'object')
+        ? r.before_departure : DEFAULT_RULES.Air.beforeDeparture;
+      planned.origin_cleared = flight ? addDays(flight, -(back.cleared ?? 1)) : null;
+      planned.packing_list_ready = flight ? addDays(flight, -(back.packing ?? 2)) : null;
+    } else {
+      planned.packing_list_ready = addDays(ws, r.packing_list_offset_days);
+      planned.origin_cleared = addDays(ws, r.origin_cleared_offset_days);
+      planned.departed = addDays(ws, r.departed_offset_days);
+    }
+
+    const departedReal = (m.departed && m.departed.actual_at) || null;
+    const departBasis = departedReal || planned.departed;
+
+    const transit = Number(c.transit_days);
+    planned.arrived = Number.isFinite(transit) ? addDays(departBasis, transit) : null;
+
+    const arrivedReal = (m.arrived && m.arrived.actual_at) || null;
+    const arriveBasis = arrivedReal || planned.arrived;
+    planned.dest_cleared = arriveBasis ? addDays(arriveBasis, r.arrived_to_dest_cleared_days) : null;
+    planned.fc_receipt = planned.dest_cleared
+      ? addDays(planned.dest_cleared, r.dest_cleared_to_fc_days) : null;
+
+    return { planned, rules: r, departure_basis: departedReal ? 'actual' : 'plan' };
+  }
+
+  function milestonesFor(uid) {
+    const rows = db.prepare('SELECT * FROM consignment_milestone WHERE consignment_uid = ?').all(uid);
+    const out = {};
+    for (const r of rows) out[r.stage] = r;
+    return out;
+  }
+
+  const upsertMilestone = db.prepare(`
+    INSERT INTO consignment_milestone
+      (consignment_uid, stage, planned_at, actual_at, state, source_user, source_detail, recorded_at)
+    VALUES (@uid, @stage, @planned, @actual, @state, @user, @detail, @at)
+    ON CONFLICT(consignment_uid, stage) DO UPDATE SET
+      planned_at = @planned, actual_at = @actual, state = @state,
+      source_user = @user, source_detail = @detail, recorded_at = @at`);
+
+  // Planned dates are refreshed whenever anything they depend on changes. Never touches a
+  // stage that a person or a carrier has spoken for.
+  function refreshPlanned(uid) {
+    const c = db.prepare('SELECT * FROM consignment WHERE consignment_uid = ?').get(uid);
+    if (!c) return;
+    const m = milestonesFor(uid);
+    const { planned } = computePlanned(c, m);
+    for (const stage of STAGES) {
+      const existing = m[stage];
+      if (existing && existing.state !== 'assumed') {
+        // Keep the recorded fact; only the plan beside it moves.
+        upsertMilestone.run({ uid, stage, planned: planned[stage] || null,
+          actual: existing.actual_at, state: existing.state,
+          user: existing.source_user, detail: existing.source_detail, at: existing.recorded_at });
+      } else {
+        upsertMilestone.run({ uid, stage, planned: planned[stage] || null,
+          actual: null, state: 'assumed', user: null, detail: null, at: null });
+      }
+    }
+  }
+
+  function shape(c) {
+    const m = milestonesFor(c.consignment_uid);
+    const { planned, departure_basis } = computePlanned(c, m);
+    const lanes = db.prepare('SELECT lane_key FROM consignment_lane WHERE consignment_uid = ?')
+      .all(c.consignment_uid).map(x => x.lane_key);
+
+    // A lane on more than one consignment in the same week: allowed, surfaced, not blocked.
+    const shared = lanes.filter(k => {
+      const n = db.prepare(`SELECT COUNT(*) n FROM consignment_lane
+                             WHERE lane_key = ? AND week_start = ?`).get(k, c.week_start);
+      return n && n.n > 1;
+    });
+
+    return {
+      ...c,
+      lanes,
+      split_lanes: shared,
+      departure_basis,
+      milestones: STAGES.map(stage => {
+        const row = m[stage] || {};
+        return {
+          stage,
+          planned_at: planned[stage] || row.planned_at || null,
+          actual_at: row.actual_at || null,
+          state: row.state || 'assumed',
+          source_user: row.source_user || null,
+          recorded_at: row.recorded_at || null,
+        };
+      }),
+      // Quoted is what the carrier's schedule said at booking; achieved is what the confirmed
+      // dates show. Kept apart on purpose — an aggregator's revised ETA must never overwrite
+      // the quote, or the carrier's own revision erases the evidence of their slip.
+      transit: (() => {
+        const quoted = Number.isFinite(Number(c.transit_days)) ? Number(c.transit_days) : null;
+        const dep = m.departed && m.departed.actual_at;
+        const arr = m.arrived && m.arrived.actual_at;
+        const achieved = (dep && arr)
+          ? Math.round((new Date(arr + 'T00:00:00Z') - new Date(dep + 'T00:00:00Z')) / 86400000)
+          : null;
+        return {
+          quoted, achieved,
+          variance: (quoted != null && achieved != null) ? achieved - quoted : null,
+        };
+      })(),
+
+      // What is missing before this can be tracked or invoiced.
+      needs: [
+        !c.reference ? 'reference' : null,
+        !Number.isFinite(Number(c.transit_days)) ? 'transit_days' : null,
+        c.status === 'booked' && !c.mbl ? 'mbl' : null,
+        c.status === 'booked' && !c.hbl ? 'hbl' : null,
+        c.status === 'booked' && !c.shipment_ref ? 'shipment_ref' : null,
+      ].filter(Boolean),
+    };
+  }
+
+  // ── Read ──
+  router.get('/', authenticateRequest, auditLog('view_consignments'), (req, res) => {
+    try {
+      const ws = String(req.query.week || '').trim();
+      const client = curClient();
+      const rows = ws
+        ? db.prepare(`SELECT * FROM consignment WHERE client_id = ? AND week_start = ?
+                       ORDER BY mode, reference`).all(client, ws)
+        : db.prepare(`SELECT * FROM consignment WHERE client_id = ?
+                       ORDER BY week_start DESC, mode, reference LIMIT 200`).all(client);
+      res.json({ ok: true, week_start: ws || null, consignments: rows.map(shape) });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  // ── Create or update ──
+  router.post('/', authenticateRequest, requireRole(['admin', 'supplier']),
+    auditLog('save_consignment'), (req, res) => {
+    try {
+      const b = req.body || {};
+      const client = curClient();
+      const uid = String(b.consignment_uid || '').trim() || randomUUID();
+      const mode = b.mode === 'Air' ? 'Air' : 'Sea';
+      const ws = String(b.week_start || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) {
+        return res.status(400).json({ ok: false, error: 'week_start must be YYYY-MM-DD.' });
+      }
+
+      // Transit time is asked for at setup, because it belongs to the sailing and nobody
+      // knows it later. The rule default is offered, never applied silently.
+      const r = rulesFor(client, b.facility, mode);
+      const transit = Number.isFinite(Number(b.transit_days)) ? Number(b.transit_days) : null;
+
+      const exists = db.prepare('SELECT consignment_uid FROM consignment WHERE consignment_uid = ?').get(uid);
+      if (exists) {
+        db.prepare(`UPDATE consignment SET facility=@facility, mode=@mode, reference=@reference,
+                      size_ft=@size, carrier=@carrier, vessel=@vessel, transit_days=@transit,
+                      departure_planned=@depPlanned,
+                      shipment_ref=@shipment, hbl=@hbl, mbl=@mbl, status=@status, updated_at=@now
+                     WHERE consignment_uid=@uid`)
+          .run({ uid, facility: b.facility || null, mode, reference: b.reference || null,
+                 size: b.size_ft || null, carrier: b.carrier || null, vessel: b.vessel || null,
+                 transit, depPlanned: b.departure_planned || null,
+                 shipment: b.shipment_ref || null, hbl: b.hbl || null, mbl: b.mbl || null,
+                 status: b.status || 'planned', now: new Date().toISOString() });
+      } else {
+        db.prepare(`INSERT INTO consignment (consignment_uid, client_id, week_start, facility, mode,
+                      reference, size_ft, carrier, vessel, transit_days, departure_planned,
+                      shipment_ref, hbl, mbl, status, updated_at)
+                    VALUES (@uid,@client,@ws,@facility,@mode,@reference,@size,@carrier,@vessel,
+                            @transit,@depPlanned,@shipment,@hbl,@mbl,@status,@now)`)
+          .run({ uid, client, ws, facility: b.facility || null, mode, reference: b.reference || null,
+                 size: b.size_ft || null, carrier: b.carrier || null, vessel: b.vessel || null,
+                 transit: transit == null ? (r.default_transit_days || null) : transit,
+                 depPlanned: b.departure_planned || null,
+                 shipment: b.shipment_ref || null, hbl: b.hbl || null, mbl: b.mbl || null,
+                 status: b.status || 'planned', now: new Date().toISOString() });
+      }
+
+      if (Array.isArray(b.lanes)) {
+        db.prepare('DELETE FROM consignment_lane WHERE consignment_uid = ?').run(uid);
+        const ins = db.prepare(`INSERT OR IGNORE INTO consignment_lane
+                                  (consignment_uid, lane_key, week_start, client_id)
+                                VALUES (?,?,?,?)`);
+        for (const k of b.lanes) if (String(k || '').trim()) ins.run(uid, String(k).trim(), ws, client);
+      }
+
+      refreshPlanned(uid);
+      const row = db.prepare('SELECT * FROM consignment WHERE consignment_uid = ?').get(uid);
+      res.json({ ok: true, consignment: shape(row) });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  // ── Confirm or amend a milestone ──
+  // The only way a date becomes actual. Confirming takes the planned date as fact; amending
+  // supplies a different one. Both are deliberate; neither can happen by saving a form.
+  router.post('/:uid/milestone', authenticateRequest, requireRole(['admin', 'supplier']),
+    auditLog('confirm_milestone'), (req, res) => {
+    try {
+      const uid = String(req.params.uid || '').trim();
+      const b = req.body || {};
+      const stage = String(b.stage || '').trim();
+      if (!STAGES.includes(stage)) return res.status(400).json({ ok: false, error: 'Unknown stage.' });
+
+      const c = db.prepare('SELECT * FROM consignment WHERE consignment_uid = ? AND client_id = ?')
+        .get(uid, curClient());
+      if (!c) return res.status(404).json({ ok: false, error: 'No such consignment.' });
+
+      const m = milestonesFor(uid);
+      const { planned } = computePlanned(c, m);
+      const user = (req.auth && req.auth.userId) || null;
+      const now = new Date().toISOString();
+
+      if (b.clear) {
+        // Back to assumed. A mistaken confirmation must be undoable, or people stop confirming.
+        upsertMilestone.run({ uid, stage, planned: planned[stage] || null, actual: null,
+          state: 'assumed', user: null, detail: null, at: null });
+      } else {
+        const amended = String(b.actual_at || '').trim();
+        const actual = amended || planned[stage];
+        if (!actual) return res.status(400).json({ ok: false, error: 'No date to record for this stage.' });
+        upsertMilestone.run({
+          uid, stage, planned: planned[stage] || null, actual: actual.slice(0, 10),
+          state: amended && amended.slice(0, 10) !== (planned[stage] || '') ? 'amended' : 'confirmed',
+          user, detail: b.note || null, at: now,
+        });
+      }
+
+      // A real departure or arrival moves everything downstream that nobody has spoken for.
+      refreshPlanned(uid);
+      const row = db.prepare('SELECT * FROM consignment WHERE consignment_uid = ?').get(uid);
+      res.json({ ok: true, consignment: shape(row) });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  // ── Rules ──
+  router.get('/rules', authenticateRequest, (req, res) => {
+    const client = curClient();
+    const rows = db.prepare('SELECT * FROM consignment_rules WHERE client_id = ?').all(client);
+    res.json({ ok: true, rules: rows, defaults: DEFAULT_RULES,
+      note: 'Air offsets are seeded from the sea rhythm and are meant to be corrected — a flight cut-off is not Wednesday.' });
+  });
+
+  router.put('/rules', authenticateRequest, requireRole(['admin']), auditLog('save_consignment_rules'), (req, res) => {
+    try {
+      const b = req.body || {};
+      const mode = b.mode === 'Air' ? 'Air' : 'Sea';
+      db.prepare(`INSERT INTO consignment_rules (client_id, facility, mode,
+                    packing_list_offset_days, origin_cleared_offset_days, departed_offset_days,
+                    arrived_to_dest_cleared_days, dest_cleared_to_fc_days, default_transit_days,
+                    before_departure, updated_at)
+                  VALUES (@client,@facility,@mode,@p,@o,@d,@ad,@df,@t,@bd,@now)
+                  ON CONFLICT(client_id, facility, mode) DO UPDATE SET
+                    packing_list_offset_days=@p, origin_cleared_offset_days=@o,
+                    departed_offset_days=@d, arrived_to_dest_cleared_days=@ad,
+                    dest_cleared_to_fc_days=@df, default_transit_days=@t,
+                    before_departure=@bd, updated_at=@now`)
+        .run({ client: curClient(), facility: b.facility || '', mode,
+               p: Number(b.packing_list_offset_days) || 0, o: Number(b.origin_cleared_offset_days) || 0,
+               d: Number(b.departed_offset_days) || 0, ad: Number(b.arrived_to_dest_cleared_days),
+               df: Number(b.dest_cleared_to_fc_days),
+               t: b.default_transit_days == null ? null : Number(b.default_transit_days),
+               bd: b.before_departure ? JSON.stringify(b.before_departure) : null,
+               now: new Date().toISOString() });
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  // ── The worklist ──
+  // What needs a person, derived rather than flagged. On a quiet day it is empty, and an empty
+  // list is the signal that nothing needs you.
+  router.get('/worklist', authenticateRequest, auditLog('view_consignment_worklist'), (req, res) => {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const rows = db.prepare(`SELECT * FROM consignment WHERE client_id = ? AND status != 'closed'
+                                ORDER BY week_start DESC LIMIT 200`).all(curClient());
+      const items = [];
+      for (const c of rows) {
+        const s = shape(c);
+        for (const ms of s.milestones) {
+          if (ms.state !== 'assumed') continue;
+          if (!ms.planned_at) continue;
+          if (ms.planned_at > today) continue;          // not due yet; nothing to do
+          const daysOver = Math.round(
+            (new Date(today + 'T00:00:00Z') - new Date(ms.planned_at + 'T00:00:00Z')) / 86400000);
+          items.push({
+            consignment_uid: c.consignment_uid,
+            reference: c.reference || 'not advised',
+            mode: c.mode,
+            week_start: c.week_start,
+            stage: ms.stage,
+            planned_at: ms.planned_at,
+            days_overdue: daysOver,
+            // A stage days past its plan with nobody confirming is either late or unrecorded.
+            severity: daysOver >= 3 ? 'overdue' : (daysOver >= 1 ? 'due' : 'today'),
+          });
+        }
+        for (const need of s.needs) {
+          items.push({ consignment_uid: c.consignment_uid, reference: c.reference || 'not advised',
+            mode: c.mode, week_start: c.week_start, stage: null, missing: need, severity: 'incomplete' });
+        }
+      }
+      items.sort((a, b) => (b.days_overdue || 0) - (a.days_overdue || 0));
+      res.json({ ok: true, as_at: today, count: items.length, items });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  // ── Migration from the week blob ──
+  // Containers already live in flow_week under intl_weekcontainers, each carrying the lane
+  // keys it holds. That relationship is what makes this migration possible without anyone
+  // re-keying a week.
+  //
+  // The existing dates are NOT imported as actuals. Every one of them equals the plan — they
+  // were written by the mirror when a pre-filled form was saved, not observed. Importing them
+  // as facts would carry the original problem into the new model and make the first twelve
+  // weeks of reporting as meaningless as the last twelve. They come in as `assumed`, which is
+  // what they always were.
+  function migrateWeek(ws, opts) {
+    const client = curClient();
+    const dry = !!(opts && opts.dryRun);
+    const rows = db.prepare('SELECT facility, data FROM flow_week WHERE week_start = ?').all(ws);
+
+    const made = [], skipped = [], lanesSeen = new Map();
+    for (const r of rows) {
+      let blob; try { blob = JSON.parse(r.data); } catch (_) { continue; }
+      const wc = blob && blob.intl_weekcontainers;
+      const list = Array.isArray(wc) ? wc : (Array.isArray(wc && wc.containers) ? wc.containers : []);
+
+      for (const c of list) {
+        const ref = String(c.container_id || c.container || '').trim();
+        const laneKeys = Array.isArray(c.lane_keys) ? c.lane_keys.filter(Boolean) : [];
+        if (!ref && !laneKeys.length) { skipped.push({ reason: 'no reference and no lanes' }); continue; }
+
+        // Air is identified the way the rest of the codebase does it: the reference, or a
+        // size field carrying 'AIR' rather than a box size.
+        const air = /air|awb|^[A-Z]{2}\d{3,4}\//i.test(ref)
+          || String(c.size_ft || '').toUpperCase().includes('AIR');
+        const mode = air ? 'Air' : 'Sea';
+
+        const existing = db.prepare(`SELECT consignment_uid FROM consignment
+                                      WHERE client_id = ? AND week_start = ? AND reference IS ?`)
+          .get(client, ws, ref || null);
+        if (existing) { skipped.push({ reference: ref, reason: 'already migrated' }); continue; }
+
+        const uid = randomUUID();
+        const rule = rulesFor(client, r.facility, mode);
+
+        if (!dry) {
+          db.prepare(`INSERT INTO consignment (consignment_uid, client_id, week_start, facility,
+                        mode, reference, size_ft, carrier, vessel, transit_days, status, updated_at)
+                      VALUES (@uid,@client,@ws,@facility,@mode,@ref,@size,@carrier,@vessel,@transit,'planned',@now)`)
+            .run({ uid, client, ws, facility: r.facility || null, mode, ref: ref || null,
+                   size: air ? null : (c.size_ft || null), carrier: c.carrier || null,
+                   vessel: c.vessel || null,
+                   // The rule default, not a measured transit. Flagged in `needs` until
+                   // somebody enters the real one for this sailing.
+                   transit: rule.default_transit_days || null, now: new Date().toISOString() });
+
+          const ins = db.prepare(`INSERT OR IGNORE INTO consignment_lane
+                                    (consignment_uid, lane_key, week_start, client_id) VALUES (?,?,?,?)`);
+          for (const k of laneKeys) ins.run(uid, String(k).trim(), ws, client);
+          refreshPlanned(uid);
+        }
+
+        for (const k of laneKeys) lanesSeen.set(k, (lanesSeen.get(k) || 0) + 1);
+        made.push({ consignment_uid: dry ? null : uid, reference: ref || 'not advised',
+                    mode, lanes: laneKeys.length, transit_days_defaulted: rule.default_transit_days || null });
+      }
+    }
+
+    // A lane on two containers in the same week is the rare air split. Reported, not refused.
+    const split = [...lanesSeen.entries()].filter(([, n]) => n > 1).map(([k]) => k);
+
+    // Lanes in the week that no container claims: they would silently have no dates at all,
+    // which is worse than the current state. Named so they can be assigned.
+    const orphans = [];
+    for (const r of rows) {
+      let blob; try { blob = JSON.parse(r.data); } catch (_) { continue; }
+      const lanes = (blob && blob.intl_lanes && typeof blob.intl_lanes === 'object') ? Object.keys(blob.intl_lanes) : [];
+      for (const k of lanes) if (!lanesSeen.has(k)) orphans.push(k);
+    }
+
+    return {
+      week_start: ws, dry_run: dry,
+      consignments_created: made.length, consignments: made,
+      skipped, split_lanes: split, unassigned_lanes: orphans,
+      note: 'Existing lane dates were not imported as actuals: they are copies of the plan, '
+          + 'not observations. Every stage starts assumed.',
+    };
+  }
+
+  router.post('/migrate', authenticateRequest, requireRole(['admin']),
+    auditLog('migrate_consignments'), (req, res) => {
+    try {
+      const ws = String((req.body && req.body.week_start) || req.query.week || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) {
+        return res.status(400).json({ ok: false, error: 'week_start must be YYYY-MM-DD.' });
+      }
+      const dry = String((req.body && req.body.dry_run) ?? req.query.dry_run ?? 'true') !== 'false';
+      res.json({ ok: true, ...migrateWeek(ws, { dryRun: dry }) });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  // ── Clearing the legacy dates ──
+  // The 297 rows in lane_actual_dates are copies of the plan, written by the mirror when a
+  // pre-filled form was saved. Left in place they would sit alongside real confirmations and
+  // be indistinguishable in a report, so they come out — along with the same dates in the
+  // week's plan blob, which is where the pre-fill came from.
+  //
+  // Per week, dry run by default. Doing a week, checking the transit screen, then proceeding
+  // is recoverable; clearing everything at once is not.
+  function clearLegacy(ws, opts) {
+    const dry = !(opts && opts.confirm === true);
+    const client = curClient();
+
+    const actuals = db.prepare(`SELECT lane_key, stage, actual_at, source
+                                  FROM lane_actual_dates WHERE week_start = ?`).all(ws);
+    const bySource = {};
+    for (const a of actuals) bySource[a.source] = (bySource[a.source] || 0) + 1;
+
+    // Lane date fields inside the week blob, which is what pre-filled the form.
+    const FIELDS = ['packing_list_ready_at', 'origin_customs_cleared_at', 'departed_at',
+                    'arrived_at', 'dest_customs_cleared_at', 'eta_fc'];
+    const rows = db.prepare('SELECT facility, data FROM flow_week WHERE week_start = ?').all(ws);
+    let blobDates = 0;
+    const blobPlan = [];
+    for (const r of rows) {
+      let blob; try { blob = JSON.parse(r.data); } catch (_) { continue; }
+      const lanes = (blob && blob.intl_lanes && typeof blob.intl_lanes === 'object') ? blob.intl_lanes : {};
+      for (const [k, lane] of Object.entries(lanes)) {
+        const hit = FIELDS.filter(f => lane && lane[f]);
+        if (hit.length) { blobDates += hit.length; blobPlan.push({ facility: r.facility, lane_key: k, fields: hit }); }
+      }
+    }
+
+    if (!dry) {
+      const tx = db.transaction(() => {
+        db.prepare('DELETE FROM lane_actual_dates WHERE week_start = ?').run(ws);
+        for (const r of rows) {
+          let blob; try { blob = JSON.parse(r.data); } catch (_) { continue; }
+          const lanes = (blob && blob.intl_lanes && typeof blob.intl_lanes === 'object') ? blob.intl_lanes : null;
+          if (!lanes) continue;
+          let touched = false;
+          for (const lane of Object.values(lanes)) {
+            for (const f of FIELDS) if (lane && lane[f]) { delete lane[f]; touched = true; }
+          }
+          // Only the six date fields are removed. Shipment refs, notes, customs holds and
+          // everything invoicing reads are left exactly as they are.
+          if (touched) {
+            db.prepare('UPDATE flow_week SET data = ?, updated_at = ? WHERE facility = ? AND week_start = ?')
+              .run(JSON.stringify(blob), new Date().toISOString(), r.facility, ws);
+          }
+        }
+      });
+      tx();
+    }
+
+    return {
+      week_start: ws, dry_run: dry,
+      lane_actual_rows: actuals.length, by_source: bySource,
+      plan_blob_dates: blobDates, plan_blob_lanes: blobPlan,
+      preserved: 'container records, shipment refs, notes, customs holds, and everything invoicing reads',
+      note: dry ? 'Nothing removed. Send confirm: true to apply.' : 'Removed.',
+    };
+  }
+
+  router.post('/legacy/clear', authenticateRequest, requireRole(['admin']),
+    auditLog('clear_legacy_lane_dates'), (req, res) => {
+    try {
+      const b = req.body || {};
+      const ws = String(b.week_start || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ws)) {
+        return res.status(400).json({ ok: false, error: 'week_start must be YYYY-MM-DD.' });
+      }
+      res.json({ ok: true, ...clearLegacy(ws, { confirm: b.confirm === true }) });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  console.log('[consignments] model v1 mounted');
+  router._internals = { computePlanned, refreshPlanned, shape, STAGES, DEFAULT_RULES, rulesFor, migrateWeek, clearLegacy };
+  return router;
+};
