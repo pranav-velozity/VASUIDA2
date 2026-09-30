@@ -42,6 +42,8 @@
   const today = () => new Date().toISOString().slice(0, 10);
 
   let _week = null, _data = [], _busy = false;
+  const _expanded = {};        // which tiles are showing their full journey
+  const _open = {};            // which stage each tile has open
 
   function styles() {
     if (document.getElementById('cg-css')) return;
@@ -77,6 +79,38 @@
       .cg-field{border:.5px solid rgba(0,0,0,.16);border-radius:8px;padding:6px 9px;
         font-size:12px;font-family:inherit;width:100%;}
       .cg-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+
+      /* Tiles: one per movement, wide enough to read, narrow enough that a week fits on a
+         screen without scrolling. */
+      .cg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:12px;margin-top:12px;}
+      .cg-tile{background:#fff;border:.5px solid rgba(0,0,0,.09);border-radius:12px;padding:14px 15px;
+        display:flex;flex-direction:column;gap:10px;transition:border-color .2s,box-shadow .2s;}
+      .cg-tile:hover{box-shadow:0 2px 10px rgba(16,18,27,.07);}
+      /* Only lateness gets a border. If every state had one, none of them would read. */
+      .cg-tile.is-late{border-color:rgba(153,0,51,.35);}
+      .cg-thead{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;}
+      .cg-tmeta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:3px;
+        font-size:10.5px;color:${MID};}
+      .cg-ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px;}
+
+      /* The spine: six dots down the right, newest state at a glance. */
+      .cg-spine{display:flex;flex-direction:column;gap:5px;align-items:center;flex-shrink:0;padding-top:2px;}
+      .cg-sdot{width:9px;height:9px;border-radius:50%;border:1.5px solid;padding:0;cursor:pointer;
+        transition:transform .15s,box-shadow .2s;}
+      .cg-sdot:hover{transform:scale(1.35);}
+
+      .cg-tbody{min-height:62px;display:flex;flex-direction:column;gap:7px;align-items:flex-start;}
+      .cg-tnext{display:flex;flex-direction:column;gap:1px;}
+      .cg-tnlabel{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};}
+      .cg-tnstage{font-size:15px;font-weight:600;letter-spacing:-.01em;}
+      .cg-tndate{font-family:ui-monospace,monospace;font-size:12px;color:${MID};}
+      .cg-tconfirm{padding:6px 12px;font-size:11.5px;}
+
+      .cg-tfoot{display:flex;align-items:center;gap:8px;font-size:10px;color:${LIGHT};}
+      .cg-bar{flex:1;height:3px;background:#EFF1F4;border-radius:2px;overflow:hidden;}
+      .cg-barfill{display:block;height:3px;background:${OK};border-radius:2px;transition:width .4s;}
+      .cg-tquote{display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:10.5px;color:${MID};
+        border-top:.5px solid rgba(0,0,0,.05);padding-top:9px;}
 
       /* The worklist: one line per consignment, and the actions sit next to the content
          rather than pinned to the far edge with a corridor of white between. */
@@ -151,36 +185,141 @@
   // ── A consignment reads as a journey, not a spreadsheet row ──
   // Six date inputs across six columns is the thing we are trying to leave behind. A rail with
   // a node per stage says the same in a glance: how far along, what is next, what is late.
+  // ── One tile per movement ──
+  // Four to six movements a week is exactly the count where tiles beat rows: each one is a
+  // thing you act on, not a record you scan. The tile gives most of its space to the only
+  // question that matters day to day — what is next, and did it happen.
+  //
+  // Colour is reserved for lateness. Six stages in three colours across five tiles is
+  // eighteen states competing for attention, and colour that means everything means nothing.
+  // Red here always means "this needs you".
+
+  const stageState = (ms) => {
+    if (ms.state === 'amended') return 'amended';
+    if (ms.state !== 'assumed') return 'done';
+    if (ms.planned_at && ms.planned_at <= today()) return 'due';
+    return 'future';
+  };
+  const STATE_INK = { done: OK, amended: WARN, due: LATE, future: '#C7C7CC' };
+
+  // The stage the tile is about: the first thing that is due, or failing that the first
+  // thing still to come.
+  function nextStage(c) {
+    const due = c.milestones.find(ms => stageState(ms) === 'due');
+    if (due) return { ms: due, overdue: true };
+    const future = c.milestones.find(ms => stageState(ms) === 'future');
+    return future ? { ms: future, overdue: false } : null;
+  }
+
+  // The vertical column, top right. Same dot vocabulary as the expanded view, so the two
+  // never need learning twice.
+  function spine(c, activeStage) {
+    return `
+      <div class="cg-spine">
+        ${c.milestones.map(ms => {
+          const st = stageState(ms);
+          const ink = STATE_INK[st];
+          const is = ms.stage === activeStage;
+          return `
+            <button class="cg-sdot" data-open="${esc(c.consignment_uid)}" data-stage="${esc(ms.stage)}"
+              title="${esc(STAGE_LABEL[ms.stage])} — ${esc(day(st === 'done' || st === 'amended' ? ms.actual_at : ms.planned_at))}"
+              style="background:${st === 'future' ? '#fff' : ink};border-color:${ink};
+                     ${is ? 'transform:scale(1.35);' : ''}
+                     ${st === 'due' ? 'box-shadow:0 0 0 3px rgba(153,0,51,.14);' : ''}"></button>`;
+        }).join('')}
+      </div>`;
+  }
+
+  function tile(c) {
+    const t = c.transit || {};
+    const quoteUnset = c.needs.includes('transit_days') || c.transit_defaulted;
+    const nx = nextStage(c);
+    const done = c.milestones.filter(ms => ms.state !== 'assumed').length;
+    const open = _open[c.consignment_uid] || null;
+    const pct = Math.round((done / c.milestones.length) * 100);
+
+    const headline = nx
+      ? `<div class="cg-tnext" style="color:${nx.overdue ? LATE : DARK};">
+           <span class="cg-tnlabel">${nx.overdue ? 'Waiting on' : 'Next'}</span>
+           <span class="cg-tnstage">${esc(STAGE_LABEL[nx.ms.stage])}</span>
+           <span class="cg-tndate">${esc(day(nx.ms.planned_at))}</span>
+         </div>
+         ${nx.overdue ? `<button class="cg-btn cg-tconfirm" data-ok="${esc(c.consignment_uid)}"
+              data-stage="${esc(nx.ms.stage)}">Happened on plan</button>
+            <button class="cg-tick" data-open="${esc(c.consignment_uid)}"
+              data-stage="${esc(nx.ms.stage)}">different date</button>`
+           : `<div class="cg-sub">Nothing due yet.</div>`}`
+      : `<div class="cg-tnext" style="color:${OK};">
+           <span class="cg-tnlabel">Complete</span>
+           <span class="cg-tnstage">All six recorded</span>
+         </div>`;
+
+    return `
+      <div class="cg-tile ${nx && nx.overdue ? 'is-late' : ''}" data-row="${esc(c.consignment_uid)}">
+        <div class="cg-thead">
+          <div style="min-width:0;">
+            <div class="cg-ref">${esc(c.reference || 'not advised')}</div>
+            <div class="cg-tmeta">
+              <span class="cg-tag" style="background:${c.mode === 'Air' ? 'rgba(30,155,215,.12)' : 'rgba(153,0,51,.10)'};
+                    color:${c.mode === 'Air' ? '#15618F' : BRAND};">${esc(c.mode)}</span>
+              ${c.size_ft ? `<span>${esc(c.size_ft)}</span>` : ''}
+              ${c.vessel ? `<span class="cg-ell">${esc(c.vessel)}</span>` : ''}
+            </div>
+          </div>
+          ${spine(c, open)}
+        </div>
+
+        <div class="cg-tbody">${headline}</div>
+
+        <div class="cg-tfoot">
+          <span>${done}/${c.milestones.length} recorded</span>
+          <span class="cg-bar"><span class="cg-barfill" style="width:${pct}%;"></span></span>
+          <span>${c.lanes.length} lane${c.lanes.length === 1 ? '' : 's'}</span>
+        </div>
+
+        <div class="cg-tquote">
+          ${quoteUnset
+            ? `<span style="color:${LATE};">transit not confirmed${t.quoted != null ? ` — using ${t.quoted}d` : ''}</span>`
+            : `quoted ${t.quoted}d${t.achieved != null ? ` · achieved ${t.achieved}d` : ''}${
+                t.variance == null ? '' : ` · <b style="color:${t.variance > 0 ? LATE : OK};">${t.variance > 0 ? '+' : ''}${t.variance}d</b>`}`}
+          ${c.needs.filter(x => x !== 'transit_days').length
+            ? `<span style="color:${LATE};"> · needs ${c.needs.filter(x => x !== 'transit_days').map(esc).join(', ')}</span>` : ''}
+          <span style="flex:1;"></span>
+          <button class="cg-tick" data-edit="${esc(c.consignment_uid)}">details</button>
+          <button class="cg-tick" data-expand="${esc(c.consignment_uid)}">${_expanded[c.consignment_uid] ? 'hide' : 'history'}</button>
+        </div>
+
+        ${_expanded[c.consignment_uid] ? rail(c) : ''}
+        <div class="cg-popslot" data-slot="${esc(c.consignment_uid)}"></div>
+      </div>`;
+  }
+
+  // The full journey, for when someone asks what happened to this container. Same dots, laid
+  // out along a line rather than down a column.
   function rail(c) {
-    const n = c.milestones.length;
     return `
       <div class="cg-rail">
         <div class="cg-line"></div>
-        ${c.milestones.map((ms, i) => {
-          const done = ms.state !== 'assumed';
-          const due = !done && ms.planned_at && ms.planned_at <= today();
-          const amended = ms.state === 'amended';
-          const ink = done ? (amended ? WARN : OK) : (due ? LATE : '#C7C7CC');
-          const shown = done ? ms.actual_at : ms.planned_at;
+        ${c.milestones.map(ms => {
+          const st = stageState(ms);
+          const ink = STATE_INK[st];
+          const shown = (st === 'done' || st === 'amended') ? ms.actual_at : ms.planned_at;
           return `
-            <button class="cg-node" data-open="${esc(c.consignment_uid)}" data-stage="${esc(ms.stage)}"
-                    title="${esc(STAGE_LABEL[ms.stage])} — ${esc(day(shown))}">
-              <span class="cg-dot" style="background:${done ? ink : '#fff'};border-color:${ink};
-                    ${due ? 'box-shadow:0 0 0 4px rgba(153,0,51,.12);' : ''}"></span>
-              <span class="cg-nlabel" style="color:${done || due ? DARK : LIGHT};">${esc(STAGE_LABEL[ms.stage])}</span>
+            <button class="cg-node" data-open="${esc(c.consignment_uid)}" data-stage="${esc(ms.stage)}">
+              <span class="cg-dot" style="background:${st === 'future' ? '#fff' : ink};border-color:${ink};
+                    ${st === 'due' ? 'box-shadow:0 0 0 4px rgba(153,0,51,.12);' : ''}"></span>
+              <span class="cg-nlabel" style="color:${st === 'future' ? LIGHT : DARK};">${esc(STAGE_LABEL[ms.stage])}</span>
               <span class="cg-ndate" style="color:${ink};">${esc(day(shown))}</span>
-              ${due ? '<span class="cg-ndue">due</span>' : ''}
-              ${amended ? '<span class="cg-namend">amended</span>' : ''}
+              ${st === 'due' ? '<span class="cg-ndue">due</span>' : ''}
+              ${st === 'amended' ? '<span class="cg-namend">amended</span>' : ''}
             </button>`;
         }).join('')}
       </div>`;
   }
 
-  // Opened from a node rather than sitting on screen for every stage at once. Thirty date
-  // inputs competing for attention when one or two need anything is how the old screen taught
-  // people to stop looking.
   function stagePopover(c, ms) {
-    const done = ms.state !== 'assumed';
+    const st = stageState(ms);
+    const done = st === 'done' || st === 'amended';
     return `
       <div class="cg-pop">
         <div class="cg-poph">${esc(STAGE_LABEL[ms.stage])} &middot; ${esc(c.reference || 'not advised')}</div>
@@ -200,37 +339,6 @@
         </div>
       </div>`;
   }
-
-  function consignmentRow(c) {
-    const t = c.transit || {};
-    // A defaulted transit is not a quote. Until the carrier's figure is in, every date after
-    // departure is a guess, and the row says so rather than looking complete.
-    const quoteUnset = c.needs.includes('transit_days') || c.transit_defaulted;
-    const variance = t.variance == null ? '' :
-      ` · <b style="color:${t.variance > 0 ? LATE : OK};">${t.variance > 0 ? '+' : ''}${t.variance}d vs quote</b>`;
-
-    return `
-      <div class="cg-item" data-row="${esc(c.consignment_uid)}">
-        <div class="cg-itop">
-          <span class="cg-ref">${esc(c.reference || 'not advised')}</span>
-          <span class="cg-tag" style="background:${c.mode === 'Air' ? 'rgba(30,155,215,.12)' : 'rgba(153,0,51,.10)'};
-                color:${c.mode === 'Air' ? '#15618F' : BRAND};">${esc(c.mode)}</span>
-          ${c.size_ft ? `<span class="cg-dim">${esc(c.size_ft)}</span>` : ''}
-          ${c.vessel ? `<span class="cg-dim">${esc(c.vessel)}</span>` : ''}
-          <span class="cg-dim">${c.lanes.length} lane${c.lanes.length === 1 ? '' : 's'}</span>
-          <span class="cg-dim">${quoteUnset
-            ? `<span style="color:${LATE};">transit not confirmed${t.quoted != null ? ` (using ${t.quoted}d)` : ''}</span>`
-            : `quoted ${t.quoted}d${t.achieved != null ? ` · achieved ${t.achieved}d` : ''}${variance}`}</span>
-          <span style="flex:1;"></span>
-          ${c.needs.filter(x => x !== 'transit_days').length
-            ? `<span class="cg-need">needs ${c.needs.filter(x => x !== 'transit_days').map(esc).join(', ')}</span>` : ''}
-          <button class="cg-tick" data-edit="${esc(c.consignment_uid)}">details</button>
-        </div>
-        ${rail(c)}
-        <div class="cg-popslot" data-slot="${esc(c.consignment_uid)}"></div>
-      </div>`;
-  }
-
 
   function editor(c) {
     const f = (label, key, val, ph) => `
@@ -310,7 +418,7 @@
             <span class="cg-sub">${_data.length} movement${_data.length === 1 ? '' : 's'} &middot;
               dates belong to the movement, lanes inherit them</span>
           </div>
-          ${_data.length ? _data.map(consignmentRow).join('')
+          ${_data.length ? `<div class="cg-grid">${_data.map(tile).join('')}</div>`
             : `<div class="cg-sub" style="padding:10px 0 0;">No consignments for this week yet.
                  Assign containers in Container Manager, then migrate the week.</div>`}
         </div>
@@ -342,7 +450,14 @@
       const already = slot.getAttribute('data-stage') === stage && slot.innerHTML.trim();
       slot.innerHTML = already ? '' : stagePopover(c, ms);
       slot.setAttribute('data-stage', already ? '' : stage);
+      _open[uid] = already ? null : stage;
       if (!already) wire(root);
+    });
+
+    root.querySelectorAll('[data-expand]').forEach(b => b.onclick = () => {
+      const uid = b.getAttribute('data-expand');
+      _expanded[uid] = !_expanded[uid];
+      render(root);
     });
 
     root.querySelectorAll('[data-popclose]').forEach(b => b.onclick = () => {
