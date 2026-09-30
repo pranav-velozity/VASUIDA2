@@ -658,6 +658,7 @@
     styles();
     if (opts && opts.week) _week = opts.week;
     el.id = el.id || 'cg-root';
+    el.dataset.cgOwned = '1';          // the caller placed this; the observer leaves it alone
     return load(el);
   }
 
@@ -741,8 +742,21 @@
     if (window.__consignmentsObserver) return;
     const obs = new MutationObserver(() => {
       const root = document.getElementById('cg-root');
-      if (root && root.isConnected) return;                  // still on the page, nothing to do
-      if (findHost()) mount();
+      const host = findHost();
+
+      // The section is gone: so is the panel. Rendered-on-request hosts are exempt — those
+      // belong to whoever asked for them and are theirs to clear.
+      if (root && root.isConnected && !host && !root.dataset.cgOwned) {
+        root.remove();
+        return;
+      }
+
+      if (root && root.isConnected) {
+        // Still here, but the section may have been rebuilt around it.
+        if (host && !host.contains(root) && !root.dataset.cgOwned) { root.remove(); mount(); }
+        return;
+      }
+      if (host) mount();
     });
     obs.observe(document.body, { childList: true, subtree: true });
     window.__consignmentsObserver = obs;
