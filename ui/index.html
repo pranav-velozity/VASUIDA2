@@ -6232,6 +6232,16 @@ window.__openPrebookModal = function(){
     wrap.innerHTML = pillsBar + '<div id="wh-ops-content-mirror">' + src.innerHTML + '</div>';
     detail.innerHTML = '';
     detail.appendChild(wrap);
+
+    if (view === 'transit' && window.__consignments
+        && typeof window.__consignments.renderInto === 'function') {
+      var live = wrap.querySelector('#ops-transit-host') || wrap.querySelector('#wh-ops-content-mirror');
+      if (live) {
+        live.innerHTML = '';
+        window.__consignments.renderInto(live, { week: (window.state && window.state.weekStart) || '' });
+      }
+    }
+
     // Restart the observer after rebuild
     setTimeout(startDetailWatcher, 100);
   }
@@ -6272,6 +6282,16 @@ window.__openPrebookModal = function(){
         + '<div id="wh-modal-content">' + src.innerHTML + '</div>';
       modal.appendChild(card);
       document.body.appendChild(modal);
+
+      // Live re-render for the transit view; a cloned tile has no listeners.
+      if ((window._lastOpsView || '') === 'transit' && window.__consignments
+          && typeof window.__consignments.renderInto === 'function') {
+        var mhost = card.querySelector('#ops-transit-host') || card.querySelector('#wh-modal-content');
+        if (mhost) {
+          mhost.innerHTML = '';
+          window.__consignments.renderInto(mhost, { week: (window.state && window.state.weekStart) || '' });
+        }
+      }
       // Close on backdrop click
       modal.addEventListener('click', function(ev){
         if(ev.target === modal || ev.target.id === 'wh-modal-close'){
@@ -6496,7 +6516,7 @@ window.__openPrebookModal = function(){
   <script src="/public/supplier_invoices_additive.js?v=4" defer></script>
   <script src="/public/dept_owners_additive.js?v=1" defer></script>
   <script src="/public/tile_polish_additive.js?v=3" defer></script>
-    <script src="/public/consignment_additive.js?v=8"></script>
+    <script src="/public/consignment_additive.js?v=9"></script>
     <script src="/public/report_builder.js?v=1"></script>
     <script src="/public/apo_builder.js?v=1"></script>
   <script src="/public/weekly_history_additive.js?v=3" defer></script>
