@@ -30,7 +30,7 @@
   // ------------------------- PATCH (v51.1) -------------------------
   // Guardrails to keep other modules from breaking Flow.
   // NOTE: Scripts load order is exec -> receiving -> flow (defer). Some helpers are expected globally.
-  window.__FLOW_BUILD__ = "v65-lastmile-schedule-dialog" + new Date().toISOString();
+  window.__FLOW_BUILD__ = "v66-lane-details-collapsed" + new Date().toISOString();
 
   // Receiving module expects this helper; if missing it throws and can interrupt week load flows.
   if (typeof window.computeCartonsOutByPOFromState !== 'function') {
@@ -5222,14 +5222,14 @@ detail.innerHTML = [
             </div>
           </div>
           <div class="flex items-center gap-2">
-            <button type="button" id="flow-lane-collapse" class="text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Collapse</button>
+            <button type="button" id="flow-lane-collapse" class="text-xs px-2 py-1 border rounded-lg bg-white hover:bg-gray-50">Expand</button>
             <span class="dot ${dot(lane.level)}"></span>
             <span class="text-xs px-2 py-0.5 rounded-full border ${pill(lane.level)} whitespace-nowrap">${statusLabel(lane.level)}</span>
           </div>
         </div>
 
 
-        <div id="flow-lane-editor-body" class="mt-3">
+        <div id="flow-lane-editor-body" class="mt-3 hidden">
           <div style="display:grid;grid-template-columns:1fr auto;gap:3px;align-items:center;margin-bottom:10px;">
             <div class="text-sm font-semibold text-gray-700">Docs &amp; customs milestones</div>
             <button type="button" id="flow-intl-copy-all" class="text-[11px] text-gray-600 underline hover:text-gray-800">Copy baselines</button>

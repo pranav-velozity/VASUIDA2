@@ -294,8 +294,7 @@
           </div>
 
           ${locked
-            ? `<div class="cg-lock">Enter this shipment&rsquo;s details before recording anything —
-                 the dates are computed from a default transit time, not the carrier&rsquo;s quote.
+            ? `<div class="cg-lock">Dates use a default transit, not the carrier&rsquo;s quote.
                  <button class="cg-btn cg-tconfirm" data-edit="${esc(c.consignment_uid)}">Add details</button></div>`
             : due
               ? `<div class="cg-duebox">
@@ -477,9 +476,7 @@
       catch (e) {
         const msg = String(e.message || e);
         alert(/details_required/.test(msg)
-          ? 'Enter this shipment\u2019s details first — the carrier\u2019s quoted transit time and the '
-            + 'shipment references. Until those are in, the planned dates are a guess and confirming '
-            + 'one would record a date nobody promised.'
+          ? 'Add the details first \u2014 the dates are still a guess without the carrier\u2019s quote.'
           : 'Could not save: ' + msg);
       }
       finally { _busy = false; }
