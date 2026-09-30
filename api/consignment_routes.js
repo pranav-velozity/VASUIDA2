@@ -51,6 +51,8 @@ module.exports = function mountConsignments(deps) {
       vessel          TEXT,                      -- vessel and voyage, or flight
       transit_days    REAL,                      -- carrier-quoted, THIS sailing, port to port
       departure_planned TEXT,                    -- air: the flight date, when not in the reference
+      transit_confirmed INTEGER NOT NULL DEFAULT 0,  -- 0 = still the rule default, not a carrier quote
+      baseline_fc_at  TEXT,                      -- the FC date the plan promised at the outset
       shipment_ref    TEXT,
       hbl             TEXT,
       mbl             TEXT,                      -- what an aggregator subscribes with
@@ -250,6 +252,16 @@ module.exports = function mountConsignments(deps) {
     if (!c) return;
     const m = milestonesFor(uid);
     const { planned } = computePlanned(c, m);
+
+    // Set once, and only once the transit time is a carrier quote rather than a rule default.
+    // Freezing it against the default made entering the real quote look like a two-day gain
+    // before anything had happened — the baseline has to be the first plan anyone promised,
+    // not the first one the system guessed.
+    if (!c.baseline_fc_at && c.transit_confirmed && planned.fc_receipt) {
+      db.prepare('UPDATE consignment SET baseline_fc_at = ? WHERE consignment_uid = ?')
+        .run(planned.fc_receipt, uid);
+      c.baseline_fc_at = planned.fc_receipt;
+    }
     for (const stage of STAGES) {
       const existing = m[stage];
       if (existing && existing.state !== 'assumed') {
@@ -309,10 +321,29 @@ module.exports = function mountConsignments(deps) {
         };
       })(),
 
+      // How much the promised FC date has moved, and whether the inputs behind it are real.
+      // A plan built on a rule default rather than a carrier quote is low confidence however
+      // little it has drifted — the number it rests on was never a promise.
+      eta_fc: planned.fc_receipt || null,
+      baseline_fc_at: c.baseline_fc_at || null,
+      confidence: (() => {
+        if (!c.transit_confirmed) return { level: 'unverified', drift: null,
+          why: 'transit time is still the default, not a carrier quote' };
+        const base = c.baseline_fc_at, now = planned.fc_receipt;
+        if (!base || !now) return { level: 'unknown', drift: null, why: 'no FC date yet' };
+        const drift = Math.round((new Date(now + 'T00:00:00Z') - new Date(base + 'T00:00:00Z')) / 86400000);
+        const level = Math.abs(drift) <= 1 ? 'on plan'
+          : (drift <= 4 && drift > 0 ? 'slipping' : (drift > 4 ? 'at risk' : 'ahead'));
+        return { level, drift,
+          why: drift === 0 ? 'tracking the original plan'
+             : `${Math.abs(drift)} day${Math.abs(drift) === 1 ? '' : 's'} ${drift > 0 ? 'later' : 'earlier'} than first planned` };
+      })(),
+
       // What is missing before this can be tracked or invoiced.
+      transit_confirmed: !!c.transit_confirmed,
       needs: [
         !c.reference ? 'reference' : null,
-        !Number.isFinite(Number(c.transit_days)) ? 'transit_days' : null,
+        (!c.transit_confirmed || !Number.isFinite(Number(c.transit_days))) ? 'transit_days' : null,
         c.status === 'booked' && !c.mbl ? 'mbl' : null,
         c.status === 'booked' && !c.hbl ? 'hbl' : null,
         c.status === 'booked' && !c.shipment_ref ? 'shipment_ref' : null,
@@ -358,23 +389,30 @@ module.exports = function mountConsignments(deps) {
       if (exists) {
         db.prepare(`UPDATE consignment SET facility=@facility, mode=@mode, reference=@reference,
                       size_ft=@size, carrier=@carrier, vessel=@vessel, transit_days=@transit,
-                      departure_planned=@depPlanned,
+                      transit_confirmed=@tconf, departure_planned=@depPlanned,
                       shipment_ref=@shipment, hbl=@hbl, mbl=@mbl, status=@status, updated_at=@now
                      WHERE consignment_uid=@uid`)
           .run({ uid, facility: b.facility || null, mode, reference: b.reference || null,
                  size: b.size_ft || null, carrier: b.carrier || null, vessel: b.vessel || null,
-                 transit, depPlanned: b.departure_planned || null,
+                 transit,
+                 // Entering a transit time IS confirming it: the field only gets a value when
+                 // somebody puts the carrier's figure in.
+                 tconf: transit != null ? 1 : 0,
+                 depPlanned: b.departure_planned || null,
                  shipment: b.shipment_ref || null, hbl: b.hbl || null, mbl: b.mbl || null,
                  status: b.status || 'planned', now: new Date().toISOString() });
       } else {
         db.prepare(`INSERT INTO consignment (consignment_uid, client_id, week_start, facility, mode,
-                      reference, size_ft, carrier, vessel, transit_days, departure_planned,
-                      shipment_ref, hbl, mbl, status, updated_at)
+                      reference, size_ft, carrier, vessel, transit_days, transit_confirmed,
+                      departure_planned, shipment_ref, hbl, mbl, status, updated_at)
                     VALUES (@uid,@client,@ws,@facility,@mode,@reference,@size,@carrier,@vessel,
-                            @transit,@depPlanned,@shipment,@hbl,@mbl,@status,@now)`)
+                            @transit,@tconf,@depPlanned,@shipment,@hbl,@mbl,@status,@now)`)
           .run({ uid, client, ws, facility: b.facility || null, mode, reference: b.reference || null,
                  size: b.size_ft || null, carrier: b.carrier || null, vessel: b.vessel || null,
                  transit: transit == null ? (r.default_transit_days || null) : transit,
+                 // A transit time supplied on create is a quote; one filled in from the rule
+                 // default is not, and must not unlock recording.
+                 tconf: transit != null ? 1 : 0,
                  depPlanned: b.departure_planned || null,
                  shipment: b.shipment_ref || null, hbl: b.hbl || null, mbl: b.mbl || null,
                  status: b.status || 'planned', now: new Date().toISOString() });
@@ -410,6 +448,19 @@ module.exports = function mountConsignments(deps) {
       const c = db.prepare('SELECT * FROM consignment WHERE consignment_uid = ? AND client_id = ?')
         .get(uid, curClient());
       if (!c) return res.status(404).json({ ok: false, error: 'No such consignment.' });
+
+      // Nothing can be confirmed until the movement is actually described. Confirming a
+      // stage against a date computed from a default transit records a fact that was never
+      // planned — which is how the old screen filled up with dates nobody believed.
+      if (!c.transit_confirmed && !b.clear) {
+        return res.status(409).json({ ok: false, error: 'details_required',
+          message: 'Enter this consignment\u2019s details first — the carrier\u2019s quoted transit time, '
+                 + 'and the shipment references. Until then the planned dates are a guess.',
+          missing: [
+            !c.transit_confirmed ? 'transit_days' : null,
+            !c.reference ? 'reference' : null,
+          ].filter(Boolean) });
+      }
 
       const m = milestonesFor(uid);
       const { planned } = computePlanned(c, m);
