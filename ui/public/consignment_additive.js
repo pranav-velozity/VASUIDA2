@@ -576,12 +576,20 @@
 
   // Mounted beside the existing transit markup rather than replacing it, so the old screen
   // stays reachable until this has been used for a week or two.
+  // Render into an element the caller owns. Nothing is appended to the page on its own.
+  function renderInto(el, opts) {
+    if (!el) return;
+    styles();
+    if (opts && opts.week) _week = opts.week;
+    el.id = el.id || 'cg-root';
+    return load(el);
+  }
+
   function mount() {
     styles();
-    const host = document.getElementById('flow-transit-panel')
-      || document.getElementById('page-flow')
-      || document.querySelector('[data-node="transit"]')
-      || document.querySelector('main');
+    // One place decides where this belongs. mount() having its own lookup meant the observer
+    // and the mount disagreed, and the panel silently never appeared.
+    const host = findHost();
     if (!host) return;
     const existing = document.getElementById('cg-root');
     // A root left behind in a host that is no longer on the page is not a reason to skip:
@@ -616,7 +624,7 @@
   }
 
   window.__consignments = {
-    mount,
+    mount, renderInto,
     reload: () => { const r = document.getElementById('cg-root'); if (r) load(r); },
     setWeek: (ws) => {
       _week = ws;
@@ -631,9 +639,17 @@
   // early or waits longer than it needs to. Watch for it instead, and give up after a while
   // rather than polling forever on a page that will never have one.
   function findHost() {
-    return document.getElementById('flow-transit-panel')
-        || document.getElementById('page-flow')
-        || document.querySelector('[data-node="transit"]');
+    const named = document.getElementById('flow-transit-panel')
+               || document.querySelector('[data-node="transit"]');
+    if (named) return named;
+
+    // No id on the section itself. The Manage Containers button sits inside it, so its card
+    // is a reliable way in — and lands the panel beside the lanes it describes rather than
+    // at the bottom of the Week Hub, which is where appending to #page-flow put it.
+    const btn = document.getElementById('flow-containers-btn');
+    if (!btn) return null;
+    const card = btn.closest('.rounded-2xl') || btn.closest('.rounded-xl') || btn.parentElement;
+    return (card && card.parentElement) || null;
   }
 
   function whenReady() {

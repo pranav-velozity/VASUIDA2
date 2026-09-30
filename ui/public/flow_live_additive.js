@@ -3358,25 +3358,28 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
       });
     }
 
-    // ── Late POs
-    if(receiving.latePOs && num(receiving.latePOs) > 0){
+    // ── Receiving, in one line
+    var lateN = num(receiving.latePOs || 0), missN = num(receiving.missingPOs || 0);
+    if(lateN > 0 || missN > 0){
+      var bits = [];
+      if(missN) bits.push(fmtInt(missN) + ' not yet received');
+      if(lateN) bits.push(fmtInt(lateN) + ' received late');
+      var worst = (receiving.suppliers||[])
+        .map(function(x){ return { name: x.supplier, n: num(x.latePOs||0) + Math.max(0, num(x.poCount||0) - num(x.receivedPOs||0)) }; })
+        .filter(function(x){ return x.n > 0; })
+        .sort(function(a,b){ return b.n - a.n; });
       actions.push({
-        level: 'yellow',
+        level: missN > 0 ? 'red' : 'yellow',
         icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 9h10M7 13h6"/><path d="M6 3h12a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3H10l-4 3v-3H6a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3z"/></svg>',
-        text: fmtInt(receiving.latePOs) + ' PO' + (num(receiving.latePOs)>1?'s':'') + ' received late',
-        sub: (function(){
-          var sup = (receiving.suppliers||[])
-            .map(function(x){ return { name: x.supplier, late: num(x.latePOs||0) }; })
-            .filter(function(x){ return x.late > 0; })
-            .sort(function(a,b){ return b.late - a.late; });
-          if(!sup.length) return 'After baseline deadline';
-          var top = sup.slice(0,2).map(function(x){ return x.name + ' (' + x.late + ')'; }).join(', ');
-          return 'Worst: ' + top + (sup.length>2 ? ' +' + (sup.length-2) + ' more' : '');
-        })()
+        text: bits.join(' · ') + ' of ' + fmtInt(receiving.plannedPOs || 0) + ' POs',
+        sub: worst.length
+          ? 'Worst: ' + worst.slice(0,2).map(function(x){ return x.name + ' (' + x.n + ')'; }).join(', ')
+            + (worst.length>2 ? ' +' + (worst.length-2) + ' more' : '')
+          : 'Against the baseline deadline'
       });
     }
 
-    // ── Customs holds
+        // ── Customs holds
     if(intl.holds && num(intl.holds) > 0){
       actions.push({
         level: 'red',
