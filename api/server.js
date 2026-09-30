@@ -11921,6 +11921,13 @@ async function _iconicAlert(filename, errMsg) {
 // The Monday attachments the server can now produce for itself. Both call the same code the
 // screens call, so a downloaded file and an emailed one cannot differ.
 const stockStatusReport = require('./stock_status_report');
+// One alert record, read by the map, the exceptions panel and email alike. Derived from the
+// consignments rather than stored, so there is no queue to keep in step with reality.
+const alertRoutes = require('./alert_routes')({
+  express, db, authenticateRequest, requireRole, auditLog, curClient,
+});
+app.use('/alerts', alertRoutes);
+
 // Dates belong to the movement, not to each lane. See ./consignment_routes for why.
 app.use('/consignments', require('./consignment_routes')({
   express, db, authenticateRequest, requireRole, auditLog, curClient,
