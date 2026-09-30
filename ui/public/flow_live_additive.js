@@ -3344,7 +3344,17 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
         level: vas.level === 'red' ? 'red' : 'yellow',
         icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V6a2 2 0 0 1 2-2h6v16"/><path d="M14 20V10a2 2 0 0 1 2-2h4v12"/><path d="M7 8h2M7 11h2M7 14h2"/></svg>',
         text: fmtInt(vasRemaining) + ' units not yet applied',
-        sub: Math.round(vasPct) + '% complete'
+        // A percentage without a rate is not a forecast. At the pace so far, this says whether
+        // the week lands.
+        sub: (function(){
+          var pct = Math.round(vasPct);
+          var dayNo = Math.max(1, Math.ceil((Date.now() - new Date(ws + 'T00:00:00Z')) / 86400000));
+          var perDay = Math.round(num(vas.appliedUnits||0) / dayNo);
+          if(!perDay) return pct + '% complete';
+          var daysLeft = Math.ceil(vasRemaining / perDay);
+          return pct + '% complete · ' + fmtInt(perDay) + '/day so far · ~'
+               + daysLeft + ' day' + (daysLeft>1?'s':'') + ' to finish';
+        })()
       });
     }
 
@@ -3354,7 +3364,15 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
         level: 'yellow',
         icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 9h10M7 13h6"/><path d="M6 3h12a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3H10l-4 3v-3H6a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3z"/></svg>',
         text: fmtInt(receiving.latePOs) + ' PO' + (num(receiving.latePOs)>1?'s':'') + ' received late',
-        sub: 'After baseline deadline'
+        sub: (function(){
+          var sup = (receiving.suppliers||[])
+            .map(function(x){ return { name: x.supplier, late: num(x.latePOs||0) }; })
+            .filter(function(x){ return x.late > 0; })
+            .sort(function(a,b){ return b.late - a.late; });
+          if(!sup.length) return 'After baseline deadline';
+          var top = sup.slice(0,2).map(function(x){ return x.name + ' (' + x.late + ')'; }).join(', ');
+          return 'Worst: ' + top + (sup.length>2 ? ' +' + (sup.length-2) + ' more' : '');
+        })()
       });
     }
 
@@ -3385,6 +3403,43 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
       });
     }
 
+    // ── Transit stages waiting on somebody
+    // Read from the consignments the Transit panel maintains. Cached on the window by that
+    // panel, so this adds no fetch of its own and simply stays quiet when it has nothing.
+    var cg = Array.isArray(window.__cgConsignments) ? window.__cgConsignments : [];
+    if(cg.length){
+      var todayISO = new Date().toISOString().slice(0,10);
+      var waiting = [];
+      cg.forEach(function(c){
+        (c.milestones||[]).forEach(function(m){
+          if(m.state === 'assumed' && m.planned_at && m.planned_at <= todayISO){
+            waiting.push({ ref: c.reference || 'not advised', stage: m.stage, planned: m.planned_at });
+          }
+        });
+      });
+      var unverified = cg.filter(function(c){ return !c.transit_confirmed; });
+      if(waiting.length){
+        var worst = waiting.slice().sort(function(a,b){ return a.planned < b.planned ? -1 : 1; })[0];
+        var overdue = Math.round((new Date(todayISO+'T00:00:00Z') - new Date(worst.planned+'T00:00:00Z'))/86400000);
+        var refs = Array.from(new Set(waiting.map(function(w){ return w.ref; })));
+        actions.push({
+          level: overdue >= 3 ? 'red' : 'yellow',
+          icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+          text: fmtInt(waiting.length) + ' transit milestone' + (waiting.length>1?'s':'') + ' unconfirmed',
+          sub: refs.slice(0,2).join(', ') + (refs.length>2 ? ' +' + (refs.length-2) : '')
+             + ' · oldest ' + overdue + 'd past plan'
+        });
+      }
+      if(unverified.length){
+        actions.push({
+          level: 'yellow',
+          icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6M12 16v6M2 12h6M16 12h6"/><circle cx="12" cy="12" r="3"/></svg>',
+          text: fmtInt(unverified.length) + ' consignment' + (unverified.length>1?'s':'') + ' without a carrier quote',
+          sub: 'Dates are computed from a default transit — ETA FC is a guess until entered'
+        });
+      }
+    }
+
     // ── Containers at sea / in transit
     var weekContainers = loadIntlWeekContainers(ws);
     var containers = Array.isArray(weekContainers && weekContainers.containers) ? weekContainers.containers : [];
@@ -3395,7 +3450,19 @@ const nameLabel = done ? `${n.label} ✓` : n.label;
         level: 'green',
         icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l.9-4.5L12 9l8.1 3.5.9 4.5"/><path d="M3 17c2 2 4 2 6 0s4-2 6 0 4 2 6 0"/><path d="M12 9V3"/></svg>',
         text: fmtInt(atSea.length) + ' container' + (atSea.length>1?'s':'') + ' in transit',
-        sub: vessels.length > 0 ? 'Vessel' + (vessels.length>1?'s':'') + ': ' + vessels.slice(0,2).join(', ') + (vessels.length>2?' +' + (vessels.length-2):'') : 'En route'
+        // Which lanes are aboard and when the first one lands: the two things anyone asks
+        // next, and both are already on the container record.
+        sub: (function(){
+          var lanes = 0;
+          atSea.forEach(function(c){ lanes += (Array.isArray(c.lane_keys) ? c.lane_keys.length : 0); });
+          var etas = atSea.map(function(c){ return c.eta_fc || c.arrived_at_planned || null; })
+                          .filter(Boolean).sort();
+          var bits = [];
+          if(lanes) bits.push(fmtInt(lanes) + ' lane' + (lanes>1?'s':'') + ' aboard');
+          if(etas.length) bits.push('first due ' + fmtInTZ(etas[0], tz));
+          if(vessels.length) bits.push(vessels.slice(0,2).join(', ') + (vessels.length>2?' +' + (vessels.length-2):''));
+          return bits.length ? bits.join(' · ') : 'En route';
+        })()
       });
     }
 

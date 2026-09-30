@@ -430,6 +430,16 @@
       <div class="cg-wrap">
         <div class="cg-card">
           <div class="cg-head">
+            <span class="cg-h">Consignments</span>
+            <span class="cg-sub">${_data.length} movement${_data.length === 1 ? '' : 's'} &middot;
+              dates belong to the movement, lanes inherit them</span>
+          </div>
+          ${_data.length ? `<div class="cg-grid">${_data.map(tile).join('')}</div>`
+            : `<div class="cg-sub" style="padding:10px 0 0;">No consignments for this week yet.
+                 Assign containers in Container Manager, then migrate the week.</div>`}
+        </div>
+        <div class="cg-card">
+          <div class="cg-head">
             <span class="cg-h">Needs an update</span>
             <span class="cg-sub">${totalDue
               ? `${totalDue} stage${totalDue === 1 ? '' : 's'} across ${groups.length} consignment${groups.length === 1 ? '' : 's'}`
@@ -451,16 +461,6 @@
             : `<div class="cg-sub" style="padding:8px 0 0;">Every stage that has come due has been confirmed or amended.</div>`}
         </div>
 
-        <div class="cg-card">
-          <div class="cg-head">
-            <span class="cg-h">Consignments</span>
-            <span class="cg-sub">${_data.length} movement${_data.length === 1 ? '' : 's'} &middot;
-              dates belong to the movement, lanes inherit them</span>
-          </div>
-          ${_data.length ? `<div class="cg-grid">${_data.map(tile).join('')}</div>`
-            : `<div class="cg-sub" style="padding:10px 0 0;">No consignments for this week yet.
-                 Assign containers in Container Manager, then migrate the week.</div>`}
-        </div>
         <div id="cg-editor-slot"></div>
       </div>`;
 
@@ -564,6 +564,9 @@
       const r = await call(`/consignments?week=${encodeURIComponent(ws || '')}`);
       _data = (r && r.consignments) || [];
       _week = ws;
+      // Shared with the Control Tower exception strip, which would otherwise repeat the fetch.
+      window.__cgConsignments = _data;
+      window.__cgWeek = ws;
       render(root);
     } catch (e) {
       root.innerHTML = `<div class="cg-card"><div class="cg-h">Consignments unavailable</div>
