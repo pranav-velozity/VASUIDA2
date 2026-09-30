@@ -53,6 +53,9 @@ module.exports = function mountConsignments(deps) {
       departure_planned TEXT,                    -- air: the flight date, when not in the reference
       transit_confirmed INTEGER NOT NULL DEFAULT 0,  -- 0 = still the rule default, not a carrier quote
       baseline_fc_at  TEXT,                      -- the FC date the plan promised at the outset
+      baseline_transit_days REAL,                -- the first quote entered; later ones are deviations
+      requote_count   INTEGER NOT NULL DEFAULT 0,
+      requote_log     TEXT,
       shipment_ref    TEXT,
       hbl             TEXT,
       mbl             TEXT,                      -- what an aggregator subscribes with
@@ -258,9 +261,11 @@ module.exports = function mountConsignments(deps) {
     // before anything had happened — the baseline has to be the first plan anyone promised,
     // not the first one the system guessed.
     if (!c.baseline_fc_at && c.transit_confirmed && planned.fc_receipt) {
-      db.prepare('UPDATE consignment SET baseline_fc_at = ? WHERE consignment_uid = ?')
-        .run(planned.fc_receipt, uid);
+      db.prepare(`UPDATE consignment SET baseline_fc_at = ?, baseline_transit_days = ?
+                   WHERE consignment_uid = ?`)
+        .run(planned.fc_receipt, c.transit_days, uid);
       c.baseline_fc_at = planned.fc_receipt;
+      c.baseline_transit_days = c.transit_days;
     }
     for (const stage of STAGES) {
       const existing = m[stage];
@@ -310,14 +315,23 @@ module.exports = function mountConsignments(deps) {
       // the quote, or the carrier's own revision erases the evidence of their slip.
       transit: (() => {
         const quoted = Number.isFinite(Number(c.transit_days)) ? Number(c.transit_days) : null;
+        const baseline = Number.isFinite(Number(c.baseline_transit_days)) ? Number(c.baseline_transit_days) : null;
         const dep = m.departed && m.departed.actual_at;
         const arr = m.arrived && m.arrived.actual_at;
         const achieved = (dep && arr)
           ? Math.round((new Date(arr + 'T00:00:00Z') - new Date(dep + 'T00:00:00Z')) / 86400000)
           : null;
+        let log = [];
+        try { log = JSON.parse(c.requote_log || '[]') || []; } catch (_) {}
         return {
-          quoted, achieved,
-          variance: (quoted != null && achieved != null) ? achieved - quoted : null,
+          quoted, achieved, baseline,
+          // Against the first promise, which is what the client experienced.
+          variance: (baseline != null && achieved != null) ? achieved - baseline : null,
+          // And against the quote in force now, which is what the carrier last said.
+          variance_to_current: (quoted != null && achieved != null) ? achieved - quoted : null,
+          requotes: Number(c.requote_count) || 0,
+          requote_days: (baseline != null && quoted != null) ? quoted - baseline : null,
+          requote_log: log,
         };
       })(),
 
@@ -385,7 +399,20 @@ module.exports = function mountConsignments(deps) {
       const r = rulesFor(client, b.facility, mode);
       const transit = Number.isFinite(Number(b.transit_days)) ? Number(b.transit_days) : null;
 
-      const exists = db.prepare('SELECT consignment_uid FROM consignment WHERE consignment_uid = ?').get(uid);
+      const exists = db.prepare('SELECT * FROM consignment WHERE consignment_uid = ?').get(uid);
+
+      // A changed quote after the baseline is set is a deviation from the plan, logged with
+      // who changed it and when. The baseline itself never moves.
+      if (exists && exists.baseline_transit_days != null && transit != null
+          && Number(transit) !== Number(exists.transit_days)) {
+        let log = [];
+        try { log = JSON.parse(exists.requote_log || '[]') || []; } catch (_) { log = []; }
+        log.push({ from: exists.transit_days, to: transit, at: new Date().toISOString(),
+                   by: (req.auth && req.auth.userId) || null });
+        db.prepare('UPDATE consignment SET requote_count = ?, requote_log = ? WHERE consignment_uid = ?')
+          .run(log.length, JSON.stringify(log.slice(-20)), uid);
+      }
+
       if (exists) {
         db.prepare(`UPDATE consignment SET facility=@facility, mode=@mode, reference=@reference,
                       size_ft=@size, carrier=@carrier, vessel=@vessel, transit_days=@transit,
