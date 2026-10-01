@@ -11688,9 +11688,10 @@ app.post('/ops/monthly-client-report/run', (req, res, next) => {
     // would deliver the client a duplicate.
     const key = `mcr_sent_${month}`;
     if (!dryRun && !force &&
-        db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability=?`).get(key))
+        db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability=?`).get(key)) {
       mcrLog({ month, trigger: cron ? 'cron' : 'manual', outcome: 'skipped', reason: 'already_sent' });
       return res.json({ skipped: true, reason: 'already_sent', month });
+    }
 
     const out = await mcrSendMonthly(month, `${req.protocol}://${req.get('host')}`, { dryRun, force });
     if (out.sent) db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled)
