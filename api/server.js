@@ -11556,6 +11556,28 @@ app.delete('/report/recipients/:id', authenticateRequest, requireRole(['admin'])
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS mcr_run_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ran_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    month      TEXT,
+    trigger    TEXT,              -- cron | manual | dry_run
+    outcome    TEXT NOT NULL,     -- sent | skipped | failed
+    reason     TEXT,
+    detail     TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_mcr_log_month ON mcr_run_log(month);
+`);
+
+function mcrLog(row) {
+  try {
+    db.prepare(`INSERT INTO mcr_run_log (month, trigger, outcome, reason, detail)
+                VALUES (?,?,?,?,?)`)
+      .run(row.month || null, row.trigger || null, row.outcome,
+           row.reason || null, row.detail ? JSON.stringify(row.detail).slice(0, 2000) : null);
+  } catch (e) { console.warn('[mcr] could not write the run log:', e.message); }
+}
+
 // ── Monthly client report: scheduled send ──
 // The cron fires DAILY at 15:00 UTC and this decides whether to act. Sydney is UTC+10 or
 // +11 depending on daylight saving, so any fixed monthly cron expression drifts by an hour
@@ -11624,6 +11646,23 @@ async function mcrSendMonthly(month, origin, opts) {
     rows: { shipping: shipping.rowCount, vas: vas.rowCount } };
 }
 
+// Did it run, and what happened? Previously unanswerable without reading the database.
+app.get('/ops/monthly-client-report/status', authenticateRequest, (req, res) => {
+  try {
+    const runs = db.prepare(`SELECT * FROM mcr_run_log ORDER BY id DESC LIMIT 40`).all();
+    const sent = db.prepare(`SELECT capability FROM client_capability
+                              WHERE client_id='__meta' AND capability LIKE 'mcr_sent_%'`).all()
+      .map(r => String(r.capability).replace('mcr_sent_', '')).sort();
+    const { to, cc } = mcrRecipients();
+    res.json({ ok: true,
+      months_sent: sent,
+      recipients: { to, cc, from: process.env.MONTHLY_CLIENT_REPORT_FROM || process.env.EXCEPTION_EMAIL_FROM || null },
+      recent_runs: runs });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
 app.post('/ops/monthly-client-report/run', (req, res, next) => {
   const cronSecret = process.env.LANE_CRON_SECRET;
   if (cronSecret && req.headers['x-lane-cron-secret'] === cronSecret) return next();
@@ -11637,8 +11676,9 @@ app.post('/ops/monthly-client-report/run', (req, res, next) => {
 
     // The daily trigger only acts on the 1st in Sydney, at or after 02:00 local.
     if (cron && !force && !(syd.d === 1 && syd.h >= 2)) {
-      return res.json({ skipped: true, reason: 'not_due',
-        sydney: `${syd.y}-${String(syd.m).padStart(2, '0')}-${String(syd.d).padStart(2, '0')} ${syd.h}:00` });
+      const when = `${syd.y}-${String(syd.m).padStart(2, '0')}-${String(syd.d).padStart(2, '0')} ${syd.h}:00`;
+      mcrLog({ trigger: 'cron', outcome: 'skipped', reason: 'not_due', detail: { sydney: when } });
+      return res.json({ skipped: true, reason: 'not_due', sydney: when });
     }
 
     const month = String(req.query.month || '').trim() || sydneyPreviousMonth();
@@ -11649,15 +11689,24 @@ app.post('/ops/monthly-client-report/run', (req, res, next) => {
     const key = `mcr_sent_${month}`;
     if (!dryRun && !force &&
         db.prepare(`SELECT 1 x FROM client_capability WHERE client_id='__meta' AND capability=?`).get(key))
+      mcrLog({ month, trigger: cron ? 'cron' : 'manual', outcome: 'skipped', reason: 'already_sent' });
       return res.json({ skipped: true, reason: 'already_sent', month });
 
     const out = await mcrSendMonthly(month, `${req.protocol}://${req.get('host')}`, { dryRun, force });
     if (out.sent) db.prepare(`INSERT OR IGNORE INTO client_capability (client_id, capability, enabled)
                               VALUES ('__meta', ?, 1)`).run(key);
     if (!out.sent && !out.dryRun) console.warn(`[mcr] ${month} NOT sent: ${out.reason}`);
+    mcrLog({ month, trigger: dryRun ? 'dry_run' : (cron ? 'cron' : 'manual'),
+             outcome: out.sent ? 'sent' : (out.dryRun ? 'skipped' : 'skipped'),
+             reason: out.sent ? null : (out.reason || (out.dryRun ? 'dry_run' : null)),
+             detail: { rows: out.rows, fx: out.fx, to: out.to } });
     res.json({ trigger: cron ? 'cron' : 'manual', sydney_hour: syd.h, ...out });
   } catch (e) {
     console.error('[POST /ops/monthly-client-report/run]', e);
+    // A failure is the thing most worth recording, and the one this job never recorded.
+    mcrLog({ month: String(req.query.month || '') || null,
+             trigger: req.headers['x-lane-cron-secret'] ? 'cron' : 'manual',
+             outcome: 'failed', reason: String(e.message || e) });
     res.status(500).json({ error: String(e.message || e) });
   }
 });
@@ -11685,19 +11734,19 @@ async function mcrResolveRate(month) {
   const lastDay = new Date(Date.UTC(+month.slice(0, 4), +month.slice(5, 7), 0)).toISOString().slice(0, 10);
   try {
     const { rate, date } = await mcrFetchUsdAud(lastDay);
-    db.prepare(`INSERT INTO fin_fx_rates (from_curr, to_curr, rate, updated_at)
+    db.prepare(`INSERT INTO fin_fx_rates (from_curr, to_curr, rate, fetched_at)
                 VALUES ('USD','AUD',?, datetime('now'))
-                ON CONFLICT(from_curr, to_curr) DO UPDATE SET rate=excluded.rate, updated_at=datetime('now')`)
+                ON CONFLICT(from_curr, to_curr) DO UPDATE SET rate=excluded.rate, fetched_at=datetime('now')`)
       .run(rate);
     return { rate, date, source: 'live',
       note: `Converted at 1 USD = ${rate} AUD — European Central Bank reference rate, ${date}.` };
   } catch (e) {
     console.warn('[mcr:fx] live rate unavailable:', e.message);
-    const fx = db.prepare(`SELECT rate, updated_at FROM fin_fx_rates WHERE from_curr='USD' AND to_curr='AUD'`).get();
+    const fx = db.prepare(`SELECT rate, fetched_at FROM fin_fx_rates WHERE from_curr='USD' AND to_curr='AUD'`).get();
     if (!fx || !fx.rate) return { error: 'no_rate' };
     // Falling back silently would send a file labelled AUD converted at an unknown rate.
-    return { rate: fx.rate, date: String(fx.updated_at || '').slice(0, 10), source: 'stored',
-      note: `Converted at 1 USD = ${fx.rate} AUD — rate of ${String(fx.updated_at || '').slice(0, 10)}; a live rate was unavailable at the time of sending.` };
+    return { rate: fx.rate, date: String(fx.fetched_at || '').slice(0, 10), source: 'stored',
+      note: `Converted at 1 USD = ${fx.rate} AUD — rate of ${String(fx.fetched_at || '').slice(0, 10)}; a live rate was unavailable at the time of sending.` };
   }
 }
 
