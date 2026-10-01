@@ -54,6 +54,12 @@ module.exports = function mountConsignments(deps) {
       transit_confirmed INTEGER NOT NULL DEFAULT 0,  -- 0 = still the rule default, not a carrier quote
       baseline_fc_at  TEXT,                      -- the FC date the plan promised at the outset
       baseline_transit_days REAL,                -- the first quote entered; later ones are deviations
+      -- What the carrier currently expects. Kept on the consignment rather than written into
+      -- a milestone's planned date, because the plan is recomputed whenever anything changes
+      -- and a value written into it is erased on the next pass.
+      carrier_etd     TEXT,
+      carrier_eta     TEXT,
+      carrier_est_at  TEXT,
       requote_count   INTEGER NOT NULL DEFAULT 0,
       requote_log     TEXT,
       shipment_ref    TEXT,
@@ -215,14 +221,21 @@ module.exports = function mountConsignments(deps) {
     } else {
       planned.packing_list_ready = addDays(ws, r.packing_list_offset_days);
       planned.origin_cleared = addDays(ws, r.origin_cleared_offset_days);
-      planned.departed = addDays(ws, r.departed_offset_days);
+      // The rhythm says Wednesday; the carrier says when the ship actually sails. Where they
+      // disagree the carrier wins, because the rhythm is a planning convenience and the
+      // carrier is looking at the vessel.
+      planned.departed = c.carrier_etd || addDays(ws, r.departed_offset_days);
     }
 
     const departedReal = (m.departed && m.departed.actual_at) || null;
     const departBasis = departedReal || planned.departed;
 
+    // Arrival follows the quoted transit from whenever departure actually is — so a three-day
+    // ETD slip moves the arrival by three days without anyone touching the quote. A carrier
+    // ETA, where there is one, is more specific and takes precedence.
     const transit = Number(c.transit_days);
-    planned.arrived = Number.isFinite(transit) ? addDays(departBasis, transit) : null;
+    planned.arrived = c.carrier_eta
+      || (Number.isFinite(transit) ? addDays(departBasis, transit) : null);
 
     const arrivedReal = (m.arrived && m.arrived.actual_at) || null;
     const arriveBasis = arrivedReal || planned.arrived;
@@ -339,6 +352,9 @@ module.exports = function mountConsignments(deps) {
       // A plan built on a rule default rather than a carrier quote is low confidence however
       // little it has drifted — the number it rests on was never a promise.
       eta_fc: planned.fc_receipt || null,
+      carrier: (c.carrier_etd || c.carrier_eta)
+        ? { etd: c.carrier_etd || null, eta: c.carrier_eta || null, as_at: c.carrier_est_at || null }
+        : null,
       baseline_fc_at: c.baseline_fc_at || null,
       confidence: (() => {
         if (!c.transit_confirmed) return { level: 'unverified', drift: null,

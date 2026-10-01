@@ -11921,6 +11921,17 @@ async function _iconicAlert(filename, errMsg) {
 // The Monday attachments the server can now produce for itself. Both call the same code the
 // screens call, so a downloaded file and an emailed one cannot differ.
 const stockStatusReport = require('./stock_status_report');
+// Terminal49 writes the two milestones a carrier can actually observe — departure and
+// arrival — and revises the planned arrival. It never touches the quoted transit, or a stage
+// a person has already confirmed.
+const consignmentRoutes = require('./consignment_routes')({
+  express, db, authenticateRequest, requireRole, auditLog, curClient,
+});
+app.use('/t49', require('./t49_routes')({
+  express, db, authenticateRequest, requireRole, auditLog, curClient,
+  refreshPlanned: consignmentRoutes._internals && consignmentRoutes._internals.refreshPlanned,
+}));
+
 // One alert record, read by the map, the exceptions panel and email alike. Derived from the
 // consignments rather than stored, so there is no queue to keep in step with reality.
 const alertRoutes = require('./alert_routes')({
@@ -11929,9 +11940,7 @@ const alertRoutes = require('./alert_routes')({
 app.use('/alerts', alertRoutes);
 
 // Dates belong to the movement, not to each lane. See ./consignment_routes for why.
-app.use('/consignments', require('./consignment_routes')({
-  express, db, authenticateRequest, requireRole, auditLog, curClient,
-}));
+app.use('/consignments', consignmentRoutes);
 
 // Read-only: where transit time is actually lost, before anything is bought to fix it.
 app.use('/lanes', require('./lane_slip_report')({
