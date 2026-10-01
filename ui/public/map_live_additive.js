@@ -140,7 +140,65 @@
   }
 
   // ── Build all map data ──
-  function buildMapData(lanes, containers, plan, receiving, appliedByPO){
+  /* ── Consignment dates, overlaid onto the lane ──
+   The map reads its dates from the lane blob — departed_at, arrived_at and the rest. Those
+   fields stopped being written when dates moved onto the container: a confirmation now lands
+   in consignment_milestone, and so does anything Terminal49 reports. The map was still
+   reading the old copy, which is worse than reading nothing because a stale date looks
+   exactly like a current one.
+
+   Rather than rewrite the stage logic, the consignment's dates are written onto the lane
+   object under the names the getters already look for. Everything downstream — stages, arcs,
+   vessel grouping — works unchanged, and a week not yet brought across still falls back to
+   whatever the lane itself holds. */
+const CG_STAGE_FIELD = {
+  packing_list_ready: 'packing_list_ready_at',
+  origin_cleared: 'origin_customs_cleared_at',
+  departed: 'departed_at',
+  arrived: 'arrived_at',
+  dest_cleared: 'dest_customs_cleared_at',
+  fc_receipt: 'eta_fc',
+};
+
+function cgIndex(consignments){
+  const byLane = new Map();
+  for(const c of (consignments||[])){
+    const dates = {}, states = {};
+    for(const ms of (c.milestones||[])){
+      const field = CG_STAGE_FIELD[ms.stage];
+      if(!field) continue;
+      // An actual is a fact; a planned date is only shown for the delivery estimate, where
+      // the map has always displayed an expectation rather than an event.
+      if(ms.actual_at) dates[field] = ms.actual_at;
+      else if(ms.stage === 'fc_receipt' && ms.planned_at) dates[field] = ms.planned_at;
+      states[ms.stage] = ms.state;
+    }
+    const entry = {
+      dates, states,
+      reference: c.reference || null,
+      vessel: c.vessel || null,
+      mbl: c.mbl || null,
+      hbl: c.hbl || null,
+      eta_fc: c.eta_fc || null,
+      confidence: c.confidence || null,
+      transit: c.transit || null,
+      tracked: !!(c.carrier && (c.carrier.etd || c.carrier.eta)),
+    };
+    for(const k of (c.lanes||[])) byLane.set(String(k), entry);
+  }
+  return byLane;
+}
+
+// Lanes are keyed supplier||zendesk||freight. The map holds the parts, so the key is rebuilt
+// rather than assumed to be on the row.
+function cgKeyFor(lane){
+  const sup = String(lane.supplier||'').trim();
+  const zd = String(lane.zendesk||'').trim();
+  const fr = String(lane.freight||'').trim();
+  return sup + '||' + zd + '||' + fr;
+}
+
+function buildMapData(lanes, containers, plan, receiving, appliedByPO, consignments){
 
     // ── Diagnostics — visible in DevTools console ──
     console.log('[Map:build] inputs — plan:',plan.length,'receiving:',receiving.length,'appliedByPO:',appliedByPO.size,'lanes:',lanes.length);
@@ -245,8 +303,13 @@
       last_mile: [],
     };
 
+    const cgByLane = cgIndex(consignments);
+
     for(const lane of lanes){
-      const m = lane.manual || {};
+      const cg = cgByLane.get(cgKeyFor(lane)) || null;
+      // The consignment wins where it has something to say; the lane blob fills the rest, so
+      // a week not yet brought across is unaffected.
+      const m = cg ? Object.assign({}, lane.manual || {}, cg.dates) : (lane.manual || {});
       const zendesk = String(lane.zendesk||'').trim();
       const freight = String(lane.freight||'').trim().toLowerCase();
       const isAir = freight === 'air';
@@ -287,7 +350,21 @@
       const etaPort = getEtaFC(m) || getLatestArrival(m);
 
       const weekLabel = zdWeek.get(zendesk) || '';
-      const zdEntry = {zendesk, applied, planned, hbl, mbl, supplier: lane.supplier||'', freight: lane.freight||'', stage, manual: m, isAir, etaPort, weekLabel};
+      // What the consignment says about running late, so the map can show it rather than
+      // leaving people to compare dates in their head.
+      const conf = cg && cg.confidence ? cg.confidence : null;
+      const drift = conf && typeof conf.drift === 'number' ? conf.drift : null;
+      const delay = (drift != null && drift > 0) ? drift : null;
+      const early = (drift != null && drift < 0) ? -drift : null;
+      const unconfirmed = cg
+        ? Object.entries(cg.states || {}).filter(([, st]) => st === 'assumed').length
+        : null;
+
+      const zdEntry = {zendesk, applied, planned, hbl, mbl, supplier: lane.supplier||'', freight: lane.freight||'', stage, manual: m, isAir, etaPort, weekLabel,
+        container: cg ? cg.reference : null,
+        delay, early, confidence: conf ? conf.level : null, unconfirmed,
+        tracked: cg ? cg.tracked : false,
+        etaFc: cg ? cg.eta_fc : null};
 
       // Static location
       if(stage !== 'transit'){
@@ -376,7 +453,30 @@
   }
 
   // ── Detail panel helpers ──
-  function dRow(label,value){
+  // A delay badge for a lane, from the consignment's own reading of its dates. Only lateness
+// gets colour: if every state had its own, a red pill would stop meaning "look at this".
+function delayPill(z){
+  if(!z) return '';
+  if(z.delay){
+    return `<span style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;
+      background:rgba(153,0,51,.10);color:#990033;border-radius:4px;padding:1px 5px;
+      letter-spacing:.04em;" title="${z.delay} day${z.delay===1?'':'s'} later than first promised${
+        z.etaFc?' · now due '+z.etaFc:''}">+${z.delay}D</span>`;
+  }
+  if(z.early){
+    return `<span style="display:inline-block;margin-left:6px;font-size:9px;font-weight:600;
+      background:rgba(27,127,59,.10);color:#1B7F3B;border-radius:4px;padding:1px 5px;"
+      title="${z.early} day${z.early===1?'':'s'} earlier than first promised">-${z.early}D</span>`;
+  }
+  if(z.confidence === 'unverified'){
+    return `<span style="display:inline-block;margin-left:6px;font-size:9px;font-weight:600;
+      background:#F2F2F5;color:#8E8E93;border-radius:4px;padding:1px 5px;"
+      title="No carrier quote — the dates are computed from a default transit">EST</span>`;
+  }
+  return '';
+}
+
+function dRow(label,value){
     if(!value||value==='—') return '';
     return `<div style="display:flex;justify-content:space-between;padding:8px 12px;border-bottom:0.5px solid rgba(0,0,0,0.05);">
       <span style="font-size:11px;color:#AEAEB2;">${label}</span>
@@ -409,7 +509,7 @@
       return `
       <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;border-bottom:0.5px solid rgba(0,0,0,0.05);">
         <div>
-          <div style="font-size:11px;font-weight:500;color:#1C1C1E;">#${z.zendesk}<span style="font-size:10px;font-weight:400;color:#AEAEB2;">${wkLabel}</span></div>
+          <div style="font-size:11px;font-weight:500;color:#1C1C1E;">#${z.zendesk}<span style="font-size:10px;font-weight:400;color:#AEAEB2;">${wkLabel}</span>${delayPill(z)}</div>
           ${z.supplier?`<div style="font-size:10px;color:#AEAEB2;">${z.supplier}</div>`:''}
         </div>
         <div style="font-size:11px;color:#6E6E73;">${z.applied.toLocaleString()} applied</div>
@@ -483,7 +583,7 @@
       const wkLabel = z.weekLabel ? ` (${fmtWeek(z.weekLabel)})` : '';
       return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;border-bottom:0.5px solid rgba(0,0,0,0.05);">
         <div>
-          <div style="font-size:11px;font-weight:500;color:#1C1C1E;">#${z.zendesk}<span style="font-size:10px;font-weight:400;color:#AEAEB2;">${wkLabel}</span></div>
+          <div style="font-size:11px;font-weight:500;color:#1C1C1E;">#${z.zendesk}<span style="font-size:10px;font-weight:400;color:#AEAEB2;">${wkLabel}</span>${delayPill(z)}</div>
           ${z.supplier?`<div style="font-size:10px;color:#AEAEB2;">${z.supplier}</div>`:''}
         </div>
         <div style="text-align:right;">
@@ -1073,6 +1173,15 @@
 
     const weekStart=window.state?.weekStart||'';
 
+  // Dates now live on the consignment. Fetched here so the map reads the same record the
+  // Transit & Clearing tiles do — two sources would drift, and the map is where people look
+  // when they want to believe something.
+  let consignments=[];
+  try{
+    const cg=await api('/consignments?week='+encodeURIComponent(weekStart));
+    consignments=(cg&&cg.consignments)||[];
+  }catch(_){ /* a week with none, or an older deployment: fall back to the lane blob */ }
+
     // ── appliedByPO: use window.state.records + fetch older weeks ──
     // state.records only covers current week — fetch all 16 weeks for complete picture
     const appliedByPO=new Map();
@@ -1171,7 +1280,7 @@
     console.log('[Map] plan sample zendesk fields:',planRows.slice(0,3).map(p=>p.zendesk_ticket));
     console.log('[Map] lane sample zendesks:',dedupedLanes.slice(0,3).map(l=>l.zendesk));
 
-    return {lanes:dedupedLanes,containers:allContainers,plan:planRows,receiving,appliedByPO};
+    return {lanes:dedupedLanes,containers:allContainers,plan:planRows,receiving,appliedByPO,consignments};
   }
 
   // ── Init ──
@@ -1196,7 +1305,7 @@
 
     try{
       const raw=await loadMapData();
-      mapData=buildMapData(raw.lanes,raw.containers,raw.plan,raw.receiving,raw.appliedByPO);
+      mapData=buildMapData(raw.lanes,raw.containers,raw.plan,raw.receiving,raw.appliedByPO,raw.consignments);
       // Stash for the Detail modal — it needs plan rows (for PO/SKU) and the
       // built location/vessel groups (to derive stage + days-at-stage).
       _modalCache.mapData = mapData;
