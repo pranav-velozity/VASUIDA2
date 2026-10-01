@@ -74,6 +74,21 @@ module.exports = function mountT49(deps) {
     );
   `);
 
+  // The same trap: t49_link gained columns after it first existed.
+  function addColumn(table, column, decl) {
+    try {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+      if (!cols.includes(column)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+        console.log(`[t49] added ${table}.${column}`);
+      }
+    } catch (e) { console.warn(`[t49] could not add ${table}.${column}:`, e.message); }
+  }
+  for (const [col, decl] of [['pickup_lfd', 'TEXT'], ['holds', 'TEXT'], ['available_at', 'TEXT'],
+                             ['pod_terminal', 'TEXT'], ['last_context', 'TEXT']]) {
+    addColumn('t49_link', col, decl);
+  }
+
   // ── Their vocabulary, mapped onto ours ──
   // Observations only: each of these is something the carrier or terminal saw happen.
   const ACTUAL_EVENTS = {

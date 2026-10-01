@@ -121,6 +121,41 @@ module.exports = function mountConsignments(deps) {
     );
   `);
 
+  // ── Columns added after the table first existed ──
+  // CREATE TABLE IF NOT EXISTS does nothing to a table that is already there, so every column
+  // added since the first deploy has to be applied on its own. Without this, a database
+  // created last week has none of them and saving fails with "no such column".
+  function addColumn(table, column, decl) {
+    try {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+      if (!cols.includes(column)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+        console.log(`[consignments] added ${table}.${column}`);
+      }
+    } catch (e) {
+      console.warn(`[consignments] could not add ${table}.${column}:`, e.message);
+    }
+  }
+
+  addColumn('consignment', 'transit_confirmed', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('consignment', 'departure_planned', 'TEXT');
+  addColumn('consignment', 'baseline_fc_at', 'TEXT');
+  addColumn('consignment', 'baseline_transit_days', 'REAL');
+  addColumn('consignment', 'requote_count', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('consignment', 'requote_log', 'TEXT');
+  addColumn('consignment', 'carrier_etd', 'TEXT');
+  addColumn('consignment', 'carrier_eta', 'TEXT');
+  addColumn('consignment', 'carrier_est_at', 'TEXT');
+  addColumn('consignment_rules', 'before_departure', 'TEXT');
+
+  // Anything migrated before the quote was tracked carries a rule default, not a carrier
+  // figure, and must stay locked until somebody enters the real one. The default for the
+  // column does that; this only makes the intent explicit for rows that predate it.
+  try {
+    db.prepare(`UPDATE consignment SET transit_confirmed = 0
+                 WHERE transit_confirmed IS NULL`).run();
+  } catch (_) { /* nothing to do on a fresh table */ }
+
   const STAGES = ['packing_list_ready', 'origin_cleared', 'departed', 'arrived', 'dest_cleared', 'fc_receipt'];
 
   // Sea reflects the rhythm as described: packing Friday (+4), cleared the Monday after (+7),
