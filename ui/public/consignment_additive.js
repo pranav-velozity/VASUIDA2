@@ -204,7 +204,9 @@
     });
     const text = await res.text();
     let json = null; try { json = JSON.parse(text); } catch (_) {}
-    if (!res.ok) throw new Error((json && json.error) || text.slice(0, 200));
+    if (!res.ok) {
+      throw new Error((json && (json.message || json.error)) || text.slice(0, 200));
+    }
     return json;
   }
   // ── A consignment reads as a journey, not a spreadsheet row ──
@@ -435,6 +437,7 @@
           ${f('Container / AWB', 'reference', c.reference)}
           ${f('Vessel / flight', 'vessel', c.vessel)}
           ${f('Carrier', 'carrier', c.carrier)}
+          ${c.mode === 'Air' ? '' : f('Carrier code (SCAC)', 'scac', c.scac, 'EGLV, MAEU, CMDU…')}
           ${f('Transit days (quoted)', 'transit_days', c.transit_days, 'e.g. 26')}
           ${c.mode === 'Air' ? f('Flight date', 'departure_planned', c.departure_planned, 'YYYY-MM-DD') : ''}
           ${f('Shipment #', 'shipment_ref', c.shipment_ref)}
@@ -611,8 +614,15 @@
     root.querySelectorAll('[data-track]').forEach(b => b.onclick = () => act(async () => {
       const uid = b.getAttribute('data-track');
       b.textContent = 'asking…';
-      const r = await post('/t49/subscribe', { consignment_uid: uid });
-      if (r && r.note) alert(r.note);
+      try {
+        const r = await post('/t49/subscribe', { consignment_uid: uid });
+        if (r && r.note) alert(r.note);
+      } catch (e) {
+        // Terminal49's own words. An error that says only "refused" leaves somebody guessing
+        // at a carrier code they could have typed in ten seconds.
+        alert(String(e.message || e));
+        throw e;
+      }
     }));
 
     root.querySelectorAll('[data-ack]').forEach(b => b.onclick = () => act(() =>
