@@ -109,6 +109,9 @@
       .cg-tfoot{display:flex;align-items:center;gap:8px;font-size:10px;color:${LIGHT};}
       .cg-bar{flex:1;height:3px;background:#EFF1F4;border-radius:2px;overflow:hidden;}
       .cg-barfill{display:block;height:3px;background:${OK};border-radius:2px;transition:width .4s;}
+      .cg-track{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
+        border-radius:5px;padding:2px 7px;border:0;cursor:default;font-family:inherit;}
+      button.cg-track{cursor:pointer;}
       .cg-alert{display:flex;align-items:flex-start;gap:12px;padding:10px 0;
         border-top:.5px solid rgba(0,0,0,.05);}
       .cg-aheadline{font-size:12.5px;font-weight:600;color:${DARK};line-height:1.35;}
@@ -263,6 +266,30 @@
     'unknown':    { ink: LIGHT, bg: '#F2F2F5' },
   };
 
+  // Terminal49 covers ocean only, and only once there is something to track with. The chip
+  // says which of those is true rather than leaving a silent gap.
+  function trackingChip(c) {
+    if (c.mode === 'Air') return `<span class="cg-dim" title="Terminal49 tracks ocean freight">air · manual</span>`;
+    const t = _tracking[c.consignment_uid];
+    if (t && t.state === 'tracking') {
+      return `<span class="cg-track" style="background:rgba(27,127,59,.12);color:${OK};">tracking</span>`;
+    }
+    if (t && t.state === 'requested') {
+      return `<span class="cg-track" style="background:#F2F2F5;color:${MID};"
+        title="Terminal49 is looking for this shipment">requested</span>`;
+    }
+    if (t && t.state === 'failed') {
+      return `<button class="cg-track" style="background:rgba(153,0,51,.10);color:${LATE};"
+        data-track="${esc(c.consignment_uid)}" title="${esc(t.failed_reason || 'The carrier could not find it')}">retry tracking</button>`;
+    }
+    if (!c.mbl) {
+      return `<span class="cg-track" style="background:rgba(184,134,11,.14);color:${WARN};"
+        title="Terminal49 needs the MBL to track this">MBL needed</span>`;
+    }
+    return `<button class="cg-track" style="background:#fff;border:.5px solid rgba(0,0,0,.16);color:${DARK};"
+      data-track="${esc(c.consignment_uid)}">track it</button>`;
+  }
+
   function tile(c) {
     const t = c.transit || {};
     const conf = c.confidence || { level: 'unknown', why: '' };
@@ -336,6 +363,7 @@
           ${c.needs.filter(x => x !== 'transit_days').length
             ? `<span style="color:${LATE};"> · needs ${c.needs.filter(x => x !== 'transit_days').map(esc).join(', ')}</span>` : ''}
           <span style="flex:1;"></span>
+          ${trackingChip(c)}
           <button class="cg-tick" data-edit="${esc(c.consignment_uid)}">details</button>
           <button class="cg-tick" data-expand="${esc(c.consignment_uid)}">${_expanded[c.consignment_uid] ? 'hide' : 'history'}</button>
         </div>
@@ -580,6 +608,13 @@
       mig.disabled = false; mig.textContent = 'Check this week';
     };
 
+    root.querySelectorAll('[data-track]').forEach(b => b.onclick = () => act(async () => {
+      const uid = b.getAttribute('data-track');
+      b.textContent = 'asking…';
+      const r = await post('/t49/subscribe', { consignment_uid: uid });
+      if (r && r.note) alert(r.note);
+    }));
+
     root.querySelectorAll('[data-ack]').forEach(b => b.onclick = () => act(() =>
       post('/alerts/ack', { consignment_uid: b.getAttribute('data-ack'),
                             kind: b.getAttribute('data-kind'),
@@ -637,7 +672,18 @@
           const k = i.getAttribute('data-f');
           body[k] = k === 'transit_days' ? (i.value === '' ? null : Number(i.value)) : i.value.trim();
         });
-        await post('/consignments', body);
+        const saved = await post('/consignments', body);
+
+        // Subscribing is the point of entering the MBL, so it happens here rather than
+        // waiting for somebody to remember. Guarded: only ocean, only with an MBL, and only
+        // when nothing is tracking yet — a correction to a tracked consignment must not
+        // create a second tracking request.
+        const sc = (saved && saved.consignment) || {};
+        const already = _tracking[c.consignment_uid];
+        if (sc.mode !== 'Air' && body.mbl && !already) {
+          try { await post('/t49/subscribe', { consignment_uid: c.consignment_uid }); }
+          catch (e) { console.warn('[consignments] could not subscribe:', e.message); }
+        }
         slot.innerHTML = '';
       });
     });
@@ -646,6 +692,7 @@
   const currentWeek = () => _week || window.state?.weekStart || window._reportsWeek || null;
 
   let _alerts = [];
+  let _tracking = {};        // consignment_uid -> { state, failed_reason, container_number }
 
   function alertCard() {
     const open = _alerts.filter(a => !a.acknowledged_at && a.kind === 'fc_moved');
@@ -688,6 +735,14 @@
         _alerts = (al && al.alerts) || [];
       } catch (_) { _alerts = []; }
       window.__cgAlerts = _alerts;
+
+      // Who is being tracked, so the tile can say so rather than leaving people to guess
+      // whether the carrier feed is on for this box.
+      try {
+        const t = await call('/t49/status');
+        _tracking = {};
+        for (const sub of ((t && t.subscriptions) || [])) _tracking[sub.consignment_uid] = sub;
+      } catch (_) { _tracking = {}; }
       render(root);
     } catch (e) {
       root.innerHTML = `<div class="cg-card"><div class="cg-h">Consignments unavailable</div>
