@@ -88,6 +88,7 @@ module.exports = function mountT49(deps) {
                              ['pod_terminal', 'TEXT'], ['last_context', 'TEXT']]) {
     addColumn('t49_link', col, decl);
   }
+  addColumn('consignment', 'scac', 'TEXT');
 
   // ── Their vocabulary, mapped onto ours ──
   // Observations only: each of these is something the carrier or terminal saw happen.
@@ -164,24 +165,61 @@ module.exports = function mountT49(deps) {
           message: 'Enter the MBL or the container number before subscribing.' });
       }
 
-      const body = { data: { type: 'tracking_request', attributes: {
-        request_type: type, request_number: number,
-        scac: req.body.scac || undefined,          // omitted: Terminal49 infers the carrier
-        ref_numbers: [c.reference, c.shipment_ref].filter(Boolean),
-      } } };
+      // Terminal49 requires either a carrier SCAC or an explicit instruction to work it out.
+      // An omitted `scac` is not the same as asking them to infer it: JSON.stringify drops an
+      // undefined key, so the first version of this sent neither and was refused for a blank
+      // SCAC it never knowingly sent.
+      const scac = String(req.body.scac || c.scac || '').trim().toUpperCase();
 
-      const r = await fetch(API + '/tracking_requests', {
-        method: 'POST',
-        headers: { 'Authorization': 'Token ' + key,
-                   'Content-Type': 'application/vnd.api+json',
-                   'Accept': 'application/vnd.api+json' },
-        body: JSON.stringify(body),
-      });
-      const text = await r.text();
-      let json = null; try { json = JSON.parse(text); } catch (_) {}
-      if (!r.ok) {
+      const ask = async (attrs) => {
+        const r = await fetch(API + '/tracking_requests', {
+          method: 'POST',
+          headers: { 'Authorization': 'Token ' + key,
+                     'Content-Type': 'application/vnd.api+json',
+                     'Accept': 'application/vnd.api+json' },
+          body: JSON.stringify({ data: { type: 'tracking_request', attributes: Object.assign({
+            request_type: type, request_number: number,
+            ref_numbers: [c.reference, c.shipment_ref].filter(Boolean),
+          }, attrs) } }),
+        });
+        const text = await r.text();
+        let json = null; try { json = JSON.parse(text); } catch (_) {}
+        return { ok: r.ok, status: r.status, json, text };
+      };
+
+      // With a SCAC, ask directly. Without one, ask them to infer it — and if their account
+      // does not have inference, say so in words rather than passing their error through.
+      let out = scac ? await ask({ scac }) : await ask({ auto_detect_vocc_scac: true });
+
+      if (!out.ok && !scac) {
+        const errs = (out.json && out.json.errors) || [];
+        const aboutScac = errs.some(e => /scac/i.test(JSON.stringify(e)));
+        if (aboutScac) {
+          return res.status(400).json({ ok: false, error: 'scac_required',
+            message: 'Terminal49 needs the carrier code (SCAC) for this shipment and could not '
+                   + 'work it out from the number. Add it in the consignment details — it is on '
+                   + 'the bill of lading, and Evergreen is EGLV, Maersk MAEU, CMA CGM CMDU, ONE ONEY.',
+            detail: errs });
+        }
+      }
+
+      if (!out.ok) {
+        const errs = (out.json && out.json.errors) || [];
+        // Their message, surfaced in full. A caller who cannot see why it failed has to guess.
         return res.status(502).json({ ok: false, error: 'terminal49_refused',
-          status: r.status, detail: (json && json.errors) || text.slice(0, 300) });
+          status: out.status,
+          message: errs.map(e => e.detail || e.title).filter(Boolean).join('; ')
+                   || String(out.text || '').slice(0, 300),
+          detail: errs.length ? errs : out.text.slice(0, 500) });
+      }
+
+      const json = out.json;
+      // Whatever carrier they settled on, keep it: the next subscription for this box should
+      // not have to be inferred again.
+      const used = scac || (json && json.data && json.data.attributes && json.data.attributes.scac) || null;
+      if (used) {
+        try { db.prepare('UPDATE consignment SET scac = ? WHERE consignment_uid = ?').run(used, uid); }
+        catch (_) {}
       }
 
       db.prepare(`INSERT INTO t49_link (client_id, consignment_uid, container_number,
@@ -191,10 +229,11 @@ module.exports = function mountT49(deps) {
                     container_number=@cont, request_number=@num, request_type=@type,
                     scac=@scac, state='requested', failed_reason=NULL, updated_at=@now`)
         .run({ c: client, u: uid, cont: c.reference || null, num: number, type,
-               scac: req.body.scac || null, now: new Date().toISOString() });
+               scac: used || null, now: new Date().toISOString() });
 
       // Nothing is tracked yet — the carrier has to find it first, and that arrives by webhook.
       res.json({ ok: true, state: 'requested', request_type: type, request_number: number,
+        scac: used || '(being inferred)',
         note: 'Terminal49 is looking for this shipment. Tracking starts when it confirms.' });
     } catch (e) {
       res.status(500).json({ ok: false, error: String(e.message || e) });
