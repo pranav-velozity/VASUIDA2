@@ -274,11 +274,17 @@
     if (c.mode === 'Air') return `<span class="cg-dim" title="Terminal49 tracks ocean freight">air · manual</span>`;
     const t = _tracking[c.consignment_uid];
     if (t && t.state === 'tracking') {
-      return `<span class="cg-track" style="background:rgba(27,127,59,.12);color:${OK};">tracking</span>`;
+      // Catch up is offered even while tracking: a box subscribed mid-voyage has history the
+      // feed will never send, and this is the only way to get it.
+      return `<span class="cg-track" style="background:rgba(27,127,59,.12);color:${OK};">tracking</span>
+        <button class="cg-tick" data-backfill="${esc(c.consignment_uid)}"
+          title="Fetch what Terminal49 already knows about this shipment">catch up</button>`;
     }
     if (t && t.state === 'requested') {
       return `<span class="cg-track" style="background:#F2F2F5;color:${MID};"
-        title="Terminal49 is looking for this shipment">requested</span>`;
+          title="Terminal49 is looking for this shipment">requested</span>
+        <button class="cg-tick" data-backfill="${esc(c.consignment_uid)}"
+          title="Fetch what Terminal49 already knows about this shipment">catch up</button>`;
     }
     if (t && t.state === 'failed') {
       return `<button class="cg-track" style="background:rgba(153,0,51,.10);color:${LATE};"
@@ -610,6 +616,18 @@
       }
       mig.disabled = false; mig.textContent = 'Check this week';
     };
+
+    root.querySelectorAll('[data-backfill]').forEach(b => b.onclick = () => act(async () => {
+      const uid = b.getAttribute('data-backfill');
+      b.textContent = 'fetching…';
+      const r = await post('/t49/backfill', { consignment_uid: uid });
+      const did = (r && r.applied || []).map(a => `${a.stage.replace(/_/g, ' ')} ${a.date}`);
+      alert(did.length
+        ? 'Recorded from Terminal49:\n\n' + did.join('\n')
+          + (r.carrier_eta ? `\n\nTheir ETA: ${r.carrier_eta}` : '')
+          + (r.pickup_lfd ? `\nLast free day: ${r.pickup_lfd}` : '')
+        : (r && r.note) || 'Terminal49 has nothing recorded for this shipment yet.');
+    }));
 
     root.querySelectorAll('[data-track]').forEach(b => b.onclick = () => act(async () => {
       const uid = b.getAttribute('data-track');
