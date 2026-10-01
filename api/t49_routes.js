@@ -26,6 +26,8 @@
 */
 'use strict';
 
+const crypto = require('crypto');
+
 module.exports = function mountT49(deps) {
   const { express, db, authenticateRequest, requireRole, auditLog, curClient, refreshPlanned } = deps;
   const router = express.Router();
@@ -241,16 +243,46 @@ module.exports = function mountT49(deps) {
   });
 
   // ── Receiving ──
-  // The secret is in the path rather than a header: Terminal49 posts a plain JSON:API document
-  // with no signature of its own, so an unguessable URL is what stands between this endpoint
-  // and anyone who finds it. Compared as a whole string, not a prefix.
-  router.post('/webhook/:secret', express.json({ type: ['application/json', 'application/vnd.api+json'] }),
-    async (req, res) => {
-    const expected = process.env.T49_WEBHOOK_SECRET || '';
+  // Terminal49 signs every delivery: HMAC-SHA256 of the raw body, hex, in
+  // X-T49-Webhook-Signature. That is strictly better than a secret in the URL — a signature
+  // proves the payload came from them AND that nobody altered it, where a path only proves
+  // somebody knew the path.
+  //
+  // Both are accepted. The signature is the real check; the path secret remains so an
+  // endpoint registered the old way keeps working.
+  const rawJson = express.json({
+    type: ['application/json', 'application/vnd.api+json'],
+    // The signature is over the exact bytes sent. Re-serialising the parsed object would
+    // produce different bytes and a digest that never matches.
+    verify: (req, _res, buf) => { req.rawBody = buf; },
+  });
+
+  function signatureOk(req) {
+    const secret = process.env.T49_SIGNING_SECRET || '';
+    if (!secret) return null;                       // not configured: cannot judge
+    const given = String(req.get('X-T49-Webhook-Signature') || '');
+    if (!given || !req.rawBody) return false;
+    const mine = crypto.createHmac('sha256', secret).update(req.rawBody).digest('hex');
+    const a = Buffer.from(given), b = Buffer.from(mine);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
+
+  async function handle(req, res) {
+    const signed = signatureOk(req);
+    const pathSecret = process.env.T49_WEBHOOK_SECRET || '';
     const given = String(req.params.secret || '');
-    if (!expected || given.length !== expected.length || given !== expected) {
-      log({ outcome: 'error', note: 'bad webhook secret' });
-      return res.status(404).end();        // 404, not 403: an attacker learns nothing
+    const pathOk = !!pathSecret && given.length === pathSecret.length && given === pathSecret;
+
+    if (signed === false) {
+      log({ outcome: 'error', note: 'signature did not verify' });
+      return res.status(404).end();
+    }
+    // Nothing to authenticate with at all: neither a valid signature nor a matching path.
+    if (!signed && !pathOk) {
+      log({ outcome: 'error',
+            note: given ? 'bad webhook path secret and no valid signature'
+                        : 'no signature and no path secret — set T49_SIGNING_SECRET' });
+      return res.status(404).end();        // 404, not 403: a prober learns nothing
     }
 
     // Acknowledge immediately. Terminal49 retries on failure, and a slow handler turns a
@@ -423,7 +455,12 @@ module.exports = function mountT49(deps) {
       console.error('[t49] webhook handling failed:', e);
       log({ outcome: 'error', note: String(e.message || e) });
     }
-  });
+  }
+
+  // Signed deliveries land here; the path-secret form is kept for an endpoint already
+  // registered that way.
+  router.post('/webhook', rawJson, handle);
+  router.post('/webhook/:secret', rawJson, handle);
 
   // ── Looking at what happened ──
   router.get('/status', authenticateRequest, (req, res) => {
@@ -433,7 +470,11 @@ module.exports = function mountT49(deps) {
                                  FROM t49_event ORDER BY id DESC LIMIT 50`).all();
     res.json({ ok: true,
       configured: !!process.env.T49_API_KEY,
-      webhook_configured: !!process.env.T49_WEBHOOK_SECRET,
+      webhook_configured: !!(process.env.T49_SIGNING_SECRET || process.env.T49_WEBHOOK_SECRET),
+      signature_verification: !!process.env.T49_SIGNING_SECRET,
+      webhook_url: process.env.T49_SIGNING_SECRET
+        ? '/t49/webhook   (signed — no secret in the path)'
+        : '/t49/webhook/<T49_WEBHOOK_SECRET>',
       subscriptions: links, recent_events: recent });
   });
 
