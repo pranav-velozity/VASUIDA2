@@ -326,9 +326,16 @@ module.exports = function mountT49(deps) {
       }
 
       const now = new Date().toISOString();
-      if (shipId && link.t49_shipment_id !== shipId) {
+      const firstContact = shipId && link.t49_shipment_id !== shipId;
+      if (firstContact) {
         db.prepare('UPDATE t49_link SET t49_shipment_id = ?, state = ?, updated_at = ? WHERE client_id = ? AND consignment_uid = ?')
           .run(shipId, 'tracking', now, link.client_id, link.consignment_uid);
+
+        // Tracking has just started, so everything before this moment is history that will
+        // never be delivered. Fetch it once, now.
+        backfill(link.consignment_uid)
+          .then(r => console.log('[t49] backfill on first contact:', r && r.note))
+          .catch(e => console.warn('[t49] backfill failed:', e.message));
       }
 
       if (event === 'tracking_request.failed' || event === 'tracking_request.awaiting_manifest') {
@@ -461,6 +468,142 @@ module.exports = function mountT49(deps) {
   // registered that way.
   router.post('/webhook', rawJson, handle);
   router.post('/webhook/:secret', rawJson, handle);
+
+  // ── Catching up on what already happened ──
+  // Webhooks only carry events that fire AFTER you subscribe. A container subscribed
+  // mid-voyage has a departure, possibly an arrival, and an ETA already sitting in
+  // Terminal49 — none of which will ever be delivered. Without this, those stages stay empty
+  // and nobody can tell "did not happen" from "happened before we were watching", which is
+  // the exact ambiguity this project exists to remove.
+  async function backfill(uid) {
+    const key = process.env.T49_API_KEY;
+    if (!key) return { ok: false, error: 'T49_API_KEY is not set.' };
+
+    const link = db.prepare('SELECT * FROM t49_link WHERE consignment_uid = ?').get(uid);
+    if (!link) return { ok: false, error: 'This consignment is not subscribed.' };
+
+    const get = async (path) => {
+      const r = await fetch(API + path, {
+        headers: { 'Authorization': 'Token ' + key, 'Accept': 'application/vnd.api+json' },
+      });
+      const text = await r.text();
+      let json = null; try { json = JSON.parse(text); } catch (_) {}
+      return { ok: r.ok, status: r.status, json, text };
+    };
+
+    // Find the shipment: by the id we already hold, or by searching their records for the
+    // number we subscribed with.
+    let shipment = null, containers = [];
+    if (link.t49_shipment_id) {
+      const r = await get(`/shipments/${encodeURIComponent(link.t49_shipment_id)}?include=containers`);
+      if (r.ok && r.json) { shipment = r.json.data; containers = (r.json.included || []).filter(x => x.type === 'container'); }
+    }
+    if (!shipment) {
+      const q = await get(`/shipments?q=${encodeURIComponent(link.request_number || link.container_number || '')}&include=containers`);
+      // A list endpoint returns an array; a lookup that resolves to one returns an object.
+      // Accept either rather than silently finding nothing.
+      const found = q.ok && q.json
+        ? (Array.isArray(q.json.data) ? q.json.data[0] : q.json.data)
+        : null;
+      if (found && found.id) {
+        shipment = found;
+        containers = (q.json.included || []).filter(x => x.type === 'container');
+      }
+    }
+    if (!shipment) {
+      return { ok: false, error: 'not_found',
+        message: 'Terminal49 has no shipment for this number yet. If the request is still '
+               + 'awaiting manifest, try again once it has been found.' };
+    }
+
+    if (shipment.id && link.t49_shipment_id !== shipment.id) {
+      db.prepare(`UPDATE t49_link SET t49_shipment_id = ?, state = 'tracking', updated_at = ?
+                   WHERE consignment_uid = ?`).run(shipment.id, new Date().toISOString(), uid);
+    }
+
+    // Prefer our own container where the shipment carries several.
+    const mine = containers.find(c => c.attributes && c.attributes.number === link.container_number)
+              || containers[0] || null;
+    const sa = shipment.attributes || {};
+    const ca = (mine && mine.attributes) || {};
+
+    const applied = [], skipped = [];
+    const now = new Date().toISOString();
+
+    // Their field names for the things we treat as observations.
+    const facts = [
+      ['departed', ca.pod_vessel_departed_at || sa.pol_vessel_departed_at || ca.pol_vessel_departed_at],
+      ['arrived', ca.pod_vessel_arrived_at || sa.pod_vessel_arrived_at],
+      ['dest_cleared', ca.available_for_pickup_at || ca.pod_full_out_at],
+    ];
+
+    for (const [stage, raw] of facts) {
+      const when = dayOf(raw);
+      if (!when) { skipped.push({ stage, why: 'Terminal49 has no date for this yet' }); continue; }
+      const existing = db.prepare('SELECT * FROM consignment_milestone WHERE consignment_uid = ? AND stage = ?')
+        .get(uid, stage);
+      // A person's record is never overwritten by a catch-up.
+      if (existing && existing.state !== 'assumed' && existing.state !== 'carrier') {
+        skipped.push({ stage, why: `already ${existing.state} by a person` });
+        continue;
+      }
+      db.prepare(`INSERT INTO consignment_milestone
+                    (consignment_uid, stage, planned_at, actual_at, state, source_user, source_detail, recorded_at)
+                  VALUES (@uid,@stage,@planned,@actual,'carrier','terminal49','backfill',@at)
+                  ON CONFLICT(consignment_uid, stage) DO UPDATE SET
+                    actual_at=@actual, state='carrier', source_user='terminal49',
+                    source_detail='backfill', recorded_at=@at`)
+        .run({ uid, stage, planned: existing ? existing.planned_at : null, actual: when, at: now });
+      applied.push({ stage, date: when });
+    }
+
+    // And their current expectations, which move the plan but never a quote.
+    const etd = dayOf(ca.pol_etd_at || sa.pol_etd_at);
+    const eta = dayOf(ca.pod_eta_at || sa.pod_eta_at);
+    if (etd || eta) {
+      db.prepare(`UPDATE consignment SET carrier_etd = COALESCE(?, carrier_etd),
+                    carrier_eta = COALESCE(?, carrier_eta), carrier_est_at = ?
+                  WHERE consignment_uid = ?`).run(etd, eta, now, uid);
+    }
+
+    // Terminal facts worth having now rather than at the next update event.
+    const dl = ca.import_deadlines || {};
+    db.prepare(`UPDATE t49_link SET pickup_lfd = COALESCE(?, pickup_lfd),
+                  holds = COALESCE(?, holds), pod_terminal = COALESCE(?, pod_terminal), updated_at = ?
+                WHERE consignment_uid = ?`)
+      .run(dayOf(ca.pickup_lfd || dl.pickup_lfd || dl.pickup_lfd_terminal),
+           ca.holds_at_pod_terminal ? JSON.stringify(ca.holds_at_pod_terminal) : null,
+           ca.pod_terminal_name || null, now, uid);
+
+    try { if (typeof refreshPlanned === 'function') refreshPlanned(uid); } catch (_) {}
+
+    log({ event: 'backfill', shipment_id: shipment.id, container: ca.number || link.container_number,
+          applied_to: uid, outcome: 'applied',
+          note: applied.length ? applied.map(a => `${a.stage}=${a.date}`).join(' · ') : 'nothing to apply',
+          payload: { shipment: sa, container: ca } });
+
+    return { ok: true, shipment_id: shipment.id, container: ca.number || link.container_number,
+             applied, skipped,
+             carrier_etd: etd || null, carrier_eta: eta || null,
+             pickup_lfd: dayOf(ca.pickup_lfd || dl.pickup_lfd || dl.pickup_lfd_terminal) || null,
+             note: applied.length
+               ? 'Recorded from what Terminal49 already holds. Future milestones arrive by webhook.'
+               : 'Terminal49 has no completed milestones for this shipment yet.' };
+  }
+
+  router.post('/backfill', authenticateRequest, requireRole(['admin', 'supplier']),
+    auditLog('t49_backfill'), async (req, res) => {
+    try {
+      const uid = String((req.body && req.body.consignment_uid) || '').trim();
+      const c = db.prepare('SELECT consignment_uid FROM consignment WHERE consignment_uid = ? AND client_id = ?')
+        .get(uid, curClient());
+      if (!c) return res.status(404).json({ ok: false, error: 'No such consignment.' });
+      const out = await backfill(uid);
+      res.status(out.ok ? 200 : 400).json(out);
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
 
   // ── Looking at what happened ──
   router.get('/status', authenticateRequest, (req, res) => {
