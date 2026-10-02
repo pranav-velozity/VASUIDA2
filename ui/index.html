@@ -8564,6 +8564,10 @@ function renderReportsPage(container){
       'Planned Units':   r.planned,
       'Actual Received': r.actual_received,
       'Applied Units':   r.applied,
+      // Blank rather than zero where the plan carried no cost: an empty cell reads as a
+      // figure nobody supplied, a zero reads as free goods.
+      'Unit Cost':       (r.unit_cost  == null) ? '' : Number(r.unit_cost),
+      'Total Cost':      (r.total_cost == null) ? '' : Number(r.total_cost),
       'Received Date':   r.received_date  ? r.received_date.slice(0,10)  : '',
       'Departed Date':   r.departed_date  ? r.departed_date.slice(0,10)  : '',
       'ETA FC':          r.eta_fc         ? r.eta_fc.slice(0,10)         : '',
@@ -8572,7 +8576,7 @@ function renderReportsPage(container){
     }));
     const wb  = XLSX.utils.book_new();
     const ws2 = XLSX.utils.json_to_sheet(xlsRows);
-    ws2['!cols'] = [18,12,16,14,8,14,12,14,16,14,14,14,12,14,12].map(w=>({wch:w}));
+    ws2['!cols'] = [18,12,16,14,8,14,12,14,16,14,12,14,14,14,12,14,12].map(w=>({wch:w}));
     XLSX.utils.book_append_sheet(wb, ws2, 'Stock Status');
     XLSX.writeFile(wb, `Stock_Status_${from}${to !== from ? '_to_'+to : ''}.xlsx`);
     if (bar) bar.textContent = `Downloaded ${rows.length} rows.`;
