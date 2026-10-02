@@ -1038,26 +1038,27 @@ module.exports = function mountConsignments(deps) {
     if (ev === 'backfill') {
       const parts = note.split(' · ').map(p => p.split('=')).filter(p => p.length === 2 && ymdOk(p[1]));
       if (!parts.length) return null;
-      return { text: 'Tracking recorded ' + parts.map(([s, d]) => `${STAGE_SHORT[s] || s} ${fmtDay(d)}`).join(', ') };
+      return { kind: 'backfill', text: 'Tracking recorded ' + parts.map(([s, d]) => `${STAGE_SHORT[s] || s} ${fmtDay(d)}`).join(', ') };
     }
     const dates = note.match(/\d{4}-\d{2}-\d{2}/g) || [];
     if (/estimated/.test(ev)) {
       if (!dates.length) return null;
-      return { estimate: true, text: `${/departed/.test(ev) ? 'Departure' : 'Arrival'} estimate now ${fmtDay(dates[0])}` };
+      return { estimate: true, kind: 'estimate', field: /departed/.test(ev) ? 'carrier_etd' : 'carrier_eta', new_value: dates[0],
+               text: `${/departed/.test(ev) ? 'Departure' : 'Arrival'} estimate now ${fmtDay(dates[0])}` };
     }
     const m = note.match(/^(departed|arrived|dest_cleared) = (\d{4}-\d{2}-\d{2})/);
-    if (m) return { text: `${ACT_TEXT[m[1]]} ${fmtDay(m[2])}` };
+    if (m) return { kind: 'actual', stage: m[1], date: m[2], text: `${ACT_TEXT[m[1]]} ${fmtDay(m[2])}` };
     if (/^LFD |hold\(s\)/.test(note)) {
       const bits = [];
       const lfd = note.match(/LFD (\d{4}-\d{2}-\d{2})/);
       if (lfd) bits.push(`Last free day ${fmtDay(lfd[1])}`);
       const h = note.match(/(\d+) hold\(s\)/);
       if (h) bits.push(`${h[1]} hold${h[1] === '1' ? '' : 's'} reported at the terminal`);
-      return bits.length ? { text: bits.join(' · ') } : null;
+      return bits.length ? { kind: h ? 'hold' : 'lfd', lfd: lfd ? lfd[1] : null, text: bits.join(' · ') } : null;
     }
     let t = note;
     for (const d of dates) t = t.replace(d, fmtDay(d));
-    return { text: t.charAt(0).toUpperCase() + t.slice(1) };
+    return { kind: /transshipment/.test(ev) ? 'transshipment' : 'context', text: t.charAt(0).toUpperCase() + t.slice(1) };
   }
 
   function eventsFor(uid, milestones) {
@@ -1069,7 +1070,7 @@ module.exports = function mountConsignments(deps) {
       haveEstimateLog = est.length > 0;
       for (const e of est) {
         const what = e.field === 'carrier_etd' ? 'Departure' : 'Arrival';
-        out.push({ at: e.recorded_at, text: e.old_value
+        out.push({ at: e.recorded_at, kind: 'estimate', field: e.field, old_value: e.old_value, new_value: e.new_value, text: e.old_value
           ? `${what} estimate revised ${fmtDay(e.old_value)} \u2192 ${fmtDay(e.new_value)}`
           : `${what} estimate set: ${fmtDay(e.new_value)}` });
       }
@@ -1081,12 +1082,14 @@ module.exports = function mountConsignments(deps) {
         const h = humanEvent(r);
         if (!h) continue;
         if (h.estimate && haveEstimateLog) continue;     // the log says it better: old and new
-        out.push({ at: String(r.received_at || '').replace(' ', 'T') + (String(r.received_at || '').includes('Z') ? '' : 'Z'), text: h.text });
+        const { estimate, ...rest } = h;
+        out.push(Object.assign({ at: String(r.received_at || '').replace(' ', 'T') + (String(r.received_at || '').includes('Z') ? '' : 'Z') }, rest));
       }
     } catch (_) { /* no tracking on this deployment */ }
     for (const m of (milestones || [])) {
       if ((m.state === 'confirmed' || m.state === 'amended') && m.recorded_at && m.actual_at) {
-        out.push({ at: m.recorded_at, text: `${STAGE_TEXT[m.stage]} ${m.state === 'amended' ? 'recorded' : 'confirmed'} for ${fmtDay(m.actual_at)}` });
+        out.push({ at: m.recorded_at, kind: 'confirmed', stage: m.stage, date: m.actual_at,
+                   text: `${STAGE_TEXT[m.stage]} ${m.state === 'amended' ? 'recorded' : 'confirmed'} for ${fmtDay(m.actual_at)}` });
       }
     }
     const seen = new Set();
