@@ -602,7 +602,7 @@ window.__clerkOnLoad = function() {
         </span>
       </span>
       <a class="pn-nav-item" href="#exec" id="nav-exec" onclick="event.preventDefault();window.show('#exec')">Executive</a>
-      <a class="pn-nav-item" href="#map" id="nav-map" onclick="event.preventDefault();window.show('#map')">Live Map</a>
+      <a class="pn-nav-item" href="#map" id="nav-map" onclick="event.preventDefault();window.show('#map')">Transit Movements</a>
       <a class="pn-nav-item" href="#d2d" id="nav-d2d" style="display:none;" onclick="event.preventDefault();window.show('#d2d')">Shipments</a>
       <a class="pn-nav-item" href="#reports" id="nav-reports" onclick="event.preventDefault();window.show('#reports')">Reports &amp; Downloads</a>
       <a class="pn-nav-item" href="#finance" id="nav-finance" onclick="event.preventDefault();window.show('#finance')" style="display:none;">Finance</a>
@@ -6485,7 +6485,8 @@ window.__openPrebookModal = function(){
 <script src="/public/flow_live_additive.js?v=130" defer></script>
 <script src="/public/lane_snapshot_additive.js?v=1" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
-<script src="/public/map_live_additive.js?v=3" defer></script>
+<!-- Transit Movements replaced the Live Map (map_live_additive.js is kept in the repo for rollback, not loaded). -->
+<script src="/public/transit_movements_additive.js?v=1" defer></script>
   <script src="/public/finance_additive.js?v=28" defer></script>
   <script src="/public/collaboration_additive.js?v=2" defer></script>
   <script src="/public/exec_pdf_additive.js?v=3" defer></script>
@@ -7151,7 +7152,7 @@ document.addEventListener('DOMContentLoaded', function(){
       return;
     }
 
-    // ── Live Map ──
+    // ── Transit Movements (route #map, page-map) ──
     if(h==='#d2d'){
       _pnHideAll();
       _pnSetHash('#d2d');
