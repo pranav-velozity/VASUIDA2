@@ -26,7 +26,7 @@
 
   // ── Palette (Pinpoint status colours) ──
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
-  const GREEN = '#97DC21', AMBER = '#F5BD25', RED = '#990033', GREY = '#8A8A8A';
+  const GREEN = '#C7EA46', AMBER = '#F5BD25', RED = '#990033', GREY = '#8A8A8A';
   const STATUS = {
     on_time:    { c: GREEN, l: 'On time' },
     behind:     { c: AMBER, l: 'Behind' },
@@ -319,71 +319,57 @@
   }
 
   // ════ Highlights ════
-  // The delivery-date, unconfirmed and no-quote readings come from /alerts, the same engine
-  // the Transit & Clearing panel and the alert email use, so "delayed" means one thing.
-  // Two are added here because only this screen holds the facts behind them: a container held
-  // at the terminal against its last free day, and lanes on no movement.
-  const SEV = { high: RED, medium: AMBER, low: '#6E6E73' };
+  // What has happened — not what is wrong. Open problems are already on the screen (the
+  // timeline, the status colours, the panel); repeating them here buried the news. This is the
+  // last seven days of change across the movements in play: a carrier moving a date, a ship
+  // leaving or arriving, a hold, someone confirming a milestone, a client being told.
+  const SEV = { high: RED, medium: AMBER, low: '#6E6E73', good: GREEN };
+  const SEV_TEXT = { high: RED, medium: '#8A6D00', low: MUTED, good: '#4A6A00' };
+  const HL_DAYS = 7;
+  function ago(t) {
+    const mins = Math.round((Date.now() - t) / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    const h = Math.round(mins / 60);
+    if (h < 24) return `${h}h ago`;
+    return timeLabel(new Date(t).toISOString());
+  }
   function highlights(M) {
+    const since = Date.now() - HL_DAYS * 86400000;
     const out = [];
-    const byUid = new Map(M.all.map(m => [m.uid, m]));
-    for (const a of (S.alerts || [])) {
-      if (a.acknowledged_at) continue;
-      const m = byUid.get(a.consignment_uid);
-      if (!m || !m.live || !M.byMode(m)) continue;
-      let title = a.headline, sub = [a.detail, a.action].filter(Boolean).join('. '), tag = '';
-      if (a.kind === 'fc_moved') {
-        const drift = m.base && m.fc ? diff(m.base, m.fc) : null;
-        tag = drift ? (drift > 0 ? `+${drift}d FC` : `${drift}d FC`) : '';
-        title = `${m.ref} now arrives ${fmtDay(m.fc)}${drift ? `, ${plural(Math.abs(drift), 'day')} ${drift > 0 ? 'later' : 'earlier'} than promised` : ''}`;
-        if (a.dock_at) sub = `Dock booked ${fmtDay(a.dock_at)}. ${a.action || ''}`.trim();
-      } else if (a.kind === 'unconfirmed') {
-        const st = String(a.signature || '').split('@');
-        const days = st[1] ? diff(st[1], M.today) : null;
-        tag = days === 0 ? 'Due today' : (days ? `${plural(days, 'day')} over` : '');
-        title = `${m.ref} — ${STAGE_VERB[st[0]] || 'a milestone'} not confirmed${st[1] ? ` (planned ${fmtDay(st[1])})` : ''}`;
-        sub = m.air ? 'Air isn’t tracked automatically. Confirm it happened, or record the date it did.' : 'Confirm it happened on plan, or record the date it did.';
-      } else if (a.kind === 'no_quote') {
-        const until = diff(M.today, m.d('departed'));
-        tag = until != null && until >= 0 ? (until === 0 ? 'Departs today' : `${plural(until, 'day')} to go`) : '';
-        title = m.c.reference ? `${m.ref} has no carrier quote` : `${m.routeText.split(' · ')[0]} ${m.c.size_ft ? m.c.size_ft + '′ ' : ''}leaves ${fmtDay(m.d('departed'))} with no container number or quote`;
-        sub = m.c.reference ? 'Its dates come from the default transit time. Enter the quoted transit.' : 'Pinpoint can’t track it yet, and its FC date is still a rule default.';
-      }
-      out.push({ uid: m.uid, wk: m.wkLabel, ref: m.c.reference ? m.ref : 'not advised', sev: a.severity || 'medium', title, sub, tag, rank: a.severity === 'high' ? 0 : a.severity === 'medium' ? 1 : 2 });
-    }
     for (const m of M.all) {
-      if (!m.live || !M.byMode(m) || !m.held || !m.term) continue;
-      const lfdIn = m.health.lfd_in;
-      const urgent = lfdIn != null && lfdIn <= 2;
-      out.push({
-        uid: m.uid, wk: m.wkLabel, ref: m.ref, sev: urgent ? 'high' : 'medium', rank: urgent ? -1 : 1,
-        title: `${m.term.holds.join(', ')} hold at ${m.term.terminal || 'the terminal'}${m.term.lfd ? ` — last free day ${fmtDay(m.term.lfd)}` : ''}`,
-        sub: m.term.lfd ? `Demurrage from ${fmtDay(addD(m.term.lfd, 1))}. Destination clearance not yet confirmed.` : 'Destination clearance not yet confirmed.',
-        tag: lfdIn == null ? 'Held' : lfdIn < 0 ? 'LFD passed' : lfdIn === 0 ? 'LFD today' : `${plural(lfdIn, 'day')}`,
-      });
+      if (!M.byMode(m)) continue;
+      const recentDelivery = m.delivered && m.fc && diff(m.fc, M.today) <= HL_DAYS;
+      if (!m.live && !recentDelivery) continue;
+      for (const e of (m.c.events || [])) {
+        const t = Date.parse(e.at);
+        if (!t || t < since || e.kind === 'backfill') continue;
+        let sev = 'low', tag = '', what = e.text;
+        if (e.kind === 'estimate') {
+          const w = e.field === 'carrier_etd' ? 'departure' : 'arrival';
+          if (e.old_value && e.new_value) {
+            const dd = diff(e.old_value, e.new_value);
+            sev = dd > 0 ? 'high' : dd < 0 ? 'good' : 'low';
+            tag = dd ? `${dd > 0 ? '+' : '−'}${plural(Math.abs(dd), 'day')}` : '';
+            what = `Carrier moved ${w} ${fmtDay(e.old_value)} → ${fmtDay(e.new_value)}`;
+          } else { what = `Carrier set ${w} for ${fmtDay(e.new_value)}`; tag = 'New estimate'; }
+        } else if (e.kind === 'actual') {
+          sev = 'good'; tag = ({ departed: 'Departed', arrived: 'Arrived', dest_cleared: 'Available' })[e.stage] || 'Tracked';
+        } else if (e.kind === 'hold') { sev = 'high'; tag = 'Hold'; }
+        else if (e.kind === 'lfd') { sev = 'medium'; tag = 'Last free day'; }
+        else if (e.kind === 'confirmed') { sev = 'good'; tag = 'Confirmed'; }
+        else if (e.kind === 'transshipment') { tag = 'Transshipment'; }
+        out.push({ uid: m.uid, wk: m.wkLabel, title: `${m.ref} — ${what}`, sub: `${m.routeText} · now ${m.where.charAt(0).toLowerCase()}${m.where.slice(1)}`,
+                   tag, sev, at: t, when: ago(t) });
+      }
+      const n = m.c.last_notification;
+      if (n && Date.parse(n.sent_at) >= since) {
+        const t = Date.parse(n.sent_at);
+        out.push({ uid: m.uid, wk: m.wkLabel, title: `${m.ref} — client notified (${plural(n.to_count, 'recipient')})`, sub: n.subject || '',
+                   tag: 'Notified', sev: 'low', at: t, when: ago(t) });
+      }
     }
-    if (M.unassigned.length) {
-      const legacy = M.unassigned.filter(u => u.legacy_dates).length;
-      const pos = M.unassigned.reduce((a, u) => a + (u.pos || 0), 0);
-      const wks = [...new Set(M.unassigned.map(u => isoWeek(u.week_start)))];
-      out.push({
-        uid: 'none', wk: wks.length > 1 ? `${wks[0]}–${wks[wks.length - 1].slice(1)}` : wks[0], ref: plural(pos, 'PO'), sev: legacy ? 'high' : 'low', rank: legacy ? 0.5 : 2,
-        title: `${plural(M.unassigned.length, 'lane')} ${M.unassigned.length === 1 ? 'is' : 'are'} on no movement`,
-        sub: legacy ? `${legacy} still carr${legacy === 1 ? 'ies' : 'y'} dates typed on the lane — that is what drew the phantom ship. Assign them in Transit & Clearing.` : 'Assign them to a container or flight in Transit & Clearing.',
-        tag: plural(M.unassigned.length, 'lane'),
-      });
-    }
-    // One line per movement — its most pressing — with a count of the rest, so the list stays
-    // a list of things to do rather than every reading of every container.
-    out.sort((a, b) => a.rank - b.rank);
-    const seen = new Map(), lines = [];
-    for (const h of out) {
-      if (seen.has(h.uid)) { seen.get(h.uid).more++; continue; }
-      const line = Object.assign({ more: 0 }, h);
-      seen.set(h.uid, line); lines.push(line);
-    }
-    for (const l of lines) if (l.more) l.sub = `${l.sub} (+${l.more} more on this ${l.uid === 'none' ? 'list' : 'movement'})`;
-    return lines;
+    return out.sort((a, b) => b.at - a.at).slice(0, 40);
   }
 
   // ════ Styles ════
@@ -452,8 +438,10 @@
 .tm-pill.sel .tm-wk{background:${INK};color:#fff}
 .tm-anim{transition:left 1.2s cubic-bezier(.2,.7,.2,1),width 1.2s cubic-bezier(.2,.7,.2,1),top 1.2s cubic-bezier(.2,.7,.2,1),opacity .5s ease}
 .tm-tl-grid{display:grid;grid-template-columns:280px minmax(0,1fr)}
-.tm-trow{display:grid;grid-template-columns:280px minmax(0,1fr);height:84px;border-bottom:1px solid ${SOFT};position:relative}
-.tm-trow.sel{background:#F7F2F4;box-shadow:inset 3px 0 0 ${RED}}
+.tm-trow{display:grid;grid-template-columns:280px minmax(0,1fr);height:100px;position:relative;margin:8px 0;border-radius:10px;box-shadow:inset 0 0 0 1px ${LINE}}
+.tm-trow.sel{background:rgba(153,0,51,.04);box-shadow:inset 3px 0 0 ${RED},inset 0 0 0 1px ${LINE}}
+.tm-pulse-done{animation:tmRingDone 2.4s ease-out infinite}
+.tm-pulse-next{animation:tmRingNext 2.4s ease-out infinite}
 .tm-whead{display:grid;grid-template-columns:280px minmax(0,1fr);height:44px;background:#F7F7F5;border-bottom:1px solid ${LINE};border-top:1px solid ${LINE};position:relative}
 .tm-badge{font-size:13px;font-weight:600;padding:3px 8px;border-radius:5px;background:#fff;border:1px solid #D6D6D2}
 .tm-badge.cur{background:${INK};color:#fff;border-color:${INK}}
@@ -475,6 +463,8 @@
 .tm-skel{background:linear-gradient(90deg,#EEE 0,#F6F6F4 50%,#EEE 100%);background-size:200% 100%;animation:tmSk 1.2s infinite;border-radius:10px}
 @keyframes tmIn{from{transform:translateX(28px);opacity:0}to{transform:none;opacity:1}}
 @keyframes tmFade{from{opacity:0}to{opacity:1}}
+@keyframes tmRingDone{0%{box-shadow:0 0 0 2px #fff,0 0 0 2px ${GREEN}}70%,100%{box-shadow:0 0 0 2px #fff,0 0 0 12px ${GREEN}00}}
+@keyframes tmRingNext{0%{box-shadow:0 0 0 2px #fff,0 0 0 2px rgba(18,18,18,.5)}70%,100%{box-shadow:0 0 0 2px #fff,0 0 0 12px rgba(18,18,18,0)}}
 @keyframes tmTick{from{transform:translateY(0)}to{transform:translateY(-50%)}}
 @keyframes tmPulse{0%,100%{box-shadow:0 0 0 0 ${GREEN}99}50%{box-shadow:0 0 0 4px ${GREEN}00}}
 @keyframes tmSk{from{background-position:200% 0}to{background-position:-200% 0}}
@@ -585,15 +575,15 @@
           <span class="s" title="${esc(h.sub)}">${esc(h.sub)}</span>
         </span>
         <span class="r">
-          <span class="tm-mono" style="font-size:11.5px;color:${MUTED};max-width:100%;overflow:hidden;text-overflow:ellipsis">${esc(h.ref || '')}</span>
-          ${h.tag ? `<span style="font-size:12px;font-weight:600;color:${h.sev === 'high' ? RED : h.sev === 'medium' ? '#8A6D00' : MUTED}">${esc(h.tag)}</span>` : ''}
+          <span style="font-size:11.5px;color:${MUTED}">${esc(h.when || '')}</span>
+          ${h.tag ? `<span style="font-size:12px;font-weight:600;color:${SEV_TEXT[h.sev] || MUTED}">${esc(h.tag)}</span>` : ''}
         </span>
       </button>`;
   }
   function renderHighlights(H) {
     const roll = H.length > HL_VISIBLE && !S.hlAll;
     let list;
-    if (!H.length) list = `<div style="padding:4px 20px 18px;font-size:14px;color:${MUTED}">Nothing needs a person. Everything is on plan or tracked.</div>`;
+    if (!H.length) list = `<div style="padding:4px 20px 18px;font-size:14px;color:${MUTED}">Nothing has changed in the last ${HL_DAYS} days.</div>`;
     else if (roll) {
       // The list is drawn twice and moved up by half its height, so the loop has no seam.
       const rows = H.map(h => hlRow(h, false)).join('') + H.map(h => hlRow(h, true)).join('');
@@ -605,7 +595,7 @@
   <div style="display:flex;justify-content:space-between;align-items:baseline;padding:16px 20px 10px;gap:12px;flex-wrap:wrap">
     <h2 class="tm-h2">Highlights</h2>
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-      <span class="tm-note">${H.length ? `${plural(H.length, 'item')}${roll ? ' · rolling, hover to pause' : ''}` : ''}</span>
+      <span class="tm-note">${H.length ? `${plural(H.length, 'update')} in the last ${HL_DAYS} days${roll ? ' · rolling, hover to pause' : ''}` : ''}</span>
       ${H.length > HL_VISIBLE ? `<button class="tm-pillbtn" data-act="hl-all">${S.hlAll ? 'Roll' : 'Show all'}</button>` : ''}
     </div>
   </div>
@@ -715,7 +705,7 @@
         const st = STATUS[m.st] || STATUS.on_time;
         return `<button class="tm-pill tm-anim${S.sel === m.uid ? ' sel' : ''}${m.assumedPos ? ' assumed' : ''}" title="${esc(m.assumedPos ? `${m.where} — placed by plan; not yet confirmed` : m.where)}" data-act="${m.live ? 'pick' : 'hist'}" data-uid="${esc(m.uid)}" data-v="${m.wk}" data-dbl="${esc(m.uid)}"
           aria-label="${esc(`${m.wkLabel} ${m.ref}, ${m.where}`)}" ${A(`transform:${tr};border:1.5px solid ${st.c};`, { left: [lb, ln] })}>
-          ${dot(m.st, 10)}<span class="tm-mono tm-wk">${m.wkLabel}</span><span class="tm-mono">${esc(m.short)}</span></button>`;
+          <span style="display:inline-flex;color:${S.sel === m.uid ? INK : st.c}" aria-hidden="true">${modeIcon(m.mode, 13)}</span><span class="tm-mono tm-wk">${m.wkLabel}</span><span class="tm-mono">${esc(m.short)}</span></button>`;
       }).join('');
       const trails = list.filter(m => m.prog > 0.02 || m.progB > 0.02).map(m => {
         const st = STATUS[m.st] || STATUS.on_time;
@@ -903,7 +893,7 @@
         const sel = S.sel === m.uid;
         b.style.cssText = `position:absolute;z-index:1;left:${xb}px;top:${ybS}px;transform:translate(${leftSide ? 'calc(-100% + 9px)' : '-9px'},-50%);display:flex;align-items:center;gap:6px;height:24px;padding:${leftSide ? '0 4px 0 9px' : '0 9px 0 4px'};border-radius:12px;font-size:11px;white-space:nowrap;${leftSide ? 'flex-direction:row-reverse;' : ''}${sel ? `background:#fff;color:${INK};` : `background:rgba(30,30,30,.95);color:#fff;border:1.5px ${m.assumedPos ? 'dashed' : 'solid'} ${st.c};`}`;
         if (m.assumedPos) b.title = `${m.where} — placed by plan; not yet confirmed`;
-        b.innerHTML = `${dot(m.st, 11).replace('style="', `style="box-shadow:0 0 0 4px ${st.c}40;`)}<span class="tm-mono tm-wk" style="${sel ? `background:${INK};color:#fff` : ''}">${m.wkLabel}</span><span class="tm-mono">${esc(m.short)}</span>`;
+        b.innerHTML = `<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:${st.c}${st.hollow ? '55' : ''};color:${m.st === 'delayed' ? '#fff' : INK};box-shadow:0 0 0 3px ${st.c}40" aria-hidden="true">${modeIcon(m.mode, 11)}</span><span class="tm-mono tm-wk" style="${sel ? `background:${INK};color:#fff` : ''}">${m.wkLabel}</span><span class="tm-mono">${esc(m.short)}</span>`;
         host.appendChild(b);
         if (xb !== xn || ybS !== ynS) requestAnimationFrame(() => requestAnimationFrame(() => { b.style.left = xn + 'px'; b.style.top = ynS + 'px'; }));
       }
@@ -921,6 +911,7 @@
   // Weeks start collapsed: each header still shows its movements' FC dates, late ones in red,
   // and a week opens with one click.
   const isShut = (k) => (k in S.collapsed) ? !!S.collapsed[k] : true;
+  const MS_SHORT = { packing_list_ready: 'Packed', origin_cleared: 'Cleared', departed: 'Departed', arrived: 'Arrived', dest_cleared: 'Cleared', fc_receipt: 'FC' };
   function renderTimeline(M) {
     const start = addD(mondayOf(M.today), -14);
     const TODAY = diff(start, M.today);
@@ -967,12 +958,13 @@
         const bx = ix(m.base);
         const on = pFc.n > bx, onB = pFc.b > bx;
         const w = (x) => `${Math.max(0, pct(x) - pct(bx))}%`;
-        out.push(`<div class="tm-anim" ${A(`position:absolute;top:calc(50% + 10px);height:4px;left:${pct(bx)}%;background:${RED};`, { width: [w(pFc.b), w(pFc.n)], opacity: [onB ? '1' : '0', on ? '1' : '0'] })}></div>`);
-        labels.push(`<div class="tm-anim" ${A(`position:absolute;top:calc(50% + 16px);left:${pct(bx)}%;font-size:11px;font-weight:600;color:${RED};white-space:nowrap;`, { opacity: [onB ? '1' : '0', on ? '1' : '0'] })}>${on ? `+${pFc.n - bx}d` : ''}</div>`);
+        // Along the bottom edge, clear of the milestone labels.
+        out.push(`<div class="tm-anim" title="${esc(`First promised ${fmtDay(m.base)}`)}" ${A(`position:absolute;bottom:9px;height:4px;left:${pct(bx)}%;background:${RED};border-radius:2px;`, { width: [w(pFc.b), w(pFc.n)], opacity: [onB ? '1' : '0', on ? '1' : '0'] })}></div>`);
+        labels.push(`<div class="tm-anim" ${A(`position:absolute;bottom:4px;transform:translateX(6px);font-size:11px;font-weight:600;color:${RED};white-space:nowrap;`, { left: [`${pct(Math.max(pFc.b, bx))}%`, `${pct(Math.max(pFc.n, bx))}%`], opacity: [onB ? '1' : '0', on ? '1' : '0'] })}>${on ? `+${pFc.n - bx}d vs first promise` : ''}</div>`);
       }
       const via = (m.route.via || []).map(v => v.code ? v.code.replace(/^[A-Z]{2}(?=[A-Z]{3}$)/, '') : v.name).filter(Boolean);
       if (via.length && pDep.n != null && pArr.n != null) {
-        labels.push(`<div style="position:absolute;top:calc(50% - 26px);left:${pct((pDep.n + pArr.n) / 2)}%;transform:translateX(-50%);font-size:11px;color:${MUTED};white-space:nowrap">via ${esc(via.join(', '))}</div>`);
+        labels.push(`<div style="position:absolute;top:5px;left:${pct((pDep.n + pArr.n) / 2)}%;transform:translateX(-50%);font-size:11px;color:${MUTED};white-space:nowrap">via ${esc(via.join(', '))}</div>`);
       }
       if (m.term && m.term.lfd && !m.delivered && !m.term.available_at) {
         const lx = ix(m.term.lfd);
@@ -981,17 +973,48 @@
           labels.push(`<div style="position:absolute;top:6px;left:calc(${pct(lx)}% + 5px);font-size:11px;font-weight:600;color:${RED};white-space:nowrap">LFD ${esc(fmtDay(m.term.lfd))}</div>`);
         }
       }
-      for (const st of STAGES) {
-        const x = N[st]; if (!x || !x.v) continue;
+      // The last milestone achieved and the next one due pulse together — same rhythm, same
+      // moment — so the eye reads "here, and next". Delivered movements are still.
+      const present = STAGES.filter(st => N[st] && N[st].v);
+      let lastDone = null;
+      for (const st of present) if (N[st].actual) lastDone = st;
+      const nextUp = m.delivered ? null : present.find((st, i) => !N[st].actual && (lastDone == null || i > present.indexOf(lastDone)));
+      // Every marker is named. Labels sit below the line, or above it when below is taken,
+      // placed in order of importance — FC receipt, then where it is now and what is next —
+      // so when milestones a day apart cannot all be labelled, the ones that matter are.
+      const DAY_PX = 20;
+      const taken = { below: [], above: [] };
+      const fits = (slot, a, b) => taken[slot].every(([x, y]) => b <= x || a >= y);
+      const order = present.slice().sort((p, q) => {
+        const rank = (st) => st === 'fc_receipt' ? 0 : st === lastDone ? 1 : st === nextUp ? 2 : (st === 'departed' || st === 'arrived') ? 3 : 4;
+        return rank(p) - rank(q);
+      });
+      const labelFor = {};
+      for (const st of order) {
+        const x = N[st], xn = ix(x.v);
+        if (xn > N_DAYS - 0.6 || xn < -0.5) continue;
+        const text = st === 'fc_receipt' ? `FC ${fmtShort(x.v)}` : MS_SHORT[st];
+        const half = (text.length * 6.2 + 8) / DAY_PX / 2;
+        const a = xn - half - 0.1, b = xn + half + 0.1;
+        const slot = fits('below', a, b) ? 'below' : fits('above', a, b) ? 'above' : null;
+        if (!slot) continue;
+        taken[slot].push([a, b]);
+        labelFor[st] = { slot, text };
+      }
+      for (const st of present) {
+        const x = N[st];
         const xn = ix(x.v), xb = ix(B[st] && B[st].v);
         if (xn > N_DAYS - 0.6 || xn < -0.5) continue;
-        marks.push(`<div class="tm-anim" title="${esc(`${STAGE_LABEL[st]} · ${fmtDay(x.v)} · ${stateWord(x)}`)}" ${A(`position:absolute;top:50%;box-sizing:border-box;${markStyle(x.actual ? x.state : 'assumed', x.planned)}`, { left: [`${pct(xb)}%`, `${pct(xn)}%`] })}></div>`);
+        const pulse = !m.delivered && (st === lastDone ? ' tm-pulse-done' : st === nextUp ? ' tm-pulse-next' : '');
+        marks.push(`<div class="tm-anim${pulse}" title="${esc(`${STAGE_LABEL[st]} · ${fmtDay(x.v)} · ${stateWord(x)}`)}" ${A(`position:absolute;top:50%;box-sizing:border-box;${markStyle(x.actual ? x.state : 'assumed', x.planned)}`, { left: [`${pct(xb)}%`, `${pct(xn)}%`] })}></div>`);
+        const L = labelFor[st];
+        if (!L) continue;
+        const overdue = !x.actual && x.planned && x.planned < M.today;
+        const tone = x.actual ? `color:${INK};font-weight:600` : overdue ? `color:${RED};font-weight:600` : `color:${MUTED};font-weight:500`;
+        labels.push(`<div class="tm-anim" ${A(`position:absolute;${L.slot === 'below' ? 'top:calc(50% + 11px)' : 'top:calc(50% - 25px)'};transform:translateX(-50%);font-size:${st === 'fc_receipt' ? 11 : 10.5}px;white-space:nowrap;${tone};`, { left: [`${pct(xb)}%`, `${pct(xn)}%`] })}>${esc(L.text)}</div>`);
       }
-      if (pFc.n != null) {
-        if (pFc.n > N_DAYS - 1) labels.push(`<div style="position:absolute;top:calc(50% - 26px);right:8px;font-size:12px;font-weight:600;white-space:nowrap">FC ${esc(fmtDay(m.fc))} →</div>`);
-        else if (pFc.n >= 0) labels.push(`<div class="tm-anim" ${A('position:absolute;top:calc(50% - 26px);transform:translateX(-50%);font-size:12px;font-weight:600;white-space:nowrap;', { left: [`${pct(pFc.b)}%`, `${pct(pFc.n)}%`] })}>FC ${esc(fmtDay(m.fc))}</div>`);
-        else labels.push(`<div style="position:absolute;top:calc(50% - 26px);left:8px;font-size:12px;font-weight:600;white-space:nowrap">← FC ${esc(fmtDay(m.fc))}</div>`);
-      }
+      if (pFc.n != null && pFc.n > N_DAYS - 0.6) labels.push(`<div style="position:absolute;top:5px;right:8px;font-size:11px;font-weight:600;white-space:nowrap">FC ${esc(fmtDay(m.fc))} →</div>`);
+      else if (pFc.n != null && pFc.n < -0.5) labels.push(`<div style="position:absolute;top:5px;left:8px;font-size:11px;font-weight:600;white-space:nowrap">← FC ${esc(fmtDay(m.fc))}</div>`);
       const on = S.sel === m.uid;
       const tone = m.st === 'delayed' ? `color:${RED};font-weight:600` : m.st === 'behind' ? `color:${INK};font-weight:600` : m.delivered ? `color:${MUTED};font-weight:500` : `color:${INK};font-weight:500`;
       return `<div class="tm-trow${on ? ' sel' : ''}">
@@ -1096,6 +1119,7 @@
     <span><span style="width:10px;height:10px;border-radius:50%;border:2px solid ${RED};display:inline-block;box-sizing:border-box"></span>Assumed, past due</span>
     <span><span style="width:18px;height:6px;background:${RED};display:inline-block"></span>Slip against first promise</span>
     <span><span style="width:18px;height:4px;background:#CFCFCB;display:inline-block"></span>Execution week</span>
+    <span><span class="tm-pulse-done" style="width:10px;height:10px;border-radius:50%;background:${GREEN};border:1.5px solid ${INK};display:inline-block;box-sizing:border-box"></span><span class="tm-pulse-next" style="width:10px;height:10px;border-radius:50%;border:1.5px dashed #8A8A8A;display:inline-block;box-sizing:border-box;margin-left:-2px"></span>Pulsing: last achieved and next due</span>
   </div>
 </section>`;
   }
@@ -1343,7 +1367,7 @@
           <span style="font-size:12px;color:${MUTED};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(m.where)} · ${plural(m.lanes, 'lane')} · ${plural(m.pos, 'PO')}</span></span>
           <span style="display:flex;flex-direction:column;gap:3px;align-items:flex-end">${dd ? `<span class="tm-mono" style="font-size:13px;font-weight:600;${dd.delta > 0 ? `color:${RED}` : ''}">${dd.tp}d → ${dd.ta}d${dd.delta > 0 ? '  +' + dd.delta : ''}</span>` : ''}<span style="font-size:12px;color:${MUTED}">FC ${esc(fmtDay(m.fc))}</span></span></button>`; }).join('')}
       </div>
-      ${hl.length ? `<div class="tm-sec"><div class="tm-cap" style="padding-bottom:6px">Highlights this week</div>
+      ${hl.length ? `<div class="tm-sec"><div class="tm-cap" style="padding-bottom:6px">Updates this week</div>
         ${hl.map(h => `<button class="tm-row" data-act="pick" data-uid="${esc(h.uid)}" style="display:grid;grid-template-columns:3px minmax(0,1fr);gap:12px;padding:10px 8px;margin:0 -8px;border-top:1px solid #F3F3F1;border-radius:6px;min-height:52px">
           <span style="border-radius:2px;background:${SEV[h.sev]}"></span><span style="display:flex;flex-direction:column;gap:2px"><span style="font-size:13px;font-weight:500">${esc(h.title)}</span><span style="font-size:12px;color:${MUTED}">${esc(h.sub)}</span></span></button>`).join('')}</div>` : ''}
       <div style="padding:16px 22px 24px"><button class="tm-link" data-act="week-report" data-v="${S.wkSel}">Transit performance from ${isoWeek(S.wkSel)} ${I.out()}</button></div>`;
