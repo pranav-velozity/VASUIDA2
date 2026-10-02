@@ -173,9 +173,13 @@ function cgIndex(consignments){
       else if(ms.stage === 'fc_receipt' && ms.planned_at) dates[field] = ms.planned_at;
       states[ms.stage] = ms.state;
     }
+    const planned = {};
+    for(const ms of (c.milestones||[])){ if(ms.planned_at) planned[ms.stage] = ms.planned_at; }
+
     const entry = {
-      dates, states,
+      dates, states, planned,
       reference: c.reference || null,
+      mode: c.mode || null,
       vessel: c.vessel || null,
       mbl: c.mbl || null,
       hbl: c.hbl || null,
@@ -360,7 +364,13 @@ function buildMapData(lanes, containers, plan, receiving, appliedByPO, consignme
         ? Object.entries(cg.states || {}).filter(([, st]) => st === 'assumed').length
         : null;
 
+      // A consignment waiting to leave still has a planned departure, and that is the thing
+      // people want from the map before it sails: which box, and when does it go.
+      const plannedDep = cg ? (cg.planned || {}).departed || null : null;
+
       const zdEntry = {zendesk, applied, planned, hbl, mbl, supplier: lane.supplier||'', freight: lane.freight||'', stage, manual: m, isAir, etaPort, weekLabel,
+        etd: plannedDep,
+        booked: !!(cg && cg.reference),
         container: cg ? cg.reference : null,
         delay, early, confidence: conf ? conf.level : null, unconfirmed,
         tracked: cg ? cg.tracked : false,
@@ -380,12 +390,18 @@ function buildMapData(lanes, containers, plan, receiving, appliedByPO, consignme
           if(lks.includes(lane.key)){ vessel = String(c.vessel||'').trim(); if(vessel) break; }
         }
       }
-      // Group unassigned vessels by freight type so they show as one arc
-      // instead of many overlapping dots at origin port
-      const key = vessel || (isAir ? 'NO_VESSEL_AIR' : 'NO_VESSEL_SEA');
+      // One group per movement: the container or AWB it rides on. Falling back to the vessel
+      // name, and only then to a shared bucket, so two different flights are two markers
+      // rather than one.
+      const key = (cg && cg.reference) || vessel || (isAir ? 'NO_VESSEL_AIR' : 'NO_VESSEL_SEA');
+
+      // The mode belongs to the consignment, not to whichever lane created the group. An AWB
+      // was being drawn as a ship because a sea lane reached the bucket first.
+      const groupIsAir = cg ? (cg.mode === 'Air') : isAir;
 
       if(!vesselGroups.has(key)){
-        vesselGroups.set(key, {vessel, isAir, zdentrys: [],
+        vesselGroups.set(key, {vessel: vessel || (cg && cg.vessel) || '', isAir: groupIsAir,
+          reference: (cg && cg.reference) || null, zdentrys: [],
           departed: null, etaPort: null, arrived: null, destClr: null});
       }
       const vg = vesselGroups.get(key);
@@ -736,6 +752,68 @@ function dRow(label,value){
       dot.setAttribute('stroke','#fff'); dot.setAttribute('stroke-width','1.5');
       dot.setAttribute('opacity',active?'1':'0.4');
       svgEl.appendChild(dot);
+
+      // Booked, waiting to leave — listed beside the origin port rather than piled onto it.
+      if(locKey === 'origin_port'){
+        const waiting = new Map();
+        for(const z of (mapData.locationGroups?.origin_port || [])){
+          if(!z.container) continue;                     // a lane on no container has no ETD
+          if(!waiting.has(z.container)){
+            waiting.set(z.container, {ref: z.container, isAir: z.isAir, etd: z.etd, lanes: 0});
+          }
+          const w = waiting.get(z.container);
+          w.lanes++;
+          if(z.etd && (!w.etd || z.etd < w.etd)) w.etd = z.etd;
+        }
+        const list = [...waiting.values()].sort((a,b)=>String(a.etd||'').localeCompare(String(b.etd||'')));
+        if(list.length){
+          const bx = lx - 190, by = ly + 16;
+          const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+          g.setAttribute('class','map-waiting');
+          const h = 16 + list.length * 15;
+          const bg = document.createElementNS('http://www.w3.org/2000/svg','rect');
+          bg.setAttribute('x', bx); bg.setAttribute('y', by);
+          bg.setAttribute('width', 182); bg.setAttribute('height', h);
+          bg.setAttribute('rx', 7);
+          bg.setAttribute('fill', 'rgba(255,255,255,.93)');
+          bg.setAttribute('stroke', 'rgba(0,0,0,.10)');
+          bg.setAttribute('stroke-width', '.5');
+          g.appendChild(bg);
+
+          const cap = document.createElementNS('http://www.w3.org/2000/svg','text');
+          cap.setAttribute('x', bx + 9); cap.setAttribute('y', by + 12);
+          cap.setAttribute('font-size','7.5'); cap.setAttribute('fill','#8E8E93');
+          cap.setAttribute('letter-spacing','.06em');
+          cap.textContent = 'BOOKED — AWAITING DEPARTURE';
+          g.appendChild(cap);
+
+          list.forEach((w,i)=>{
+            const y = by + 26 + i*15;
+            const mk = document.createElementNS('http://www.w3.org/2000/svg','text');
+            mk.setAttribute('x', bx + 9); mk.setAttribute('y', y);
+            mk.setAttribute('font-size','8.5');
+            mk.setAttribute('fill', w.isAir ? AIR_COLOR : '#990033');
+            mk.textContent = w.isAir ? '✈' : '⛴';
+            g.appendChild(mk);
+
+            const ref = document.createElementNS('http://www.w3.org/2000/svg','text');
+            ref.setAttribute('x', bx + 22); ref.setAttribute('y', y);
+            ref.setAttribute('font-size','8.5'); ref.setAttribute('fill','#1C1C1E');
+            ref.textContent = w.ref.length > 15 ? w.ref.slice(0,15)+'…' : w.ref;
+            g.appendChild(ref);
+
+            const etd = document.createElementNS('http://www.w3.org/2000/svg','text');
+            etd.setAttribute('x', bx + 173); etd.setAttribute('y', y);
+            etd.setAttribute('font-size','8'); etd.setAttribute('text-anchor','end');
+            etd.setAttribute('fill', w.etd ? '#6E6E73' : '#C7C7CC');
+            // The date it is due to leave, which is the only question worth asking of a box
+            // that has not left.
+            etd.textContent = w.etd ? ('ETD ' + fmtDate(w.etd)) : 'no ETD';
+            g.appendChild(etd);
+          });
+          svgEl.appendChild(g);
+        }
+      }
 
       // Labels on left for Shenzhen cluster + Sydney WH, right for ports/airport
       const labelLeft = ['supplier','vas_facility','origin_port','client_wh'].includes(locKey);
