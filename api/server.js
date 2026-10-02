@@ -6096,6 +6096,11 @@ app.get('/report/stock-status',
             facility:  String(p.facility_name || '').trim() || '',
             due_date:  String(p.due_date || '').trim() || '',
             planned:   Number(p.target_qty || 0) || 0,
+            // The supplier's cost per unit, as the plan gives it. Not landed: shipping is
+            // VelOzity's, and adding it here would state a number the client did not pay.
+            cost:      (p.cost === null || p.cost === undefined || String(p.cost).trim() === '')
+                         ? null : Number(p.cost),
+            currency:  String(p.cost_currency || p.source_supplier_currency || '').trim() || null,
             week_start: pw.week_start,
           });
         }
@@ -6213,7 +6218,19 @@ app.get('/report/stock-status',
       else if (lane?.departed_at)                     status = 'In Transit';
       else if (actualReceived > 0)                    status = 'In Stock';
 
+      // A line that received nothing is not stock. It was asked for and did not arrive, which
+      // is a different report; including it here puts zero-value rows in a stock file.
+      if (!(actualReceived > 0)) continue;
+
+      const unitCost = Number.isFinite(item.cost) ? item.cost : null;
+
       rows.push({
+        unit_cost:        unitCost,
+        currency:         item.currency || null,
+        // What arrived, at what the client paid for it. Null rather than zero where the plan
+        // carried no cost: a zero total would read as free goods rather than a missing figure.
+        total_cost:       unitCost === null ? null
+                            : Math.round(actualReceived * unitCost * 100) / 100,
         week_start:       item.week_start,
         supplier:         item.supplier,
         zendesk:          item.zendesk,
@@ -11645,6 +11662,13 @@ async function mcrSendMonthly(month, origin, opts) {
     fx: { rate: fx.rate, date: fx.date, source: fx.source },
     rows: { shipping: shipping.rowCount, vas: vas.rowCount } };
 }
+
+// The month's stock position, in the client's inbox at 5am on the 1st. Calendar months, not
+// reporting weeks, because that is what a finance team recognises.
+app.use('/ops', require('./monthly_stock_job')({
+  express, db, authenticateRequest, auditLog, curClient,
+  internal: internalAuth, sendViaResend, logger: console,
+}));
 
 // Did it run, and what happened? Previously unanswerable without reading the database.
 app.get('/ops/monthly-client-report/status', authenticateRequest, (req, res) => {

@@ -23,10 +23,11 @@
   const COLUMNS = [
     'Supplier', 'Zendesk', 'PO', 'SKU', 'Freight', 'Facility', 'Due Date',
     'Planned Units', 'Actual Received', 'Applied Units',
+    'Unit Cost', 'Total Cost',
     'Received Date', 'Departed Date', 'ETA FC', 'Delivered Date', 'Status',
   ];
 
-  const WIDTHS = [18, 12, 16, 14, 8, 14, 12, 14, 16, 14, 14, 14, 12, 14, 12];
+  const WIDTHS = [18, 12, 16, 14, 8, 14, 12, 14, 16, 14, 12, 14, 14, 14, 12, 14, 12];
 
   // Timestamps are shown as dates: the time of day is noise in a stock report and it made
   // the columns three times wider than they needed to be.
@@ -46,6 +47,10 @@
       'Planned Units': num(r.planned),
       'Actual Received': num(r.actual_received),
       'Applied Units': num(r.applied),
+      // Blank, not zero, where the plan carried no cost. A zero total reads as free goods;
+      // an empty cell reads as a figure nobody supplied, which is what it is.
+      'Unit Cost': (r.unit_cost === null || r.unit_cost === undefined) ? '' : Number(r.unit_cost),
+      'Total Cost': (r.total_cost === null || r.total_cost === undefined) ? '' : Number(r.total_cost),
       'Received Date': day(r.received_date),
       'Departed Date': day(r.departed_date),
       'ETA FC': day(r.eta_fc),
