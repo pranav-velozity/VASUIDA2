@@ -185,14 +185,21 @@
     const lanesN = (c.lanes || []).length;
 
     // Where it is along its route, 0 at the origin and 1 at the destination.
+    // Actual dates first. Where nobody has confirmed one, the plan places it — a flight
+    // booked for last week has almost certainly flown — and the pill is drawn dashed so a
+    // planned position never passes for a confirmed one.
+    const depReal = ymd(dep.actual_at), arrReal = ymd(arr.actual_at);
+    const depAt = depReal || (d('departed') && d('departed') <= today ? d('departed') : null);
     const progWith = (arrDate) => {
-      if (arr.actual_at || delivered) return 1;
-      if (!dep.actual_at) return 0;
+      if (arrReal || delivered) return 1;
+      if (!depAt) return 0;
       const a = arrDate || d('arrived');
-      const span = diff(dep.actual_at, a);
+      if (!depReal && a && a <= today) return 1;
+      const span = diff(depAt, a);
       if (!span || span <= 0) return 0.5;
-      return clamp(diff(dep.actual_at, today) / span, 0.05, 0.95);
+      return clamp(diff(depAt, today) / span, 0.05, 0.95);
     };
+    const assumedPos = !delivered && !arrReal && !!((depAt && !depReal) || (!depReal && d('arrived') && d('arrived') <= today));
     const changed = c.changed_24h || {};
     const prog = progWith(null);
     const progB = ('carrier_eta' in changed && changed.carrier_eta) ? progWith(changed.carrier_eta) : prog;
@@ -226,7 +233,7 @@
       wk: c.week_start, wkLabel: isoWeek(c.week_start), ms, d, delivered, health, st: health.key, held, term, route,
       lanes: lanesN, pos: cs.pos || 0, skus: cs.skus || 0, units: cs.planned || 0,
       fc: d('fc_receipt'), base: ymd(c.baseline_fc_at), basePlan: c.baseline_plan || null,
-      changed, prog, progB, where, sub: subBits.join(' · '),
+      changed, prog, progB, assumedPos, where, sub: subBits.join(' · '),
       routeText: `${air ? 'Air' : 'Sea'} · ${originName} → ${destName}`,
       live: false,
     };
@@ -394,7 +401,10 @@
 .tm{font-family:'Geist','Helvetica Neue',Helvetica,Arial,sans-serif;color:${INK};box-sizing:border-box;padding:24px 28px 48px;max-width:1600px;margin:0 auto;display:flex;flex-direction:column;gap:20px;-webkit-font-smoothing:antialiased}
 .tm *{box-sizing:border-box}
 .tm-mono{font-family:'Geist Mono',ui-monospace,Menlo,monospace}
-.tm button{font:inherit;color:inherit;background:none;border:0;padding:0;margin:0;text-align:left;cursor:pointer}
+/* Zero-specificity reset: a plain .tm button rule outranked every pill and chip class, which
+   is what blew their text up and made their backgrounds transparent. */
+.tm :where(button){font:inherit;color:inherit;background:none;border:0;padding:0;margin:0;text-align:left;cursor:pointer}
+.tm :where(button,.tm-chip,.tm-wchip,.tm-pill,.tm-pillbtn){white-space:nowrap}
 .tm button:focus-visible,.tm input:focus-visible,.tm textarea:focus-visible,.tm select:focus-visible{outline:2px solid ${RED};outline-offset:2px}
 .tm button[disabled]{cursor:not-allowed;opacity:.55}
 .tm-card{background:#fff;border:1px solid ${LINE};border-radius:12px;overflow:hidden}
@@ -405,21 +415,29 @@
 .tm-head{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;flex-wrap:wrap}
 .tm-head h1{margin:0;font-size:34px;font-weight:600;letter-spacing:-.02em;line-height:1}
 .tm-kicker{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:${MUTED};font-weight:500}
-.tm-pillbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:16px;border:1px solid #D6D6D2!important;background:#fff!important;font-size:13px;font-weight:500}
-.tm-btn{height:40px;padding:0 14px;border-radius:8px;border:1px solid #D6D6D2!important;background:#fff!important;font-size:13px;font-weight:500;display:inline-flex;align-items:center;gap:8px}
-.tm-btn-p{height:44px;padding:0 16px;border-radius:8px;background:${INK}!important;color:#fff!important;font-size:14px;font-weight:500;display:inline-flex;align-items:center;gap:8px}
-.tm-btn-s{height:44px;padding:0 16px;border-radius:8px;background:#fff!important;border:1px solid #D6D6D2!important;font-size:14px;font-weight:500;display:inline-flex;align-items:center;gap:8px}
+.tm-pillbtn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:15px;border:1px solid #D6D6D2;background:#fff;font-size:12px;font-weight:500}
+.tm-btn{height:38px;padding:0 14px;border-radius:8px;border:1px solid #D6D6D2;background:#fff;font-size:12.5px;font-weight:500;display:inline-flex;align-items:center;gap:8px}
+.tm-btn-p{height:42px;padding:0 16px;border-radius:8px;background:${INK};color:#fff;font-size:13px;font-weight:500;display:inline-flex;align-items:center;gap:8px}
+.tm-btn-s{height:42px;padding:0 16px;border-radius:8px;background:#fff;border:1px solid #D6D6D2;font-size:13px;font-weight:500;display:inline-flex;align-items:center;gap:8px}
 .tm-seg{display:flex;background:#E7E7E4;border-radius:8px;padding:3px;gap:2px}
-.tm-seg button{height:34px;padding:0 14px;border-radius:6px;font-size:13px;font-weight:500;color:${MUTED}}
+.tm-seg button{height:32px;padding:0 14px;border-radius:6px;font-size:12.5px;font-weight:500;color:${MUTED}}
 .tm-seg button[aria-pressed="true"]{background:#fff;color:${INK};box-shadow:0 1px 2px rgba(0,0,0,.08)}
-.tm-hl{display:grid;grid-template-columns:3px minmax(0,1fr) auto;gap:14px;align-items:stretch;padding:12px 20px;border-top:1px solid ${SOFT};min-height:56px;width:100%}
+.tm-hl{display:grid;grid-template-columns:3px 54px minmax(0,1fr) minmax(0,auto);gap:14px;align-items:center;padding:0 calc(20px + 3%) 0 20px;border-top:1px solid ${SOFT};height:64px;width:100%}
+.tm-hl .bar{align-self:stretch;margin:10px 0;border-radius:2px}
+.tm-hl .t{font-size:13.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tm-hl .s{font-size:12.5px;color:${MUTED};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tm-hl .r{display:flex;flex-direction:column;align-items:flex-end;gap:4px;max-width:200px;min-width:0}
+.tm-tick{position:relative;overflow:hidden}
+.tm-tick-inner{display:flex;flex-direction:column;animation:tmTick var(--tm-dur,60s) linear infinite}
+.tm-tick:hover .tm-tick-inner,.tm-tick:focus-within .tm-tick-inner{animation-play-state:paused}
+.tm-live{width:6px;height:6px;border-radius:50%;background:${GREEN};display:inline-block;flex-shrink:0;animation:tmPulse 1.8s ease-in-out infinite}
 .tm-dark{background:${INK};color:#fff;border-radius:12px;padding:18px 20px 20px;display:flex;flex-direction:column}
 .tm-dseg{display:flex;background:#262626;border-radius:8px;padding:3px;gap:2px}
 .tm-dseg button{height:30px;padding:0 12px;border-radius:6px;font-size:12px;font-weight:500;color:#B5B5B5}
 .tm-dseg button[aria-pressed="true"]{background:#fff;color:${INK}}
-.tm-iconbtn{width:36px;height:36px;border-radius:8px;border:1px solid #3A3A3A!important;display:inline-flex;align-items:center;justify-content:center}
-.tm-wchip{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:16px;font-size:12px;font-weight:500;color:#D9D9D9;border:1px solid #3A3A3A!important}
-.tm-wchip[aria-pressed="true"]{background:#fff!important;color:${INK};border-color:#fff!important}
+.tm-iconbtn{width:36px;height:36px;border-radius:8px;border:1px solid #3A3A3A;display:inline-flex;align-items:center;justify-content:center}
+.tm-wchip{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;border-radius:15px;font-size:11.5px;font-weight:500;color:#D9D9D9;border:1px solid #3A3A3A}
+.tm-wchip[aria-pressed="true"]{background:#fff;color:${INK};border-color:#fff}
 .tm-wchip .n{font-size:11px;font-weight:600;min-width:16px;height:16px;padding:0 4px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;background:#333;color:#B5B5B5}
 .tm-wchip[aria-pressed="true"] .n{background:${INK};color:#fff}
 .tm-menu{position:absolute;top:38px;left:0;z-index:5;width:270px;background:#fff;color:${INK};border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.35);padding:6px;display:flex;flex-direction:column}
@@ -427,8 +445,9 @@
 .tm-menu button:hover{background:#F4F4F2}
 .tm-route{display:grid;grid-template-columns:140px minmax(0,1fr) 150px;align-items:center;height:48px;border-top:1px solid #262626}
 .tm-track{position:relative;height:48px}
-.tm-pill{position:absolute;top:50%;display:flex;align-items:center;gap:6px;height:28px;padding:0 10px 0 7px;border-radius:14px;font-size:12px;white-space:nowrap;background:#1E1E1E;color:#fff;transition:left 1.2s cubic-bezier(.2,.7,.2,1)}
-.tm-pill.sel{background:#fff!important;color:${INK}!important}
+.tm-pill{position:absolute;top:50%;z-index:1;display:flex;align-items:center;gap:6px;height:26px;padding:0 10px 0 7px;border-radius:13px;font-size:11.5px;white-space:nowrap;background:#1E1E1E;color:#fff;transition:left 1.2s cubic-bezier(.2,.7,.2,1)}
+.tm-pill.sel{background:#fff;color:${INK}}
+.tm-pill.assumed{border-style:dashed!important}
 .tm-wk{font-size:10px;font-weight:600;padding:1px 4px;border-radius:3px;background:rgba(255,255,255,.16)}
 .tm-pill.sel .tm-wk{background:${INK};color:#fff}
 .tm-anim{transition:left 1.2s cubic-bezier(.2,.7,.2,1),width 1.2s cubic-bezier(.2,.7,.2,1),top 1.2s cubic-bezier(.2,.7,.2,1),opacity .5s ease}
@@ -444,7 +463,7 @@
 .tm-ov-dim{position:absolute;inset:0;background:rgba(18,18,18,.28);animation:tmFade .2s ease;cursor:default}
 .tm-panel{position:relative;margin-left:auto;width:100%;max-width:520px;height:100%;overflow-y:auto;background:#fff;display:flex;flex-direction:column;box-shadow:-20px 0 60px rgba(0,0,0,.18);animation:tmIn .28s cubic-bezier(.2,.7,.2,1)}
 .tm-pnav{position:sticky;top:0;z-index:2;background:#fff;display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid ${SOFT}}
-.tm-sq{width:40px;height:40px;border-radius:8px;border:1px solid #D6D6D2!important;display:inline-flex!important;align-items:center;justify-content:center}
+.tm-sq{width:40px;height:40px;border-radius:8px;border:1px solid #D6D6D2;display:inline-flex;align-items:center;justify-content:center}
 .tm-sec{padding:16px 22px 4px;display:flex;flex-direction:column}
 .tm-li{display:grid;gap:10px;align-items:center;padding:9px 0;border-top:1px solid #F3F3F1;font-size:13px}
 .tm-chip{display:inline-flex;justify-content:center;align-items:center;height:22px;padding:0 8px;border-radius:11px;font-size:11px;font-weight:600;white-space:nowrap}
@@ -456,9 +475,11 @@
 .tm-skel{background:linear-gradient(90deg,#EEE 0,#F6F6F4 50%,#EEE 100%);background-size:200% 100%;animation:tmSk 1.2s infinite;border-radius:10px}
 @keyframes tmIn{from{transform:translateX(28px);opacity:0}to{transform:none;opacity:1}}
 @keyframes tmFade{from{opacity:0}to{opacity:1}}
+@keyframes tmTick{from{transform:translateY(0)}to{transform:translateY(-50%)}}
+@keyframes tmPulse{0%,100%{box-shadow:0 0 0 0 ${GREEN}99}50%{box-shadow:0 0 0 4px ${GREEN}00}}
 @keyframes tmSk{from{background-position:200% 0}to{background-position:-200% 0}}
 @media (max-width:900px){.tm{padding:16px 12px 40px}.tm-route{grid-template-columns:96px minmax(0,1fr) 96px}.tm-head h1{font-size:28px}}
-@media (prefers-reduced-motion:reduce){.tm *,.tm-ov *,.tm-modal-wrap *{transition:none!important;animation:none!important}}
+@media (prefers-reduced-motion:reduce){.tm *,.tm-ov *,.tm-modal-wrap *{transition:none!important;animation:none!important}.tm-tick{overflow-y:auto!important}}
 `;
     document.head.appendChild(s);
   }
@@ -552,30 +573,43 @@
   }
 
   // ════ Highlights ════
+  // Five or six at a time. Past that the list rolls slowly upward and pauses under the
+  // pointer or keyboard focus; "Show all" stops it and lists everything.
+  const HL_VISIBLE = 6, HL_ROW = 64, HL_SECONDS = 4.5;
+  function hlRow(h, clone) {
+    return `<button class="tm-hl tm-row" data-act="pick" data-uid="${esc(h.uid)}" ${clone ? 'tabindex="-1" aria-hidden="true"' : ''}>
+        <span class="bar" style="background:${SEV[h.sev] || SEV.low}"></span>
+        <span class="tm-mono" style="font-size:15px;font-weight:700;letter-spacing:-.01em;white-space:nowrap">${esc(h.wk || '')}</span>
+        <span style="display:flex;flex-direction:column;gap:3px;min-width:0">
+          <span class="t" title="${esc(h.title)}">${esc(h.title)}</span>
+          <span class="s" title="${esc(h.sub)}">${esc(h.sub)}</span>
+        </span>
+        <span class="r">
+          <span class="tm-mono" style="font-size:11.5px;color:${MUTED};max-width:100%;overflow:hidden;text-overflow:ellipsis">${esc(h.ref || '')}</span>
+          ${h.tag ? `<span style="font-size:12px;font-weight:600;color:${h.sev === 'high' ? RED : h.sev === 'medium' ? '#8A6D00' : MUTED}">${esc(h.tag)}</span>` : ''}
+        </span>
+      </button>`;
+  }
   function renderHighlights(H) {
-    const rows = H.map(h => `
-      <button class="tm-hl tm-row" data-act="pick" data-uid="${esc(h.uid)}">
-        <span style="width:3px;border-radius:2px;background:${SEV[h.sev] || SEV.low}"></span>
-        <span style="display:flex;flex-direction:column;gap:2px;min-width:0;justify-content:center">
-          <span style="font-size:14px;font-weight:500">${esc(h.title)}</span>
-          <span style="font-size:13px;color:${MUTED}">${esc(h.sub)}</span>
-        </span>
-        <span style="display:flex;flex-direction:column;align-items:flex-end;justify-content:center;gap:4px">
-          <span style="display:flex;align-items:center;gap:8px">
-            <span class="tm-mono" style="font-size:11px;font-weight:600;padding:2px 6px;border-radius:4px;background:${SOFT}">${esc(h.wk || '')}</span>
-            <span class="tm-mono" style="font-size:12px;color:${MUTED}">${esc(h.ref || '')}</span>
-          </span>
-          ${h.tag ? `<span style="font-size:12px;font-weight:600;white-space:nowrap;color:${h.sev === 'high' ? RED : h.sev === 'medium' ? '#8A6D00' : MUTED}">${esc(h.tag)}</span>` : ''}
-        </span>
-      </button>`).join('');
+    const roll = H.length > HL_VISIBLE && !S.hlAll;
+    let list;
+    if (!H.length) list = `<div style="padding:4px 20px 18px;font-size:14px;color:${MUTED}">Nothing needs a person. Everything is on plan or tracked.</div>`;
+    else if (roll) {
+      // The list is drawn twice and moved up by half its height, so the loop has no seam.
+      const rows = H.map(h => hlRow(h, false)).join('') + H.map(h => hlRow(h, true)).join('');
+      list = `<div class="tm-tick" style="height:${HL_VISIBLE * HL_ROW}px" aria-live="off">
+          <div class="tm-tick-inner" style="--tm-dur:${Math.round(H.length * HL_SECONDS)}s">${rows}</div></div>`;
+    } else list = `<div style="display:flex;flex-direction:column">${H.map(h => hlRow(h, false)).join('')}</div>`;
     return `
 <section class="tm-card" aria-label="Highlights">
   <div style="display:flex;justify-content:space-between;align-items:baseline;padding:16px 20px 10px;gap:12px;flex-wrap:wrap">
     <h2 class="tm-h2">Highlights</h2>
-    <div class="tm-note">${H.length ? `${plural(H.length, 'item')} · everything else is on plan or tracked` : ''}</div>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <span class="tm-note">${H.length ? `${plural(H.length, 'item')}${roll ? ' · rolling, hover to pause' : ''}` : ''}</span>
+      ${H.length > HL_VISIBLE ? `<button class="tm-pillbtn" data-act="hl-all">${S.hlAll ? 'Roll' : 'Show all'}</button>` : ''}
+    </div>
   </div>
-  ${H.length ? `<div style="display:flex;flex-direction:column">${rows}</div>`
-             : `<div style="padding:4px 20px 18px;font-size:14px;color:${MUTED}">Nothing needs a person. Everything is on plan or tracked.</div>`}
+  ${list}
 </section>`;
   }
 
@@ -601,7 +635,8 @@
         <span style="display:flex;align-items:center;gap:8px"><span class="tm-mono" style="font-size:12px;font-weight:600">${e.label}</span><span style="font-size:12px;color:${MUTED}">${esc(e.date)}</span></span>
         <span style="font-size:12px;${e.before ? `color:${GREY};font-style:italic` : `font-weight:500`}">${e.before ? 'before tracking' : e.n ? plural(e.n, 'movement') : 'no movements'}</span></button>`).join('');
     const legend = ['on_time', 'behind', 'delayed', 'not_booked'].map(k =>
-      `<span style="display:flex;align-items:center;gap:6px;font-size:12px;color:#D9D9D9">${dot(k, 10)}${k === 'not_booked' ? 'Not booked or no quote' : STATUS[k].l}</span>`).join('');
+      `<span style="display:flex;align-items:center;gap:6px;font-size:12px;color:#D9D9D9">${dot(k, 10)}${k === 'not_booked' ? 'Not booked or no quote' : STATUS[k].l}</span>`).join('')
+      + `<span style="display:flex;align-items:center;gap:6px;font-size:12px;color:#D9D9D9"><span style="width:18px;height:10px;border-radius:5px;border:1.5px dashed #9C9C9C;display:inline-block"></span>Position from plan — not yet confirmed</span>`;
     const head = `
   <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;padding-bottom:10px">
     <div style="display:flex;flex-direction:column;gap:2px;min-width:0">
@@ -651,8 +686,16 @@
       if (!groups.has(k)) groups.set(k, []);
       groups.get(k).push(m);
     }
-    const order = [...groups.entries()].sort((a, b) => (a[0].startsWith('sea') ? 0 : 1) - (b[0].startsWith('sea') ? 0 : 1));
-    return order.map(([k, list]) => {
+    // At most three to a line. A route carrying more is drawn as several lines, newest week
+    // first, so pills never stack on top of one another.
+    const PER_LINE = 3;
+    const order = [];
+    for (const [k, all] of [...groups.entries()].sort((a, b) => (a[0].startsWith('sea') ? 0 : 1) - (b[0].startsWith('sea') ? 0 : 1))) {
+      const sorted = all.slice().sort((a, b) => b.wk.localeCompare(a.wk) || b.prog - a.prog);
+      const parts = Math.ceil(sorted.length / PER_LINE);
+      for (let i = 0; i < parts; i++) order.push([k, sorted.slice(i * PER_LINE, (i + 1) * PER_LINE), i, parts]);
+    }
+    return order.map(([k, list, part, parts]) => {
       const m0 = list[0], o = m0.route.origin, d = m0.route.dest;
       const air = m0.mode === 'air';
       const via = [];
@@ -662,7 +705,7 @@
         const pB = m.progB, pN = m.prog;
         const pos = (p, seen) => {
           const slot = Math.round(p * 20);
-          seen[slot] = (seen[slot] || 0) + 1; const shift = (seen[slot] - 1) * 124;
+          seen[slot] = (seen[slot] || 0) + 1; const shift = (seen[slot] - 1) * 136;
           return p <= 0.02 ? [`calc(${p * 100}% + ${10 + shift}px)`, 'translate(0,-50%)']
                : p >= 0.98 ? [`calc(${p * 100}% - ${10 + shift}px)`, 'translate(-100%,-50%)']
                : [`calc(${p * 100}% + ${shift}px)`, 'translate(-50%,-50%)'];
@@ -670,7 +713,7 @@
         const [ln, tr] = pos(pN, seenN);
         const lb = S.phase === 'before' ? pos(pB, seenB)[0] : ln;
         const st = STATUS[m.st] || STATUS.on_time;
-        return `<button class="tm-pill tm-anim${S.sel === m.uid ? ' sel' : ''}" data-act="${m.live ? 'pick' : 'hist'}" data-uid="${esc(m.uid)}" data-v="${m.wk}" data-dbl="${esc(m.uid)}"
+        return `<button class="tm-pill tm-anim${S.sel === m.uid ? ' sel' : ''}${m.assumedPos ? ' assumed' : ''}" title="${esc(m.assumedPos ? `${m.where} — placed by plan; not yet confirmed` : m.where)}" data-act="${m.live ? 'pick' : 'hist'}" data-uid="${esc(m.uid)}" data-v="${m.wk}" data-dbl="${esc(m.uid)}"
           aria-label="${esc(`${m.wkLabel} ${m.ref}, ${m.where}`)}" ${A(`transform:${tr};border:1.5px solid ${st.c};`, { left: [lb, ln] })}>
           ${dot(m.st, 10)}<span class="tm-mono tm-wk">${m.wkLabel}</span><span class="tm-mono">${esc(m.short)}</span></button>`;
       }).join('');
@@ -678,9 +721,10 @@
         const st = STATUS[m.st] || STATUS.on_time;
         return `<div class="tm-anim" ${A(`position:absolute;left:0;top:50%;height:3px;transform:translateY(-50%);border-radius:2px;background:${st.c};`, { width: [`${m.progB * 100}%`, `${m.prog * 100}%`] })}></div>`;
       }).join('');
-      const end = (p, alignRight) => `<div style="display:flex;flex-direction:column;gap:1px;${alignRight ? 'align-items:flex-end;text-align:right' : ''};min-width:0">
+      const cont = part > 0;
+      const end = (p, alignRight) => `<div style="display:flex;flex-direction:column;gap:1px;${alignRight ? 'align-items:flex-end;text-align:right' : ''};min-width:0;${cont ? 'opacity:.45' : ''}">
           <span class="tm-mono" style="font-size:13px;font-weight:600">${esc(p ? (p.code || '') : '') || '—'}</span>
-          <span style="font-size:11px;color:#9C9C9C;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p ? (p.name || '') : 'Port not yet known')}</span></div>`;
+          <span style="font-size:11px;color:#9C9C9C;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p ? (p.name || '') : 'Port not yet known')}${parts > 1 ? ` · ${part + 1}/${parts}` : ''}</span></div>`;
       return `<div class="tm-route">${end(o, false)}
         <div class="tm-track">
           <div style="position:absolute;left:0;right:0;top:50%;border-top:1.5px ${air ? 'dashed' : 'solid'} #4A4A4A"></div>
@@ -857,7 +901,8 @@
         b.setAttribute('data-uid', m.uid); b.setAttribute('data-v', m.wk); b.setAttribute('data-dbl', m.uid);
         b.setAttribute('aria-label', `${m.wkLabel} ${m.ref}, ${m.where}`);
         const sel = S.sel === m.uid;
-        b.style.cssText = `position:absolute;left:${xb}px;top:${ybS}px;transform:translate(${leftSide ? 'calc(-100% + 9px)' : '-9px'},-50%);display:flex;align-items:center;gap:6px;height:26px;padding:${leftSide ? '0 4px 0 9px' : '0 9px 0 4px'};border-radius:13px;font-size:11px;white-space:nowrap;${leftSide ? 'flex-direction:row-reverse;' : ''}${sel ? `background:#fff;color:${INK};` : `background:rgba(30,30,30,.92);color:#fff;border:1.5px solid ${st.c};`}`;
+        b.style.cssText = `position:absolute;z-index:1;left:${xb}px;top:${ybS}px;transform:translate(${leftSide ? 'calc(-100% + 9px)' : '-9px'},-50%);display:flex;align-items:center;gap:6px;height:24px;padding:${leftSide ? '0 4px 0 9px' : '0 9px 0 4px'};border-radius:12px;font-size:11px;white-space:nowrap;${leftSide ? 'flex-direction:row-reverse;' : ''}${sel ? `background:#fff;color:${INK};` : `background:rgba(30,30,30,.95);color:#fff;border:1.5px ${m.assumedPos ? 'dashed' : 'solid'} ${st.c};`}`;
+        if (m.assumedPos) b.title = `${m.where} — placed by plan; not yet confirmed`;
         b.innerHTML = `${dot(m.st, 11).replace('style="', `style="box-shadow:0 0 0 4px ${st.c}40;`)}<span class="tm-mono tm-wk" style="${sel ? `background:${INK};color:#fff` : ''}">${m.wkLabel}</span><span class="tm-mono">${esc(m.short)}</span>`;
         host.appendChild(b);
         if (xb !== xn || ybS !== ynS) requestAnimationFrame(() => requestAnimationFrame(() => { b.style.left = xn + 'px'; b.style.top = ynS + 'px'; }));
@@ -873,6 +918,9 @@
   }
 
   // ════ Timeline by execution week ════
+  // Weeks start collapsed: each header still shows its movements' FC dates, late ones in red,
+  // and a week opens with one click.
+  const isShut = (k) => (k in S.collapsed) ? !!S.collapsed[k] : true;
   function renderTimeline(M) {
     const start = addD(mondayOf(M.today), -14);
     const TODAY = diff(start, M.today);
@@ -960,7 +1008,7 @@
     }
 
     function weekHeader(w, list) {
-      const shut = !!S.collapsed[w];
+      const shut = isShut(w);
       const lanes = list.reduce((a, m) => a + m.lanes, 0), pos = list.reduce((a, m) => a + m.pos, 0);
       const L = pct(Math.max(-0.5, ix(w) - 0.5)), R = pct(ix(w) + 6.5);
       const mini = shut ? list.map(m => {
@@ -990,10 +1038,10 @@
     for (const w of weeks) {
       const list = M.timeline.filter(m => m.wk === w);
       rows.push(weekHeader(w, list));
-      if (!S.collapsed[w]) for (const m of list) rows.push(moveRow(m));
+      if (!isShut(w)) for (const m of list) rows.push(moveRow(m));
     }
     if (M.unassigned.length) {
-      const shut = !!S.collapsed.none;
+      const shut = isShut('none');
       const wks = [...new Set(M.unassigned.map(u => isoWeek(u.week_start)))];
       const pos = M.unassigned.reduce((a, u) => a + (u.pos || 0), 0);
       const legacy = M.unassigned.filter(u => u.legacy_dates).length;
@@ -1017,7 +1065,7 @@
         <div style="position:relative;height:100%"><div style="position:absolute;left:12px;right:12px;top:18px;bottom:18px;border:1px dashed #BDBDB8;border-radius:8px;display:flex;align-items:center;padding:0 14px;font-size:13px;color:${MUTED};background:#fff">Not placed on the timeline. Dates typed on a lane are ignored until the lane joins a movement.</div></div>
       </div>`);
     }
-    const anyShut = Object.values(S.collapsed).some(Boolean);
+    const anyOpen = weeks.some(w => !isShut(w)) || (M.unassigned.length && !isShut('none'));
     const empty = !M.timeline.length && !M.unassigned.length;
     return `
 <section class="tm-card" aria-label="Timeline by execution week">
@@ -1026,7 +1074,7 @@
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
       <span class="tm-note">Double-click a movement for its POs and SKUs · green is done, dashed is still a plan</span>
       ${M.timeline.length ? `<button class="tm-btn" style="height:32px;font-size:12px" data-act="export-all">${I.dl()} Export POs &amp; SKUs</button>` : ''}
-      <button class="tm-btn" style="height:32px;font-size:12px" data-act="collapse-all">${anyShut ? 'Expand all' : 'Collapse all'}</button>
+      <button class="tm-btn" style="height:32px;font-size:12px" data-act="collapse-all">${anyOpen ? 'Collapse all' : 'Expand all'}</button>
     </div>
   </div>
   ${empty ? `<div style="padding:24px 20px 28px;font-size:14px;color:${MUTED}">No movements in play. When a container or flight is set up in Transit &amp; Clearing it appears here.</div>` : `
@@ -1041,7 +1089,7 @@
     </div>
   </div>`}
   <div class="tm-legend">
-    <span><span style="width:9px;height:9px;background:${GREEN};border:1.5px solid ${INK};transform:rotate(45deg);display:inline-block;box-sizing:border-box"></span>Tracked event</span>
+    <span><span style="width:9px;height:9px;background:${GREEN};border:1.5px solid ${INK};transform:rotate(45deg);display:inline-block;box-sizing:border-box"></span>Live carrier event</span>
     <span><span style="width:10px;height:10px;border-radius:50%;background:${GREEN};border:1.5px solid ${INK};display:inline-block;box-sizing:border-box"></span>Confirmed by a person</span>
     <span><span style="width:22px;height:6px;background:${GREEN};box-shadow:0 0 0 1px ${INK};display:inline-block"></span>Completed leg</span>
     <span><span style="width:10px;height:10px;border-radius:50%;border:1.5px dashed #8A8A8A;display:inline-block;box-sizing:border-box"></span>Assumed</span>
@@ -1055,7 +1103,7 @@
   // ════ Slide-over panels ════
   const chipFor = (x, today) => {
     const b = 'class="tm-chip" style="';
-    if (x.state === 'carrier') return `<span ${b}background:${INK};color:#fff">Tracked</span>`;
+    if (x.state === 'carrier') return `<span ${b}background:${INK};color:#fff;gap:5px" title="Recorded from the carrier’s own event, as it happened"><span class="tm-live"></span>Live · carrier</span>`;
     if (x.state === 'confirmed') return `<span ${b}border:1px solid ${INK}">Confirmed</span>`;
     if (x.state === 'amended') return `<span ${b}border:1px solid ${INK}">Amended</span>`;
     const p = ymd(x.planned_at);
@@ -1217,8 +1265,11 @@
         ${[['Terminal', term.terminal], ['Last free day', term.lfd ? fmtDay(term.lfd) : null], ['Holds', term.holds && term.holds.length ? term.holds.join(', ') : 'None reported'], ['Available for pickup', term.available_at ? fmtDay(term.available_at) : 'Not yet']]
           .filter(r => r[1]).map(r => `<div style="display:flex;justify-content:space-between;gap:12px;font-size:13px"><span style="color:${MUTED}">${r[0]}</span><span style="font-weight:500;text-align:right">${esc(r[1])}</span></div>`).join('')}
       </div>` : ''}
-      <div class="tm-sec"><div class="tm-cap" style="padding-bottom:6px">Milestones</div>
-        ${STAGES.filter(st => m.ms[st]).map(st => { const x = m.ms[st]; return `<div class="tm-li" style="grid-template-columns:minmax(0,1fr) 88px 104px">
+      <div class="tm-sec"><div class="tm-cap" style="padding-bottom:4px">Milestones</div>
+        ${!m.air && term && term.tracking
+          ? `<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:${INK};padding:2px 0 8px"><span class="tm-live"></span><span><b style="font-weight:600">Live carrier tracking.</b> <span style="color:${MUTED}">Departure, arrival and availability come from the carrier’s own events as they happen${term.updated_at ? ` · last update ${esc(timeLabel(String(term.updated_at).replace(' ', 'T') + (String(term.updated_at).includes('Z') ? '' : 'Z')))}` : ''}.</span></span></div>`
+          : `<div style="font-size:12px;color:${MUTED};padding:2px 0 8px">${m.air ? 'Air isn’t tracked automatically — each date is confirmed by the team.' : 'Not yet subscribed to carrier tracking — dates are planned or confirmed by the team.'}</div>`}
+        ${STAGES.filter(st => m.ms[st]).map(st => { const x = m.ms[st]; return `<div class="tm-li" style="grid-template-columns:minmax(0,1fr) 80px 118px">
           <span>${STAGE_LABEL[st]}</span><span class="tm-mono" style="font-size:12px;${x.actual_at ? `color:${INK};font-weight:500` : `color:${MUTED}`}">${esc(fmtShort(x.actual_at || x.planned_at))}</span>${chipFor(x, M.today)}</div>`; }).join('')}
       </div>
       <div class="tm-sec"><div style="display:flex;justify-content:space-between" class="tm-cap"><span>Lanes on this movement</span></div>
@@ -1683,12 +1734,14 @@
       case 'earlier-toggle': S.corrMore = !S.corrMore; render(); break;
       case 'pick': S.sel = uid; S.panel = 'mv'; S.amend = null; S.legacy = null; S.corrMore = false; render(); break;
       case 'hist': openReport('__openTransitHistory', v); break;
-      case 'wk-toggle': S.collapsed = Object.assign({}, S.collapsed, { [v]: !S.collapsed[v] }); render(); break;
+      case 'wk-toggle': { const shut = (v in S.collapsed) ? !!S.collapsed[v] : true; S.collapsed = Object.assign({}, S.collapsed, { [v]: !shut }); render(); break; }
+      case 'hl-all': S.hlAll = !S.hlAll; render(); break;
       case 'wk-open': S.wkSel = v; S.panel = 'wk'; render(); break;
       case 'collapse-all': {
-        const any = Object.values(S.collapsed).some(Boolean);
-        const c = {};
-        if (!any) { for (const w of model().liveWeeks) c[w] = true; c.none = true; }
+        const keys = model().liveWeeks.concat(['none']);
+        const shut = (k) => (k in S.collapsed) ? !!S.collapsed[k] : true;
+        const anyOpen = keys.some(k => !shut(k));
+        const c = {}; for (const k of keys) c[k] = anyOpen;
         S.collapsed = c; render(); break;
       }
       case 'panel-close': S.panel = null; S.amend = null; S.legacy = null; render(); break;
