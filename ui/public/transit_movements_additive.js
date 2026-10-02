@@ -234,7 +234,7 @@
       lanes: lanesN, pos: cs.pos || 0, skus: cs.skus || 0, units: cs.planned || 0,
       fc: d('fc_receipt'), base: ymd(c.baseline_fc_at), basePlan: c.baseline_plan || null,
       changed, prog, progB, assumedPos, where, sub: subBits.join(' · '),
-      routeText: `${air ? 'Air' : 'Sea'} · ${originName} → ${destName}`,
+      routeText: (route.origin || route.dest) ? `${air ? 'Air' : 'Sea'} · ${originName} → ${destName}` : `${air ? 'Air' : 'Sea'} · port not yet known`,
       live: false,
     };
   }
@@ -927,16 +927,6 @@
       if (dow === 6) bands.push(`<div style="position:absolute;top:0;bottom:0;left:${i / N_DAYS * 100}%;width:${2 / N_DAYS * 100}%;background:#F6F6F3"></div>`);
     }
 
-    const seg = (a, b, h, past) => {
-      const style = (L, R) => [`${L}%`, `${Math.max(0, R - L)}%`];
-      const [lN, wN] = style(pct(a.n), pct(b.n)), [lB, wB] = style(pct(a.b), pct(b.b));
-      const look = past ? `background:${GREEN};box-shadow:0 0 0 1px ${INK};` : 'background:repeating-linear-gradient(90deg,#9A9A96 0 5px,transparent 5px 9px);';
-      return `<div class="tm-anim" ${A(`position:absolute;top:50%;height:${past ? h + 2 : h}px;transform:translateY(-50%);${look}`, { left: [lB, lN], width: [wB, wN], opacity: [Number(wB.replace('%', '')) > 0.05 ? '1' : '0', Number(wN.replace('%', '')) > 0.05 ? '1' : '0'] })}></div>`;
-    };
-    const split = (a, b, h, out) => {
-      const mid = { n: clamp(TODAY, Math.min(a.n, b.n), Math.max(a.n, b.n)), b: clamp(TODAY, Math.min(a.b, b.b), Math.max(a.b, b.b)) };
-      out.push(seg(a, mid, h, true)); out.push(seg(mid, b, h, false));
-    };
     const markStyle = (st, planned) => {
       if (st === 'carrier') return `width:12px;height:12px;background:${GREEN};border:1.5px solid ${INK};transform:translate(-50%,-50%) rotate(45deg);box-shadow:0 0 0 2px #fff;`;
       if (st === 'confirmed' || st === 'amended') return `width:13px;height:13px;border-radius:50%;background:${GREEN};border:1.5px solid ${INK};transform:translate(-50%,-50%);box-shadow:0 0 0 2px #fff;`;
@@ -951,8 +941,64 @@
       const out = [], marks = [], labels = [];
       const first = STAGES.find(st => N[st] && N[st].v);
       const pDep = P('departed'), pArr = P('arrived'), pFc = P('fc_receipt'), pFirst = first ? P(first) : null;
-      if (pFirst && pDep.n != null && pArr.n != null && pFc.n != null) {
-        split(pFirst, pDep, 2, out); split(pDep, pArr, 6, out); split(pArr, pFc, 2, out);
+      // Where it actually is. Lime runs only to the last milestone someone confirmed or the
+      // carrier reported — elapsed time is not progress. From there to today is either
+      // "in progress" (the next milestone isn't due yet) or "overdue" (it was due and nobody
+      // has said it happened). Everything after today is plan.
+      const present = STAGES.filter(st => N[st] && N[st].v);
+      let lastDone = null;
+      for (const st of present) if (N[st].actual) lastDone = st;
+      const nextUp = m.delivered ? null : present.find((st, i) => !N[st].actual && (lastDone == null || i > present.indexOf(lastDone)));
+      const doneX = lastDone ? ix(N[lastDone].v) : null;
+      const overX = nextUp && N[nextUp].v < M.today ? ix(N[nextUp].v) : null;
+      const kindAt = (x) => (doneX != null && x < doneX) ? 'done' : x < TODAY ? ((overX != null && x >= overX) ? 'over' : 'prog') : 'future';
+      const LOOK = {
+        done: (h) => `height:${h + 2}px;background:${GREEN};box-shadow:0 0 0 1px ${INK};`,
+        prog: (h) => `height:${h}px;background:${INK};opacity:.5;`,
+        over: (h) => `height:${h + 1}px;background:repeating-linear-gradient(90deg,${RED} 0 6px,transparent 6px 10px);`,
+        future: (h) => `height:${h}px;background:repeating-linear-gradient(90deg,#9A9A96 0 5px,transparent 5px 9px);`,
+      };
+      const legs = first && pDep.n != null && pArr.n != null && pFc.n != null
+        ? [[pFirst.n, pDep.n, 2], [pDep.n, pArr.n, 6], [pArr.n, pFc.n, 2]] : [];
+      for (const [s0, e0, h] of legs) {
+        if (e0 <= s0) continue;
+        const cuts = [s0, e0, doneX, overX, TODAY].filter(v => v != null && v >= s0 && v <= e0);
+        const pts = [...new Set(cuts)].sort((a, b) => a - b);
+        for (let i = 0; i < pts.length - 1; i++) {
+          const a = pts[i], b = pts[i + 1];
+          if (b - a < 0.01) continue;
+          const L = pct(a), R = pct(b);
+          if (R - L < 0.05) continue;
+          out.push(`<div style="position:absolute;top:50%;transform:translateY(-50%);left:${L}%;width:${R - L}%;${LOOK[kindAt((a + b) / 2)](h)}"></div>`);
+        }
+      }
+      // A pill on each leg that has an answer: finished legs against their plan, the overdue
+      // stretch, and a sea leg whose carrier ETA has moved. Legs still running on plan stay quiet.
+      const pills = [];
+      const pill = (x0, x1, text, col, ink) => {
+        const a = Math.max(x0, -0.5), b = Math.min(x1, N_DAYS - 0.6);
+        if (b - a < 3) return;
+        pills.push(`<div title="${esc(text)}" style="position:absolute;top:50%;left:${pct((a + b) / 2)}%;transform:translate(-50%,-50%);z-index:1;height:17px;padding:0 7px;border-radius:9px;background:#fff;border:1.5px solid ${col};color:${ink};font-size:10px;font-weight:600;white-space:nowrap;display:flex;align-items:center">${esc(text)}</div>`);
+      };
+      const P0 = m.basePlan;
+      const legDefs = [[first, 'departed'], ['departed', 'arrived'], ['arrived', 'fc_receipt']];
+      for (const [a, b] of legDefs) {
+        if (!a || !N[a] || !N[b]) continue;
+        const xa = ix(N[a].v), xb = ix(N[b].v);
+        if (N[a].actual && N[b].actual && P0 && P0[a] && P0[b]) {
+          const dd = diff(N[a].v, N[b].v) - diff(P0[a], P0[b]);
+          if (dd > 1) pill(xa, xb, `+${dd}d`, RED, RED);
+          else if (dd < -1) pill(xa, xb, `${dd}d`, GREEN, '#4A6A00');
+          else pill(xa, xb, 'On plan', GREEN, '#4A6A00');
+        } else if (a === 'departed' && N.departed.actual && !N.arrived.actual && !m.air && m.c.carrier_eta && P0 && P0.arrived) {
+          const dd = diff(P0.arrived, m.c.carrier_eta);
+          if (dd > 1) pill(xa, xb, `ETA +${dd}d`, AMBER, '#8A6D00');
+        }
+      }
+      if (overX != null) {
+        const days = diff(N[nextUp].v, M.today);
+        const what = STAGE_VERB[nextUp];
+        pill(overX, TODAY, `${what.charAt(0).toUpperCase() + what.slice(1)} overdue ${days}d`, RED, RED);
       }
       if (m.base && pFc.n != null) {
         const bx = ix(m.base);
@@ -975,10 +1021,6 @@
       }
       // The last milestone achieved and the next one due pulse together — same rhythm, same
       // moment — so the eye reads "here, and next". Delivered movements are still.
-      const present = STAGES.filter(st => N[st] && N[st].v);
-      let lastDone = null;
-      for (const st of present) if (N[st].actual) lastDone = st;
-      const nextUp = m.delivered ? null : present.find((st, i) => !N[st].actual && (lastDone == null || i > present.indexOf(lastDone)));
       // Every marker is named. Labels sit below the line, or above it when below is taken,
       // placed in order of importance — FC receipt, then where it is now and what is next —
       // so when milestones a day apart cannot all be labelled, the ones that matter are.
@@ -990,6 +1032,17 @@
         return rank(p) - rank(q);
       });
       const labelFor = {};
+      const early = present.filter(st => ix(N[st].v) < -0.5);
+      if (early.length) {
+        const st = early[early.length - 1], x = N[st];
+        const overdue = early.some(s => !N[s].actual && N[s].planned && N[s].planned < M.today);
+        const pulse = m.delivered ? '' : early.includes(nextUp) ? ' tm-pulse-next' : early.includes(lastDone) ? ' tm-pulse-done' : '';
+        const tip = early.map(s => `${STAGE_LABEL[s]} · ${fmtDay(N[s].v)} · ${stateWord(N[s])}`).join('\n');
+        marks.push(`<div class="${pulse.trim()}" title="${esc(tip)}" style="position:absolute;top:50%;left:6px;box-sizing:border-box;${markStyle(x.actual ? x.state : 'assumed', x.planned).replace('translate(-50%,-50%)', 'translate(0,-50%)')}"></div>`);
+        const text = `← ${MS_SHORT[st]} ${fmtShort(x.v)}${early.length > 1 ? ` +${early.length - 1}` : ''}`;
+        labels.push(`<div title="${esc(tip)}" style="position:absolute;top:calc(50% + 11px);left:4px;font-size:10.5px;white-space:nowrap;${x.actual ? `color:${INK};font-weight:600` : overdue ? `color:${RED};font-weight:600` : `color:${MUTED}`}">${esc(text)}</div>`);
+        taken.below.push([-0.5, -0.5 + (text.length * 6.2 + 10) / DAY_PX]);
+      }
       for (const st of order) {
         const x = N[st], xn = ix(x.v);
         if (xn > N_DAYS - 0.6 || xn < -0.5) continue;
@@ -1026,7 +1079,7 @@
             <span style="font-size:12px;white-space:nowrap;display:flex;align-items:center;gap:6px;${tone}">${dot(m.st, 8)}${esc(m.where)}</span>
           </span>
         </button>
-        <div style="position:relative;height:100%">${out.join('')}${marks.join('')}${labels.join('')}</div>
+        <div style="position:relative;height:100%">${out.join('')}${pills.join('')}${marks.join('')}${labels.join('')}</div>
       </div>`;
     }
 
@@ -1114,7 +1167,9 @@
   <div class="tm-legend">
     <span><span style="width:9px;height:9px;background:${GREEN};border:1.5px solid ${INK};transform:rotate(45deg);display:inline-block;box-sizing:border-box"></span>Live carrier event</span>
     <span><span style="width:10px;height:10px;border-radius:50%;background:${GREEN};border:1.5px solid ${INK};display:inline-block;box-sizing:border-box"></span>Confirmed by a person</span>
-    <span><span style="width:22px;height:6px;background:${GREEN};box-shadow:0 0 0 1px ${INK};display:inline-block"></span>Completed leg</span>
+    <span><span style="width:22px;height:6px;background:${GREEN};box-shadow:0 0 0 1px ${INK};display:inline-block"></span>Done — confirmed or tracked</span>
+    <span><span style="width:22px;height:6px;background:${INK};opacity:.5;display:inline-block"></span>In progress</span>
+    <span><span style="width:22px;height:6px;background:repeating-linear-gradient(90deg,${RED} 0 6px,transparent 6px 10px);display:inline-block"></span>Overdue — not confirmed</span>
     <span><span style="width:10px;height:10px;border-radius:50%;border:1.5px dashed #8A8A8A;display:inline-block;box-sizing:border-box"></span>Assumed</span>
     <span><span style="width:10px;height:10px;border-radius:50%;border:2px solid ${RED};display:inline-block;box-sizing:border-box"></span>Assumed, past due</span>
     <span><span style="width:18px;height:6px;background:${RED};display:inline-block"></span>Slip against first promise</span>
