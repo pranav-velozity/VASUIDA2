@@ -12000,10 +12000,18 @@ const stockStatusReport = require('./stock_status_report');
 // a person has already confirmed.
 const consignmentRoutes = require('./consignment_routes')({
   express, db, authenticateRequest, requireRole, auditLog, curClient,
+  // Transit Movements: client notifications go out through the same Resend sender as the
+  // exception email, and only VelOzity staff may send them.
+  requireInternalOrg, sendViaResend,
 });
+const _cgInternals = consignmentRoutes._internals || {};
 app.use('/t49', require('./t49_routes')({
   express, db, authenticateRequest, requireRole, auditLog, curClient,
-  refreshPlanned: consignmentRoutes._internals && consignmentRoutes._internals.refreshPlanned,
+  refreshPlanned: _cgInternals.refreshPlanned,
+  // The estimate history and the ports, kept by the consignments module.
+  logEstimate: _cgInternals.logEstimate,
+  recordPorts: _cgInternals.recordPorts,
+  addViaPort: _cgInternals.addViaPort,
 }));
 
 // One alert record, read by the map, the exceptions panel and email alike. Derived from the

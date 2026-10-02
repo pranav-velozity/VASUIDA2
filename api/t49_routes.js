@@ -30,6 +30,9 @@ const crypto = require('crypto');
 
 module.exports = function mountT49(deps) {
   const { express, db, authenticateRequest, requireRole, auditLog, curClient, refreshPlanned } = deps;
+  // Optional, from the consignments module: the estimate history and the ports. Absent (an
+  // older server.js), tracking behaves exactly as before.
+  const { logEstimate, recordPorts, addViaPort } = deps;
   const router = express.Router();
 
   const API = 'https://api.terminal49.com/v2';
@@ -136,6 +139,40 @@ module.exports = function mountT49(deps) {
   };
 
   const dayOf = (v) => v ? String(v).slice(0, 10) : null;
+
+  // ── Ports, read from the shipment ──
+  // The shipment carries the port of loading and the port of discharge. Field names are read
+  // defensively — several spellings are accepted — and nothing is written when none is found,
+  // so a payload of a different shape degrades to "port not yet known", never to a wrong port.
+  const firstOf = (...v) => { for (const x of v) if (x != null && String(x).trim() !== '') return String(x).trim(); return null; };
+  function portsFromShipment(sa) {
+    const a = sa || {};
+    return {
+      origin: firstOf(a.port_of_lading_locode, a.pol_locode, a.port_of_lading_code),
+      origin_name: firstOf(a.port_of_lading_name, a.pol_name),
+      dest: firstOf(a.port_of_discharge_locode, a.pod_locode, a.port_of_discharge_code),
+      dest_name: firstOf(a.port_of_discharge_name, a.pod_name),
+    };
+  }
+  function savePorts(uid, sa) {
+    if (typeof recordPorts !== 'function' || !uid || !sa) return false;
+    try { return recordPorts(uid, portsFromShipment(sa)); } catch (_) { return false; }
+  }
+  // A transshipment event names where it happened either on the event itself or through a
+  // related location in `included`.
+  function viaFromEvent(transport, included) {
+    const a = (transport && transport.attributes) || {};
+    let code = firstOf(a.location_locode, a.port_locode, a.locode);
+    let name = firstOf(a.location_name, a.port_name);
+    const rel = transport && transport.relationships && transport.relationships.location && transport.relationships.location.data;
+    if (rel && Array.isArray(included)) {
+      const loc = included.find(x => x && x.id === rel.id && x.type === rel.type);
+      const la = (loc && loc.attributes) || {};
+      code = code || firstOf(la.locode, la.code, la.un_locode);
+      name = name || firstOf(la.name, la.city);
+    }
+    return (code || name) ? { code, name } : null;
+  }
 
   // ── Subscribing ──
   router.post('/subscribe', authenticateRequest, requireRole(['admin', 'supplier']),
@@ -326,6 +363,7 @@ module.exports = function mountT49(deps) {
       }
 
       const now = new Date().toISOString();
+      if (shipment && shipment.attributes) savePorts(link.consignment_uid, shipment.attributes);
       const firstContact = shipId && link.t49_shipment_id !== shipId;
       if (firstContact) {
         db.prepare('UPDATE t49_link SET t49_shipment_id = ?, state = ?, updated_at = ? WHERE client_id = ? AND consignment_uid = ?')
@@ -409,6 +447,8 @@ module.exports = function mountT49(deps) {
         // recomputed whenever anything changes, and a date written straight into it was being
         // erased moments later by that recompute.
         const col = estStage === 'departed' ? 'carrier_etd' : 'carrier_eta';
+        // The value being replaced is only readable before the update.
+        if (typeof logEstimate === 'function') { try { logEstimate(link.consignment_uid, col, eta, 'tracking'); } catch (_) {} }
         db.prepare(`UPDATE consignment SET ${col} = ?, carrier_est_at = ? WHERE consignment_uid = ?`)
           .run(eta, now, link.consignment_uid);
 
@@ -446,6 +486,9 @@ module.exports = function mountT49(deps) {
 
       // ── Context: explains a long transit, or starts the last mile ──
       const ctx = CONTEXT_EVENTS[event];
+      if (ctx && /transshipment/.test(event) && typeof addViaPort === 'function') {
+        try { const via = viaFromEvent(transport, included); if (via) addViaPort(link.consignment_uid, via); } catch (_) {}
+      }
       if (ctx) {
         const when = dayOf(transport && transport.attributes &&
           (transport.attributes.timestamp || transport.attributes.actual_at));
@@ -560,6 +603,10 @@ module.exports = function mountT49(deps) {
     // And their current expectations, which move the plan but never a quote.
     const etd = dayOf(ca.pol_etd_at || sa.pol_etd_at);
     const eta = dayOf(ca.pod_eta_at || sa.pod_eta_at);
+    savePorts(uid, sa);
+    if (typeof logEstimate === 'function') {
+      try { if (etd) logEstimate(uid, 'carrier_etd', etd, 'tracking'); if (eta) logEstimate(uid, 'carrier_eta', eta, 'tracking'); } catch (_) {}
+    }
     if (etd || eta) {
       db.prepare(`UPDATE consignment SET carrier_etd = COALESCE(?, carrier_etd),
                     carrier_eta = COALESCE(?, carrier_eta), carrier_est_at = ?
@@ -606,6 +653,58 @@ module.exports = function mountT49(deps) {
   });
 
   // ── Looking at what happened ──
+  // ── Ports for consignments tracked before ports were kept ──
+  // Every backfill stored the shipment it read, and every webhook stored its payload. Reading
+  // those back fills the ports without calling the provider. Idempotent: it only touches
+  // consignments that have no port yet, and never overwrites one.
+  function portsFromStored() {
+    if (typeof recordPorts !== 'function') return { scanned: 0, filled: 0, via: 0 };
+    let scanned = 0, filled = 0, via = 0;
+    try {
+      const need = new Set(db.prepare(`SELECT consignment_uid FROM consignment
+                                         WHERE origin_port IS NULL AND dest_port IS NULL AND mode = 'Sea'`).all().map(r => r.consignment_uid));
+      const rows = db.prepare(`SELECT applied_to, event, payload FROM t49_event
+                                WHERE applied_to IS NOT NULL AND payload IS NOT NULL
+                                  AND (event = 'backfill' OR payload LIKE '%port_of_%' OR event LIKE '%transshipment%')
+                                ORDER BY id`).all();
+      for (const r of rows) {
+        scanned++;
+        let body; try { body = JSON.parse(r.payload); } catch (_) { continue; }
+        if (need.has(r.applied_to)) {
+          const sa = r.event === 'backfill'
+            ? (body && body.shipment)
+            : ((Array.isArray(body && body.included) ? body.included : []).find(x => x && x.type === 'shipment') || {}).attributes;
+          if (sa && savePorts(r.applied_to, sa)) { filled++; need.delete(r.applied_to); }
+        }
+        if (/transshipment/.test(String(r.event || '')) && typeof addViaPort === 'function') {
+          const inc = Array.isArray(body && body.included) ? body.included : [];
+          const tr = inc.find(x => x && x.type === 'transport_event');
+          const v = viaFromEvent(tr, inc);
+          if (v && addViaPort(r.applied_to, v)) via++;
+        }
+      }
+    } catch (e) { console.warn('[t49] ports from stored payloads:', e.message); }
+    return { scanned, filled, via };
+  }
+  try {
+    const r = portsFromStored();
+    if (r.scanned) console.log(`[t49] ports from stored payloads: ${r.filled} consignment(s) filled, ${r.via} transshipment port(s), ${r.scanned} payload(s) read`);
+  } catch (_) {}
+
+  // Read-only: what the stored shipments actually call their port fields. Run once after
+  // deploy to confirm the names before trusting the route lines.
+  router.get('/ports-check', authenticateRequest, requireRole(['admin']), (req, res) => {
+    try {
+      const row = db.prepare(`SELECT payload FROM t49_event WHERE event = 'backfill' AND payload IS NOT NULL ORDER BY id DESC LIMIT 1`).get();
+      let keys = [];
+      if (row) { try { const sa = (JSON.parse(row.payload) || {}).shipment || {}; keys = Object.keys(sa).filter(k => /port|pol|pod|locode|destination/i.test(k)); } catch (_) {} }
+      const counts = db.prepare(`SELECT COUNT(*) total, SUM(CASE WHEN origin_port IS NOT NULL OR dest_port IS NOT NULL THEN 1 ELSE 0 END) with_ports
+                                   FROM consignment WHERE client_id = ? AND mode = 'Sea'`).get(curClient());
+      res.json({ ok: true, port_fields_seen: keys, sea_consignments: counts.total || 0, with_ports: counts.with_ports || 0,
+                 rerun: portsFromStored() });
+    } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
+  });
+
   router.get('/status', authenticateRequest, (req, res) => {
     const client = curClient();
     const links = db.prepare('SELECT * FROM t49_link WHERE client_id = ? ORDER BY updated_at DESC').all(client);

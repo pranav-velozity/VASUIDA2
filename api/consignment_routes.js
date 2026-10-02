@@ -34,6 +34,8 @@ const { randomUUID } = require('crypto');
 
 module.exports = function mountConsignments(deps) {
   const { express, db, authenticateRequest, requireRole, auditLog, curClient } = deps;
+  // Optional, passed by server.js. Absent, the notify route fails closed rather than open.
+  const { requireInternalOrg, sendViaResend } = deps;
   const router = express.Router();
 
   // ── Schema ──
@@ -147,6 +149,60 @@ module.exports = function mountConsignments(deps) {
   addColumn('consignment', 'carrier_eta', 'TEXT');
   addColumn('consignment', 'carrier_est_at', 'TEXT');
   addColumn('consignment_rules', 'before_departure', 'TEXT');
+
+  // ── Where the movement runs ──
+  // Sea ports come from tracking (port of loading / port of discharge) the first time the
+  // shipment is reported, and transshipment ports from the transshipment events. Nobody types
+  // them. Air has no tracking, so it runs on a fixed default unless these are set.
+  addColumn('consignment', 'origin_port', 'TEXT');        // UN/LOCODE, e.g. CNYTN
+  addColumn('consignment', 'origin_port_name', 'TEXT');
+  addColumn('consignment', 'dest_port', 'TEXT');
+  addColumn('consignment', 'dest_port_name', 'TEXT');
+  addColumn('consignment', 'via_ports', 'TEXT');          // JSON [{code, name}]
+  addColumn('consignment', 'ports_at', 'TEXT');
+
+  db.exec(`
+    -- Every revision of the carrier's expectation, with the value it replaced. The consignment
+    -- holds only the latest, so without this "was Mon 5 Oct" and the overnight replay on the
+    -- Transit Movements screen have nothing to read.
+    CREATE TABLE IF NOT EXISTS consignment_estimate_log (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      consignment_uid TEXT NOT NULL,
+      field           TEXT NOT NULL,      -- carrier_etd | carrier_eta
+      old_value       TEXT,
+      new_value       TEXT,
+      source          TEXT,
+      recorded_at     TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_cel_uid ON consignment_estimate_log(consignment_uid, id);
+
+    -- What was actually sent to a client about a movement — the text as sent, not the draft,
+    -- so the record matches what they received.
+    CREATE TABLE IF NOT EXISTS consignment_notification (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      client_id       TEXT NOT NULL,
+      consignment_uid TEXT NOT NULL,
+      sent_at         TEXT NOT NULL,
+      sent_by         TEXT,
+      to_json         TEXT NOT NULL,
+      subject         TEXT,
+      body            TEXT,
+      attached        INTEGER NOT NULL DEFAULT 0,
+      resend_id       TEXT,
+      status          TEXT NOT NULL,      -- sent | failed
+      error           TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_cn_uid ON consignment_notification(consignment_uid, id);
+
+    -- Addresses offered next time, per client.
+    CREATE TABLE IF NOT EXISTS notify_recipient (
+      client_id     TEXT NOT NULL,
+      email         TEXT NOT NULL,
+      uses          INTEGER NOT NULL DEFAULT 0,
+      last_used_at  TEXT,
+      PRIMARY KEY (client_id, email)
+    );
+  `);
 
   // Anything migrated before the quote was tracked carries a rule default, not a carrier
   // figure, and must stay locked until somebody enters the real one. The default for the
@@ -820,7 +876,685 @@ module.exports = function mountConsignments(deps) {
     }
   });
 
+  // ════════════════════════════════════════════════════════════════════════════════════════
+  // Transit Movements — the screen that replaced the Live Map.
+  //
+  // Everything here is read-only except the notification send. Nothing in shape() changed:
+  // the screen's extra facts are assembled by enrich(), used only by /board, so the Transit &
+  // Clearing worklist and every other reader of this router get byte-identical responses.
+  // ════════════════════════════════════════════════════════════════════════════════════════
+
+  const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const MO = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const ymdOk = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+  const fmtDay = (ymd) => {
+    if (!ymd) return null;
+    const d = new Date(String(ymd).slice(0, 10) + 'T00:00:00Z');
+    if (isNaN(d)) return String(ymd);
+    return `${WD[d.getUTCDay()]} ${d.getUTCDate()} ${MO[d.getUTCMonth()]}`;
+  };
+  const dayDiff = (a, b) => {
+    if (!a || !b) return null;
+    const x = new Date(String(a).slice(0, 10) + 'T00:00:00Z');
+    const y = new Date(String(b).slice(0, 10) + 'T00:00:00Z');
+    if (isNaN(x) || isNaN(y)) return null;
+    return Math.round((y - x) / 86400000);
+  };
+  // Planning happens in Sydney. The worklist uses UTC; for a last-free-day countdown the
+  // difference is a whole day for half of every working day, so this one is local.
+  const BOARD_TZ = process.env.BOARD_TZ || 'Australia/Sydney';
+  const todayLocal = () => {
+    try { return new Intl.DateTimeFormat('en-CA', { timeZone: BOARD_TZ }).format(new Date()); }
+    catch (_) { return new Date().toISOString().slice(0, 10); }
+  };
+  const mondayOf = (ymd) => {
+    const d = new Date(String(ymd).slice(0, 10) + 'T00:00:00Z');
+    const dow = (d.getUTCDay() + 6) % 7;
+    d.setUTCDate(d.getUTCDate() - dow);
+    return d.toISOString().slice(0, 10);
+  };
+
+  // The weekly VAS model's tables (flow_week, records) carry no client_id: they are ICONIC's.
+  // Anything read from them is gated exactly the way the tenancy middleware gates their own
+  // endpoints, so a door-to-door client never sees another client's week.
+  function ownsWeekModel(client) {
+    try {
+      return !!db.prepare(`SELECT 1 x FROM client_capability
+                            WHERE client_id = ? AND capability = 'week_hub' AND enabled = 1`).get(client);
+    } catch (_) { return client === 'ICONIC'; }
+  }
+
+  // ── Ports ──
+  const AIR_ORIGIN = { code: process.env.AIR_ORIGIN_CODE || 'SZX', name: process.env.AIR_ORIGIN_NAME || 'Shenzhen Bao\u2019an' };
+  const AIR_DEST = { code: process.env.AIR_DEST_CODE || 'SYD', name: process.env.AIR_DEST_NAME || 'Sydney Airport' };
+
+  function routeOf(c) {
+    let via = [];
+    try { via = JSON.parse(c.via_ports || '[]') || []; } catch (_) { via = []; }
+    const o = (c.origin_port || c.origin_port_name)
+      ? { code: c.origin_port || null, name: c.origin_port_name || c.origin_port } : null;
+    const d = (c.dest_port || c.dest_port_name)
+      ? { code: c.dest_port || null, name: c.dest_port_name || c.dest_port } : null;
+    if (c.mode === 'Air') return { origin: o || AIR_ORIGIN, dest: d || AIR_DEST, via, source: (o || d) ? 'recorded' : 'default' };
+    return { origin: o, dest: d, via, source: (o || d) ? 'tracking' : 'unknown' };
+  }
+
+  // Written by the tracking integration. Never blanks a value it already holds: a later
+  // event that omits the port is not evidence the port changed.
+  function recordPorts(uid, p) {
+    try {
+      const v = (x) => (x == null || String(x).trim() === '') ? null : String(x).trim();
+      const o = v(p && p.origin), on = v(p && p.origin_name), d = v(p && p.dest), dn = v(p && p.dest_name);
+      if (!o && !on && !d && !dn) return false;
+      const r = db.prepare(`UPDATE consignment SET origin_port = COALESCE(?, origin_port),
+                              origin_port_name = COALESCE(?, origin_port_name),
+                              dest_port = COALESCE(?, dest_port),
+                              dest_port_name = COALESCE(?, dest_port_name), ports_at = ?
+                            WHERE consignment_uid = ?`)
+        .run(o, on, d, dn, new Date().toISOString(), uid);
+      return r.changes > 0;
+    } catch (e) { console.warn('[consignments] recordPorts:', e.message); return false; }
+  }
+
+  function addViaPort(uid, port) {
+    try {
+      const code = port && port.code ? String(port.code).trim() : null;
+      const name = port && port.name ? String(port.name).trim() : null;
+      if (!code && !name) return false;
+      const row = db.prepare('SELECT via_ports, origin_port, dest_port FROM consignment WHERE consignment_uid = ?').get(uid);
+      if (!row) return false;
+      // The ports at either end are not stops along the way.
+      if (code && (code === row.origin_port || code === row.dest_port)) return false;
+      let via = []; try { via = JSON.parse(row.via_ports || '[]') || []; } catch (_) { via = []; }
+      if (via.some(x => (code && x.code === code) || (!code && name && x.name === name))) return false;
+      via.push({ code, name: name || code });
+      db.prepare('UPDATE consignment SET via_ports = ? WHERE consignment_uid = ?').run(JSON.stringify(via.slice(0, 6)), uid);
+      return true;
+    } catch (e) { console.warn('[consignments] addViaPort:', e.message); return false; }
+  }
+
+  // ── Estimate history ──
+  // Called BEFORE the consignment is updated, so the value being replaced is still there.
+  function logEstimate(uid, field, newValue, source) {
+    try {
+      if (field !== 'carrier_etd' && field !== 'carrier_eta') return false;
+      if (!newValue) return false;
+      const row = db.prepare(`SELECT ${field} v FROM consignment WHERE consignment_uid = ?`).get(uid);
+      if (!row) return false;
+      const old = row.v ? String(row.v).slice(0, 10) : null;
+      const nv = String(newValue).slice(0, 10);
+      if (old === nv) return false;
+      db.prepare(`INSERT INTO consignment_estimate_log (consignment_uid, field, old_value, new_value, source, recorded_at)
+                  VALUES (?,?,?,?,?,?)`).run(uid, field, old, nv, source || null, new Date().toISOString());
+      return true;
+    } catch (e) { console.warn('[consignments] logEstimate:', e.message); return false; }
+  }
+
+  // ── Terminal facts ──
+  // Kept by the tracking integration in its own table. Read defensively: the table belongs to
+  // another module and may not exist on a deployment without tracking.
+  function terminalFor(uid) {
+    try {
+      const t = db.prepare(`SELECT state, pickup_lfd, holds, available_at, pod_terminal, last_context, updated_at
+                              FROM t49_link WHERE consignment_uid = ?`).get(uid);
+      if (!t) return null;
+      let holds = [];
+      try {
+        const raw = JSON.parse(t.holds || '[]');
+        holds = (Array.isArray(raw) ? raw : [])
+          .filter(h => {
+            if (!h) return false;
+            if (typeof h !== 'object') return true;
+            const st = String(h.status || '').toLowerCase();
+            return !/(released|cleared|resolved|none)/.test(st);
+          })
+          .map(h => {
+            const n = typeof h === 'object' ? String(h.name || h.description || h.type || 'hold') : String(h);
+            return n.replace(/_/g, ' ').replace(/^./, ch => ch.toUpperCase());
+          });
+      } catch (_) { holds = []; }
+      return {
+        tracking: t.state === 'tracking', state: t.state || null,
+        lfd: t.pickup_lfd || null, holds, available_at: t.available_at || null,
+        terminal: t.pod_terminal || null, last_context: t.last_context || null, updated_at: t.updated_at || null,
+      };
+    } catch (_) { return null; }
+  }
+
+  // ── What happened, in words ──
+  const STAGE_TEXT = {
+    packing_list_ready: 'Packing list ready', origin_cleared: 'Origin cleared', departed: 'Departure',
+    arrived: 'Arrival', dest_cleared: 'Destination clearance', fc_receipt: 'FC receipt',
+  };
+  const STAGE_SHORT = {
+    packing_list_ready: 'packing list', origin_cleared: 'origin cleared', departed: 'departed',
+    arrived: 'arrived', dest_cleared: 'available', fc_receipt: 'FC receipt',
+  };
+  const ACT_TEXT = { departed: 'Departed the port of loading', arrived: 'Arrived at the port of discharge', dest_cleared: 'Available for pickup' };
+
+  function humanEvent(r) {
+    const ev = String(r.event || ''), note = String(r.note || '');
+    if (!note || /attributes updated|nothing to apply/.test(note) || ev.startsWith('tracking_request')) return null;
+    if (ev === 'backfill') {
+      const parts = note.split(' · ').map(p => p.split('=')).filter(p => p.length === 2 && ymdOk(p[1]));
+      if (!parts.length) return null;
+      return { text: 'Tracking recorded ' + parts.map(([s, d]) => `${STAGE_SHORT[s] || s} ${fmtDay(d)}`).join(', ') };
+    }
+    const dates = note.match(/\d{4}-\d{2}-\d{2}/g) || [];
+    if (/estimated/.test(ev)) {
+      if (!dates.length) return null;
+      return { estimate: true, text: `${/departed/.test(ev) ? 'Departure' : 'Arrival'} estimate now ${fmtDay(dates[0])}` };
+    }
+    const m = note.match(/^(departed|arrived|dest_cleared) = (\d{4}-\d{2}-\d{2})/);
+    if (m) return { text: `${ACT_TEXT[m[1]]} ${fmtDay(m[2])}` };
+    if (/^LFD |hold\(s\)/.test(note)) {
+      const bits = [];
+      const lfd = note.match(/LFD (\d{4}-\d{2}-\d{2})/);
+      if (lfd) bits.push(`Last free day ${fmtDay(lfd[1])}`);
+      const h = note.match(/(\d+) hold\(s\)/);
+      if (h) bits.push(`${h[1]} hold${h[1] === '1' ? '' : 's'} reported at the terminal`);
+      return bits.length ? { text: bits.join(' · ') } : null;
+    }
+    let t = note;
+    for (const d of dates) t = t.replace(d, fmtDay(d));
+    return { text: t.charAt(0).toUpperCase() + t.slice(1) };
+  }
+
+  function eventsFor(uid, milestones) {
+    const out = [];
+    let haveEstimateLog = false;
+    try {
+      const est = db.prepare(`SELECT field, old_value, new_value, recorded_at FROM consignment_estimate_log
+                               WHERE consignment_uid = ? ORDER BY id DESC LIMIT 10`).all(uid);
+      haveEstimateLog = est.length > 0;
+      for (const e of est) {
+        const what = e.field === 'carrier_etd' ? 'Departure' : 'Arrival';
+        out.push({ at: e.recorded_at, text: e.old_value
+          ? `${what} estimate revised ${fmtDay(e.old_value)} \u2192 ${fmtDay(e.new_value)}`
+          : `${what} estimate set: ${fmtDay(e.new_value)}` });
+      }
+    } catch (_) { /* table predates this deploy only in theory */ }
+    try {
+      const rows = db.prepare(`SELECT received_at, event, note FROM t49_event
+                                WHERE applied_to = ? AND outcome = 'applied' ORDER BY id DESC LIMIT 40`).all(uid);
+      for (const r of rows) {
+        const h = humanEvent(r);
+        if (!h) continue;
+        if (h.estimate && haveEstimateLog) continue;     // the log says it better: old and new
+        out.push({ at: String(r.received_at || '').replace(' ', 'T') + (String(r.received_at || '').includes('Z') ? '' : 'Z'), text: h.text });
+      }
+    } catch (_) { /* no tracking on this deployment */ }
+    for (const m of (milestones || [])) {
+      if ((m.state === 'confirmed' || m.state === 'amended') && m.recorded_at && m.actual_at) {
+        out.push({ at: m.recorded_at, text: `${STAGE_TEXT[m.stage]} ${m.state === 'amended' ? 'recorded' : 'confirmed'} for ${fmtDay(m.actual_at)}` });
+      }
+    }
+    const seen = new Set();
+    return out
+      .filter(e => { const k = e.text; if (seen.has(k)) return false; seen.add(k); return true; })
+      .sort((a, b) => String(b.at).localeCompare(String(a.at)))
+      .slice(0, 8);
+  }
+
+  // ── The plan as first promised, leg by leg ──
+  // Not stored, and does not need to be: the original plan is fully determined by the rules
+  // and the first carrier quote, so it is recomputed with the carrier's later revisions and
+  // every recorded actual taken out. The frozen FC date wins where the two disagree (a rule
+  // edited since), so the legs always add up to the promise that was actually made.
+  function baselinePlan(c) {
+    if (c.baseline_transit_days == null) return null;
+    try {
+      const cb = { ...c, transit_days: c.baseline_transit_days, carrier_eta: null, carrier_etd: null };
+      const { planned } = computePlanned(cb, {});
+      if (c.baseline_fc_at) planned.fc_receipt = c.baseline_fc_at;
+      return planned;
+    } catch (_) { return null; }
+  }
+
+  // ── On time, behind, delayed ──
+  // One reading, against the first promise: within a day is on time, two to four days late is
+  // behind, more than four is delayed — and a container held at the terminal with its last
+  // free day two days out or less is delayed whatever the dates say, because that is when it
+  // starts costing money.
+  function statusOf(c, sh, term, today) {
+    const fc = (sh.milestones || []).find(m => m.stage === 'fc_receipt') || {};
+    const delivered = !!fc.actual_at;
+    const drift = sh.confidence && typeof sh.confidence.drift === 'number' ? sh.confidence.drift : null;
+    const late = delivered ? (c.baseline_fc_at ? dayDiff(c.baseline_fc_at, fc.actual_at) : null) : drift;
+    const held = !!(term && term.holds && term.holds.length && !term.available_at && !delivered);
+    const lfdIn = term && term.lfd ? dayDiff(today, term.lfd) : null;
+    const base = { delivered, late, held, lfd_in: lfdIn };
+    if (!delivered && !c.reference) return { ...base, key: 'not_booked', label: 'Not booked', why: 'No container number or AWB yet, so it cannot be tracked.' };
+    if (!c.transit_confirmed && !(delivered && late != null)) {
+      return { ...base, key: 'no_quote', label: 'No quote', why: 'Transit is the rule default, not a carrier quote.' };
+    }
+    if (held && lfdIn != null && lfdIn <= 2) {
+      return { ...base, key: 'delayed', label: 'Delayed',
+        why: lfdIn < 0 ? `Held at the terminal; the last free day passed ${-lfdIn} day${lfdIn === -1 ? '' : 's'} ago.`
+                       : `Held at the terminal; the last free day is ${lfdIn === 0 ? 'today' : `in ${lfdIn} day${lfdIn === 1 ? '' : 's'}`}.` };
+    }
+    if (late != null && late > 4) return { ...base, key: 'delayed', label: 'Delayed', why: `${late} days later than first promised.` };
+    if (late != null && late >= 2) return { ...base, key: 'behind', label: 'Behind', why: `${late} days later than first promised.` };
+    return { ...base, key: 'on_time', label: 'On time',
+      why: held ? 'Held at the terminal, but within the free days.' : (late != null && late < -1 ? `${-late} days earlier than first promised.` : 'Within a day of the first promise.') };
+  }
+
+  // ── Contents: lanes → POs → SKUs ──
+  function planRowsFor(ws, client) {
+    try {
+      const r = db.prepare('SELECT data FROM plans WHERE week_start = ? AND client_id = ?').get(ws, client);
+      if (!r) return [];
+      const arr = JSON.parse(r.data);
+      return Array.isArray(arr) ? arr : [];
+    } catch (_) { return []; }
+  }
+
+  function rowsForLane(laneKey, rows) {
+    const [sup = '', zd = '', fr = ''] = String(laneKey).split('||');
+    const z = zd.trim(), f = fr.trim().toLowerCase();
+    let m = z ? rows.filter(r => {
+      const t = String(r.zendesk_ticket == null ? '' : r.zendesk_ticket).trim();
+      return t === z || (t !== '' && !isNaN(Number(t)) && !isNaN(Number(z)) && Number(t) === Number(z));
+    }) : [];
+    if (!m.length) {
+      const s = sup.trim().toLowerCase();
+      m = rows.filter(r => String(r.supplier_name || '').trim().toLowerCase() === s);
+    }
+    // A lane is supplier + ticket + freight; the same ticket can ship part by air.
+    if (f && m.some(r => r.freight_type)) m = m.filter(r => !r.freight_type || String(r.freight_type).trim().toLowerCase() === f);
+    return m;
+  }
+
+  function laneLatestArrival(ws) {
+    const map = {};
+    try {
+      const rows = db.prepare('SELECT data FROM flow_week WHERE week_start = ?').all(ws);
+      for (const r of rows) {
+        let blob; try { blob = JSON.parse(r.data); } catch (_) { continue; }
+        const lanes = (blob && blob.intl_lanes && typeof blob.intl_lanes === 'object') ? blob.intl_lanes : {};
+        for (const [k, v] of Object.entries(lanes)) if (v && v.latest_arrival_date) map[k] = String(v.latest_arrival_date).slice(0, 10);
+      }
+    } catch (_) { /* no week data */ }
+    return map;
+  }
+
+  let _recordsHasClient = null;
+  function processedFor(pos, client) {
+    const out = new Map();
+    if (!pos.length) return out;
+    try {
+      if (_recordsHasClient == null) {
+        _recordsHasClient = db.prepare('PRAGMA table_info(records)').all().some(c => c.name === 'client_id');
+      }
+      for (let i = 0; i < pos.length; i += 400) {
+        const chunk = pos.slice(i, i + 400);
+        const ph = chunk.map(() => '?').join(',');
+        const sql = `SELECT po_number po, sku_code sku, COUNT(*) n FROM records
+                      WHERE status = 'complete' AND po_number IN (${ph})
+                      ${_recordsHasClient ? 'AND (client_id = ? OR client_id IS NULL)' : ''}
+                      GROUP BY po_number, sku_code`;
+        const rows = db.prepare(sql).all(...chunk, ...(_recordsHasClient ? [client] : []));
+        for (const r of rows) {
+          const k = String(r.po || '').trim().toUpperCase() + '|' + String(r.sku || '').trim().toUpperCase();
+          out.set(k, (out.get(k) || 0) + Number(r.n || 0));
+        }
+      }
+    } catch (e) { console.warn('[consignments] processedFor:', e.message); }
+    return out;
+  }
+
+  function contentsFor(c, laneKeys, opts) {
+    const client = c.client_id;
+    const withProcessed = !!(opts && opts.processed);
+    const owns = ownsWeekModel(client);
+    const plan = (opts && opts.plan) || planRowsFor(c.week_start, client);
+    const latest = owns ? ((opts && opts.latest) || laneLatestArrival(c.week_start)) : {};
+    const lanes = laneKeys.map(k => {
+      const [sup = '', zd = '', fr = ''] = String(k).split('||');
+      const rows = rowsForLane(k, plan);
+      const byPo = new Map();
+      for (const r of rows) {
+        const po = String(r.po_number || '').trim();
+        if (!po) continue;
+        if (!byPo.has(po)) byPo.set(po, new Map());
+        const sku = String(r.sku_code || '').trim();
+        const skus = byPo.get(po);
+        const cur = skus.get(sku) || {
+          sku,
+          description: [r.item_description, r.item_color, r.item_size].filter(x => x && String(x).trim()).join(' · ') || null,
+          planned: 0, processed: null,
+        };
+        cur.planned += Number(r.target_qty || 0) || 0;
+        skus.set(sku, cur);
+      }
+      const pos = [...byPo.entries()].map(([po, skus]) => ({ po, skus: [...skus.values()] }));
+      return { lane_key: k, supplier: sup, zendesk: zd, freight: fr, latest_arrival: latest[k] || null, pos };
+    });
+    let processedAvailable = false;
+    if (withProcessed && owns) {
+      const allPos = [...new Set(lanes.flatMap(l => l.pos.map(p => p.po)))];
+      const done = processedFor(allPos, client);
+      processedAvailable = true;
+      for (const l of lanes) for (const p of l.pos) for (const s of p.skus) {
+        s.processed = done.get(p.po.toUpperCase() + '|' + s.sku.toUpperCase()) || 0;
+      }
+    }
+    const totals = { lanes: lanes.length, pos: 0, skus: 0, planned: 0, processed: processedAvailable ? 0 : null };
+    for (const l of lanes) {
+      l.planned = 0; l.processed = processedAvailable ? 0 : null; l.skus = 0;
+      for (const p of l.pos) {
+        p.planned = p.skus.reduce((a, s) => a + s.planned, 0);
+        p.processed = processedAvailable ? p.skus.reduce((a, s) => a + (s.processed || 0), 0) : null;
+        l.planned += p.planned; l.skus += p.skus.length;
+        if (processedAvailable) l.processed += p.processed;
+      }
+      totals.pos += l.pos.length; totals.skus += l.skus; totals.planned += l.planned;
+      if (processedAvailable) totals.processed += l.processed;
+    }
+    return { lanes, totals, processed_available: processedAvailable, week_model: owns };
+  }
+
+  function enrich(c, sh, ctx) {
+    const term = terminalFor(c.consignment_uid);
+    const health = statusOf(c, sh, term, ctx.today);
+    let est = [];
+    try {
+      est = db.prepare(`SELECT field, old_value, new_value, recorded_at FROM consignment_estimate_log
+                         WHERE consignment_uid = ? ORDER BY id DESC LIMIT 20`).all(c.consignment_uid);
+    } catch (_) { est = []; }
+    const prevOf = (f) => { const r = est.find(e => e.field === f && e.old_value); return r ? r.old_value : null; };
+    const since = Date.now() - 24 * 3600 * 1000;
+    // For the overnight replay: the earliest value each estimate held inside the last day.
+    const changed = {};
+    for (const e of est.slice().reverse()) {
+      // A first estimate (nothing before it) is not a change anyone can replay.
+      if (Date.parse(e.recorded_at) >= since && e.old_value && !(e.field in changed)) changed[e.field] = e.old_value;
+    }
+    let last = null;
+    try {
+      last = db.prepare(`SELECT sent_at, to_json, subject FROM consignment_notification
+                          WHERE consignment_uid = ? AND status = 'sent' ORDER BY id DESC LIMIT 1`).get(c.consignment_uid) || null;
+      if (last) { let to = []; try { to = JSON.parse(last.to_json || '[]'); } catch (_) {} last = { sent_at: last.sent_at, to_count: to.length, subject: last.subject }; }
+    } catch (_) { last = null; }
+    const contents = ctx.planByWeek ? (() => {
+      if (!ctx.planByWeek.has(c.week_start)) ctx.planByWeek.set(c.week_start, planRowsFor(c.week_start, c.client_id));
+      const cs = contentsFor(c, sh.lanes || [], { plan: ctx.planByWeek.get(c.week_start), latest: {} });
+      return cs.totals;
+    })() : null;
+    return {
+      ...sh,
+      // shape() replaces `carrier` with the carrier's estimates; the name is kept here.
+      carrier_name: c.carrier || null,
+      route: routeOf(c),
+      terminal: term,
+      // `status` is already the consignment's own planned | booked | closed; this is the reading.
+      health,
+      baseline_plan: baselinePlan(c),
+      estimate_prev: { carrier_eta: prevOf('carrier_eta'), carrier_etd: prevOf('carrier_etd') },
+      changed_24h: changed,
+      events: eventsFor(c.consignment_uid, sh.milestones),
+      contents_summary: contents,
+      last_notification: last,
+    };
+  }
+
+  // ── The board ──
+  router.get('/board', authenticateRequest, auditLog('view_transit_board'), (req, res) => {
+    try {
+      const client = curClient();
+      const today = todayLocal();
+      const thisMonday = mondayOf(today);
+      const addW = (ymd, n) => addDays(ymd, n * 7);
+      let from = ymdOk(req.query.from) ? mondayOf(req.query.from) : addW(thisMonday, -10);
+      let to = ymdOk(req.query.to) ? mondayOf(req.query.to) : addW(thisMonday, 1);
+      if (to < from) [from, to] = [to, from];
+      if (dayDiff(from, to) > 26 * 7) from = addW(to, -26);
+
+      const rows = db.prepare(`SELECT * FROM consignment WHERE client_id = ? AND week_start >= ? AND week_start <= ?
+                                ORDER BY week_start, mode, reference`).all(client, from, to);
+      const ctx = { today, planByWeek: new Map() };
+      const consignments = rows.map(c => enrich(c, shape(c), ctx));
+
+      const first = db.prepare('SELECT MIN(week_start) w FROM consignment WHERE client_id = ?').get(client);
+
+      // Lanes in a week that no consignment carries. Read from the week model only, and only
+      // for weeks still in play — the screen never places them, it names them.
+      const owns = ownsWeekModel(client);
+      const unassigned = [];
+      if (owns) {
+        const FIELDS = ['packing_list_ready_at', 'origin_customs_cleared_at', 'departed_at', 'arrived_at', 'dest_customs_cleared_at', 'eta_fc'];
+        const liveFrom = addW(thisMonday, -5);
+        const weeks = db.prepare(`SELECT DISTINCT week_start FROM flow_week WHERE week_start >= ? AND week_start <= ?`)
+          .all(liveFrom > from ? liveFrom : from, thisMonday).map(r => r.week_start);
+        for (const ws of weeks) {
+          const assigned = new Set(db.prepare('SELECT lane_key FROM consignment_lane WHERE week_start = ? AND client_id = ?')
+            .all(ws, client).map(r => r.lane_key));
+          let legacyRows = [];
+          try { legacyRows = db.prepare('SELECT DISTINCT lane_key FROM lane_actual_dates WHERE week_start = ?').all(ws).map(r => r.lane_key); } catch (_) {}
+          const legacySet = new Set(legacyRows);
+          const plan = ctx.planByWeek.has(ws) ? ctx.planByWeek.get(ws) : planRowsFor(ws, client);
+          ctx.planByWeek.set(ws, plan);
+          const seen = new Set();
+          for (const r of db.prepare('SELECT data FROM flow_week WHERE week_start = ?').all(ws)) {
+            let blob; try { blob = JSON.parse(r.data); } catch (_) { continue; }
+            const lanes = (blob && blob.intl_lanes && typeof blob.intl_lanes === 'object') ? blob.intl_lanes : {};
+            for (const [k, v] of Object.entries(lanes)) {
+              if (assigned.has(k) || seen.has(k)) continue;
+              seen.add(k);
+              const [sup = '', zd = '', fr = ''] = k.split('||');
+              const legacy = FIELDS.filter(f => v && v[f]);
+              const dep = v && v.departed_at ? String(v.departed_at).slice(0, 10) : null;
+              const pos = new Set(rowsForLane(k, plan).map(x => String(x.po_number || '').trim()).filter(Boolean));
+              unassigned.push({ week_start: ws, lane_key: k, supplier: sup, zendesk: zd, freight: fr,
+                legacy_dates: legacy.length > 0 || legacySet.has(k), legacy_departed: dep, pos: pos.size });
+            }
+          }
+        }
+      }
+
+      let lastEvent = null;
+      try {
+        const r = db.prepare(`SELECT MAX(e.received_at) at FROM t49_event e
+                                JOIN consignment c ON c.consignment_uid = e.applied_to
+                               WHERE c.client_id = ? AND e.outcome = 'applied'`).get(client);
+        lastEvent = r && r.at ? String(r.at).replace(' ', 'T') + (String(r.at).includes('Z') ? '' : 'Z') : null;
+      } catch (_) { lastEvent = null; }
+
+      res.json({
+        ok: true, client_id: client, today, this_week: thisMonday, from, to,
+        tracking_started: (first && first.w) || null,
+        tracking_last_event_at: lastEvent,
+        week_model: owns,
+        consignments, unassigned,
+      });
+    } catch (e) {
+      console.error('[consignments] board failed:', e);
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  function loadOwn(uid) {
+    return db.prepare('SELECT * FROM consignment WHERE consignment_uid = ? AND client_id = ?').get(uid, curClient());
+  }
+
+  router.get('/:uid/contents', authenticateRequest, auditLog('view_consignment_contents'), (req, res) => {
+    try {
+      const c = loadOwn(String(req.params.uid || '').trim());
+      if (!c) return res.status(404).json({ ok: false, error: 'No such consignment.' });
+      const sh = shape(c);
+      res.json({ ok: true, consignment_uid: c.consignment_uid, reference: c.reference || null,
+        week_start: c.week_start, ...contentsFor(c, sh.lanes || [], { processed: true }) });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  // ── One spreadsheet, whoever asks for it ──
+  // The download button and the email attachment call the same builder, so the file a client
+  // receives and the one a person downloads cannot differ.
+  async function contentsWorkbook(list) {
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'VelOzity Pinpoint';
+    wb.created = new Date();
+    const ws = wb.addWorksheet('POs and SKUs', { views: [{ state: 'frozen', ySplit: 1 }] });
+    ws.columns = [
+      { header: 'Week', key: 'week', width: 11 },
+      { header: 'Movement', key: 'ref', width: 20 },
+      { header: 'Mode', key: 'mode', width: 6 },
+      { header: 'Status', key: 'status', width: 11 },
+      { header: 'FC receipt (now)', key: 'fc', width: 15 },
+      { header: 'First promised', key: 'base', width: 15 },
+      { header: 'Supplier', key: 'sup', width: 30 },
+      { header: 'Zendesk', key: 'zd', width: 10 },
+      { header: 'PO', key: 'po', width: 14 },
+      { header: 'SKU', key: 'sku', width: 22 },
+      { header: 'Description', key: 'desc', width: 34 },
+      { header: 'Planned units', key: 'planned', width: 13 },
+      { header: 'Processed units', key: 'processed', width: 15 },
+      { header: 'Lane latest arrival', key: 'latest', width: 18 },
+    ];
+    ws.getRow(1).font = { bold: true };
+    for (const item of list) {
+      const { c, sh, contents } = item;
+      const fc = (sh.milestones || []).find(m => m.stage === 'fc_receipt') || {};
+      const term = terminalFor(c.consignment_uid);
+      const st = statusOf(c, sh, term, todayLocal());
+      for (const l of contents.lanes) {
+        const lanePos = l.pos.length ? l.pos : [{ po: '', skus: [{ sku: '', description: '', planned: null, processed: null }] }];
+        for (const p of lanePos) for (const s of (p.skus.length ? p.skus : [{ sku: '', planned: null, processed: null }])) {
+          ws.addRow({ week: c.week_start, ref: c.reference || 'not advised', mode: c.mode, status: st.label,
+            fc: fc.actual_at || fc.planned_at || '', base: c.baseline_fc_at || '',
+            sup: l.supplier, zd: l.zendesk, po: p.po, sku: s.sku, desc: s.description || '',
+            planned: s.planned, processed: s.processed, latest: l.latest_arrival || '' });
+        }
+      }
+    }
+    return Buffer.from(await wb.xlsx.writeBuffer());
+  }
+
+  const safeName = (s) => String(s || 'movement').replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 60);
+
+  router.get('/:uid/contents.xlsx', authenticateRequest, auditLog('download_consignment_contents'), async (req, res) => {
+    try {
+      const c = loadOwn(String(req.params.uid || '').trim());
+      if (!c) return res.status(404).json({ ok: false, error: 'No such consignment.' });
+      const sh = shape(c);
+      const buf = await contentsWorkbook([{ c, sh, contents: contentsFor(c, sh.lanes || [], { processed: true }) }]);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeName(c.reference)}_${c.week_start}_POs.xlsx"`);
+      res.send(buf);
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  // Every live movement in one sheet — what the old map's Detail view export was for.
+  router.get('/contents.xlsx', authenticateRequest, auditLog('download_transit_contents'), async (req, res) => {
+    try {
+      const uids = String(req.query.uids || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 60);
+      if (!uids.length) return res.status(400).json({ ok: false, error: 'uids is required.' });
+      const list = [];
+      for (const uid of uids) {
+        const c = loadOwn(uid);
+        if (!c) continue;
+        const sh = shape(c);
+        list.push({ c, sh, contents: contentsFor(c, sh.lanes || [], { processed: true }) });
+      }
+      const buf = await contentsWorkbook(list);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="transit_movements_${todayLocal()}.xlsx"`);
+      res.send(buf);
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  // ── Client notifications ──
+  // VelOzity staff only. requireRole cannot express that — a client's own org admin holds the
+  // Clerk admin role — so this uses the internal-organisation check, and fails closed when it
+  // was not provided.
+  const internalOnly = typeof requireInternalOrg === 'function'
+    ? requireInternalOrg
+    : (req, res) => res.status(403).json({ ok: false, error: 'internal_only' });
+
+  const EMAIL_RE = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/;
+  const NOTIFY_FROM = process.env.NOTIFY_FROM || 'VelOzity Operations <operations@velozity.au>';
+  const NOTIFY_REPLY_TO = process.env.NOTIFY_REPLY_TO || 'operations@velozity.au';
+  const escHtml = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  router.get('/notify/recipients', authenticateRequest, internalOnly, (req, res) => {
+    try {
+      const client = curClient();
+      const rows = db.prepare(`SELECT email FROM notify_recipient WHERE client_id = ?
+                                ORDER BY last_used_at DESC, uses DESC LIMIT 40`).all(client);
+      const lastRow = db.prepare(`SELECT to_json FROM consignment_notification WHERE client_id = ? AND status = 'sent'
+                                   ORDER BY id DESC LIMIT 1`).get(client);
+      let last = []; try { last = JSON.parse((lastRow && lastRow.to_json) || '[]'); } catch (_) {}
+      res.json({ ok: true, recipients: rows.map(r => r.email), last, from: NOTIFY_FROM, reply_to: NOTIFY_REPLY_TO });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
+  router.post('/:uid/notify', authenticateRequest, internalOnly, auditLog('notify_consignment'), async (req, res) => {
+    const client = curClient();
+    const uid = String(req.params.uid || '').trim();
+    const b = req.body || {};
+    const user = (req.auth && req.auth.userId) || null;
+    try {
+      const c = loadOwn(uid);
+      if (!c) return res.status(404).json({ ok: false, error: 'No such consignment.' });
+      if (typeof sendViaResend !== 'function') return res.status(503).json({ ok: false, error: 'Email sending is not configured on this server.' });
+
+      const to = [...new Set((Array.isArray(b.to) ? b.to : []).map(x => String(x || '').trim().toLowerCase()).filter(Boolean))];
+      const bad = to.filter(x => !EMAIL_RE.test(x));
+      if (!to.length) return res.status(400).json({ ok: false, error: 'Add at least one recipient.' });
+      if (bad.length) return res.status(400).json({ ok: false, error: `Not a valid email address: ${bad.join(', ')}` });
+      if (to.length > 20) return res.status(400).json({ ok: false, error: 'At most 20 recipients.' });
+      const subject = String(b.subject || '').trim().slice(0, 200);
+      const body = String(b.body || '').replace(/\r\n/g, '\n').trim().slice(0, 10000);
+      if (!subject) return res.status(400).json({ ok: false, error: 'A subject is required.' });
+      if (!body) return res.status(400).json({ ok: false, error: 'The message is empty.' });
+
+      const attachments = [];
+      if (b.attach) {
+        const sh = shape(c);
+        const buf = await contentsWorkbook([{ c, sh, contents: contentsFor(c, sh.lanes || [], { processed: true }) }]);
+        attachments.push({ filename: `${safeName(c.reference)}_${c.week_start}_POs.xlsx`, content: buf.toString('base64') });
+      }
+      const html = `<div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5;color:#121212;">`
+        + body.split(/\n{2,}/).map(p => `<p style="margin:0 0 12px;">${escHtml(p).replace(/\n/g, '<br>')}</p>`).join('')
+        + `</div>`;
+
+      const sentAt = new Date().toISOString();
+      let result;
+      try {
+        result = await sendViaResend({ from: NOTIFY_FROM, replyTo: NOTIFY_REPLY_TO, to, subject, html, text: body, attachments });
+      } catch (err) {
+        db.prepare(`INSERT INTO consignment_notification (client_id, consignment_uid, sent_at, sent_by, to_json, subject, body, attached, status, error)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)`)
+          .run(client, uid, sentAt, user, JSON.stringify(to), subject, body, attachments.length ? 1 : 0, 'failed', String(err.message || err).slice(0, 500));
+        return res.status(502).json({ ok: false, error: 'The email could not be sent: ' + String(err.message || err).slice(0, 200) });
+      }
+      const tx = db.transaction(() => {
+        db.prepare(`INSERT INTO consignment_notification (client_id, consignment_uid, sent_at, sent_by, to_json, subject, body, attached, resend_id, status)
+                    VALUES (?,?,?,?,?,?,?,?,?,'sent')`)
+          .run(client, uid, sentAt, user, JSON.stringify(to), subject, body, attachments.length ? 1 : 0, (result && result.id) || null);
+        const up = db.prepare(`INSERT INTO notify_recipient (client_id, email, uses, last_used_at) VALUES (?,?,1,?)
+                               ON CONFLICT(client_id, email) DO UPDATE SET uses = uses + 1, last_used_at = excluded.last_used_at`);
+        for (const e of to) up.run(client, e, sentAt);
+      });
+      tx();
+      res.json({ ok: true, sent_at: sentAt, to, resend_id: (result && result.id) || null });
+    } catch (e) {
+      console.error('[consignments] notify failed:', e);
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
   console.log('[consignments] model v1 mounted');
-  router._internals = { computePlanned, refreshPlanned, shape, STAGES, DEFAULT_RULES, rulesFor, migrateWeek, clearLegacy };
+  router._internals = { computePlanned, refreshPlanned, shape, STAGES, DEFAULT_RULES, rulesFor, migrateWeek, clearLegacy,
+    logEstimate, recordPorts, addViaPort, routeOf, statusOf, contentsFor };
   return router;
 };
