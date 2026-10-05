@@ -335,39 +335,60 @@
     return timeLabel(new Date(t).toISOString());
   }
   function highlights(M) {
+    // One line per movement. A container that departed, had its ETA revised twice and had a
+    // milestone confirmed is one piece of news, not five: the line leads with its most
+    // important change and folds the rest into "Also". ETA revisions are netted — first value
+    // to latest — so a date that moved and came back is not reported as a slip.
     const since = Date.now() - HL_DAYS * 86400000;
     const out = [];
+    const PRI = { hold: 0, later: 1, lfd: 2, actual: 3, earlier: 4, confirmed: 5, transshipment: 6, notified: 7, other: 8 };
     for (const m of M.all) {
       if (!M.byMode(m)) continue;
       const recentDelivery = m.delivered && m.fc && diff(m.fc, M.today) <= HL_DAYS;
       if (!m.live && !recentDelivery) continue;
-      for (const e of (m.c.events || [])) {
-        const t = Date.parse(e.at);
-        if (!t || t < since || e.kind === 'backfill') continue;
-        let sev = 'low', tag = '', what = e.text;
-        if (e.kind === 'estimate') {
-          const w = e.field === 'carrier_etd' ? 'departure' : 'arrival';
-          if (e.old_value && e.new_value) {
-            const dd = diff(e.old_value, e.new_value);
-            sev = dd > 0 ? 'high' : dd < 0 ? 'good' : 'low';
-            tag = dd ? `${dd > 0 ? '+' : '−'}${plural(Math.abs(dd), 'day')}` : '';
-            what = `Carrier moved ${w} ${fmtDay(e.old_value)} → ${fmtDay(e.new_value)}`;
-          } else { what = `Carrier set ${w} for ${fmtDay(e.new_value)}`; tag = 'New estimate'; }
-        } else if (e.kind === 'actual') {
-          sev = 'good'; tag = ({ departed: 'Departed', arrived: 'Arrived', dest_cleared: 'Available' })[e.stage] || 'Tracked';
-        } else if (e.kind === 'hold') { sev = 'high'; tag = 'Hold'; }
-        else if (e.kind === 'lfd') { sev = 'medium'; tag = 'Last free day'; }
-        else if (e.kind === 'confirmed') { sev = 'good'; tag = 'Confirmed'; }
-        else if (e.kind === 'transshipment') { tag = 'Transshipment'; }
-        out.push({ uid: m.uid, wk: m.wkLabel, title: `${m.ref} — ${what}`, sub: `${m.routeText} · now ${m.where.charAt(0).toLowerCase()}${m.where.slice(1)}`,
-                   tag, sev, at: t, when: ago(t) });
-      }
+      const evs = (m.c.events || []).map(e => Object.assign({ t: Date.parse(e.at) }, e))
+        .filter(e => e.t && e.t >= since && e.kind !== 'backfill').sort((a, b) => a.t - b.t);
       const n = m.c.last_notification;
-      if (n && Date.parse(n.sent_at) >= since) {
-        const t = Date.parse(n.sent_at);
-        out.push({ uid: m.uid, wk: m.wkLabel, title: `${m.ref} — client notified (${plural(n.to_count, 'recipient')})`, sub: n.subject || '',
-                   tag: 'Notified', sev: 'low', at: t, when: ago(t) });
+      if (!evs.length && !(n && Date.parse(n.sent_at) >= since)) continue;
+      const items = [];
+      // Net each estimate field across the window.
+      for (const field of ['carrier_eta', 'carrier_etd']) {
+        const es = evs.filter(e => e.kind === 'estimate' && (e.field || 'carrier_eta') === field);
+        if (!es.length) continue;
+        const from = (es.find(e => e.old_value) || {}).old_value || null, to = es[es.length - 1].new_value;
+        const w = field === 'carrier_etd' ? 'departure' : 'arrival';
+        const dd = from && to ? diff(from, to) : null;
+        const last = es[es.length - 1].t;
+        if (dd > 0) items.push({ k: 'later', t: last, sev: 'high', tag: `+${plural(dd, 'day')}`, head: `Carrier moved ${w} ${fmtDay(from)} → ${fmtDay(to)}`, short: `${w} moved to ${fmtShort(to)}` });
+        else if (dd < 0) items.push({ k: 'earlier', t: last, sev: 'good', tag: `−${plural(-dd, 'day')}`, head: `Carrier brought ${w} forward ${fmtDay(from)} → ${fmtDay(to)}`, short: `${w} forward to ${fmtShort(to)}` });
+        else if (!from && to) items.push({ k: 'other', t: last, sev: 'low', tag: 'New estimate', head: `Carrier set ${w} for ${fmtDay(to)}`, short: `${w} estimate ${fmtShort(to)}` });
+        // Moved and came back within the window: nothing to report.
       }
+      for (const e of evs) {
+        if (e.kind === 'estimate') continue;
+        if (e.kind === 'actual') {
+          const word = ({ departed: 'Departed', arrived: 'Arrived', dest_cleared: 'Available for pickup' })[e.stage] || 'Tracked';
+          items.push({ k: 'actual', t: e.t, sev: 'good', tag: word, head: e.text, short: `${word.toLowerCase()} ${e.date ? fmtShort(e.date) : ''}`.trim() });
+        } else if (e.kind === 'hold') items.push({ k: 'hold', t: e.t, sev: 'high', tag: 'Hold', head: e.text, short: 'hold reported' });
+        else if (e.kind === 'lfd') items.push({ k: 'lfd', t: e.t, sev: 'medium', tag: 'Last free day', head: e.text, short: e.lfd ? `last free day ${fmtShort(e.lfd)}` : 'last free day set' });
+        else if (e.kind === 'confirmed') items.push({ k: 'confirmed', t: e.t, sev: 'good', tag: 'Confirmed', head: e.text, short: `${(STAGE_VERB[e.stage] || 'milestone')} confirmed` });
+        else if (e.kind === 'transshipment') items.push({ k: 'transshipment', t: e.t, sev: 'low', tag: 'Transshipment', head: e.text, short: 'transshipment' });
+        else items.push({ k: 'other', t: e.t, sev: 'low', tag: '', head: e.text, short: e.text.toLowerCase() });
+      }
+      if (n && Date.parse(n.sent_at) >= since) items.push({ k: 'notified', t: Date.parse(n.sent_at), sev: 'low', tag: 'Notified', head: `Client notified (${plural(n.to_count, 'recipient')})`, short: 'client notified' });
+      if (!items.length) continue;
+      // Same kind twice (two confirmations): keep the latest of each kind.
+      const byKind = new Map();
+      for (const it of items) { const key = it.k + '|' + it.head; if (!byKind.has(key) || byKind.get(key).t < it.t) byKind.set(key, it); }
+      const list = [...byKind.values()].sort((a, b) => (PRI[a.k] - PRI[b.k]) || (b.t - a.t));
+      const lead = list[0];
+      const rest = [...new Set(list.slice(1).map(x => x.short).filter(Boolean))];
+      const latest = Math.max(...list.map(x => x.t));
+      out.push({
+        uid: m.uid, wk: m.wkLabel, title: `${m.ref} — ${lead.head}`,
+        sub: rest.length ? `Also: ${rest.slice(0, 3).join(' · ')}${rest.length > 3 ? ` · +${rest.length - 3} more` : ''}` : `${m.routeText} · now ${m.where.charAt(0).toLowerCase()}${m.where.slice(1)}`,
+        tag: lead.tag, sev: lead.sev, at: latest, when: ago(latest),
+      });
     }
     return out.sort((a, b) => b.at - a.at).slice(0, 40);
   }
