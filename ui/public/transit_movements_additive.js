@@ -395,6 +395,41 @@
     return out.sort((a, b) => b.at - a.at).slice(0, 40);
   }
 
+  // ── What needs a person now ──
+  // Standing state, not events: a movement is listed once, for its most pressing issue, for
+  // as long as the issue stands. Delayed beats held beats behind beats not booked beats a
+  // milestone past its planned date with nobody confirming it.
+  function attentionItems(M) {
+    const out = [];
+    for (const m of M.all) {
+      if (!m.live || !M.byMode(m)) continue;
+      const h = m.health || {};
+      const late = h.late;
+      let it = null;
+      if (h.key === 'delayed') it = { k: 'delayed', sev: 'high', tag: late != null && late > 0 ? `+${late}d` : (m.held ? 'Held' : 'Delayed'), phrase: m.held && h.lfd_in != null && h.lfd_in <= 2 ? `held · last free day ${fmtDay(m.term.lfd)}` : `FC ${fmtDay(m.fc)} · ${plural(late, 'day')} later than first promised` };
+      else if (m.held) it = { k: 'held', sev: h.lfd_in != null && h.lfd_in <= 2 ? 'high' : 'medium', tag: 'Hold', phrase: `${(m.term.holds || []).join(', ').toLowerCase() || 'hold'} at ${m.term.terminal || 'the terminal'}${m.term.lfd ? ` · last free day ${fmtDay(m.term.lfd)}` : ''}` };
+      else if (h.key === 'behind') it = { k: 'behind', sev: 'medium', tag: `+${late}d`, phrase: `FC ${fmtDay(m.fc)} · ${plural(late, 'day')} later than first promised` };
+      else if (h.key === 'not_booked') {
+        const dep = m.d('departed'); const until = dep ? diff(M.today, dep) : null;
+        if (until != null && until <= 7) it = { k: 'unbooked', sev: until < 0 ? 'high' : 'medium', tag: 'Not booked', phrase: `${m.air ? 'flies' : 'departs'} ${fmtDay(dep)} — no ${m.air ? 'AWB' : 'container number'} yet` };
+      }
+      if (!it) {
+        const st = STAGES.find(s => m.ms[s] && !m.ms[s].actual_at && m.ms[s].planned_at && ymd(m.ms[s].planned_at) < M.today);
+        if (st) { const days = diff(ymd(m.ms[st].planned_at), M.today); it = { k: 'unconfirmed', sev: days > 3 ? 'medium' : 'low', tag: `${days}d`, phrase: `${STAGE_VERB[st]} not confirmed · due ${fmtDay(m.ms[st].planned_at)}` }; }
+      }
+      if (!it) continue;
+      out.push({ uid: m.uid, wk: m.wkLabel, wkStart: m.wk, ref: m.ref, mode: m.mode, kind: it.k, sev: it.sev, tag: it.tag, phrase: it.phrase, attention: true, when: m.wkLabel, at: 0,
+        title: `${m.ref} — ${it.phrase}`, sub: `${m.routeText} · now ${m.where.charAt(0).toLowerCase()}${m.where.slice(1)}`, also: [] });
+    }
+    if (M.unassigned.length) {
+      const legacy = M.unassigned.filter(u => u.legacy_dates).length;
+      out.push({ uid: 'none', wk: '', wkStart: '', ref: plural(M.unassigned.length, 'lane'), mode: 'none', kind: 'unassigned', sev: legacy ? 'medium' : 'low', tag: 'No movement',
+        phrase: `on no container or flight${legacy ? ` · ${legacy} with old lane dates` : ''}`, attention: true, when: '', at: 0, title: `${plural(M.unassigned.length, 'lane')} on no movement`, sub: '', also: [] });
+    }
+    const R = { delayed: 0, held: 1, behind: 2, unbooked: 3, unconfirmed: 4, unassigned: 5 };
+    return out.sort((a, b) => (R[a.kind] - R[b.kind]) || (b.sev === 'high') - (a.sev === 'high'));
+  }
+
   // ════ Styles ════
   function styles() {
     if (document.getElementById('tm-styles')) return;
@@ -591,19 +626,20 @@
   // line per movement, four per list until "View all". The detail lives in the row's tooltip
   // and the movement panel, not in the row.
   const HL_CAP = 4;
-  const HL_COUNTS = [['later', 'slipped'], ['held', 'held'], ['progress', 'departed or arrived'], ['confirmed', 'confirmed']];
+  const HL_COUNTS = [['late', 'late'], ['held', 'held'], ['unconfirmed', 'not confirmed'], ['progress', 'moved in 7 days'], ['confirmed', 'confirmed']];
   function hlMatches(h, f) {
     if (!f) return true;
-    if (f === 'later') return h.kind === 'later';
-    if (f === 'held') return h.kind === 'hold' || h.kind === 'lfd';
-    if (f === 'progress') return h.kind === 'actual' || h.kind === 'earlier';
+    if (f === 'late') return h.kind === 'delayed' || h.kind === 'behind' || h.kind === 'later';
+    if (f === 'held') return h.kind === 'held' || h.kind === 'hold' || h.kind === 'lfd';
+    if (f === 'unconfirmed') return h.kind === 'unconfirmed' || h.kind === 'unbooked' || h.kind === 'unassigned';
+    if (f === 'progress') return h.kind === 'actual' || h.kind === 'earlier' || h.kind === 'transshipment';
     if (f === 'confirmed') return h.kind === 'confirmed';
     return true;
   }
   function hlRow(h) {
     const tip = [h.title, h.also && h.also.length ? 'Also: ' + h.also.join(' · ') : '', h.sub && !String(h.sub).startsWith('Also') ? h.sub : ''].filter(Boolean).join('\n');
     return `<button class="tm-row" data-act="pick" data-uid="${esc(h.uid)}" title="${esc(tip)}" style="display:grid;grid-template-columns:20px auto minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:0 16px;height:44px;width:100%;border-top:1px solid ${SOFT}">
-        <span style="display:inline-flex;color:${MUTED}">${modeIcon(h.mode, 15)}</span>
+        <span style="display:inline-flex;color:${MUTED}">${modeIcon(h.mode === 'none' ? 'none' : h.mode, 15)}</span>
         <span class="tm-mono" style="font-size:12.5px;font-weight:600;white-space:nowrap">${esc(h.ref)}</span>
         <span style="font-size:13px;color:${INK};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(h.phrase)}</span>
         ${h.tag ? `<span style="height:20px;padding:0 8px;border-radius:10px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;white-space:nowrap;${h.sev === 'high' ? `background:${RED};color:#fff` : h.sev === 'medium' ? `background:${AMBER};color:${INK}` : h.sev === 'good' ? `background:${GREEN};color:${INK}` : `background:${SOFT};color:${INK}`}">${esc(h.tag)}</span>` : '<span></span>'}
@@ -613,31 +649,37 @@
   function hlList(title, list, key) {
     const open = !!(S.hlOpen && S.hlOpen[key]);
     const shown = open ? list : list.slice(0, HL_CAP);
-    return `<div style="display:flex;flex-direction:column;min-width:0;border:1px solid ${LINE};border-radius:10px;overflow:hidden">
+    return `<div data-tm-hl="${key}" style="display:flex;flex-direction:column;min-width:0;border:1px solid ${LINE};border-radius:10px;overflow:hidden">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 16px;background:#FAFAF8">
         <span style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:${MUTED};font-weight:600">${title}</span>
         <span class="tm-mono" style="font-size:12px;color:${MUTED}">${list.length}</span></div>
-      ${shown.length ? shown.map(hlRow).join('') : `<div style="padding:14px 16px;font-size:13px;color:${MUTED};border-top:1px solid ${SOFT}">Nothing here in the last ${HL_DAYS} days.</div>`}
+      ${shown.length ? shown.map(hlRow).join('') : `<div style="padding:14px 16px;font-size:13px;color:${MUTED};border-top:1px solid ${SOFT}">${key === 'attn' ? 'Nothing needs a person right now.' : `Nothing moved in the last ${HL_DAYS} days.`}</div>`}
       ${list.length > HL_CAP ? `<button data-act="hl-more" data-v="${key}" style="padding:10px 16px;font-size:12.5px;font-weight:500;border-top:1px solid ${SOFT};text-align:left">${open ? 'Show fewer' : `View all ${list.length}`}</button>` : ''}
     </div>`;
   }
-  function renderHighlights(H) {
+  function renderHighlights(H, A) {
     const f = S.hlFilter || null;
-    const counts = HL_COUNTS.map(([k, l]) => [k, l, H.filter(h => hlMatches(h, k)).length]);
+    // Left: standing issues. An event-driven warning (a date moved later, a hold) joins the
+    // left list only for a movement that has no standing issue already listed there.
+    const have = new Set(A.map(a => a.uid));
+    const left = A.concat(H.filter(h => h.attention && !have.has(h.uid)));
+    const right = H.filter(h => !h.attention);
+    const all = left.concat(right);
+    const counts = HL_COUNTS.map(([k, l]) => [k, l, all.filter(h => hlMatches(h, k)).length]);
     const strip = counts.map(([k, l, n]) => `<button data-act="hl-filter" data-v="${k}" aria-pressed="${f === k}" style="display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:14px;font-size:12.5px;${f === k ? `background:${INK};color:#fff` : `background:${SOFT};color:${INK}`}${n ? '' : ';opacity:.5'}"><b class="tm-mono" style="font-weight:600">${n}</b> ${l}</button>`).join('');
-    const shown = H.filter(h => hlMatches(h, f));
+    const L = left.filter(h => hlMatches(h, f)), Rr = right.filter(h => hlMatches(h, f));
     return `
 <section class="tm-card" aria-label="Highlights">
   <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px 12px;gap:12px;flex-wrap:wrap">
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
       <h2 class="tm-h2">Highlights</h2>
-      <span class="tm-note">Last ${HL_DAYS} days</span>
+      <span class="tm-note">What needs a person, and what moved</span>
     </div>
     <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">${strip}${f ? `<button data-act="hl-filter" data-v="" style="font-size:12px;text-decoration:underline;text-underline-offset:3px;margin-left:4px;min-height:28px">Clear</button>` : ''}</div>
   </div>
-  ${!H.length ? `<div style="padding:0 20px 18px;font-size:14px;color:${MUTED}">Nothing has changed in the last ${HL_DAYS} days.</div>`
+  ${!all.length ? `<div style="padding:0 20px 18px;font-size:14px;color:${MUTED}">Nothing needs a person, and nothing has changed in the last ${HL_DAYS} days.</div>`
     : `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px;padding:0 20px 18px">
-        ${hlList('Needs attention', shown.filter(h => h.attention), 'attn')}${hlList('Progress', shown.filter(h => !h.attention), 'prog')}</div>`}
+        ${hlList('Needs attention · now', L, 'attn')}${hlList(`Progress · last ${HL_DAYS} days`, Rr, 'prog')}</div>`}
 </section>`;
   }
 
@@ -1865,7 +1907,7 @@
   // ════ Render ════
   function render() {
     if (!S.root) return;
-    if (S.view == null) S.view = isInternal() ? 'routes' : (window.pinpointIsInternal === false ? 'map' : 'routes');
+    if (S.view == null) S.view = 'map';          // one view for everyone; Routes a click away
     if (S.error && !S.board) {
       S.root.innerHTML = `<div class="tm-card" style="padding:28px;display:flex;flex-direction:column;gap:12px;align-items:flex-start">
         <h1 style="margin:0;font-size:28px;font-weight:600">Transit Movements</h1>
@@ -1881,9 +1923,11 @@
       return;
     }
     const M = model();
-    const H = highlights(M);
+    const H = highlights(M), A = attentionItems(M);
     const scrollX = (S.root.querySelector('[data-tm-tlscroll]') || {}).scrollLeft || 0;
-    S.root.innerHTML = renderHeader(M) + renderWeekPills(M) + renderHighlights(H) + (S.full ? '' : renderCorridor(M, false)) + renderTimeline(M).replace('<div style="overflow-x:auto">', '<div style="overflow-x:auto" data-tm-tlscroll>');
+    S.root.innerHTML = renderHeader(M) + renderWeekPills(M) + renderHighlights(H, A)
+      + renderTimeline(M).replace('<div style="overflow-x:auto">', '<div style="overflow-x:auto" data-tm-tlscroll>')
+      + (S.full ? '' : renderCorridor(M, false));
     const tl = S.root.querySelector('[data-tm-tlscroll]'); if (tl) tl.scrollLeft = scrollX;
     renderOverlays(M);
     const animating = runAnimation();
@@ -2206,9 +2250,7 @@
     _resizeT = setTimeout(() => { if (S.board && (S.view === 'map' || S.full) && S.root && S.root.isConnected) drawMaps(model()); }, 250);
   });
   // The default view follows who is looking, which is known only once tenancy resolves.
-  window.addEventListener('tenancy:ready', () => {
-    if (!S.viewTouched) { S.view = null; if (S.board) render(); }
-  });
+  window.addEventListener('tenancy:ready', () => { if (S.board) render(); });
 
   // ════ Mount ════
   function mount(host) {
