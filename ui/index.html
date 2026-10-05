@@ -6853,13 +6853,36 @@ document.addEventListener('keydown',function(e){
 });
 
 // ── Pulse: add message to chat ──
+// Pulse replies are text, not HTML. They were inserted raw, so the model's **bold** showed
+// as asterisks — and anything HTML-like in a question, a supplier name or a reply would have
+// run as markup. Everything is escaped first; replies then get a small, safe set of
+// formatting: **bold**, "- " bullets, line breaks and paragraphs. Nothing else.
+function pulseFormat(text, role){
+  var s = String(text == null ? '' : text)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  if (role === 'user') return s.replace(/\n/g,'<br>');
+  s = s.replace(/^\s*#{1,6}\s*/gm, '');                                   // stray headings
+  s = s.replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>');           // **bold**
+  s = s.replace(/(^|[\s(])\*([^*\n]+?)\*(?=[\s).,;:!?]|$)/g, '$1$2');    // *italic* → plain
+  var out = [], para = [];
+  var flush = function(){ if (para.length) { out.push('<p style="margin:0 0 8px;">' + para.join('<br>') + '</p>'); para = []; } };
+  s.split('\n').forEach(function(line){
+    var t = line.trim();
+    if (!t) { flush(); return; }
+    var m = t.match(/^(?:[-•*]|\d+[.)])\s+(.*)$/);
+    if (m) { flush(); out.push('<div style="display:flex;gap:6px;margin:0 0 4px;"><span>•</span><span>' + m[1] + '</span></div>'); return; }
+    para.push(t);
+  });
+  flush();
+  return out.join('');
+}
 function pulseAddMessage(text, role){
   const chat = document.getElementById('pulse-chat');
   if(!chat) return;
   const from = role==='user' ? 'You' : 'Pulse';
   const div = document.createElement('div');
   div.className = 'pulse-msg ' + role;
-  div.innerHTML = '<div class="pulse-msg-from">'+from+'</div>'+text;
+  div.innerHTML = '<div class="pulse-msg-from">'+from+'</div>'+pulseFormat(text, role);
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
 }
