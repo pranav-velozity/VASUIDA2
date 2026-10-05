@@ -442,7 +442,7 @@
 .tm-trow.sel{background:rgba(153,0,51,.04);box-shadow:inset 3px 0 0 ${RED},inset 0 0 0 1px ${LINE}}
 .tm-pulse-done{animation:tmRingDone 2.4s ease-out infinite}
 .tm-pulse-next{animation:tmRingNext 2.4s ease-out infinite}
-.tm-whead{display:grid;grid-template-columns:280px minmax(0,1fr);height:44px;background:#F7F7F5;border-bottom:1px solid ${LINE};border-top:1px solid ${LINE};position:relative}
+.tm-whead{display:grid;grid-template-columns:280px minmax(0,1fr);height:64px;background:#F7F7F5;border-bottom:1px solid ${LINE};border-top:1px solid ${LINE};position:relative}
 .tm-badge{font-size:13px;font-weight:600;padding:3px 8px;border-radius:5px;background:#fff;border:1px solid #D6D6D2}
 .tm-badge.cur{background:${INK};color:#fff;border-color:${INK}}
 .tm-legend{display:flex;flex-wrap:wrap;gap:20px;padding:14px 20px;border-top:1px solid ${LINE};font-size:12px;color:${MUTED}}
@@ -911,6 +911,13 @@
   // Weeks start collapsed: each header still shows its movements' FC dates, late ones in red,
   // and a week opens with one click.
   const isShut = (k) => (k in S.collapsed) ? !!S.collapsed[k] : true;
+  const ORIGIN = {
+    complete:    { l: 'Complete',    ink: '#4A6A00', mark: `background:${GREEN};border:1.5px solid ${INK}` },
+    in_progress: { l: 'In progress', ink: INK,       mark: `background:#fff;border:1.5px solid ${INK}` },
+    not_started: { l: 'Not started', ink: MUTED,     mark: `background:#fff;border:1.5px dashed #8A8A8A` },
+    at_risk:     { l: 'At risk',     ink: '#8A6D00', mark: `background:${AMBER};border:1.5px solid ${INK}` },
+    past_due:    { l: 'Past due',    ink: RED,       mark: `background:#fff;border:2.5px solid ${RED}` },
+  };
   const MS_SHORT = { packing_list_ready: 'Packed', origin_cleared: 'Cleared', departed: 'Departed', arrived: 'Arrived', dest_cleared: 'Cleared', fc_receipt: 'FC' };
   function renderTimeline(M) {
     const start = addD(mondayOf(M.today), -14);
@@ -1083,6 +1090,35 @@
       </div>`;
     }
 
+    // Ex-factory and VAS sit on the week's own row, above and below its execution bar, at the
+    // day they completed — or at their target while still open — so a week reads from the
+    // factory gate to the FC.
+    function originChips(w) {
+      const O = (M.B.weeks_origin || {})[w];
+      if (!O) return '';
+      const chip = (k, o, text, pos) => {
+        const st = ORIGIN[o.status] || ORIGIN.in_progress;
+        const at = o.done_at || o.target;
+        const x = ix(at);
+        let place, arrowL = '', arrowR = '';
+        if (x == null) return '';
+        if (x < -0.5) { place = 'left:6px;'; arrowL = '← '; }
+        else if (x > N_DAYS - 0.6) { place = 'right:6px;'; arrowR = ' →'; }
+        else place = `left:${pct(x)}%;transform:translateX(-8px);`;
+        let note = st.l;
+        if (o.status === 'complete' && k === 'recv' && o.late_pos) note = `Complete · ${plural(o.late_pos, 'PO')} late`;
+        else if (o.status === 'complete' && o.done_at && o.target && o.done_at > o.target) note = `Complete · ${plural(diff(o.target, o.done_at), 'day')} late`;
+        const tip = k === 'recv'
+          ? `Ex-factory (received): ${o.pos_received} of ${o.pos} POs received${o.closed_by_tick ? `, ${o.closed_by_tick} closed by the lane tick` : ''}${o.late_pos ? `, ${o.late_pos} after their due date` : ''}. Target ${fmtDay(o.target)}${o.done_at ? ` · done ${fmtDay(o.done_at)}` : ''}.`
+          : `VAS: ${o.lanes_complete} of ${o.lanes} lanes complete · ${fmtNum(o.units_applied)} of ${fmtNum(o.units_planned)} units applied. Target ${fmtDay(o.target)}${o.done_at ? ` · done ${fmtDay(o.done_at)}` : ''}.`;
+        return `<div title="${esc(tip)}" style="position:absolute;${pos};${place}display:flex;align-items:center;gap:6px;height:20px;padding:0 8px 0 4px;border-radius:10px;background:#fff;border:1px solid ${LINE};font-size:11px;white-space:nowrap;z-index:1">
+          <span style="width:11px;height:11px;border-radius:50%;box-sizing:border-box;flex-shrink:0;${st.mark}"></span>
+          <span>${arrowL}<b style="font-weight:600">${esc(text)}</b>${arrowR}</span>
+          <span style="font-weight:600;color:${st.ink}">${esc(note)}</span></div>`;
+      };
+      return chip('recv', O.received, `Ex-factory ${O.received.pct}%`, 'top:4px')
+           + chip('vas', O.vas, `VAS ${O.vas.lanes_complete}/${O.vas.lanes} lanes · ${O.vas.units_pct}%`, 'bottom:4px');
+    }
     function weekHeader(w, list) {
       const shut = isShut(w);
       const lanes = list.reduce((a, m) => a + m.lanes, 0), pos = list.reduce((a, m) => a + m.pos, 0);
@@ -1103,7 +1139,8 @@
         </div>
         <div style="position:relative">
           ${R > 0 && L < 100 ? `<div style="position:absolute;top:50%;height:4px;transform:translateY(-50%);left:${L}%;width:${Math.max(0, R - L)}%;background:#CFCFCB;border-radius:2px"></div>
-          ${ix(w) >= 0 ? `<div style="position:absolute;top:calc(50% - 20px);left:${L}%;font-size:11px;color:${MUTED};white-space:nowrap">${isoWeek(w)} execution</div>` : ''}` : ''}
+          ` : ''}
+          ${originChips(w)}
           ${mini}
         </div>
       </div>`;
@@ -1389,6 +1426,32 @@
       </div>`;
   }
 
+  const ORIGIN_PILL = {
+    complete: ['Complete', `background:${GREEN};color:${INK}`], in_progress: ['In progress', `background:${SOFT};color:${INK}`],
+    not_started: ['Not started', `background:${SOFT};color:${MUTED}`], at_risk: ['At risk', `background:${AMBER};color:${INK}`],
+    past_due: ['Past due', `background:${RED};color:#fff`],
+  };
+  function originPanel(O) {
+    if (!O) return '';
+    const pill = (s) => { const p = ORIGIN_PILL[s] || ORIGIN_PILL.in_progress; return `<span style="height:22px;padding:0 9px;border-radius:11px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;${p[1]}">${p[0]}</span>`; };
+    const r = O.received, v = O.vas;
+    const row = (title, big, status, lines) => `<div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start;padding:12px 0;border-top:1px solid #F3F3F1">
+        <div style="display:flex;flex-direction:column;gap:3px"><span style="font-size:13px;font-weight:600">${title}</span>
+          ${lines.filter(Boolean).map(l => `<span style="font-size:12px;color:${MUTED}">${esc(l)}</span>`).join('')}</div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px"><span class="tm-mono" style="font-size:22px;font-weight:600">${big}</span>${pill(status)}</div></div>`;
+    return `<div class="tm-sec" style="padding-bottom:12px;border-bottom:1px solid ${SOFT}">
+      <div style="display:flex;justify-content:space-between;align-items:baseline" class="tm-cap"><span>Origin</span><span style="text-transform:none;letter-spacing:0">factory gate → VAS done</span></div>
+      ${row('Ex-factory (received)', `${r.pct}%`, r.status, [
+        `${r.pos_received} of ${plural(r.pos, 'PO')} received${r.closed_by_tick ? ` · ${r.closed_by_tick} closed by the lane tick` : ''}`,
+        r.late_pos ? `${plural(r.late_pos, 'PO')} received after ${r.late_pos === 1 ? 'its' : 'their'} due date` : null,
+        r.done_at ? `Done ${fmtDay(r.done_at)} · target ${fmtDay(r.target)}` : `Target ${fmtDay(r.target)}`])}
+      ${row('VAS complete', `${v.lanes_complete}/${v.lanes}`, v.status, [
+        `${plural(v.lanes_complete, 'lane')} of ${v.lanes} complete · ${fmtNum(v.units_applied)} of ${fmtNum(v.units_planned)} units applied (${v.units_pct}%)`,
+        v.done_at ? `Done ${fmtDay(v.done_at)} · target ${fmtDay(v.target)}` : `Target ${fmtDay(v.target)}`])}
+      ${(O.suppliers_behind || []).length ? `<div style="font-size:12px;color:${MUTED};padding-top:4px">Furthest behind: ${esc(O.suppliers_behind.map(s => `${s.name} ${s.pct}%`).join(' · '))}</div>` : ''}
+    </div>`;
+  }
+
   function renderWeekPanel(M) {
     const ids = navIds(M), idx = ids.indexOf(S.wkSel);
     const list = M.timeline.filter(m => m.wk === S.wkSel);
@@ -1410,6 +1473,7 @@
         <div style="font-size:22px;font-weight:600;letter-spacing:-.01em">Week of ${fmtShort(S.wkSel)}</div>
         <div style="font-size:13px;color:${MUTED}">${plural(list.length, 'movement')} · ${plural(lanes, 'lane')} · ${plural(pos, 'PO')}</div>
       </div>
+      ${originPanel((M.B.weeks_origin || {})[S.wkSel])}
       ${modes ? `<div style="padding:16px 22px 18px;border-bottom:1px solid ${SOFT};display:flex;flex-direction:column;gap:12px">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px"><span class="tm-cap">Door to door · average</span><span style="font-size:12px;color:${MUTED}">packing list → received at FC</span></div>
         <div style="display:grid;grid-template-columns:56px repeat(3,minmax(0,1fr));gap:4px 12px;align-items:baseline">
