@@ -1868,7 +1868,9 @@ app.post('/pulse/chat',
     lines.push('- Give the reason for a delay only when the data states it (a carrier revising its ETA, a terminal hold, a transshipment). Otherwise say the carrier revised the date. Never speculate about causes such as congestion or weather.');
     lines.push('- Refer to tracking as Pinpoint tracking. Never name a tracking data provider.');
     lines.push('- Status meanings: on time = within a day of the first promised FC date; behind = 2–4 days later; delayed = more than 4 days later, or held at a terminal with the last free day two days away or less.');
-    lines.push('- Keep responses under 200 words unless user asks for detail. Use plain text, no markdown symbols.');
+    lines.push('- Keep responses under 200 words unless user asks for detail. Formatting: short paragraphs; **bold** only for a week or movement label; "- " for lists. No headings, tables or other markdown.');
+    lines.push('- For a transit question, answer in this order. 1) One headline line across everything asked: how many movements, how many on time / behind / delayed / held, and name the ones that are late. 2) What matters, worst first: each delayed, behind or held movement with how late it is against the first promise, the new FC date, what it carries (lanes, POs, units) and the stated cause. 3) Data gaps, grouped into one line rather than repeated per movement: e.g. "5 movements have no confirmed milestones and FC dates that passed weeks ago — they may have been delivered without being recorded; confirm them in Week Hub → Transit & Clearing." Never say a movement was delivered unless FC receipt is confirmed. 4) One suggested next action.');
+    lines.push('- Do not repeat "no carrier quote" for air: air transit is a rule default and that is normal. Mention a missing quote only for sea.');
 
     // Split prompt: static ops data (cacheable) + dynamic context (not cached)
     // Cache only kicks in when content is identical across requests.
