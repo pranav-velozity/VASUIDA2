@@ -23,7 +23,7 @@
   'use strict';
   if (window.__TM_LOADED__) return;
   window.__TM_LOADED__ = true;
-  const TM_VERSION = '17';
+  const TM_VERSION = '18';
 
   // ── Palette (Pinpoint status colours) ──
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
@@ -1927,8 +1927,8 @@
       <div style="padding:22px 28px 30px;display:flex;flex-direction:column;gap:26px">
         <div style="display:flex;flex-direction:column;gap:8px;padding:18px 20px;border-radius:12px;background:#FAFAF8;border:1px solid ${LINE}">${context}</div>
         ${sec('Journey — factory gate to FC Sydney', `<div style="display:flex;gap:10px;flex-wrap:wrap">
-          ${O ? journeyStep('Receiving', `${O.received.pct}%`, `of planned POs · ${O.received.pos_received} of ${O.received.pos}${O.received.not_received ? ` · ${plural(O.received.not_received, 'PO')} never arrived` : ''}${O.received.done_at ? ` · done ${fmtDay(O.received.done_at)}` : ` · target ${fmtDay(O.received.target)}`}`, O.received.status) : ''}
-          ${O ? journeyStep('VAS', `${O.vas.pct_of_received != null ? O.vas.pct_of_received : O.vas.units_pct}%`, `of what was received${O.vas.done_at ? ` · done ${fmtDay(O.vas.done_at)}` : ` · target ${fmtDay(O.vas.target)}`}`, O.vas.status) : ''}
+          ${O ? journeyStep('Receiving', `${O.received.pct}%`, `of planned POs · ${O.received.pos_received} of ${O.received.pos}${O.received.not_received ? ` · ${plural(O.received.not_received, 'PO')} never arrived` : ''}${O.received.done_at ? ` · ${O.received.signed_off ? 'signed off' : 'done'} ${fmtDay(O.received.done_at)}` : ` · target ${fmtDay(O.received.target)}`}`, O.received.status) : ''}
+          ${O ? journeyStep('VAS', `${O.vas.pct_of_received != null ? O.vas.pct_of_received : O.vas.units_pct}%`, `of what was received${O.vas.done_at ? ` · ${O.vas.signed_off ? 'signed off' : 'done'} ${fmtDay(O.vas.done_at)}` : ` · target ${fmtDay(O.vas.target)}`}`, O.vas.status) : ''}
           ${stageStep(list, 'departed', 'Departed', M)}${stageStep(list, 'arrived', 'Arrived', M)}${stageStep(list, 'fc_receipt', 'Received at FC', M)}
         </div>`)}
         ${sec('The numbers', `<div style="display:flex;flex-wrap:wrap;border:1px solid ${LINE};border-radius:10px;overflow:hidden;background:#fff">
