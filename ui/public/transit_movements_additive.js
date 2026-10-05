@@ -211,6 +211,10 @@
     const progB = progCalc(recent('departed') ? null : depReal, recent('arrived') ? null : arrReal, delivered && !recent('fc_receipt'),
       changed.carrier_eta || null);
     const changedAny = Object.keys(changed).length > 0 || recentStages.length > 0;
+    const changeBits = recentStages.map(st => `${STAGE_LABEL[st]} ${fmtShort(ms[st].actual_at)}`);
+    if (changed.carrier_eta && c.carrier_eta) changeBits.push(`Arrival ${fmtShort(changed.carrier_eta)} → ${fmtShort(c.carrier_eta)}`);
+    if (changed.carrier_etd && c.carrier_etd) changeBits.push(`Departure ${fmtShort(changed.carrier_etd)} → ${fmtShort(c.carrier_etd)}`);
+    const changeText = changeBits.slice(0, 3).join(' · ') + (changeBits.length > 3 ? ` · +${changeBits.length - 3} more` : '');
 
     // In words, for the row and the pill.
     let where;
@@ -241,7 +245,7 @@
       wk: c.week_start, wkLabel: isoWeek(c.week_start), ms, d, delivered, health, st: health.key, held, term, route,
       lanes: lanesN, pos: cs.pos || 0, skus: cs.skus || 0, units: cs.planned || 0,
       fc: d('fc_receipt'), base: ymd(c.baseline_fc_at), basePlan: c.baseline_plan || null,
-      changed, recentStages, changedAny, prog, progB, assumedPos, where, sub: subBits.join(' · '),
+      changed, recentStages, changedAny, changeText, prog, progB, assumedPos, where, sub: subBits.join(' · '),
       routeText: (route.origin || route.dest) ? `${air ? 'Air' : 'Sea'} · ${originName} → ${destName}` : `${air ? 'Air' : 'Sea'} · port not yet known`,
       live: false,
     };
@@ -369,8 +373,8 @@
         const w = field === 'carrier_etd' ? 'departure' : 'arrival';
         const dd = from && to ? diff(from, to) : null;
         const last = es[es.length - 1].t;
-        if (dd > 0) items.push({ k: 'later', t: last, sev: 'high', tag: `+${dd}d`, head: `Carrier moved ${w} ${fmtDay(from)} → ${fmtDay(to)}`, phrase: `${w} moved to ${fmtDay(to)}`, short: `${w} moved to ${fmtShort(to)}` });
-        else if (dd < 0) items.push({ k: 'earlier', t: last, sev: 'good', tag: `−${-dd}d`, head: `Carrier brought ${w} forward ${fmtDay(from)} → ${fmtDay(to)}`, phrase: `${w} forward to ${fmtDay(to)}`, short: `${w} forward to ${fmtShort(to)}` });
+        if (dd > 0) items.push({ k: 'later', t: last, sev: 'high', impact: 10000 + dd, tag: `+${dd}d`, head: `Carrier moved ${w} ${fmtDay(from)} → ${fmtDay(to)}`, phrase: `${w} moved to ${fmtDay(to)}`, short: `${w} moved to ${fmtShort(to)}` });
+        else if (dd < 0) items.push({ k: 'earlier', t: last, sev: 'good', impact: 1000 - dd, tag: `−${-dd}d`, head: `Carrier brought ${w} forward ${fmtDay(from)} → ${fmtDay(to)}`, phrase: `${w} forward to ${fmtDay(to)}`, short: `${w} forward to ${fmtShort(to)}` });
         else if (!from && to) items.push({ k: 'other', t: last, sev: 'low', tag: 'Estimate', head: `Carrier set ${w} for ${fmtDay(to)}`, phrase: `${w} estimate ${fmtDay(to)}`, short: `${w} estimate ${fmtShort(to)}` });
         // Moved and came back within the window: nothing to report.
       }
@@ -400,9 +404,11 @@
         title: `${m.ref} — ${lead.head}`,
         sub: rest.length ? `Also: ${rest.slice(0, 3).join(' · ')}${rest.length > 3 ? ` · +${rest.length - 3} more` : ''}` : `${m.routeText} · now ${m.where.charAt(0).toLowerCase()}${m.where.slice(1)}`,
         tag: lead.tag, sev: lead.sev, at: latest, when: ago(latest),
+        impact: lead.impact || (lead.k === 'hold' ? 50000 : lead.k === 'lfd' ? 20000 : lead.k === 'actual' ? 500 : lead.k === 'confirmed' ? 100 : 0),
       });
     }
-    return out.sort((a, b) => b.at - a.at).slice(0, 40);
+    // Largest effect on the delivery date first; among equals, the most recent.
+    return out.sort((a, b) => (b.impact - a.impact) || (b.at - a.at)).slice(0, 40);
   }
 
   // ── What needs a person now ──
@@ -428,16 +434,22 @@
         if (st) { const days = diff(ymd(m.ms[st].planned_at), M.today); it = { k: 'unconfirmed', sev: days > 3 ? 'medium' : 'low', tag: `${days}d`, phrase: `${STAGE_VERB[st]} not confirmed · due ${fmtDay(m.ms[st].planned_at)}` }; }
       }
       if (!it) continue;
-      out.push({ uid: m.uid, wk: m.wkLabel, wkStart: m.wk, ref: m.ref, mode: m.mode, kind: it.k, sev: it.sev, tag: it.tag, phrase: it.phrase, attention: true, when: m.wkLabel, at: 0,
+      const lateDays = Math.max(0, Number(late) || 0);
+      it.impact = it.k === 'held' || (it.k === 'delayed' && m.held) ? (h.lfd_in != null && h.lfd_in <= 2 ? 100000 - h.lfd_in : 50000 + lateDays)
+        : it.k === 'delayed' || it.k === 'behind' ? 10000 + lateDays
+        : it.k === 'unbooked' ? 5000 + (it.tag === 'Not booked' ? 0 : 0)
+        : it.k === 'unconfirmed' ? Number(String(it.tag).replace('d', '')) || 0 : 0;
+      out.push({ uid: m.uid, wk: m.wkLabel, wkStart: m.wk, ref: m.ref, mode: m.mode, kind: it.k, sev: it.sev, tag: it.tag, phrase: it.phrase, attention: true, when: m.wkLabel, at: 0, impact: it.impact,
         title: `${m.ref} — ${it.phrase}`, sub: `${m.routeText} · now ${m.where.charAt(0).toLowerCase()}${m.where.slice(1)}`, also: [] });
     }
     if (M.unassigned.length) {
       const legacy = M.unassigned.filter(u => u.legacy_dates).length;
-      out.push({ uid: 'none', wk: '', wkStart: '', ref: plural(M.unassigned.length, 'lane'), mode: 'none', kind: 'unassigned', sev: legacy ? 'medium' : 'low', tag: 'No movement',
+      out.push({ uid: 'none', wk: '', wkStart: '', ref: plural(M.unassigned.length, 'lane'), mode: 'none', kind: 'unassigned', sev: legacy ? 'medium' : 'low', tag: 'No movement', impact: legacy ? 1 : 0,
         phrase: `on no container or flight${legacy ? ` · ${legacy} with old lane dates` : ''}`, attention: true, when: '', at: 0, title: `${plural(M.unassigned.length, 'lane')} on no movement`, sub: '', also: [] });
     }
-    const R = { delayed: 0, held: 1, behind: 2, unbooked: 3, unconfirmed: 4, unassigned: 5 };
-    return out.sort((a, b) => (R[a.kind] - R[b.kind]) || (b.sev === 'high') - (a.sev === 'high'));
+    // Biggest threat to the delivery date first: a hold about to cost demurrage, then the
+    // longest slip against the first promise, then the longest-unconfirmed milestone.
+    return out.sort((a, b) => b.impact - a.impact);
   }
 
   // ════ Styles ════
@@ -505,6 +517,9 @@
 .tm-wk{font-size:10px;font-weight:600;padding:1px 4px;border-radius:3px;background:rgba(255,255,255,.16)}
 .tm-pill.sel .tm-wk{background:${INK};color:#fff}
 .tm-anim{transition:left 1.2s cubic-bezier(.2,.7,.2,1),width 1.2s cubic-bezier(.2,.7,.2,1),top 1.2s cubic-bezier(.2,.7,.2,1),opacity .5s ease}
+.tm-replaying .tm-anim{transition-duration:2.5s,2.5s,2.5s,.5s}
+.tm-replay-cap{position:absolute;z-index:3;height:22px;padding:0 9px;border-radius:11px;background:${INK};color:#fff;font-size:11px;font-weight:600;white-space:nowrap;display:flex;align-items:center;gap:6px;animation:tmFade .4s ease}
+.tm-replay-banner{position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:2147483250;display:flex;align-items:center;gap:12px;height:44px;padding:0 10px 0 16px;border-radius:22px;background:${INK};color:#fff;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.25);animation:tmFade .25s ease}
 .tm-tl-grid{display:grid;grid-template-columns:280px minmax(0,1fr)}
 .tm-trow{display:grid;grid-template-columns:280px minmax(0,1fr);height:100px;position:relative;margin:8px 0;border-radius:10px;box-shadow:inset 0 0 0 1px ${LINE}}
 .tm-trow.sel{background:rgba(153,0,51,.04);box-shadow:inset 3px 0 0 ${RED},inset 0 0 0 1px ${LINE}}
@@ -986,6 +1001,13 @@
         if (m.assumedPos) b.title = `${m.where} — placed by plan; not yet confirmed`;
         b.innerHTML = `<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:${st.c}${st.hollow ? '55' : ''};color:${m.st === 'delayed' ? '#fff' : INK};box-shadow:0 0 0 3px ${st.c}40" aria-hidden="true">${modeIcon(m.mode, 11)}</span><span class="tm-mono tm-wk" style="${sel ? `background:${INK};color:#fff` : ''}">${m.wkLabel}</span><span class="tm-mono">${esc(m.short)}</span>`;
         host.appendChild(b);
+        if (S.replayIds && S.replayIds.has(m.uid) && m.changeText) {
+          const cap = document.createElement('div');
+          cap.className = 'tm-replay-cap';
+          cap.style.cssText += `left:${xn}px;top:${ynS + 20}px;transform:translateX(${leftSide ? '-100%' : '0'})`;
+          cap.textContent = m.changeText;
+          host.appendChild(cap);
+        }
         if (xb !== xn || ybS !== ynS) requestAnimationFrame(() => requestAnimationFrame(() => { b.style.left = xn + 'px'; b.style.top = ynS + 'px'; }));
       }
       const unmapped = set.filter(m => !paths.has(m.uid)).length;
@@ -1178,7 +1200,7 @@
             <span style="font-size:12px;white-space:nowrap;display:flex;align-items:center;gap:6px;${tone}">${dot(m.st, 8)}${esc(m.where)}</span>
           </span>
         </button>
-        <div style="position:relative;height:100%">${out.join('')}${pills.join('')}${marks.join('')}${labels.join('')}</div>
+        <div style="position:relative;height:100%">${out.join('')}${pills.join('')}${marks.join('')}${labels.join('')}${replaying && m.changeText ? `<div class="tm-replay-cap" style="top:6px;right:8px"><span style="opacity:.7">yesterday → today</span>${esc(m.changeText)}</div>` : ''}</div>
       </div>`;
     }
 
@@ -1750,6 +1772,10 @@
     if (S.sheet) html += `<div class="tm-modal-wrap" data-act="sheet-bg">${renderSheet(M)}</div>`;
     if (S.notify) html += `<div class="tm-modal-wrap" style="z-index:2147483150">${renderNotify(M)}</div>`;
     if (S.toast) html += `<div class="tm-toast" role="status">${esc(S.toast)}</div>`;
+    if (S.replayStage) html += `<div class="tm-replay-banner" role="status">
+        ${S.replayStage === 'playing' ? `<span class="tm-live" style="background:#fff"></span><span>Replaying yesterday → today · ${plural(S.replayIds ? S.replayIds.size : 0, 'change')}</span>`
+          : `<span>Done — ${plural(S.replayIds ? S.replayIds.size : 0, 'change')} since yesterday</span><button data-act="replay" style="height:30px;padding:0 12px;border-radius:15px;background:#fff;color:${INK};font-size:12px;font-weight:600">Replay again</button>`}
+        <button data-act="replay-end" aria-label="Close" style="width:30px;height:30px;border-radius:15px;display:inline-flex;align-items:center;justify-content:center;color:#fff">${I.x(14)}</button></div>`;
     ov.innerHTML = html;
     ov.setAttribute('data-panel-key', panelKey);
     const np = ov.querySelector('.tm-panel');
@@ -1938,8 +1964,9 @@
     const H = highlights(M), A = attentionItems(M);
     const scrollX = (S.root.querySelector('[data-tm-tlscroll]') || {}).scrollLeft || 0;
     S.root.innerHTML = renderHeader(M) + renderWeekPills(M) + renderHighlights(H, A)
-      + renderTimeline(M).replace('<div style="overflow-x:auto">', '<div style="overflow-x:auto" data-tm-tlscroll>')
-      + (S.full ? '' : renderCorridor(M, false));
+      + (S.full ? '' : renderCorridor(M, false))
+      + renderTimeline(M).replace('<div style="overflow-x:auto">', '<div style="overflow-x:auto" data-tm-tlscroll>');
+    if (S.replayStage === 'playing') S.root.classList.add('tm-replaying');
     const tl = S.root.querySelector('[data-tm-tlscroll]'); if (tl) tl.scrollLeft = scrollX;
     renderOverlays(M);
     // The map is drawn after this render; it must see the phase this render was made in,
@@ -1990,16 +2017,33 @@
     render();
   }
 
+  // A short briefing you can watch: the weeks involved open, the first changed row scrolls
+  // into view, each change moves slowly from yesterday's position to today's with a caption
+  // saying what it was, and a banner marks the start and the end.
+  const REPLAY_MS = 2800, REPLAY_DONE_MS = 8000;
   function replay() {
     const M = S.board ? model() : null;
     const movedList = M ? M.all.filter(m => m.live && m.changedAny) : [];
     if (!movedList.length) { toast('Nothing to replay: no carrier revisions and no milestones recorded in the last 24 hours.'); return; }
     S.phase = 'before';
     S.replayIds = new Set(movedList.map(m => m.uid));
+    S.replayStage = 'playing';
+    S.toast = '';
+    for (const m of movedList) S.collapsed = Object.assign({}, S.collapsed, { [m.wk]: false });
     render();
-    toast(`Replaying ${plural(movedList.length, 'change')} since yesterday: ${movedList.map(m => m.ref).slice(0, 3).join(', ')}${movedList.length > 3 ? '…' : ''}`);
-    clearTimeout(S.replayTimer);
-    S.replayTimer = setTimeout(() => { S.replayIds = null; if (S.root && S.root.isConnected) render(); }, 4000);
+    if (S.root) S.root.classList.add('tm-replaying');
+    const first = movedList.slice().sort((a, b) => a.wk.localeCompare(b.wk))[0];
+    const row = first && S.root && S.root.querySelector(`.tm-trow [data-uid="${(typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(first.uid) : String(first.uid).replace(/"/g, '')}"]`);
+    if (row) { try { row.closest('.tm-trow').scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) {} }
+    clearTimeout(S.replayTimer); clearTimeout(S.replayTimer2);
+    S.replayTimer = setTimeout(() => { if (S.root) S.root.classList.remove('tm-replaying'); S.replayStage = 'done'; if (S.board) renderOverlays(model()); }, REPLAY_MS);
+    S.replayTimer2 = setTimeout(endReplay, REPLAY_MS + REPLAY_DONE_MS);
+  }
+  function endReplay() {
+    clearTimeout(S.replayTimer); clearTimeout(S.replayTimer2);
+    if (S.root) S.root.classList.remove('tm-replaying');
+    S.replayIds = null; S.replayStage = null;
+    if (S.root && S.root.isConnected && S.board) render();
   }
 
   // ════ Actions ════
@@ -2130,6 +2174,7 @@
       case 'retry': load(); break;
       case 'mode': S.mode = v; render(); break;
       case 'replay': replay(); break;
+      case 'replay-end': endReplay(); break;
       case 'report': openReport(v); break;
       case 'week-report': openReport('__openTransitHistory', v); break;
       case 'view': S.view = v; S.viewTouched = true; render(); break;
