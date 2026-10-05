@@ -1301,6 +1301,155 @@ module.exports = function mountConsignments(deps) {
     };
   }
 
+  // ── Ex-factory and VAS: the two week-level milestones before anything moves ──
+  // Built from the same sources the Week Hub reads, so the two screens agree on a week:
+  //   · Received  — POs received ÷ POs planned (receiving vs plan). Closed when every PO is
+  //                 in, or its lane is ticked complete: the tick means "done on whatever
+  //                 arrived", so a PO that never came stops counting against the week.
+  //   · VAS       — lanes complete ÷ lanes in the week. A lane is complete when units applied
+  //                 reach units planned (the Week Hub's auto-complete), or someone ticked it.
+  //                 Units applied are counted the Week Hub's way: work done Mon–Sun of the week
+  //                 against that week's POs.
+  // Status against a target: Received by the latest PO due date, VAS by the Friday of the
+  // execution week. At risk is the Week Hub's own line: under 80% within a day of target.
+  const _colCache = {};
+  const hasCol = (t, c) => {
+    const k = t + '.' + c;
+    if (!(k in _colCache)) { try { _colCache[k] = db.prepare(`PRAGMA table_info(${t})`).all().some(x => x.name === c); } catch (_) { _colCache[k] = false; } }
+    return _colCache[k];
+  };
+  const dayOnly = (v) => v ? String(v).replace('T', ' ').slice(0, 10) : null;
+  function originStatus(done, pct, target, today) {
+    if (done) return 'complete';
+    if (target && today > target) return 'past_due';
+    if (target && dayDiff(today, target) <= 1 && pct < 80) return 'at_risk';
+    return pct > 0 ? 'in_progress' : 'not_started';
+  }
+  function originFor(ws, client, today, planRows) {
+    try {
+      const plan = planRows || planRowsFor(ws, client);
+      if (!plan.length) return null;
+      const we = addDays(ws, 6);
+      const tickets = new Map();          // zendesk → { planned, pos:Set, supplier }
+      const poTicket = new Map(), poDue = new Map(), poSupplier = new Map();
+      for (const r of plan) {
+        const po = String(r.po_number || '').trim(); if (!po) continue;
+        const t = String(r.zendesk_ticket == null ? '' : r.zendesk_ticket).trim() || 'Unspecified';
+        if (!tickets.has(t)) tickets.set(t, { planned: 0, pos: new Set() });
+        const tk = tickets.get(t);
+        tk.planned += Number(r.target_qty || 0) || 0; tk.pos.add(po);
+        poTicket.set(po, t);
+        if (r.supplier_name) poSupplier.set(po, String(r.supplier_name).trim());
+        if (r.due_date && ymdOk(String(r.due_date).slice(0, 10))) {
+          const d = String(r.due_date).slice(0, 10);
+          if (!poDue.has(po) || d > poDue.get(po)) poDue.set(po, d);
+        }
+      }
+      const allPos = [...poTicket.keys()];
+
+      // Receiving
+      const recvSql = `SELECT po_number po, received_at_local at FROM receiving WHERE week_start = ?`
+        + (hasCol('receiving', 'client_id') ? ' AND (client_id = ? OR client_id IS NULL)' : '');
+      const recv = db.prepare(recvSql).all(...(hasCol('receiving', 'client_id') ? [ws, client] : [ws]));
+      const received = new Map();
+      for (const r of recv) {
+        const po = String(r.po || '').trim();
+        if (!poTicket.has(po)) continue;
+        const d = dayOnly(r.at) || ws;
+        if (!received.has(po) || d > received.get(po)) received.set(po, d);
+      }
+
+      // Applied, the Week Hub's way
+      const lastCol = hasCol('records', 'completed_at') ? 'COALESCE(completed_at, date_local)' : 'date_local';
+      const recSql = `SELECT po_number po, COUNT(*) n, MAX(${lastCol}) last FROM records
+                       WHERE status = 'complete' AND date_local >= ? AND date_local <= ?`
+        + (hasCol('records', 'client_id') ? ' AND (client_id = ? OR client_id IS NULL)' : '') + ' GROUP BY po_number';
+      const applied = new Map();
+      for (const r of db.prepare(recSql).all(...(hasCol('records', 'client_id') ? [ws, we, client] : [ws, we]))) {
+        const po = String(r.po || '').trim();
+        if (poTicket.has(po)) applied.set(po, { n: Number(r.n || 0), last: dayOnly(r.last) });
+      }
+
+      // Ticks
+      const ticks = new Map();
+      try {
+        for (const r of db.prepare(`SELECT zendesk_ticket t, completed_at at FROM zendesk_completions WHERE week_start = ? AND completed = 1`).all(ws)) {
+          ticks.set(String(r.t).trim(), dayOnly(r.at));
+        }
+      } catch (_) { /* table absent on a fresh database */ }
+
+      let lanesDone = 0, unitsPlanned = 0, unitsApplied = 0, vasDone = null;
+      const ticketDone = new Map();
+      for (const [t, tk] of tickets) {
+        const ap = [...tk.pos].reduce((a, po) => a + ((applied.get(po) || {}).n || 0), 0);
+        unitsPlanned += tk.planned; unitsApplied += ap;
+        const auto = tk.planned > 0 && ap >= tk.planned;
+        const tick = ticks.get(t) || null;
+        if (auto || tick) {
+          lanesDone++;
+          const lastWork = [...tk.pos].map(po => (applied.get(po) || {}).last).filter(Boolean).sort().pop() || null;
+          const at = tick || lastWork;
+          ticketDone.set(t, at);
+          if (at && (!vasDone || at > vasDone)) vasDone = at;
+        }
+      }
+      const vasComplete = tickets.size > 0 && lanesDone === tickets.size;
+      const vasTarget = addDays(ws, 4);
+      const vasPct = tickets.size ? Math.round(100 * lanesDone / tickets.size) : 0;
+      const unitsPct = unitsPlanned ? Math.round(100 * Math.min(unitsApplied, unitsPlanned) / unitsPlanned) : 0;
+
+      let posClosed = 0, recvDone = null, latePos = 0;
+      for (const po of allPos) {
+        const got = received.get(po);
+        if (got) {
+          posClosed++;
+          if (!recvDone || got > recvDone) recvDone = got;
+          if (poDue.get(po) && got > poDue.get(po)) latePos++;
+        } else if (ticketDone.has(poTicket.get(po))) {
+          posClosed++;
+          const at = ticketDone.get(poTicket.get(po));
+          if (at && (!recvDone || at > recvDone)) recvDone = at;
+        }
+      }
+      const recvComplete = allPos.length > 0 && posClosed === allPos.length;
+      const recvPct = allPos.length ? Math.round(100 * received.size / allPos.length) : 0;
+      const dues = [...poDue.values()].sort();
+      const recvTarget = dues.length ? dues[dues.length - 1] : addDays(ws, 2);
+
+      // Who is furthest behind on VAS, while the week is still open.
+      const bySup = new Map();
+      for (const r of plan) {
+        const po = String(r.po_number || '').trim(); if (!po) continue;
+        const s = poSupplier.get(po) || 'Unknown';
+        if (!bySup.has(s)) bySup.set(s, { name: s, planned: 0, applied: 0, pos: new Set() });
+        const x = bySup.get(s); x.planned += Number(r.target_qty || 0) || 0; x.pos.add(po);
+      }
+      for (const x of bySup.values()) x.applied = [...x.pos].reduce((a, po) => a + ((applied.get(po) || {}).n || 0), 0);
+      const behind = vasComplete ? [] : [...bySup.values()]
+        .filter(x => x.planned > 0 && x.applied < x.planned && !([...x.pos].every(po => ticketDone.has(poTicket.get(po)))))
+        .map(x => ({ name: x.name, planned: x.planned, applied: x.applied, pct: Math.round(100 * x.applied / x.planned) }))
+        .sort((a, b) => a.pct - b.pct).slice(0, 3);
+
+      return {
+        received: {
+          pos: allPos.length, pos_received: received.size, pos_closed: posClosed, pct: recvPct, late_pos: latePos,
+          closed_by_tick: posClosed - received.size, target: recvTarget, done_at: recvComplete ? recvDone : null,
+          status: originStatus(recvComplete, recvPct, recvTarget, today),
+        },
+        vas: {
+          lanes: tickets.size, lanes_complete: lanesDone, pct: vasPct,
+          units_planned: unitsPlanned, units_applied: unitsApplied, units_pct: unitsPct,
+          target: vasTarget, done_at: vasComplete ? vasDone : null,
+          status: originStatus(vasComplete, vasPct, vasTarget, today),
+        },
+        suppliers_behind: behind,
+      };
+    } catch (e) {
+      console.warn('[consignments] originFor', ws, e.message);
+      return null;
+    }
+  }
+
   // ── The board ──
   router.get('/board', authenticateRequest, auditLog('view_transit_board'), (req, res) => {
     try {
@@ -1363,8 +1512,21 @@ module.exports = function mountConsignments(deps) {
         lastEvent = r && r.at ? String(r.at).replace(' ', 'T') + (String(r.at).includes('Z') ? '' : 'Z') : null;
       } catch (_) { lastEvent = null; }
 
+      // Ex-factory and VAS per week, for weeks with something in play (and this week).
+      const weeks_origin = {};
+      if (owns) {
+        const wks = new Set(rows.map(c => c.week_start).filter(w => w >= addW(thisMonday, -6)));
+        wks.add(thisMonday);
+        for (const ws of wks) {
+          if (!ctx.planByWeek.has(ws)) ctx.planByWeek.set(ws, planRowsFor(ws, client));
+          const o = originFor(ws, client, today, ctx.planByWeek.get(ws));
+          if (o) weeks_origin[ws] = o;
+        }
+      }
+
       res.json({
         ok: true, client_id: client, today, this_week: thisMonday, from, to,
+        weeks_origin,
         tracking_started: (first && first.w) || null,
         tracking_last_event_at: lastEvent,
         week_model: owns,
@@ -1558,6 +1720,6 @@ module.exports = function mountConsignments(deps) {
 
   console.log('[consignments] model v1 mounted');
   router._internals = { computePlanned, refreshPlanned, shape, STAGES, DEFAULT_RULES, rulesFor, migrateWeek, clearLegacy,
-    logEstimate, recordPorts, addViaPort, routeOf, statusOf, contentsFor };
+    logEstimate, recordPorts, addViaPort, routeOf, statusOf, contentsFor, originFor };
   return router;
 };
