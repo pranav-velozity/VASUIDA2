@@ -23,7 +23,7 @@
   'use strict';
   if (window.__TM_LOADED__) return;
   window.__TM_LOADED__ = true;
-  const TM_VERSION = '16';
+  const TM_VERSION = '17';
 
   // ── Palette (Pinpoint status colours) ──
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
@@ -44,7 +44,7 @@
     packing_list_ready: 'packing list', origin_cleared: 'origin clearance', departed: 'departure',
     arrived: 'arrival', dest_cleared: 'destination clearance', fc_receipt: 'FC receipt',
   };
-  const LIVE_WEEKS_BACK = 5;      // a movement older than this with no FC receipt is history, not live
+  const LIVE_WEEKS_BACK = 12;     // a movement older than this with no FC receipt is history, not live
   const EARLIER_WEEKS = 10;       // matches the reports' "last 10 weeks"
   const N_DAYS = 35;              // timeline span: two weeks back from this Monday, three ahead
   const REFRESH_MS = 5 * 60 * 1000;
@@ -1996,7 +1996,8 @@
     S.loading = true; S.error = null;
     if (!quiet && !S.board) render();
     try {
-      const board = await req('GET', '/consignments/board');
+      // Ask for the whole live window: the server's default range is shorter than 12 weeks.
+      const board = await req('GET', `/consignments/board?from=${encodeURIComponent(addD(mondayOf(todayLocal()), -7 * LIVE_WEEKS_BACK))}`);
       const today = board.today || todayLocal();
       const floor = addD(board.this_week || mondayOf(today), -7 * LIVE_WEEKS_BACK);
       const weeks = [...new Set((board.consignments || []).filter(c => {
