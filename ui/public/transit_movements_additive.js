@@ -189,20 +189,28 @@
     // booked for last week has almost certainly flown — and the pill is drawn dashed so a
     // planned position never passes for a confirmed one.
     const depReal = ymd(dep.actual_at), arrReal = ymd(arr.actual_at);
-    const depAt = depReal || (d('departed') && d('departed') <= today ? d('departed') : null);
-    const progWith = (arrDate) => {
-      if (arrReal || delivered) return 1;
+    const progCalc = (depR, arrR, deliv, arrPlanned) => {
+      const depAt = depR || (d('departed') && d('departed') <= today ? d('departed') : null);
+      if (arrR || deliv) return 1;
       if (!depAt) return 0;
-      const a = arrDate || d('arrived');
-      if (!depReal && a && a <= today) return 1;
+      const a = arrPlanned || d('arrived');
+      if (!depR && a && a <= today) return 1;
       const span = diff(depAt, a);
       if (!span || span <= 0) return 0.5;
       return clamp(diff(depAt, today) / span, 0.05, 0.95);
     };
+    const depAt = depReal || (d('departed') && d('departed') <= today ? d('departed') : null);
     const assumedPos = !delivered && !arrReal && !!((depAt && !depReal) || (!depReal && d('arrived') && d('arrived') <= today));
     const changed = c.changed_24h || {};
-    const prog = progWith(null);
-    const progB = ('carrier_eta' in changed && changed.carrier_eta) ? progWith(changed.carrier_eta) : prog;
+    // What happened in the last day: a milestone recorded, or a carrier estimate revised.
+    // "Before" is yesterday's picture — those actuals not yet recorded, the old ETA in force.
+    const since = Date.now() - 86400000;
+    const recent = (st) => !!(ms[st] && ms[st].actual_at && ms[st].recorded_at && Date.parse(ms[st].recorded_at) >= since);
+    const recentStages = STAGES.filter(recent);
+    const prog = progCalc(depReal, arrReal, delivered, null);
+    const progB = progCalc(recent('departed') ? null : depReal, recent('arrived') ? null : arrReal, delivered && !recent('fc_receipt'),
+      changed.carrier_eta || null);
+    const changedAny = Object.keys(changed).length > 0 || recentStages.length > 0;
 
     // In words, for the row and the pill.
     let where;
@@ -233,7 +241,7 @@
       wk: c.week_start, wkLabel: isoWeek(c.week_start), ms, d, delivered, health, st: health.key, held, term, route,
       lanes: lanesN, pos: cs.pos || 0, skus: cs.skus || 0, units: cs.planned || 0,
       fc: d('fc_receipt'), base: ymd(c.baseline_fc_at), basePlan: c.baseline_plan || null,
-      changed, prog, progB, assumedPos, where, sub: subBits.join(' · '),
+      changed, recentStages, changedAny, prog, progB, assumedPos, where, sub: subBits.join(' · '),
       routeText: (route.origin || route.dest) ? `${air ? 'Air' : 'Sea'} · ${originName} → ${destName}` : `${air ? 'Air' : 'Sea'} · port not yet known`,
       live: false,
     };
@@ -280,15 +288,17 @@
       if (ch.carrier_eta && m.c.carrier_eta) shiftArr = diff(m.c.carrier_eta, ch.carrier_eta) || 0;
       else shiftArr = shiftDep;
     }
+    const undo = phase === 'before' ? (m.recentStages || []) : [];
     for (const st of STAGES) {
       const x = m.ms[st];
       if (!x) continue;
-      let v = ymd(x.actual_at || x.planned_at);
-      if (!x.actual_at && v) {
+      const wasActual = !!x.actual_at && !undo.includes(st);
+      let v = wasActual ? ymd(x.actual_at) : ymd(x.planned_at || x.actual_at);
+      if (!wasActual && v) {
         if (st === 'departed' && shiftDep) v = addD(v, shiftDep);
         if ((st === 'arrived' || st === 'dest_cleared' || st === 'fc_receipt') && shiftArr) v = addD(v, shiftArr);
       }
-      out[st] = { v, actual: !!x.actual_at, state: x.state, planned: ymd(x.planned_at) };
+      out[st] = { v, actual: wasActual, state: x.state, planned: ymd(x.planned_at) };
     }
     return out;
   }
@@ -877,7 +887,8 @@
     return _libs;
   }
 
-  async function drawMaps(M) {
+  async function drawMaps(M, phase) {
+    const before = (phase || S.phase) === 'before';
     const hosts = S.root ? [...S.root.querySelectorAll('[data-tm-map]')] : [];
     const ov = document.getElementById('tm-overlay');
     if (ov) hosts.push(...ov.querySelectorAll('[data-tm-map]'));
@@ -958,7 +969,7 @@
         const kn = Math.round(xn / 30) + ':' + Math.round(yn / 30); stackN[kn] = (stackN[kn] || 0) + 1;
         const ynS = yn + (stackN[kn] - 1) * 28;
         let xb = xn, ybS = ynS;
-        if (S.phase === 'before' && m.progB !== m.prog) {
+        if (before && m.progB !== m.prog) {
           const [x2, y2] = along(px, m.progB);
           const kb = Math.round(x2 / 30) + ':' + Math.round(y2 / 30); stackB[kb] = (stackB[kb] || 0) + 1;
           xb = x2; ybS = y2 + (stackB[kb] - 1) * 28;
@@ -1156,8 +1167,9 @@
       if (pFc.n != null && pFc.n > N_DAYS - 0.6) labels.push(`<div style="position:absolute;top:5px;right:8px;font-size:11px;font-weight:600;white-space:nowrap">FC ${esc(fmtDay(m.fc))} →</div>`);
       else if (pFc.n != null && pFc.n < -0.5) labels.push(`<div style="position:absolute;top:5px;left:8px;font-size:11px;font-weight:600;white-space:nowrap">← FC ${esc(fmtDay(m.fc))}</div>`);
       const on = S.sel === m.uid;
+      const replaying = S.replayIds && S.replayIds.has(m.uid);
       const tone = m.st === 'delayed' ? `color:${RED};font-weight:600` : m.st === 'behind' ? `color:${INK};font-weight:600` : m.delivered ? `color:${MUTED};font-weight:500` : `color:${INK};font-weight:500`;
-      return `<div class="tm-trow${on ? ' sel' : ''}">
+      return `<div class="tm-trow${on ? ' sel' : ''}"${replaying ? ` style="box-shadow:inset 0 0 0 2px ${INK};transition:box-shadow .4s"` : ''}>
         <button data-act="pick" data-uid="${esc(m.uid)}" data-dbl="${esc(m.uid)}" style="display:flex;gap:12px;align-items:center;padding:12px 16px 12px 20px;height:100%;width:100%">
           <span style="width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;${on ? `background:${INK};color:#fff` : `background:#F0F0ED;color:${INK}`}">${modeIcon(m.mode)}</span>
           <span style="display:flex;flex-direction:column;gap:3px;min-width:0">
@@ -1930,8 +1942,11 @@
       + (S.full ? '' : renderCorridor(M, false));
     const tl = S.root.querySelector('[data-tm-tlscroll]'); if (tl) tl.scrollLeft = scrollX;
     renderOverlays(M);
+    // The map is drawn after this render; it must see the phase this render was made in,
+    // not whatever the animation has already moved on to.
+    const phase = S.phase;
     const animating = runAnimation();
-    if ((S.view === 'map') || S.full) drawMaps(M);
+    if ((S.view === 'map') || S.full) drawMaps(M, phase);
     return animating;
   }
 
@@ -1963,7 +1978,8 @@
       S.board = board; S.alerts = alerts; S.loadedAt = Date.now();
       if (S.sel && S.sel !== 'none' && !board.consignments.some(c => c.consignment_uid === S.sel)) { S.sel = null; if (S.panel === 'mv') S.panel = null; }
       // The overnight replay plays once, on the first load, and only if something moved.
-      const moved = (board.consignments || []).some(c => c.changed_24h && Object.keys(c.changed_24h).length);
+      const moved = (board.consignments || []).some(c => (c.changed_24h && Object.keys(c.changed_24h).length)
+        || (c.milestones || []).some(m => m.actual_at && m.recorded_at && Date.parse(m.recorded_at) >= Date.now() - 86400000));
       if (!S.playedReplay && moved && !quiet) { S.playedReplay = true; S.phase = 'before'; }
     } catch (e) {
       S.error = e.status === 403 ? 'this client does not use Transit Movements.' : (e.message || String(e));
@@ -1975,10 +1991,15 @@
   }
 
   function replay() {
-    const moved = S.board && (S.board.consignments || []).some(c => c.changed_24h && Object.keys(c.changed_24h).length);
-    if (!moved) { toast('Nothing has moved since yesterday.'); return; }
+    const M = S.board ? model() : null;
+    const movedList = M ? M.all.filter(m => m.live && m.changedAny) : [];
+    if (!movedList.length) { toast('Nothing to replay: no carrier revisions and no milestones recorded in the last 24 hours.'); return; }
     S.phase = 'before';
+    S.replayIds = new Set(movedList.map(m => m.uid));
     render();
+    toast(`Replaying ${plural(movedList.length, 'change')} since yesterday: ${movedList.map(m => m.ref).slice(0, 3).join(', ')}${movedList.length > 3 ? '…' : ''}`);
+    clearTimeout(S.replayTimer);
+    S.replayTimer = setTimeout(() => { S.replayIds = null; if (S.root && S.root.isConnected) render(); }, 4000);
   }
 
   // ════ Actions ════
