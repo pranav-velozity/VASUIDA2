@@ -1223,15 +1223,15 @@
         if (o.status === 'complete' && k === 'recv' && o.late_pos) note = `Complete · ${plural(o.late_pos, 'PO')} late`;
         else if (o.status === 'complete' && o.done_at && o.target && o.done_at > o.target) note = `Complete · ${plural(diff(o.target, o.done_at), 'day')} late`;
         const tip = k === 'recv'
-          ? `Ex-factory (received): ${o.pos_received} of ${o.pos} POs received${o.closed_by_tick ? `, ${o.closed_by_tick} closed by the lane tick` : ''}${o.late_pos ? `, ${o.late_pos} after their due date` : ''}. Target ${fmtDay(o.target)}${o.done_at ? ` · done ${fmtDay(o.done_at)}` : ''}.`
-          : `VAS: ${o.lanes_complete} of ${o.lanes} lanes complete · ${fmtNum(o.units_applied)} of ${fmtNum(o.units_planned)} units applied. Target ${fmtDay(o.target)}${o.done_at ? ` · done ${fmtDay(o.done_at)}` : ''}.`;
+          ? `Receiving: ${o.pct}% of planned POs — ${o.pos_received} of ${o.pos} received${o.closed_by_tick ? `, ${o.closed_by_tick} closed by the lane tick` : ''}${o.late_pos ? `, ${o.late_pos} after their due date` : ''}. Target ${fmtDay(o.target)}${o.done_at ? ` · done ${fmtDay(o.done_at)}` : ''}.`
+          : `VAS: ${o.pct_of_received != null ? o.pct_of_received : o.units_pct}% of what was received${o.status === 'complete' ? '' : ' so far'} · ${o.lanes_complete} of ${o.lanes} lanes closed · ${fmtNum(o.units_applied)} units applied this week. Target ${fmtDay(o.target)}${o.done_at ? ` · done ${fmtDay(o.done_at)}` : ''}.`;
         return `<div title="${esc(tip)}" style="position:absolute;${pos};${place}display:flex;align-items:center;gap:6px;height:20px;padding:0 8px 0 4px;border-radius:10px;background:#fff;border:1px solid ${LINE};font-size:11px;white-space:nowrap;z-index:1">
           <span style="width:11px;height:11px;border-radius:50%;box-sizing:border-box;flex-shrink:0;${st.mark}"></span>
           <span>${arrowL}<b style="font-weight:600">${esc(text)}</b>${arrowR}</span>
           <span style="font-weight:600;color:${st.ink}">${esc(note)}</span></div>`;
       };
-      return chip('recv', O.received, `Ex-factory ${O.received.pct}%`, 'top:4px')
-           + chip('vas', O.vas, `VAS ${O.vas.lanes_complete}/${O.vas.lanes} lanes · ${O.vas.units_pct}%`, 'bottom:4px');
+      return chip('recv', O.received, `Receiving ${O.received.pct}%`, 'top:4px')
+           + chip('vas', O.vas, `VAS ${O.vas.pct_of_received != null ? O.vas.pct_of_received : O.vas.units_pct}%`, 'bottom:4px');
     }
     function weekHeader(w, list) {
       const shut = isShut(w);
@@ -1555,12 +1555,12 @@
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px"><span class="tm-mono" style="font-size:22px;font-weight:600">${big}</span>${pill(status)}</div></div>`;
     return `<div class="tm-sec" style="padding-bottom:12px;border-bottom:1px solid ${SOFT}">
       <div style="display:flex;justify-content:space-between;align-items:baseline" class="tm-cap"><span>Origin</span><span style="text-transform:none;letter-spacing:0">factory gate → VAS done</span></div>
-      ${row('Ex-factory (received)', `${r.pct}%`, r.status, [
+      ${row('Receiving', `${r.pct}%`, r.status, [
         `${r.pos_received} of ${plural(r.pos, 'PO')} received${r.closed_by_tick ? ` · ${r.closed_by_tick} closed by the lane tick` : ''}`,
         r.late_pos ? `${plural(r.late_pos, 'PO')} received after ${r.late_pos === 1 ? 'its' : 'their'} due date` : null,
         r.done_at ? `Done ${fmtDay(r.done_at)} · target ${fmtDay(r.target)}` : `Target ${fmtDay(r.target)}`])}
-      ${row('VAS complete', `${v.lanes_complete}/${v.lanes}`, v.status, [
-        `${plural(v.lanes_complete, 'lane')} of ${v.lanes} complete · ${fmtNum(v.units_applied)} of ${fmtNum(v.units_planned)} units applied (${v.units_pct}%)`,
+      ${row('VAS complete', `${v.pct_of_received != null ? v.pct_of_received : v.units_pct}%`, v.status, [
+        `of what was received · ${plural(v.lanes_complete, 'lane')} of ${v.lanes} closed · ${fmtNum(v.units_applied)} units applied this week`,
         v.done_at ? `Done ${fmtDay(v.done_at)} · target ${fmtDay(v.target)}` : `Target ${fmtDay(v.target)}`])}
       ${(O.suppliers_behind || []).length ? `<div style="font-size:12px;color:${MUTED};padding-top:4px">Furthest behind: ${esc(O.suppliers_behind.map(s => `${s.name} ${s.pct}%`).join(' · '))}</div>` : ''}
     </div>`;
@@ -1923,8 +1923,8 @@
       <div style="padding:22px 28px 30px;display:flex;flex-direction:column;gap:26px">
         <div style="display:flex;flex-direction:column;gap:8px;padding:18px 20px;border-radius:12px;background:#FAFAF8;border:1px solid ${LINE}">${context}</div>
         ${sec('Journey — factory gate to FC Sydney', `<div style="display:flex;gap:10px;flex-wrap:wrap">
-          ${O ? journeyStep('Ex-factory', `${O.received.pct}%`, `${O.received.pos_received} of ${plural(O.received.pos, 'PO')}${O.received.done_at ? ` · done ${fmtDay(O.received.done_at)}` : ` · target ${fmtDay(O.received.target)}`}`, O.received.status) : ''}
-          ${O ? journeyStep('VAS', `${O.vas.lanes_complete}/${O.vas.lanes}`, `${O.vas.units_pct}% units${O.vas.done_at ? ` · done ${fmtDay(O.vas.done_at)}` : ` · target ${fmtDay(O.vas.target)}`}`, O.vas.status) : ''}
+          ${O ? journeyStep('Receiving', `${O.received.pct}%`, `of planned POs · ${O.received.pos_received} of ${O.received.pos}${O.received.done_at ? ` · done ${fmtDay(O.received.done_at)}` : ` · target ${fmtDay(O.received.target)}`}`, O.received.status) : ''}
+          ${O ? journeyStep('VAS', `${O.vas.pct_of_received != null ? O.vas.pct_of_received : O.vas.units_pct}%`, `of what was received${O.vas.done_at ? ` · done ${fmtDay(O.vas.done_at)}` : ` · target ${fmtDay(O.vas.target)}`}`, O.vas.status) : ''}
           ${stageStep(list, 'departed', 'Departed', M)}${stageStep(list, 'arrived', 'Arrived', M)}${stageStep(list, 'fc_receipt', 'Received at FC', M)}
         </div>`)}
         ${sec('The numbers', `<div style="display:flex;flex-wrap:wrap;border:1px solid ${LINE};border-radius:10px;overflow:hidden;background:#fff">
