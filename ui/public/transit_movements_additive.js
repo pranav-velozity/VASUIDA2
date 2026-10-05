@@ -359,23 +359,23 @@
         const w = field === 'carrier_etd' ? 'departure' : 'arrival';
         const dd = from && to ? diff(from, to) : null;
         const last = es[es.length - 1].t;
-        if (dd > 0) items.push({ k: 'later', t: last, sev: 'high', tag: `+${plural(dd, 'day')}`, head: `Carrier moved ${w} ${fmtDay(from)} → ${fmtDay(to)}`, short: `${w} moved to ${fmtShort(to)}` });
-        else if (dd < 0) items.push({ k: 'earlier', t: last, sev: 'good', tag: `−${plural(-dd, 'day')}`, head: `Carrier brought ${w} forward ${fmtDay(from)} → ${fmtDay(to)}`, short: `${w} forward to ${fmtShort(to)}` });
-        else if (!from && to) items.push({ k: 'other', t: last, sev: 'low', tag: 'New estimate', head: `Carrier set ${w} for ${fmtDay(to)}`, short: `${w} estimate ${fmtShort(to)}` });
+        if (dd > 0) items.push({ k: 'later', t: last, sev: 'high', tag: `+${dd}d`, head: `Carrier moved ${w} ${fmtDay(from)} → ${fmtDay(to)}`, phrase: `${w} moved to ${fmtDay(to)}`, short: `${w} moved to ${fmtShort(to)}` });
+        else if (dd < 0) items.push({ k: 'earlier', t: last, sev: 'good', tag: `−${-dd}d`, head: `Carrier brought ${w} forward ${fmtDay(from)} → ${fmtDay(to)}`, phrase: `${w} forward to ${fmtDay(to)}`, short: `${w} forward to ${fmtShort(to)}` });
+        else if (!from && to) items.push({ k: 'other', t: last, sev: 'low', tag: 'Estimate', head: `Carrier set ${w} for ${fmtDay(to)}`, phrase: `${w} estimate ${fmtDay(to)}`, short: `${w} estimate ${fmtShort(to)}` });
         // Moved and came back within the window: nothing to report.
       }
       for (const e of evs) {
         if (e.kind === 'estimate') continue;
         if (e.kind === 'actual') {
           const word = ({ departed: 'Departed', arrived: 'Arrived', dest_cleared: 'Available for pickup' })[e.stage] || 'Tracked';
-          items.push({ k: 'actual', t: e.t, sev: 'good', tag: word, head: e.text, short: `${word.toLowerCase()} ${e.date ? fmtShort(e.date) : ''}`.trim() });
-        } else if (e.kind === 'hold') items.push({ k: 'hold', t: e.t, sev: 'high', tag: 'Hold', head: e.text, short: 'hold reported' });
-        else if (e.kind === 'lfd') items.push({ k: 'lfd', t: e.t, sev: 'medium', tag: 'Last free day', head: e.text, short: e.lfd ? `last free day ${fmtShort(e.lfd)}` : 'last free day set' });
-        else if (e.kind === 'confirmed') items.push({ k: 'confirmed', t: e.t, sev: 'good', tag: 'Confirmed', head: e.text, short: `${(STAGE_VERB[e.stage] || 'milestone')} confirmed` });
-        else if (e.kind === 'transshipment') items.push({ k: 'transshipment', t: e.t, sev: 'low', tag: 'Transshipment', head: e.text, short: 'transshipment' });
-        else items.push({ k: 'other', t: e.t, sev: 'low', tag: '', head: e.text, short: e.text.toLowerCase() });
+          items.push({ k: 'actual', t: e.t, sev: 'good', tag: word === 'Available for pickup' ? 'Available' : word, head: e.text, phrase: `${word.toLowerCase()} ${e.date ? fmtDay(e.date) : ''}`.trim(), short: `${word.toLowerCase()} ${e.date ? fmtShort(e.date) : ''}`.trim() });
+        } else if (e.kind === 'hold') items.push({ k: 'hold', t: e.t, sev: 'high', tag: 'Hold', head: e.text, phrase: `hold at the terminal${e.lfd ? ` · last free day ${fmtDay(e.lfd)}` : ''}`, short: 'hold reported' });
+        else if (e.kind === 'lfd') items.push({ k: 'lfd', t: e.t, sev: 'medium', tag: 'LFD', head: e.text, phrase: e.lfd ? `last free day ${fmtDay(e.lfd)}` : 'last free day set', short: e.lfd ? `last free day ${fmtShort(e.lfd)}` : 'last free day set' });
+        else if (e.kind === 'confirmed') items.push({ k: 'confirmed', t: e.t, sev: 'good', tag: 'Confirmed', head: e.text, phrase: `${(STAGE_VERB[e.stage] || 'milestone')} confirmed${e.date ? ` · ${fmtDay(e.date)}` : ''}`, short: `${(STAGE_VERB[e.stage] || 'milestone')} confirmed` });
+        else if (e.kind === 'transshipment') items.push({ k: 'transshipment', t: e.t, sev: 'low', tag: 'Transship', head: e.text, phrase: 'transshipment', short: 'transshipment' });
+        else items.push({ k: 'other', t: e.t, sev: 'low', tag: '', head: e.text, phrase: e.text.charAt(0).toLowerCase() + e.text.slice(1), short: e.text.toLowerCase() });
       }
-      if (n && Date.parse(n.sent_at) >= since) items.push({ k: 'notified', t: Date.parse(n.sent_at), sev: 'low', tag: 'Notified', head: `Client notified (${plural(n.to_count, 'recipient')})`, short: 'client notified' });
+      if (n && Date.parse(n.sent_at) >= since) items.push({ k: 'notified', t: Date.parse(n.sent_at), sev: 'low', tag: 'Notified', head: `Client notified (${plural(n.to_count, 'recipient')})`, phrase: `client notified · ${plural(n.to_count, 'recipient')}`, short: 'client notified' });
       if (!items.length) continue;
       // Same kind twice (two confirmations): keep the latest of each kind.
       const byKind = new Map();
@@ -385,7 +385,9 @@
       const rest = [...new Set(list.slice(1).map(x => x.short).filter(Boolean))];
       const latest = Math.max(...list.map(x => x.t));
       out.push({
-        uid: m.uid, wk: m.wkLabel, title: `${m.ref} — ${lead.head}`,
+        uid: m.uid, wk: m.wkLabel, wkStart: m.wk, ref: m.ref, mode: m.mode, kind: lead.k, phrase: lead.phrase || lead.head,
+        attention: ['hold', 'later', 'lfd'].includes(lead.k), also: rest,
+        title: `${m.ref} — ${lead.head}`,
         sub: rest.length ? `Also: ${rest.slice(0, 3).join(' · ')}${rest.length > 3 ? ` · +${rest.length - 3} more` : ''}` : `${m.routeText} · now ${m.where.charAt(0).toLowerCase()}${m.where.slice(1)}`,
         tag: lead.tag, sev: lead.sev, at: latest, when: ago(latest),
       });
@@ -584,43 +586,58 @@
   }
 
   // ════ Highlights ════
-  // Five or six at a time. Past that the list rolls slowly upward and pauses under the
-  // pointer or keyboard focus; "Show all" stops it and lists everything.
-  const HL_VISIBLE = 6, HL_ROW = 64, HL_SECONDS = 4.5;
-  function hlRow(h, clone) {
-    return `<button class="tm-hl tm-row" data-act="pick" data-uid="${esc(h.uid)}" ${clone ? 'tabindex="-1" aria-hidden="true"' : ''}>
-        <span class="bar" style="background:${SEV[h.sev] || SEV.low}"></span>
-        <span class="tm-mono" style="font-size:15px;font-weight:700;letter-spacing:-.01em;white-space:nowrap">${esc(h.wk || '')}</span>
-        <span style="display:flex;flex-direction:column;gap:3px;min-width:0">
-          <span class="t" title="${esc(h.title)}">${esc(h.title)}</span>
-          <span class="s" title="${esc(h.sub)}">${esc(h.sub)}</span>
-        </span>
-        <span class="r">
-          <span style="font-size:11.5px;color:${MUTED}">${esc(h.when || '')}</span>
-          ${h.tag ? `<span style="font-size:12px;font-weight:600;color:${SEV_TEXT[h.sev] || MUTED}">${esc(h.tag)}</span>` : ''}
-        </span>
+  // Two short lists, not one long one: what needs attention (dates moved later, holds, last
+  // free days) beside what progressed (departed, arrived, confirmed, brought forward). One
+  // line per movement, four per list until "View all". The detail lives in the row's tooltip
+  // and the movement panel, not in the row.
+  const HL_CAP = 4;
+  const HL_COUNTS = [['later', 'slipped'], ['held', 'held'], ['progress', 'departed or arrived'], ['confirmed', 'confirmed']];
+  function hlMatches(h, f) {
+    if (!f) return true;
+    if (f === 'later') return h.kind === 'later';
+    if (f === 'held') return h.kind === 'hold' || h.kind === 'lfd';
+    if (f === 'progress') return h.kind === 'actual' || h.kind === 'earlier';
+    if (f === 'confirmed') return h.kind === 'confirmed';
+    return true;
+  }
+  function hlRow(h) {
+    const tip = [h.title, h.also && h.also.length ? 'Also: ' + h.also.join(' · ') : '', h.sub && !String(h.sub).startsWith('Also') ? h.sub : ''].filter(Boolean).join('\n');
+    return `<button class="tm-row" data-act="pick" data-uid="${esc(h.uid)}" title="${esc(tip)}" style="display:grid;grid-template-columns:20px auto minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:0 16px;height:44px;width:100%;border-top:1px solid ${SOFT}">
+        <span style="display:inline-flex;color:${MUTED}">${modeIcon(h.mode, 15)}</span>
+        <span class="tm-mono" style="font-size:12.5px;font-weight:600;white-space:nowrap">${esc(h.ref)}</span>
+        <span style="font-size:13px;color:${INK};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(h.phrase)}</span>
+        ${h.tag ? `<span style="height:20px;padding:0 8px;border-radius:10px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;white-space:nowrap;${h.sev === 'high' ? `background:${RED};color:#fff` : h.sev === 'medium' ? `background:${AMBER};color:${INK}` : h.sev === 'good' ? `background:${GREEN};color:${INK}` : `background:${SOFT};color:${INK}`}">${esc(h.tag)}</span>` : '<span></span>'}
+        <span style="font-size:11.5px;color:${MUTED};white-space:nowrap;min-width:56px;text-align:right">${esc(h.when || '')}</span>
       </button>`;
   }
+  function hlList(title, list, key) {
+    const open = !!(S.hlOpen && S.hlOpen[key]);
+    const shown = open ? list : list.slice(0, HL_CAP);
+    return `<div style="display:flex;flex-direction:column;min-width:0;border:1px solid ${LINE};border-radius:10px;overflow:hidden">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 16px;background:#FAFAF8">
+        <span style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:${MUTED};font-weight:600">${title}</span>
+        <span class="tm-mono" style="font-size:12px;color:${MUTED}">${list.length}</span></div>
+      ${shown.length ? shown.map(hlRow).join('') : `<div style="padding:14px 16px;font-size:13px;color:${MUTED};border-top:1px solid ${SOFT}">Nothing here in the last ${HL_DAYS} days.</div>`}
+      ${list.length > HL_CAP ? `<button data-act="hl-more" data-v="${key}" style="padding:10px 16px;font-size:12.5px;font-weight:500;border-top:1px solid ${SOFT};text-align:left">${open ? 'Show fewer' : `View all ${list.length}`}</button>` : ''}
+    </div>`;
+  }
   function renderHighlights(H) {
-    const roll = H.length > HL_VISIBLE && !S.hlAll;
-    let list;
-    if (!H.length) list = `<div style="padding:4px 20px 18px;font-size:14px;color:${MUTED}">Nothing has changed in the last ${HL_DAYS} days.</div>`;
-    else if (roll) {
-      // The list is drawn twice and moved up by half its height, so the loop has no seam.
-      const rows = H.map(h => hlRow(h, false)).join('') + H.map(h => hlRow(h, true)).join('');
-      list = `<div class="tm-tick" style="height:${HL_VISIBLE * HL_ROW}px" aria-live="off">
-          <div class="tm-tick-inner" style="--tm-dur:${Math.round(H.length * HL_SECONDS)}s">${rows}</div></div>`;
-    } else list = `<div style="display:flex;flex-direction:column">${H.map(h => hlRow(h, false)).join('')}</div>`;
+    const f = S.hlFilter || null;
+    const counts = HL_COUNTS.map(([k, l]) => [k, l, H.filter(h => hlMatches(h, k)).length]);
+    const strip = counts.map(([k, l, n]) => `<button data-act="hl-filter" data-v="${k}" aria-pressed="${f === k}" style="display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:14px;font-size:12.5px;${f === k ? `background:${INK};color:#fff` : `background:${SOFT};color:${INK}`}${n ? '' : ';opacity:.5'}"><b class="tm-mono" style="font-weight:600">${n}</b> ${l}</button>`).join('');
+    const shown = H.filter(h => hlMatches(h, f));
     return `
 <section class="tm-card" aria-label="Highlights">
-  <div style="display:flex;justify-content:space-between;align-items:baseline;padding:16px 20px 10px;gap:12px;flex-wrap:wrap">
-    <h2 class="tm-h2">Highlights</h2>
+  <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px 12px;gap:12px;flex-wrap:wrap">
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-      <span class="tm-note">${H.length ? `${plural(H.length, 'update')} in the last ${HL_DAYS} days${roll ? ' · rolling, hover to pause' : ''}` : ''}</span>
-      ${H.length > HL_VISIBLE ? `<button class="tm-pillbtn" data-act="hl-all">${S.hlAll ? 'Roll' : 'Show all'}</button>` : ''}
+      <h2 class="tm-h2">Highlights</h2>
+      <span class="tm-note">Last ${HL_DAYS} days</span>
     </div>
+    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">${strip}${f ? `<button data-act="hl-filter" data-v="" style="font-size:12px;text-decoration:underline;text-underline-offset:3px;margin-left:4px;min-height:28px">Clear</button>` : ''}</div>
   </div>
-  ${list}
+  ${!H.length ? `<div style="padding:0 20px 18px;font-size:14px;color:${MUTED}">Nothing has changed in the last ${HL_DAYS} days.</div>`
+    : `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px;padding:0 20px 18px">
+        ${hlList('Needs attention', shown.filter(h => h.attention), 'attn')}${hlList('Progress', shown.filter(h => !h.attention), 'prog')}</div>`}
 </section>`;
   }
 
@@ -1026,7 +1043,7 @@
       if (overX != null) {
         const days = diff(N[nextUp].v, M.today);
         const what = STAGE_VERB[nextUp];
-        pill(overX, TODAY, `${what.charAt(0).toUpperCase() + what.slice(1)} overdue ${days}d`, RED, RED);
+        pill(overX, TODAY, `${what.charAt(0).toUpperCase() + what.slice(1)} not confirmed · ${days}d`, RED, RED);
       }
       if (m.base && pFc.n != null) {
         const bx = ix(m.base);
@@ -1227,7 +1244,7 @@
     <span><span style="width:10px;height:10px;border-radius:50%;background:${GREEN};border:1.5px solid ${INK};display:inline-block;box-sizing:border-box"></span>Confirmed by a person</span>
     <span><span style="width:22px;height:6px;background:${GREEN};box-shadow:0 0 0 1px ${INK};display:inline-block"></span>Done — confirmed or tracked</span>
     <span><span style="width:22px;height:6px;background:${INK};opacity:.5;display:inline-block"></span>In progress</span>
-    <span><span style="width:22px;height:6px;background:repeating-linear-gradient(90deg,${RED} 0 6px,transparent 6px 10px);display:inline-block"></span>Overdue — not confirmed</span>
+    <span><span style="width:22px;height:6px;background:repeating-linear-gradient(90deg,${RED} 0 6px,transparent 6px 10px);display:inline-block"></span>Not confirmed — past its planned date</span>
     <span><span style="width:10px;height:10px;border-radius:50%;border:1.5px dashed #8A8A8A;display:inline-block;box-sizing:border-box"></span>Assumed</span>
     <span><span style="width:10px;height:10px;border-radius:50%;border:2px solid ${RED};display:inline-block;box-sizing:border-box"></span>Assumed, past due</span>
     <span><span style="width:18px;height:6px;background:${RED};display:inline-block"></span>Slip against first promise</span>
@@ -1244,7 +1261,7 @@
     if (x.state === 'confirmed') return `<span ${b}border:1px solid ${INK}">Confirmed</span>`;
     if (x.state === 'amended') return `<span ${b}border:1px solid ${INK}">Amended</span>`;
     const p = ymd(x.planned_at);
-    if (p && p < today) return `<span ${b}border:1.5px solid ${RED};color:${RED}">Past due</span>`;
+    if (p && p < today) return `<span ${b}border:1.5px solid ${RED};color:${RED}">Not confirmed</span>`;
     if (p && p === today) return `<span ${b}border:1px dashed #8A8A8A;color:${INK}">Due today</span>`;
     return `<span ${b}border:1px dashed #8A8A8A;color:${MUTED}">Assumed</span>`;
   };
@@ -1672,8 +1689,10 @@
     let html = '';
     if (S.full) html += `<div class="tm-ov" style="z-index:2147482900;align-items:center;justify-content:center;padding:24px"><div class="tm-ov-dim" data-act="full-close" style="background:rgba(10,10,10,.6)"></div><div style="position:relative;width:100%;display:flex;justify-content:center">${renderCorridor(M, true)}</div></div>`;
     let panelKey = '';
+    // The week report sits under the movement panel and the contents sheet, so both open on top of it.
+    if (S.report) html += `<div class="tm-modal-wrap" data-act="report-bg" style="z-index:2147482950;align-items:center;padding:4vh 2vw">${renderWeekReport(M)}</div>`;
     if (S.panel === 'mv' && S.sel) { panelKey = 'mv:' + S.sel; html += `<div class="tm-ov"><div class="tm-ov-dim" data-act="panel-close"></div><aside class="tm-panel" role="dialog" aria-label="Movement detail" ${prevPanelKey === panelKey ? 'style="animation:none"' : ''}>${renderMovementPanel(M)}</aside></div>`; }
-    if (S.panel === 'wk' && S.wkSel) { panelKey = 'wk:' + S.wkSel; html += `<div class="tm-ov"><div class="tm-ov-dim" data-act="panel-close"></div><aside class="tm-panel" role="dialog" aria-label="Week summary" ${prevPanelKey === panelKey ? 'style="animation:none"' : ''}>${renderWeekPanel(M)}</aside></div>`; }
+
     if (S.sheet) html += `<div class="tm-modal-wrap" data-act="sheet-bg">${renderSheet(M)}</div>`;
     if (S.notify) html += `<div class="tm-modal-wrap" style="z-index:2147483150">${renderNotify(M)}</div>`;
     if (S.toast) html += `<div class="tm-toast" role="status">${esc(S.toast)}</div>`;
@@ -1682,8 +1701,165 @@
     const np = ov.querySelector('.tm-panel');
     if (np && prevPanelKey === panelKey) np.scrollTop = panelScroll;
     for (const el of ov.querySelectorAll('[data-tm-scroll]')) { const k = el.getAttribute('data-tm-scroll'); if (k in keep) el.scrollTop = keep[k]; }
-    const lock = S.full || S.panel || S.sheet || S.notify;
+    const lock = S.full || S.panel || S.sheet || S.notify || S.report;
     document.documentElement.style.overflow = lock ? 'hidden' : '';
+  }
+
+  // ════ Week report ════
+  // Everything about one execution week in one place, for everyone: how it went in a few
+  // lines, the journey from factory gate to FC, the numbers, each movement, what changed,
+  // and what is not yet on a container. Opened from the week pills or a week row.
+  const RANK = { delayed: 0, behind: 1, on_time: 2, no_quote: 3, not_booked: 4 };
+  function reportWeeks(M) {
+    const w = new Set(M.liveWeeks);
+    if ((M.B.weeks_origin || {})[M.thisWeek] || M.all.some(m => m.wk === M.thisWeek)) w.add(M.thisWeek);
+    return [...w].sort();
+  }
+  function renderWeekPills(M) {
+    const weeks = reportWeeks(M);
+    if (!weeks.length) return '';
+    const pills = weeks.map(w => {
+      const list = M.all.filter(m => m.wk === w);
+      const worst = list.slice().sort((a, b) => (RANK[a.st] ?? 9) - (RANK[b.st] ?? 9))[0];
+      return `<button data-act="report-open" data-v="${w}" title="${esc(`Week report · ${isoWeek(w)} · week of ${fmtShort(w)}`)}" style="display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 12px;border-radius:16px;background:#fff;border:1px solid #D6D6D2;font-size:12.5px;font-weight:600">
+        ${worst ? dot(worst.st, 8) : `<span style="width:8px;height:8px;border-radius:50%;border:1.5px solid ${GREY};display:inline-block"></span>`}
+        <span class="tm-mono">${isoWeek(w)}</span>
+        <span style="font-weight:500;color:${MUTED}">${list.length}</span></button>`;
+    }).join('');
+    return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:-6px">
+      <span style="font-size:12px;color:${MUTED};margin-right:2px">Week reports</span>${pills}</div>`;
+  }
+
+  async function openWeekReport(ws) {
+    S.report = ws; S.panel = null;
+    render();
+    if (!S.summaries) S.summaries = {};
+    const cur = S.summaries[ws];
+    if (cur && (cur.loading || (Date.now() - cur.at < 60000))) return;
+    S.summaries[ws] = { loading: true, at: Date.now() };
+    let out = { at: Date.now() };
+    try {
+      const g = await req('GET', `/consignments/week-summary?week=${encodeURIComponent(ws)}`);
+      out.plain = g.plain; out.summary = g.summary; out.generated_at = g.generated_at;
+      if (!g.summary && g.can_write) {
+        try {
+          const p = await req('POST', '/consignments/week-summary/generate', { week: ws });
+          if (p && p.summary) { out.summary = p.summary; out.generated_at = p.generated_at; }
+          else if (p && p.discarded) out.note = 'Pulse’s draft didn’t match the data exactly, so the plain summary is shown.';
+        } catch (e) {
+          out.note = (e.data && (e.data.error === 'pulse_off' || e.data.error === 'pulse_disabled'))
+            ? 'Switch Pulse on for a written summary of this week.' : null;
+        }
+      }
+    } catch (e) { out.err = 'Couldn’t load the summary.'; }
+    S.summaries[ws] = out;
+    if (S.report === ws) render();
+  }
+
+  function journeyStep(label, value, sub, status) {
+    const P = ORIGIN_PILL[status] || (status === 'not_confirmed' ? ['Not confirmed', `background:#fff;color:${RED};box-shadow:inset 0 0 0 1.5px ${RED}`]
+      : status === 'upcoming' ? ['Upcoming', `background:${SOFT};color:${MUTED}`] : ORIGIN_PILL.in_progress);
+    return `<div style="flex:1 1 150px;min-width:140px;display:flex;flex-direction:column;gap:6px;padding:14px 16px;border:1px solid ${LINE};border-radius:10px;background:#fff">
+      <span style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:${MUTED};font-weight:600">${esc(label)}</span>
+      <span class="tm-mono" style="font-size:22px;font-weight:600">${esc(value)}</span>
+      <span style="font-size:12px;color:${MUTED};min-height:16px">${esc(sub || '')}</span>
+      <span style="align-self:flex-start;height:22px;padding:0 9px;border-radius:11px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;${P[1]}">${P[0]}</span></div>`;
+  }
+  function stageStep(list, st, label, M) {
+    const n = list.length;
+    if (!n) return journeyStep(label, '—', 'No movements yet', 'not_started');
+    const done = list.filter(m => m.ms[st] && m.ms[st].actual_at);
+    const late = list.filter(m => m.ms[st] && !m.ms[st].actual_at && m.ms[st].planned_at && ymd(m.ms[st].planned_at) < M.today);
+    const dates = done.map(m => ymd(m.ms[st].actual_at)).sort();
+    const next = list.filter(m => m.ms[st] && !m.ms[st].actual_at).map(m => ymd(m.ms[st].planned_at)).filter(Boolean).sort();
+    const status = done.length === n ? 'complete' : late.length ? 'not_confirmed' : done.length ? 'in_progress' : 'upcoming';
+    const sub = done.length === n ? `Last ${fmtDay(dates[dates.length - 1])}` : late.length ? `${plural(late.length, 'movement')} past the planned date` : next.length ? `Next planned ${fmtDay(next[0])}` : '';
+    return journeyStep(label, `${done.length}/${n}`, sub, status);
+  }
+
+  function movementCard(m, M) {
+    const st = STATUS[m.st] || STATUS.on_time;
+    const drift = m.base && m.fc ? diff(m.base, m.fc) : null;
+    const dots = STAGES.filter(s => m.ms[s]).map(s => {
+      const x = m.ms[s]; const p = ymd(x.planned_at);
+      const look = x.actual_at ? `background:${GREEN};border:1.5px solid ${INK}` : (p && p < M.today) ? `background:#fff;border:2px solid ${RED}` : `background:#fff;border:1.5px dashed #8A8A8A`;
+      return `<span title="${esc(`${STAGE_LABEL[s]} · ${fmtDay(x.actual_at || x.planned_at)} · ${x.actual_at ? (x.state === 'carrier' ? 'live carrier event' : 'confirmed') : (p && p < M.today ? 'not confirmed' : 'planned')}`)}" style="width:12px;height:12px;border-radius:50%;box-sizing:border-box;flex-shrink:0;${look}"></span>`;
+    }).join(`<span style="flex:1;height:2px;background:#E3E3E0;min-width:6px"></span>`);
+    const cs = m.c.contents_summary || {};
+    return `<div style="border:1px solid ${LINE};border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:10px;background:#fff">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <span style="display:flex;align-items:center;gap:10px;min-width:0"><span style="display:inline-flex;color:${INK}">${modeIcon(m.mode, 16)}</span>
+          <span class="tm-mono" style="font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(m.ref)}</span></span>
+        ${statusChip(m)}</div>
+      <div style="font-size:12px;color:${MUTED}">${esc(m.routeText)} · ${esc(m.where)}</div>
+      <div style="display:flex;align-items:center;gap:0">${dots}</div>
+      <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:13px">
+        <span><b style="font-weight:600">FC ${esc(fmtDay(m.fc))}</b>${drift ? ` <span style="color:${drift > 0 ? RED : '#4A6A00'};font-weight:600">${drift > 0 ? '+' : ''}${drift}d vs first promise</span>` : m.base ? ` <span style="color:${MUTED}">as first promised</span>` : ''}</span>
+        <span class="tm-mono" style="font-size:12px;color:${MUTED}">${plural(m.lanes, 'lane')} · ${plural(cs.pos || 0, 'PO')} · ${fmtNum(cs.planned || 0)} units</span></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="tm-btn" style="height:32px;font-size:12px" data-act="contents" data-uid="${esc(m.uid)}">POs &amp; SKUs</button>
+        <button class="tm-btn" style="height:32px;font-size:12px" data-act="pick" data-uid="${esc(m.uid)}">Details</button></div>
+    </div>`;
+  }
+
+  function renderWeekReport(M) {
+    const ws = S.report;
+    const weeks = reportWeeks(M);
+    const list = M.all.filter(m => m.wk === ws).sort((a, b) => (RANK[a.st] ?? 9) - (RANK[b.st] ?? 9));
+    const O = (M.B.weeks_origin || {})[ws];
+    const sm = (S.summaries || {})[ws] || { loading: true };
+    const idx = weeks.indexOf(ws);
+    const cs = list.reduce((a, m) => { const x = m.c.contents_summary || {}; a.lanes += m.lanes; a.pos += x.pos || 0; a.skus += x.skus || 0; a.units += x.planned || 0; return a; }, { lanes: 0, pos: 0, skus: 0, units: 0 });
+    const measured = list.filter(m => ['on_time', 'behind', 'delayed'].includes(m.st));
+    const onTime = measured.filter(m => m.st === 'on_time').length;
+    const sea = list.filter(m => m.mode === 'sea').length, air = list.length - sea;
+    const modes = ['sea', 'air'].map(md => {
+      const xs = list.filter(m => m.mode === md).map(d2dOf).filter(Boolean);
+      if (!xs.length) return '';
+      const tp = Math.round(xs.reduce((a, x) => a + x.tp, 0) / xs.length), ta = Math.round(xs.reduce((a, x) => a + x.ta, 0) / xs.length), dl = ta - tp;
+      return `<span style="font-size:13px;font-weight:600">${md === 'sea' ? 'Sea' : 'Air'}</span><span class="tm-mono" style="font-size:20px;font-weight:600">${tp}d</span><span class="tm-mono" style="font-size:20px;font-weight:600">${ta}d</span><span class="tm-mono" style="font-size:20px;font-weight:600;${dl > 0 ? `color:${RED}` : ''}">${dl === 0 ? '±0d' : dl > 0 ? '+' + dl + 'd' : dl + 'd'}</span>`;
+    }).join('');
+    const H = highlights(M).filter(h => h.wkStart === ws);
+    const un = (M.B.unassigned || []).filter(u => u.week_start === ws);
+    const num = (k, v, sub) => `<div style="display:flex;flex-direction:column;gap:2px;padding:12px 16px;border-right:1px solid #F3F3F1;min-width:110px"><span style="font-size:12px;color:${MUTED}">${k}</span><span class="tm-mono" style="font-size:22px;font-weight:600">${v}</span>${sub ? `<span style="font-size:11.5px;color:${MUTED}">${sub}</span>` : ''}</div>`;
+    const context = sm.loading ? `<div class="tm-skel" style="height:54px"></div>`
+      : `<p style="margin:0;font-size:16px;line-height:1.55">${esc(sm.summary || sm.plain || 'No summary yet.')}</p>
+         <div style="font-size:12px;color:${MUTED}">${sm.summary ? `Written by Pulse from Pinpoint data${sm.generated_at ? ` · ${esc(timeLabel(sm.generated_at))}` : ''}` : esc(sm.note || 'Summary from Pinpoint data')}</div>`;
+    const sec = (title, inner, right) => `<section style="display:flex;flex-direction:column;gap:12px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px"><h3 style="margin:0;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:${MUTED};font-weight:600">${title}</h3>${right || ''}</div>${inner}</section>`;
+    return `<div class="tm-modal" role="dialog" aria-label="Week report ${isoWeek(ws)}" style="max-width:none;width:min(1400px,80vw);max-height:88vh;overflow-y:auto">
+      <div style="position:sticky;top:0;z-index:2;background:#fff;display:flex;justify-content:space-between;align-items:center;gap:16px;padding:18px 28px;border-bottom:1px solid ${SOFT};flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:12px;min-width:0">
+          <span class="tm-mono" style="font-size:15px;font-weight:700;padding:4px 9px;border-radius:6px;background:${INK};color:#fff">${isoWeek(ws)}</span>
+          <div style="display:flex;flex-direction:column;gap:2px"><span style="font-size:20px;font-weight:600">Week of ${fmtDay(ws)}</span>
+            <span style="font-size:12.5px;color:${MUTED}">${plural(list.length, 'movement')} · ${sea} sea, ${air} air · execution week report</span></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="tm-sq" data-act="report-nav" data-v="-1" aria-label="Previous week" ${idx <= 0 ? 'disabled' : ''}>${I.left()}</button>
+          <button class="tm-sq" data-act="report-nav" data-v="1" aria-label="Next week" ${idx < 0 || idx >= weeks.length - 1 ? 'disabled' : ''}>${I.right()}</button>
+          ${list.length ? `<button class="tm-btn-s" data-act="report-xlsx" data-v="${ws}">${I.dl()} Download XLSX</button>` : ''}
+          <button class="tm-sq" data-act="report-close" aria-label="Close">${I.x()}</button>
+        </div>
+      </div>
+      <div style="padding:22px 28px 30px;display:flex;flex-direction:column;gap:26px">
+        <div style="display:flex;flex-direction:column;gap:8px;padding:18px 20px;border-radius:12px;background:#FAFAF8;border:1px solid ${LINE}">${context}</div>
+        ${sec('Journey — factory gate to FC Sydney', `<div style="display:flex;gap:10px;flex-wrap:wrap">
+          ${O ? journeyStep('Ex-factory', `${O.received.pct}%`, `${O.received.pos_received} of ${plural(O.received.pos, 'PO')}${O.received.done_at ? ` · done ${fmtDay(O.received.done_at)}` : ` · target ${fmtDay(O.received.target)}`}`, O.received.status) : ''}
+          ${O ? journeyStep('VAS', `${O.vas.lanes_complete}/${O.vas.lanes}`, `${O.vas.units_pct}% units${O.vas.done_at ? ` · done ${fmtDay(O.vas.done_at)}` : ` · target ${fmtDay(O.vas.target)}`}`, O.vas.status) : ''}
+          ${stageStep(list, 'departed', 'Departed', M)}${stageStep(list, 'arrived', 'Arrived', M)}${stageStep(list, 'fc_receipt', 'Received at FC', M)}
+        </div>`)}
+        ${sec('The numbers', `<div style="display:flex;flex-wrap:wrap;border:1px solid ${LINE};border-radius:10px;overflow:hidden;background:#fff">
+          ${num('Movements', list.length, `${sea} sea · ${air} air`)}${num('Lanes', cs.lanes)}${num('POs', fmtNum(cs.pos))}${num('SKUs', fmtNum(cs.skus))}${num('Units', fmtNum(cs.units))}
+          ${num('On time', measured.length ? `${onTime}/${measured.length}` : '—', 'against first promise')}</div>
+          ${modes ? `<div style="display:grid;grid-template-columns:56px repeat(3,minmax(0,140px));gap:4px 14px;align-items:baseline"><span></span><span style="font-size:12px;color:${MUTED}">D2D plan</span><span style="font-size:12px;color:${MUTED}">D2D actual</span><span style="font-size:12px;color:${MUTED}">Variance</span>${modes}</div>
+          <div style="font-size:12px;color:${MUTED}">Door to door, packing list → received at FC, averaged by mode.</div>` : ''}`)}
+        ${sec('Movements', list.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:12px">${list.map(m => movementCard(m, M)).join('')}</div>`
+          : `<div style="font-size:14px;color:${MUTED}">No containers or flights have been set up for this week yet.</div>`)}
+        ${sec('What changed', H.length ? `<div style="border:1px solid ${LINE};border-radius:10px;overflow:hidden">${H.map(hlRow).join('')}</div>`
+          : `<div style="font-size:14px;color:${MUTED}">Nothing changed in the last ${HL_DAYS} days.</div>`, `<span class="tm-note">last ${HL_DAYS} days</span>`)}
+        ${un.length ? sec('Lanes on no movement', `<div style="border:1px solid ${LINE};border-radius:10px;overflow:hidden">${un.map(u => `<div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:10px 16px;border-top:1px solid ${SOFT};font-size:13px"><span>${esc(u.supplier)} <span class="tm-mono" style="font-size:11.5px;color:${MUTED}">· ZD ${esc(u.zendesk || '—')} · ${esc(u.freight || '')}</span></span><span class="tm-mono">${plural(u.pos || 0, 'PO')}</span></div>`).join('')}</div>
+          <div style="font-size:12px;color:${MUTED}">Not yet on a container or flight, so not part of the journey above.</div>`) : ''}
+      </div>
+    </div>`;
   }
 
   // ════ Render ════
@@ -1707,7 +1883,7 @@
     const M = model();
     const H = highlights(M);
     const scrollX = (S.root.querySelector('[data-tm-tlscroll]') || {}).scrollLeft || 0;
-    S.root.innerHTML = renderHeader(M) + renderHighlights(H) + (S.full ? '' : renderCorridor(M, false)) + renderTimeline(M).replace('<div style="overflow-x:auto">', '<div style="overflow-x:auto" data-tm-tlscroll>');
+    S.root.innerHTML = renderHeader(M) + renderWeekPills(M) + renderHighlights(H) + (S.full ? '' : renderCorridor(M, false)) + renderTimeline(M).replace('<div style="overflow-x:auto">', '<div style="overflow-x:auto" data-tm-tlscroll>');
     const tl = S.root.querySelector('[data-tm-tlscroll]'); if (tl) tl.scrollLeft = scrollX;
     renderOverlays(M);
     const animating = runAnimation();
@@ -1900,7 +2076,17 @@
       case 'hist': openReport('__openTransitHistory', v); break;
       case 'wk-toggle': { const shut = (v in S.collapsed) ? !!S.collapsed[v] : true; S.collapsed = Object.assign({}, S.collapsed, { [v]: !shut }); render(); break; }
       case 'hl-all': S.hlAll = !S.hlAll; render(); break;
-      case 'wk-open': S.wkSel = v; S.panel = 'wk'; render(); break;
+      case 'wk-open': case 'report-open': openWeekReport(v); break;
+      case 'report-close': S.report = null; render(); break;
+      case 'report-bg': if (ev.target === el) { S.report = null; render(); } break;
+      case 'report-nav': { const ws = reportWeeks(model()); const i = ws.indexOf(S.report) + Number(v); if (i >= 0 && i < ws.length) openWeekReport(ws[i]); break; }
+      case 'report-xlsx': {
+        const uids = model().all.filter(m => m.wk === v).map(m => m.uid).join(',');
+        download(`/consignments/contents.xlsx?uids=${encodeURIComponent(uids)}`, `${isoWeek(v)}_POs.xlsx`).catch(e => toast('Export failed: ' + (e.message || e)));
+        break;
+      }
+      case 'hl-filter': S.hlFilter = v || null; render(); break;
+      case 'hl-more': S.hlOpen = Object.assign({}, S.hlOpen, { [v]: !(S.hlOpen && S.hlOpen[v]) }); render(); break;
       case 'collapse-all': {
         const keys = model().liveWeeks.concat(['none']);
         const shut = (k) => (k in S.collapsed) ? !!S.collapsed[k] : true;
@@ -2008,6 +2194,7 @@
     else if (S.sheet) S.sheet = null;
     else if (S.corrMore) S.corrMore = false;
     else if (S.panel) { S.panel = null; S.amend = null; S.legacy = null; }
+    else if (S.report) S.report = null;
     else if (S.full) S.full = false;
     else return;
     render();
@@ -2038,7 +2225,7 @@
       if (S.observer) S.observer.disconnect();
       S.observer = new MutationObserver(() => {
         const hidden = host.style.display === 'none' || host.classList.contains('hidden');
-        if (hidden && (S.panel || S.sheet || S.notify || S.full)) window.hideMapPage();
+        if (hidden && (S.panel || S.sheet || S.notify || S.full || S.report)) window.hideMapPage();
       });
       S.observer.observe(host, { attributes: true, attributeFilter: ['style', 'class'] });
     } catch (_) {}
@@ -2074,7 +2261,7 @@
     const pg = document.getElementById('page-map');
     if (pg) { pg.classList.add('hidden'); pg.style.display = 'none'; }
     // Overlays live on <body>; they must not outlive the page.
-    S.panel = null; S.sheet = null; S.notify = null; S.full = false; S.corrMore = false;
+    S.panel = null; S.sheet = null; S.notify = null; S.full = false; S.corrMore = false; S.report = null;
     const ov = document.getElementById('tm-overlay'); if (ov) ov.innerHTML = '';
     document.documentElement.style.overflow = '';
   };

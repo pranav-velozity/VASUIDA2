@@ -29,6 +29,7 @@
     '/ai/pulse',
     '/finance/insights',
     '/report/cost-utilisation/insights',
+    '/consignments/week-summary/generate',   // Transit Movements week report — writing only; reading a saved one is free
   ];
   const isAiUrl = (url) => {
     try {
