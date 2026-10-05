@@ -403,7 +403,7 @@
         attention: ['hold', 'later', 'lfd'].includes(lead.k), also: rest,
         title: `${m.ref} — ${lead.head}`,
         sub: rest.length ? `Also: ${rest.slice(0, 3).join(' · ')}${rest.length > 3 ? ` · +${rest.length - 3} more` : ''}` : `${m.routeText} · now ${m.where.charAt(0).toLowerCase()}${m.where.slice(1)}`,
-        tag: lead.tag, sev: lead.sev, at: latest, when: ago(latest),
+        tag: lead.tag, sev: lead.sev, at: latest, when: `${m.wkLabel} · ${ago(latest)}`,
         impact: lead.impact || (lead.k === 'hold' ? 50000 : lead.k === 'lfd' ? 20000 : lead.k === 'actual' ? 500 : lead.k === 'confirmed' ? 100 : 0),
       });
     }
@@ -668,7 +668,7 @@
         <span class="tm-mono" style="font-size:12.5px;font-weight:600;white-space:nowrap">${esc(h.ref)}</span>
         <span style="font-size:13px;color:${INK};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(h.phrase)}</span>
         ${h.tag ? `<span style="height:20px;padding:0 8px;border-radius:10px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;white-space:nowrap;${h.sev === 'high' ? `background:${RED};color:#fff` : h.sev === 'medium' ? `background:${AMBER};color:${INK}` : h.sev === 'good' ? `background:${GREEN};color:${INK}` : `background:${SOFT};color:${INK}`}">${esc(h.tag)}</span>` : '<span></span>'}
-        <span style="font-size:11.5px;color:${MUTED};white-space:nowrap;min-width:56px;text-align:right">${esc(h.when || '')}</span>
+        <span style="font-size:11.5px;color:${MUTED};white-space:nowrap;min-width:56px;text-align:right">${h.when && h.wk && h.when.startsWith(h.wk) ? `<b class="tm-mono" style="font-weight:600;color:${INK}">${esc(h.wk)}</b>${esc(h.when.slice(h.wk.length))}` : esc(h.when || '')}</span>
       </button>`;
   }
   function hlList(title, list, key) {
