@@ -1450,6 +1450,201 @@ module.exports = function mountConsignments(deps) {
     }
   }
 
+  // Lanes in a week's week model that no consignment carries. Read from the week model only
+  // (gated by the caller), for the weeks given. Shared by the board and by Pulse.
+  function unassignedLanes(client, fromWs, toWs, ctx) {
+    const FIELDS = ['packing_list_ready_at', 'origin_customs_cleared_at', 'departed_at', 'arrived_at', 'dest_customs_cleared_at', 'eta_fc'];
+    const out = [];
+    const weeks = db.prepare(`SELECT DISTINCT week_start FROM flow_week WHERE week_start >= ? AND week_start <= ?`)
+      .all(fromWs, toWs).map(r => r.week_start);
+    for (const ws of weeks) {
+      const assigned = new Set(db.prepare('SELECT lane_key FROM consignment_lane WHERE week_start = ? AND client_id = ?')
+        .all(ws, client).map(r => r.lane_key));
+      let legacyRows = [];
+      try { legacyRows = db.prepare('SELECT DISTINCT lane_key FROM lane_actual_dates WHERE week_start = ?').all(ws).map(r => r.lane_key); } catch (_) {}
+      const legacySet = new Set(legacyRows);
+      const plan = ctx.planByWeek.has(ws) ? ctx.planByWeek.get(ws) : planRowsFor(ws, client);
+      ctx.planByWeek.set(ws, plan);
+      const seen = new Set();
+      for (const r of db.prepare('SELECT data FROM flow_week WHERE week_start = ?').all(ws)) {
+        let blob; try { blob = JSON.parse(r.data); } catch (_) { continue; }
+        const lanes = (blob && blob.intl_lanes && typeof blob.intl_lanes === 'object') ? blob.intl_lanes : {};
+        for (const [k, v] of Object.entries(lanes)) {
+          if (assigned.has(k) || seen.has(k)) continue;
+          seen.add(k);
+          const [sup = '', zd = '', fr = ''] = k.split('||');
+          const legacy = FIELDS.filter(f => v && v[f]);
+          const dep = v && v.departed_at ? String(v.departed_at).slice(0, 10) : null;
+          const pos = new Set(rowsForLane(k, plan).map(x => String(x.po_number || '').trim()).filter(Boolean));
+          out.push({ week_start: ws, lane_key: k, supplier: sup, zendesk: zd, freight: fr,
+            legacy_dates: legacy.length > 0 || legacySet.has(k), legacy_departed: dep, pos: pos.size });
+        }
+      }
+    }
+    return out;
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════════════════
+  // Pulse AI — the transit picture, in words.
+  //
+  // Pulse used to read transit from the dates typed on each lane and the old week-container
+  // list: the data that drew the phantom ship, and nothing of tracking, holds, revisions or
+  // status. This builds its transit section from the same enrich() the Transit Movements
+  // screen uses, so the screen and the assistant cannot disagree.
+  //
+  // Window: the last 30 days. A movement is in it when its execution week began in the last
+  // 30 days, when anything about it happened in the last 30 days (a milestone recorded, an
+  // estimate revised, a tracking event), or when it is still on its way — a W35 container
+  // still at sea is very much part of "what transit looks like".
+  // ════════════════════════════════════════════════════════════════════════════════════════
+  const PULSE_DAYS = 30;
+  const STATE_WORDS = {
+    carrier: 'tracked from the carrier', confirmed: 'confirmed by the VelOzity team',
+    amended: 'recorded by the VelOzity team', assumed: 'planned, not yet confirmed',
+  };
+  const isoWeekOf = (ymd) => {
+    const d = new Date(String(ymd).slice(0, 10) + 'T00:00:00Z');
+    const day = (d.getUTCDay() + 6) % 7; d.setUTCDate(d.getUTCDate() - day + 3);
+    const firstThu = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
+    return 1 + Math.round(((d - firstThu) / 86400000 - 3 + ((firstThu.getUTCDay() + 6) % 7)) / 7);
+  };
+  const fmtFull = (ymd) => { const f = fmtDay(ymd); if (!f) return null; return `${f} ${String(ymd).slice(0, 4)}`; };
+  const fmtN = (n) => Number(n || 0).toLocaleString('en-AU');
+  const pl = (n, w, p) => `${n} ${n === 1 ? w : (p || w + 's')}`;
+
+  function d2dLegs(sh) {
+    const ms = {}; for (const m of (sh.milestones || [])) ms[m.stage] = m;
+    const d = (st) => ms[st] ? String(ms[st].actual_at || ms[st].planned_at || '').slice(0, 10) || null : null;
+    const P = sh.baseline_plan;
+    const first = d('packing_list_ready'), dep = d('departed'), arr = d('arrived'), fc = d('fc_receipt');
+    if (!first || !dep || !arr || !fc) return null;
+    const act = dayDiff(first, fc);
+    const plan = (P && P.packing_list_ready && P.fc_receipt) ? dayDiff(P.packing_list_ready, P.fc_receipt) : null;
+    const settled = !!(ms.fc_receipt && ms.fc_receipt.actual_at);
+    return { plan, act, settled };
+  }
+
+  function movementLines(sh, today) {
+    const c = sh;
+    const out = [];
+    const ms = {}; for (const m of (sh.milestones || [])) ms[m.stage] = m;
+    const air = c.mode === 'Air';
+    const ref = c.reference || (air ? 'AWB not yet advised' : 'container number not yet advised');
+    const r = sh.route || {};
+    const port = (p) => p ? (p.name || p.code) : null;
+    const routeTxt = (r.origin || r.dest)
+      ? `${port(r.origin) || 'origin not yet known'} → ${port(r.dest) || 'destination not yet known'}${(r.via || []).length ? ' via ' + r.via.map(port).filter(Boolean).join(', ') : ''}`
+      : 'ports not yet known';
+    const size = c.size_ft ? String(c.size_ft).replace(/ft$/i, '').trim() : '';
+    const bits = [air ? 'Air' : 'Sea', ref, size ? (/^\d+$/.test(size) ? `${size}ft` : size) : null,
+      c.carrier_name ? `carrier ${c.carrier_name}` : null, c.vessel ? `vessel ${c.vessel}` : null, routeTxt].filter(Boolean);
+    out.push(`- ${bits.join(' · ')}`);
+    const h = sh.health || {};
+    out.push(`  Status: ${h.label || 'Unknown'}${h.why ? ' — ' + h.why : ''}`);
+    const fc = ms.fc_receipt || {};
+    const fcNow = String(fc.actual_at || fc.planned_at || '').slice(0, 10) || null;
+    const fcBits = [];
+    if (fc.actual_at) fcBits.push(`received at FC ${fmtFull(fc.actual_at)}`);
+    else if (fcNow) fcBits.push(`FC receipt expected ${fmtFull(fcNow)}`);
+    if (c.baseline_fc_at) fcBits.push(`first promised ${fmtFull(c.baseline_fc_at)}`);
+    else fcBits.push('no frozen first promise yet (transit not quoted)');
+    if (!air && c.carrier_eta) {
+      const prev = c.estimate_prev && c.estimate_prev.carrier_eta;
+      fcBits.push(`carrier ETA ${fmtFull(c.carrier_eta)}${prev ? ` (previously ${fmtFull(prev)})` : ''}`);
+    }
+    out.push(`  Delivery: ${fcBits.join('; ')}`);
+    const msTxt = STAGES.filter(st => ms[st]).map(st => {
+      const m = ms[st];
+      const when = String(m.actual_at || m.planned_at || '').slice(0, 10);
+      const overdue = !m.actual_at && when && when < today;
+      return `${STAGE_TEXT[st]} ${fmtDay(when) || '—'} (${m.actual_at ? (STATE_WORDS[m.state] || 'recorded') : (overdue ? 'planned, not yet confirmed — overdue' : 'planned, not yet confirmed')})`;
+    });
+    if (msTxt.length) out.push(`  Milestones: ${msTxt.join(' · ')}`);
+    const t = sh.terminal;
+    if (!air && t && (t.terminal || t.lfd || (t.holds || []).length)) {
+      out.push(`  Terminal: ${[t.terminal, (t.holds || []).length ? `${t.holds.join(', ').toLowerCase()} hold` : 'no holds reported',
+        t.lfd ? `last free day ${fmtFull(t.lfd)}` : null, t.available_at ? `available for pickup ${fmtFull(t.available_at)}` : null].filter(Boolean).join('; ')}`);
+    }
+    if (air) out.push('  Tracking: air is not tracked automatically; dates are confirmed by the VelOzity team.');
+    else if (t && t.tracking) out.push('  Tracking: live carrier tracking through Pinpoint.');
+    else if (c.reference) out.push('  Tracking: not yet subscribed to carrier tracking.');
+    const tr = c.transit || {};
+    if (c.transit_days != null) {
+      const base = c.transit_confirmed && c.baseline_transit_days != null ? Number(c.baseline_transit_days) : null;
+      out.push(`  Transit: ${c.transit_confirmed ? `carrier quote ${pl(Number(c.transit_days), 'day')}` : `${c.transit_days}-day rule default, not a carrier quote`}${base != null && base !== Number(c.transit_days) ? `; first quote ${pl(base, 'day')}` : ''}${tr.achieved != null ? `; achieved ${pl(Number(tr.achieved), 'day')}` : ''}`);
+    }
+    const dd = d2dLegs(sh);
+    if (dd) out.push(`  Door to door (packing list → FC): ${dd.plan != null ? `plan ${dd.plan} days, ` : ''}${dd.settled ? 'actual' : 'projected'} ${dd.act} days`);
+    const cs = sh.contents_summary;
+    const laneNames = (sh.lanes || []).map(k => { const p = String(k).split('||'); return `${p[0]} (ZD ${p[1] || '—'})`; });
+    if (cs) out.push(`  Contents: ${pl(cs.lanes, 'lane')} · ${pl(cs.pos, 'PO')} · ${pl(cs.skus, 'SKU')} · ${fmtN(cs.planned)} planned units`);
+    if (laneNames.length) out.push(`  Lanes: ${laneNames.slice(0, 12).join('; ')}${laneNames.length > 12 ? `; and ${laneNames.length - 12} more` : ''}`);
+    const ev = (sh.events || []).slice(0, 5).map(e => `${e.text}${e.at ? ` (${fmtDay(String(e.at).slice(0, 10))})` : ''}`);
+    if (ev.length) out.push(`  Recent: ${ev.join(' · ')}`);
+    if (sh.last_notification) out.push(`  Client last notified: ${fmtFull(String(sh.last_notification.sent_at).slice(0, 10))} (${pl(sh.last_notification.to_count, 'recipient')})`);
+    return out;
+  }
+
+  function pulseTransit(client) {
+    const today = todayLocal();
+    const thisMonday = mondayOf(today);
+    const cutoff = addDays(today, -PULSE_DAYS);
+    const cutoffWeek = mondayOf(cutoff);
+    const lookback = addDays(thisMonday, -16 * 7);   // only to find what is still on its way
+    const rows = db.prepare(`SELECT * FROM consignment WHERE client_id = ? AND week_start >= ? AND week_start <= ?
+                              ORDER BY week_start, mode, reference`).all(client, lookback, addDays(thisMonday, 7));
+    const ctx = { today, planByWeek: new Map() };
+    const items = [];
+    for (const c of rows) {
+      const sh = shape(c);
+      const fc = (sh.milestones || []).find(m => m.stage === 'fc_receipt') || {};
+      const stillMoving = !fc.actual_at && c.status !== 'closed';
+      const touched = (sh.milestones || []).some(m => (m.recorded_at && String(m.recorded_at).slice(0, 10) >= cutoff) || (m.actual_at && String(m.actual_at).slice(0, 10) >= cutoff));
+      if (!(c.week_start >= cutoffWeek || stillMoving || touched)) continue;
+      const en = enrich(c, sh, ctx);
+      const recentEvent = (en.events || []).some(e => String(e.at || '').slice(0, 10) >= cutoff);
+      if (!(c.week_start >= cutoffWeek || stillMoving || touched || recentEvent)) continue;
+      items.push(en);
+    }
+    const owns = ownsWeekModel(client);
+    const weeks = [...new Set(items.map(x => x.week_start).concat(owns ? [thisMonday] : []))].sort();
+    const unassigned = owns ? unassignedLanes(client, cutoffWeek, thisMonday, ctx) : [];
+    const lines = [];
+    lines.push(`## Transit movements (Pinpoint) — last ${PULSE_DAYS} days, as at ${fmtFull(today)}`);
+    lines.push(`Source of truth for every transit, shipping, container, flight, ETA and delivery question. Week numbers are ISO weeks: W${isoWeekOf(thisMonday)} is the week of ${fmtFull(thisMonday)}.`);
+    lines.push(`Included: movements whose execution week began on or after ${fmtFull(cutoffWeek)}, anything that changed in the last ${PULSE_DAYS} days, and anything still on its way. Older, completed movements are not included.`);
+    if (!weeks.length) { lines.push('No movements in this window.'); return lines.join('\n'); }
+    const totals = { mv: items.length, delayed: 0, behind: 0, held: 0 };
+    for (const x of items) { if ((x.health || {}).key === 'delayed') totals.delayed++; if ((x.health || {}).key === 'behind') totals.behind++; if ((x.health || {}).held) totals.held++; }
+    lines.push(`Summary: ${pl(totals.mv, 'movement')} — ${totals.delayed} delayed, ${totals.behind} behind, ${totals.held} held at a terminal.`);
+    lines.push('');
+    for (const ws of weeks) {
+      const list = items.filter(x => x.week_start === ws);
+      const pos = list.reduce((a, x) => a + ((x.contents_summary || {}).pos || 0), 0);
+      const lanes = list.reduce((a, x) => a + ((x.lanes || []).length), 0);
+      lines.push(`### W${isoWeekOf(ws)} · execution week of ${fmtFull(ws)} · ${pl(list.length, 'movement')} · ${pl(lanes, 'lane')} · ${pl(pos, 'PO')}`);
+      if (owns) {
+        if (!ctx.planByWeek.has(ws)) ctx.planByWeek.set(ws, planRowsFor(ws, client));
+        const o = originFor(ws, client, today, ctx.planByWeek.get(ws));
+        if (o) {
+          const word = (s) => ({ complete: 'complete', in_progress: 'in progress', not_started: 'not started', at_risk: 'at risk', past_due: 'past due' })[s] || s;
+          const rr = o.received, v = o.vas;
+          lines.push(`Ex-factory (received): ${rr.pct}% — ${rr.pos_received} of ${pl(rr.pos, 'PO')} received${rr.closed_by_tick ? `, ${rr.closed_by_tick} closed by the lane completion tick` : ''}${rr.late_pos ? `, ${rr.late_pos} after their due date` : ''}; ${word(rr.status)}${rr.done_at ? ` ${fmtDay(rr.done_at)}` : ''} (target ${fmtDay(rr.target)}).`);
+          lines.push(`VAS: ${v.lanes_complete} of ${pl(v.lanes, 'lane')} complete; ${fmtN(v.units_applied)} of ${fmtN(v.units_planned)} units applied within the week (${v.units_pct}%); ${word(v.status)}${v.done_at ? ` ${fmtDay(v.done_at)}` : ''} (target ${fmtDay(v.target)}).${(o.suppliers_behind || []).length ? ` Furthest behind: ${o.suppliers_behind.map(sb => `${sb.name} ${sb.pct}%`).join(', ')}.` : ''}`);
+        }
+      }
+      if (!list.length) lines.push('No containers or flights set up for this week yet.');
+      for (const x of list) lines.push(...movementLines(x, today));
+      const un = unassigned.filter(u => u.week_start === ws);
+      if (un.length) {
+        const legacy = un.filter(u => u.legacy_dates).length;
+        lines.push(`Lanes on no movement: ${pl(un.length, 'lane')} (${pl(un.reduce((a, u) => a + (u.pos || 0), 0), 'PO')}) not assigned to any container or flight${legacy ? `; ${legacy} still ${legacy === 1 ? 'carries' : 'carry'} dates typed on the lane, which are not used` : ''}.`);
+      }
+      lines.push('');
+    }
+    return lines.join('\n');
+  }
+
   // ── The board ──
   router.get('/board', authenticateRequest, auditLog('view_transit_board'), (req, res) => {
     try {
@@ -1469,40 +1664,10 @@ module.exports = function mountConsignments(deps) {
 
       const first = db.prepare('SELECT MIN(week_start) w FROM consignment WHERE client_id = ?').get(client);
 
-      // Lanes in a week that no consignment carries. Read from the week model only, and only
-      // for weeks still in play — the screen never places them, it names them.
+      // Lanes in a week that no consignment carries — named, never placed.
       const owns = ownsWeekModel(client);
-      const unassigned = [];
-      if (owns) {
-        const FIELDS = ['packing_list_ready_at', 'origin_customs_cleared_at', 'departed_at', 'arrived_at', 'dest_customs_cleared_at', 'eta_fc'];
-        const liveFrom = addW(thisMonday, -5);
-        const weeks = db.prepare(`SELECT DISTINCT week_start FROM flow_week WHERE week_start >= ? AND week_start <= ?`)
-          .all(liveFrom > from ? liveFrom : from, thisMonday).map(r => r.week_start);
-        for (const ws of weeks) {
-          const assigned = new Set(db.prepare('SELECT lane_key FROM consignment_lane WHERE week_start = ? AND client_id = ?')
-            .all(ws, client).map(r => r.lane_key));
-          let legacyRows = [];
-          try { legacyRows = db.prepare('SELECT DISTINCT lane_key FROM lane_actual_dates WHERE week_start = ?').all(ws).map(r => r.lane_key); } catch (_) {}
-          const legacySet = new Set(legacyRows);
-          const plan = ctx.planByWeek.has(ws) ? ctx.planByWeek.get(ws) : planRowsFor(ws, client);
-          ctx.planByWeek.set(ws, plan);
-          const seen = new Set();
-          for (const r of db.prepare('SELECT data FROM flow_week WHERE week_start = ?').all(ws)) {
-            let blob; try { blob = JSON.parse(r.data); } catch (_) { continue; }
-            const lanes = (blob && blob.intl_lanes && typeof blob.intl_lanes === 'object') ? blob.intl_lanes : {};
-            for (const [k, v] of Object.entries(lanes)) {
-              if (assigned.has(k) || seen.has(k)) continue;
-              seen.add(k);
-              const [sup = '', zd = '', fr = ''] = k.split('||');
-              const legacy = FIELDS.filter(f => v && v[f]);
-              const dep = v && v.departed_at ? String(v.departed_at).slice(0, 10) : null;
-              const pos = new Set(rowsForLane(k, plan).map(x => String(x.po_number || '').trim()).filter(Boolean));
-              unassigned.push({ week_start: ws, lane_key: k, supplier: sup, zendesk: zd, freight: fr,
-                legacy_dates: legacy.length > 0 || legacySet.has(k), legacy_departed: dep, pos: pos.size });
-            }
-          }
-        }
-      }
+      const liveFrom = addW(thisMonday, -5);
+      const unassigned = owns ? unassignedLanes(client, liveFrom > from ? liveFrom : from, thisMonday, ctx) : [];
 
       let lastEvent = null;
       try {
@@ -1720,6 +1885,6 @@ module.exports = function mountConsignments(deps) {
 
   console.log('[consignments] model v1 mounted');
   router._internals = { computePlanned, refreshPlanned, shape, STAGES, DEFAULT_RULES, rulesFor, migrateWeek, clearLegacy,
-    logEstimate, recordPorts, addViaPort, routeOf, statusOf, contentsFor, originFor };
+    logEstimate, recordPorts, addViaPort, routeOf, statusOf, contentsFor, originFor, pulseTransit };
   return router;
 };

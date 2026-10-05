@@ -1752,7 +1752,7 @@ app.post('/pulse/chat',
       lines.push('');
       lines.push('## Your role');
       lines.push('You help the VelOzity operations team understand warehouse performance across receiving, VAS processing, transit, and FC delivery.');
-      lines.push('You have FULL access to the last 4 weeks of detailed operations data below. Use it to answer any question specifically and accurately.');
+      lines.push('You have the last 4 weeks of receiving and VAS detail below, and the last 30 days of transit (containers and flights) from Pinpoint. Use them to answer specifically and accurately.');
       lines.push('Be concise and direct. Lead with numbers. Do not hedge when the data is clear.');
       lines.push('You are read-only — guide users to the UI for any changes (e.g. "Update that in Week Hub → Transit & Clearing").');
       lines.push('');
@@ -1812,7 +1812,11 @@ app.post('/pulse/chat',
       lines.push('');
 
       for (const w of weeks) {
-        lines.push('### Week ' + w.week_start + ' (ends ' + w.week_end + ')');
+        // Same ISO label as the transit section, so "Week 39" finds both halves of the week.
+        const _isoW = (() => { const d = new Date(String(w.week_start).slice(0, 10) + 'T00:00:00Z'); if (isNaN(d)) return '';
+          const day = (d.getUTCDay() + 6) % 7; d.setUTCDate(d.getUTCDate() - day + 3); const ft = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
+          return 'W' + (1 + Math.round(((d - ft) / 86400000 - 3 + ((ft.getUTCDay() + 6) % 7)) / 7)); })();
+        lines.push('### Week ' + w.week_start + (_isoW ? ' (' + _isoW + ')' : '') + ' (ends ' + w.week_end + ')');
         lines.push('Planned: ' + (w.planned_total||0).toLocaleString() + ' units | Applied: ' + (w.applied_total||0).toLocaleString() + ' (' + (w.completion_pct||0) + '%) | Received POs: ' + (w.received_pos||0) + ' | Late POs: ' + (w.late_pos||0) + ' | Mobile bins (cartons out): ' + (w.total_mobile_bins||0) + ' | Bin units: ' + (w.total_bin_units||0).toLocaleString() + (w.total_bin_weight_kg ? ' | Bin weight: ' + w.total_bin_weight_kg + ' kg' : ''));
         lines.push('');
 
@@ -1828,47 +1832,42 @@ app.post('/pulse/chat',
           lines.push('');
         }
 
-        // Lanes/transit
-        if (Array.isArray(w.lanes) && w.lanes.length > 0) {
-          lines.push('Transit lanes (' + w.lanes.length + ' total):');
-          for (const l of w.lanes) {
-            const dates = [
-              l.departed      ? 'departed ' + l.departed.slice(0,10)         : null,
-              l.arrived       ? 'arrived ' + l.arrived.slice(0,10)           : null,
-              l.eta_fc        ? 'ETA FC ' + l.eta_fc.slice(0,10)             : null,
-              l.dest_customs_cleared ? 'customs cleared ' + l.dest_customs_cleared.slice(0,10) : null,
-              l.customs_hold  ? 'CUSTOMS HOLD'                               : null,
-            ].filter(Boolean).join(' | ');
-            lines.push('  Lane: ' + l.supplier + ' | Zendesk: ' + (l.zendesk||'—') + ' | ' + (l.freight||'') + (l.shipment_number ? ' | Shipment: '+l.shipment_number : '') + (l.hbl ? ' | HBL: '+l.hbl : '') + (dates ? ' | ' + dates : ' | no transit dates yet'));
-          }
-          lines.push('');
-        } else {
-          lines.push('Transit lanes: none recorded for this week');
-          lines.push('');
-        }
-
-        // Containers
-        if (Array.isArray(w.containers) && w.containers.length > 0) {
-          lines.push('Containers (' + w.containers.length + ' total):');
-          for (const c of w.containers) {
-            lines.push('  Container: ' + c.container_id + ' | Size: ' + (c.size_ft||'40') + 'ft | Vessel: ' + (c.vessel||'—') + ' | POs assigned: ' + (c.pos.join(', ')||'none') + ' | Lane keys: ' + (c.lane_keys||[]).join('; '));
-          }
-          lines.push('');
-        } else {
-          lines.push('Containers: none recorded for this week');
-          lines.push('');
-        }
+        // Transit is NOT described here. The lane-level dates and the old week-container
+        // list are what drew the phantom ship; transit comes from the movements section below.
       }
     } else {
       lines.push('## No operations data available');
-      lines.push('The client has not loaded context yet. Ask the user to navigate to Week Hub first.');
+      lines.push('Week-level receiving and VAS detail has not loaded. Ask the user to open Week Hub for PO-level questions; transit questions are answered from the section below.');
+    }
+
+    // Transit — the same picture as the Transit Movements screen, built on the server from
+    // the consignments (never from what the browser sent), scoped to this client.
+    if (!_isFulfilmentCtx) {
+      try {
+        const _cg = (typeof consignmentRoutes !== 'undefined' && consignmentRoutes && consignmentRoutes._internals) || {};
+        if (typeof _cg.pulseTransit === 'function') {
+          lines.push('');
+          lines.push(_cg.pulseTransit(curClient()));
+        }
+      } catch (e) {
+        console.warn('[/pulse/chat] transit context failed:', e.message);
+        lines.push('');
+        lines.push('## Transit movements (Pinpoint)');
+        lines.push('Transit data could not be loaded for this answer. Say so rather than guessing.');
+      }
     }
 
     lines.push('## Guidelines');
     lines.push('- Answer questions about specific POs, containers, dates, units directly from the data above');
     lines.push('- For changes: guide user to the correct UI location (e.g. "Update ETA FC in Week Hub → Transit & Clearing for Zendesk 77634")');
     lines.push('- For downloads: guide user to Reports & Downloads page and the specific report');
-    lines.push('- If asked about something not in the 12-week window, say so clearly');
+    lines.push('- If asked about something outside the data above, say so clearly');
+    lines.push('- Transit, containers, flights, ETAs, delays and delivery to the FC: answer ONLY from the Transit movements section. It is the single source of truth; there are no other transit dates.');
+    lines.push('- A milestone marked "planned, not yet confirmed" has NOT been confirmed to have happened. Never describe it as done; say it is planned or awaiting confirmation, and call it overdue when marked so.');
+    lines.push('- Weeks are ISO weeks. "Week 35", "W35" and "wk 35" all mean the W35 heading in the Transit movements section. If that week is not there, say Pinpoint\'s transit view covers the last 30 days plus anything still on its way.');
+    lines.push('- Give the reason for a delay only when the data states it (a carrier revising its ETA, a terminal hold, a transshipment). Otherwise say the carrier revised the date. Never speculate about causes such as congestion or weather.');
+    lines.push('- Refer to tracking as Pinpoint tracking. Never name a tracking data provider.');
+    lines.push('- Status meanings: on time = within a day of the first promised FC date; behind = 2–4 days later; delayed = more than 4 days later, or held at a terminal with the last free day two days away or less.');
     lines.push('- Keep responses under 200 words unless user asks for detail. Use plain text, no markdown symbols.');
 
     // Split prompt: static ops data (cacheable) + dynamic context (not cached)
@@ -1879,7 +1878,7 @@ app.post('/pulse/chat',
     // Find where the ops data starts (after the user context lines)
     // The cache split keys off the data heading. Fulfilment clients emit a different one,
     // and either slice may be empty — the API rejects an empty text block, so guard both.
-    const opsDataStartIdx = lines.findIndex(l => l.startsWith('## Operations data') || l.startsWith('## Fulfilment data'));
+    const opsDataStartIdx = lines.findIndex(l => l.startsWith('## Operations data') || l.startsWith('## Fulfilment data') || l.startsWith('## No operations data') || l.startsWith('## Transit movements'));
     const staticLines  = opsDataStartIdx >= 0 ? lines.slice(opsDataStartIdx) : lines;
     const dynamicLines = opsDataStartIdx >= 0 ? lines.slice(0, opsDataStartIdx) : [];
 
@@ -1889,7 +1888,7 @@ app.post('/pulse/chat',
     const anthropic = getAnthropic();
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 800,
+      max_tokens: 1200,
       system: [
         // Static ops data — cached for the session (content identical across turns)
         ...(staticBlock ? [{
