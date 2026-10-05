@@ -12004,6 +12004,8 @@ const consignmentRoutes = require('./consignment_routes')({
   // Transit Movements: client notifications go out through the same Resend sender as the
   // exception email, and only VelOzity staff may send them.
   requireInternalOrg, sendViaResend,
+  // The week report's written context goes through the same Pulse gate and client.
+  getAnthropic, aiAllowed,
 });
 const _cgInternals = consignmentRoutes._internals || {};
 app.use('/t49', require('./t49_routes')({

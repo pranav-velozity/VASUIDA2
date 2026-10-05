@@ -1645,6 +1645,140 @@ module.exports = function mountConsignments(deps) {
     return lines.join('\n');
   }
 
+  // ════ Week report: the written context ════
+  // A few lines on how the week went, written by Pulse from the same facts the screen and
+  // Pulse chat use — never from anything else. Saved per week and reused until those facts
+  // change, so opening a week costs nothing after the first time. Reading a saved summary
+  // never calls the model; writing one is a separate request that goes through the Pulse
+  // switch like every other AI call. Every date and number in a written summary must appear
+  // in the facts, or it is discarded and the plain summary is shown instead.
+  db.exec(`CREATE TABLE IF NOT EXISTS week_summary (
+    client_id    TEXT NOT NULL,
+    week_start   TEXT NOT NULL,
+    fingerprint  TEXT NOT NULL,
+    summary      TEXT NOT NULL,
+    model        TEXT,
+    generated_at TEXT NOT NULL,
+    PRIMARY KEY (client_id, week_start)
+  )`);
+  const { getAnthropic, aiAllowed } = deps;
+  const crypto = require('crypto');
+
+  function weekFacts(client, ws) {
+    const today = todayLocal();
+    const rows = db.prepare('SELECT * FROM consignment WHERE client_id = ? AND week_start = ? ORDER BY mode, reference').all(client, ws);
+    const ctx = { today, planByWeek: new Map() };
+    const items = rows.map(c => enrich(c, shape(c), ctx));
+    const owns = ownsWeekModel(client);
+    const lines = [`W${isoWeekOf(ws)} — execution week of ${fmtFull(ws)}. Today is ${fmtFull(today)}.`];
+    let origin = null;
+    if (owns) {
+      origin = originFor(ws, client, today, ctx.planByWeek.get(ws) || planRowsFor(ws, client));
+      if (origin) {
+        const word = (s) => ({ complete: 'complete', in_progress: 'in progress', not_started: 'not started', at_risk: 'at risk', past_due: 'past its target' })[s] || s;
+        const rr = origin.received, v = origin.vas;
+        lines.push(`Ex-factory: ${rr.pct}% of ${pl(rr.pos, 'PO')} received, ${word(rr.status)}${rr.done_at ? ` ${fmtDay(rr.done_at)}` : ''}; target ${fmtDay(rr.target)}${rr.late_pos ? `; ${rr.late_pos} POs received after their due date` : ''}.`);
+        lines.push(`VAS: ${v.lanes_complete} of ${pl(v.lanes, 'lane')} complete, ${word(v.status)}${v.done_at ? ` ${fmtDay(v.done_at)}` : ''}; target ${fmtDay(v.target)}.`);
+      }
+    }
+    for (const x of items) lines.push(...movementLines(x, today));
+    const un = owns ? unassignedLanes(client, ws, ws, ctx) : [];
+    if (un.length) lines.push(`Lanes on no movement: ${un.length}.`);
+    return { text: lines.join('\n'), items, origin, unassigned: un.length, today };
+  }
+  const fingerprintOf = (text) => crypto.createHash('sha1').update(text.replace(/^W\d+ — .*Today is .*$/m, '')).digest('hex').slice(0, 20);
+
+  function plainSummary(f) {
+    const items = f.items, n = items.length;
+    const sea = items.filter(x => x.mode !== 'Air').length, air = n - sea;
+    const parts = [];
+    if (!n) parts.push('No containers or flights have been set up for this week yet.');
+    else {
+      parts.push(`${pl(n, 'movement')} this week${n ? ` (${sea} sea, ${air} air)` : ''}.`);
+      const late = items.filter(x => ['delayed', 'behind'].includes((x.health || {}).key));
+      const onTime = items.filter(x => (x.health || {}).key === 'on_time').length;
+      if (late.length) parts.push(late.map(x => `${x.reference || 'One movement'} is ${String((x.health || {}).why || '').replace(/\.$/, '').toLowerCase() || 'running late'}`).join('; ') + '.');
+      if (onTime) parts.push(`${onTime} ${onTime === 1 ? 'is' : 'are'} on time against the first promised FC date.`);
+      const unconf = items.filter(x => (x.milestones || []).some(m => !m.actual_at && m.planned_at && String(m.planned_at).slice(0, 10) < f.today)).length;
+      if (unconf) parts.push(`${pl(unconf, 'movement')} ${unconf === 1 ? 'has' : 'have'} milestones not yet confirmed past their planned dates.`);
+    }
+    if (f.origin) parts.unshift(`Ex-factory ${f.origin.received.pct}% and VAS ${f.origin.vas.lanes_complete}/${f.origin.vas.lanes} lanes complete.`);
+    return parts.join(' ');
+  }
+
+  // Every date ("Wed 7 Oct", "7 Oct") and number in a written summary must occur in the facts.
+  const MONTHS = 'Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
+  function verifySummary(summary, facts) {
+    const bad = [];
+    const dates = summary.match(new RegExp(`\\b\\d{1,2} (?:${MONTHS})\\b`, 'g')) || [];
+    for (const d of dates) if (!facts.includes(d)) bad.push(d);
+    const nums = (summary.replace(new RegExp(`\\b\\d{1,2} (?:${MONTHS})\\b`, 'g'), '').match(/\b\d[\d,]*(?:\.\d+)?%?/g) || [])
+      .filter(x => !/^W?\d{1,2}$/.test(x) || Number(x) > 31);
+    for (const nn of nums) { const plain = nn.replace(/,/g, ''); if (!facts.includes(nn) && !facts.replace(/,/g, '').includes(plain)) bad.push(nn); }
+    if (/terminal49|t49/i.test(summary)) bad.push('provider name');
+    return bad;
+  }
+
+  router.get('/week-summary', authenticateRequest, (req, res) => {
+    try {
+      const ws = ymdOk(req.query.week) ? mondayOf(req.query.week) : null;
+      if (!ws) return res.status(400).json({ ok: false, error: 'week is required (YYYY-MM-DD).' });
+      const client = curClient();
+      const f = weekFacts(client, ws);
+      const fp = fingerprintOf(f.text);
+      const row = db.prepare('SELECT * FROM week_summary WHERE client_id = ? AND week_start = ?').get(client, ws);
+      res.json({ ok: true, week_start: ws, fingerprint: fp, plain: plainSummary(f),
+        summary: row && row.fingerprint === fp ? row.summary : null,
+        previous: row && row.fingerprint !== fp ? { summary: row.summary, generated_at: row.generated_at } : null,
+        generated_at: row && row.fingerprint === fp ? row.generated_at : null,
+        can_write: typeof getAnthropic === 'function' });
+    } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
+  });
+
+  router.post('/week-summary/generate', authenticateRequest, async (req, res) => {
+    try {
+      if (typeof aiAllowed === 'function' && !aiAllowed(req, res)) return;
+      if (typeof getAnthropic !== 'function') return res.status(503).json({ ok: false, error: 'Pulse is not configured on this server.' });
+      const b = req.body || {};
+      const ws = ymdOk(b.week) ? mondayOf(b.week) : null;
+      if (!ws) return res.status(400).json({ ok: false, error: 'week is required (YYYY-MM-DD).' });
+      const client = curClient();
+      const f = weekFacts(client, ws);
+      const fp = fingerprintOf(f.text);
+      const row = db.prepare('SELECT * FROM week_summary WHERE client_id = ? AND week_start = ?').get(client, ws);
+      if (row && row.fingerprint === fp) return res.json({ ok: true, summary: row.summary, generated_at: row.generated_at, cached: true });
+      const system = [
+        'You write the opening context for a weekly freight report that VelOzity sends to its client. VelOzity is the client\'s VAS provider and freight forwarder.',
+        'Write 3 or 4 sentences of plain text, no headings, no bullet points, no markdown, under 90 words.',
+        'Lead with the overall picture, then anything late or held and what it carries, then anything awaiting confirmation. End with nothing — no sign-off, no offers.',
+        'Use ONLY the facts provided. Every date and number you write must appear in the facts exactly as written there.',
+        'A milestone described as "planned, not yet confirmed" has not been confirmed to have happened — never describe it as done.',
+        'Give a reason for a delay only when the facts state it (a carrier revising its ETA, a terminal hold, a transshipment). Never speculate about causes.',
+        'Refer to tracking as Pinpoint tracking. Never name a tracking data provider. Name carriers when the facts do.',
+        'Write the week as "W" plus its number, as in the facts.',
+      ].join('\n');
+      const msg = await getAnthropic().messages.create({
+        model: 'claude-sonnet-4-6', max_tokens: 400, system,
+        messages: [{ role: 'user', content: `Facts for the week:\n\n${f.text}\n\nWrite the opening context.` }],
+      });
+      const text = ((msg && msg.content) || []).filter(x => x.type === 'text').map(x => x.text).join('').trim()
+        .replace(/\*\*/g, '').replace(/^#+\s*/gm, '');
+      const bad = verifySummary(text, f.text);
+      if (!text || bad.length) {
+        console.warn('[week-summary] discarded a written summary for', ws, 'unverified:', bad.slice(0, 5).join(', '));
+        return res.json({ ok: true, summary: null, plain: plainSummary(f), discarded: true });
+      }
+      const now = new Date().toISOString();
+      db.prepare(`INSERT INTO week_summary (client_id, week_start, fingerprint, summary, model, generated_at) VALUES (?,?,?,?,?,?)
+                  ON CONFLICT(client_id, week_start) DO UPDATE SET fingerprint = excluded.fingerprint, summary = excluded.summary,
+                  model = excluded.model, generated_at = excluded.generated_at`).run(client, ws, fp, text, 'claude-sonnet-4-6', now);
+      res.json({ ok: true, summary: text, generated_at: now, cached: false });
+    } catch (e) {
+      console.error('[week-summary] generate failed:', e.message);
+      res.status(500).json({ ok: false, error: 'Pulse could not write the summary just now.' });
+    }
+  });
+
   // ── The board ──
   router.get('/board', authenticateRequest, auditLog('view_transit_board'), (req, res) => {
     try {
@@ -1885,6 +2019,6 @@ module.exports = function mountConsignments(deps) {
 
   console.log('[consignments] model v1 mounted');
   router._internals = { computePlanned, refreshPlanned, shape, STAGES, DEFAULT_RULES, rulesFor, migrateWeek, clearLegacy,
-    logEstimate, recordPorts, addViaPort, routeOf, statusOf, contentsFor, originFor, pulseTransit };
+    logEstimate, recordPorts, addViaPort, routeOf, statusOf, contentsFor, originFor, pulseTransit, weekFacts, verifySummary, plainSummary };
   return router;
 };
