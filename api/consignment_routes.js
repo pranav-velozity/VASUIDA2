@@ -1181,6 +1181,21 @@ module.exports = function mountConsignments(deps) {
     return map;
   }
 
+  // The Week Hub's week sign-off: the "Receiving complete" / "VAS complete" master ticks on
+  // the Control Tower. Written through to the week record; this is the status the team means.
+  function weekSignoff(ws) {
+    const out = { receiving: false, receivingAt: null, vas: false, vasAt: null };
+    try {
+      for (const r of db.prepare('SELECT data FROM flow_week WHERE week_start = ?').all(ws)) {
+        let b; try { b = JSON.parse(r.data); } catch (_) { continue; }
+        if (!b || typeof b !== 'object') continue;
+        if (b.receivingComplete) { out.receiving = true; out.receivingAt = out.receivingAt || dayOnly(b.receivingAt); }
+        if (b.vasComplete) { out.vas = true; out.vasAt = out.vasAt || dayOnly(b.vasAt); }
+      }
+    } catch (_) {}
+    return out;
+  }
+
   let _recordsHasClient = null;
   function processedFor(pos, client) {
     const out = new Map();
@@ -1408,7 +1423,10 @@ module.exports = function mountConsignments(deps) {
           if (at && (!vasDone || at > vasDone)) vasDone = at;
         }
       }
-      const vasComplete = lanesActive > 0 && lanesDone === lanesActive;
+      const signoff = weekSignoff(ws);
+      const vasComplete = signoff.vas || (lanesActive > 0 && lanesDone === lanesActive);
+      if (signoff.vas && !vasDone) vasDone = signoff.vasAt || today;
+      if (signoff.vas && signoff.vasAt && signoff.vasAt < vasDone) vasDone = signoff.vasAt;
       const vasTarget = addDays(ws, 4);
       const vasPct = lanesActive ? Math.round(100 * lanesDone / lanesActive) : 0;
       const unitsPct = unitsPlanned ? Math.round(100 * Math.min(unitsApplied, unitsPlanned) / unitsPlanned) : 0;
@@ -1428,7 +1446,8 @@ module.exports = function mountConsignments(deps) {
           if (at && (!recvDone || at > recvDone)) recvDone = at;
         }
       }
-      const recvComplete = allPos.length > 0 && posClosed === allPos.length;
+      const recvComplete = signoff.receiving || (allPos.length > 0 && posClosed === allPos.length);
+      if (signoff.receiving) recvDone = signoff.receivingAt || recvDone || today;
       // Once the work on what arrived is done and the week's VAS target has passed, receiving
       // is closed at whatever it reached: the POs that never came moved weeks or never shipped.
       const recvClosed = !recvComplete && vasComplete && today > vasTarget;
@@ -1462,13 +1481,13 @@ module.exports = function mountConsignments(deps) {
           closed_by_tick: posClosed - received.size, target: recvTarget, done_at: recvComplete ? recvDone : (recvClosed ? vasDone : null),
           not_received: allPos.length - posClosed,
           status: recvClosed ? 'complete' : originStatus(recvComplete, recvPct, recvTarget, today),
-          closed_short: recvClosed,
+          closed_short: recvClosed, signed_off: signoff.receiving,
         },
         vas: {
           lanes: lanesActive, lanes_complete: lanesDone, lanes_nothing_received: lanesNothing, pct: vasPct,
           units_planned: unitsPlanned, units_applied: unitsApplied, units_pct: unitsPct,
           pct_of_received: vasOfReceived, units_planned_received: plannedOfReceived,
-          target: vasTarget, done_at: vasComplete ? vasDone : null,
+          target: vasTarget, done_at: vasComplete ? vasDone : null, signed_off: signoff.vas,
           status: originStatus(vasComplete, vasPct, vasTarget, today),
         },
         suppliers_behind: behind,
@@ -1768,7 +1787,7 @@ module.exports = function mountConsignments(deps) {
       if (!ws) return res.status(400).json({ ok: false, error: 'week is required (YYYY-MM-DD).' });
       const o = originFor(ws, curClient(), todayLocal());
       if (!o) return res.json({ ok: true, week_start: ws, note: 'No plan rows for this week.' });
-      res.json({ ok: true, week_start: ws, today: todayLocal(), receiving: o.received, vas: o.vas,
+      res.json({ ok: true, week_start: ws, today: todayLocal(), signoff: weekSignoff(ws), receiving: o.received, vas: o.vas,
         lanes: o.lanes_detail.sort((a, b) => (a.verdict > b.verdict ? -1 : 1)) });
     } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
   });
