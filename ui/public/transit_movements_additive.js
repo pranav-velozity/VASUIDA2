@@ -23,6 +23,7 @@
   'use strict';
   if (window.__TM_LOADED__) return;
   window.__TM_LOADED__ = true;
+  const TM_VERSION = '15';
 
   // ── Palette (Pinpoint status colours) ──
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
@@ -1222,10 +1223,10 @@
         else place = `left:${pct(x)}%;transform:translateX(-8px);`;
         let note = st.l;
         if (o.status === 'complete' && k === 'recv' && o.late_pos) note = `Complete · ${plural(o.late_pos, 'PO')} late`;
-        else if (o.status === 'closed' && k === 'recv') note = `Closed · ${plural(o.not_received || 0, 'PO')} never arrived`;
+        else if (o.status === 'complete' && k === 'recv' && o.not_received) note = `Complete · ${plural(o.not_received, 'PO')} never arrived`;
         else if (o.status === 'complete' && o.done_at && o.target && o.done_at > o.target) note = `Complete · ${plural(diff(o.target, o.done_at), 'day')} late`;
         const tip = k === 'recv'
-          ? `Receiving: ${o.pct}% of planned POs — ${o.pos_received} of ${o.pos} received${o.closed_by_tick ? `, ${o.closed_by_tick} closed by the lane tick` : ''}${o.late_pos ? `, ${o.late_pos} after their due date` : ''}${o.status === 'closed' ? `; ${o.not_received} never arrived for this week` : ''}. Target ${fmtDay(o.target)}${o.done_at ? ` · ${o.status === 'closed' ? 'closed' : 'done'} ${fmtDay(o.done_at)}` : ''}.`
+          ? `Receiving: ${o.pct}% of planned POs — ${o.pos_received} of ${o.pos} received${o.closed_by_tick ? `, ${o.closed_by_tick} closed by the lane tick` : ''}${o.late_pos ? `, ${o.late_pos} after their due date` : ''}${o.not_received ? `; ${o.not_received} never arrived for this week` : ''}. Target ${fmtDay(o.target)}${o.done_at ? ` · done ${fmtDay(o.done_at)}` : ''}.`
           : `VAS: ${o.pct_of_received != null ? o.pct_of_received : o.units_pct}% of what was received${o.status === 'complete' ? '' : ' so far'} · ${o.lanes_complete} of ${o.lanes} lanes that received stock closed${o.lanes_nothing_received ? ` · ${o.lanes_nothing_received} lanes received nothing` : ''} · ${fmtNum(o.units_applied)} units applied this week. Target ${fmtDay(o.target)}${o.done_at ? ` · done ${fmtDay(o.done_at)}` : ''}.`;
         return `<div title="${esc(tip)}" style="position:absolute;${pos};${place}display:flex;align-items:center;gap:6px;height:20px;padding:0 8px 0 4px;border-radius:10px;background:#fff;border:1px solid ${LINE};font-size:11px;white-space:nowrap;z-index:1">
           <span style="width:11px;height:11px;border-radius:50%;box-sizing:border-box;flex-shrink:0;${st.mark}"></span>
@@ -1926,7 +1927,7 @@
       <div style="padding:22px 28px 30px;display:flex;flex-direction:column;gap:26px">
         <div style="display:flex;flex-direction:column;gap:8px;padding:18px 20px;border-radius:12px;background:#FAFAF8;border:1px solid ${LINE}">${context}</div>
         ${sec('Journey — factory gate to FC Sydney', `<div style="display:flex;gap:10px;flex-wrap:wrap">
-          ${O ? journeyStep('Receiving', `${O.received.pct}%`, `of planned POs · ${O.received.pos_received} of ${O.received.pos}${O.received.status === 'closed' ? ` · ${plural(O.received.not_received || 0, 'PO')} never arrived` : ''}${O.received.done_at ? ` · ${O.received.status === 'closed' ? 'closed' : 'done'} ${fmtDay(O.received.done_at)}` : ` · target ${fmtDay(O.received.target)}`}`, O.received.status) : ''}
+          ${O ? journeyStep('Receiving', `${O.received.pct}%`, `of planned POs · ${O.received.pos_received} of ${O.received.pos}${O.received.not_received ? ` · ${plural(O.received.not_received, 'PO')} never arrived` : ''}${O.received.done_at ? ` · done ${fmtDay(O.received.done_at)}` : ` · target ${fmtDay(O.received.target)}`}`, O.received.status) : ''}
           ${O ? journeyStep('VAS', `${O.vas.pct_of_received != null ? O.vas.pct_of_received : O.vas.units_pct}%`, `of what was received${O.vas.done_at ? ` · done ${fmtDay(O.vas.done_at)}` : ` · target ${fmtDay(O.vas.target)}`}`, O.vas.status) : ''}
           ${stageStep(list, 'departed', 'Departed', M)}${stageStep(list, 'arrived', 'Arrived', M)}${stageStep(list, 'fc_receipt', 'Received at FC', M)}
         </div>`)}
@@ -2378,6 +2379,6 @@
   };
 
   // For support: window.__transitMovements.reload()
-  window.__transitMovements = { reload: () => load(), state: () => S, version: '1' };
-  console.log('[transit-movements] v1 loaded');
+  window.__transitMovements = { reload: () => load(), state: () => S, version: TM_VERSION };
+  console.log('[transit-movements] v' + TM_VERSION + ' loaded');
 })();
