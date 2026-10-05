@@ -23,7 +23,7 @@
   'use strict';
   if (window.__TM_LOADED__) return;
   window.__TM_LOADED__ = true;
-  const TM_VERSION = '15';
+  const TM_VERSION = '16';
 
   // ── Palette (Pinpoint status colours) ──
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
@@ -768,7 +768,7 @@
           <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:#777" data-tm-maploading>Loading map…</div>
         </div>
         <div style="display:flex;flex-direction:column;max-height:${full ? 'calc(100vh - 230px)' : '460px'};overflow-y:auto">${empty ? `<div style="font-size:13px;color:#9C9C9C;padding:12px">${empty.replace(/<[^>]+>/g, '')}</div>` : ''}
-          ${set.map(m => `<button data-act="${m.live ? 'pick' : 'hist'}" data-uid="${esc(m.uid)}" data-v="${m.wk}" data-dbl="${esc(m.uid)}" style="display:flex;flex-direction:column;gap:3px;padding:10px 12px;border-radius:8px;min-height:52px;width:100%;border-top:1px solid #262626;${S.sel === m.uid ? 'background:#262626' : ''}">
+          ${set.map(m => `<button data-act="pick" data-uid="${esc(m.uid)}" data-v="${m.wk}" data-dbl="${esc(m.uid)}" style="display:flex;flex-direction:column;gap:3px;padding:10px 12px;border-radius:8px;min-height:52px;width:100%;border-top:1px solid #262626;${S.sel === m.uid ? 'background:#262626' : ''}">
             <span style="display:flex;justify-content:space-between;gap:8px"><span style="display:flex;align-items:center;gap:8px">${dot(m.st, 9)}<span class="tm-mono" style="font-size:12px;font-weight:600">${esc(m.ref)}</span></span><span class="tm-mono" style="font-size:11px;color:#9C9C9C">${m.wkLabel}</span></span>
             <span style="font-size:12px;color:#B5B5B5">${esc(m.where)}</span></button>`).join('')}
         </div></div>`;
@@ -809,7 +809,7 @@
         const [ln, tr] = pos(pN, seenN);
         const lb = S.phase === 'before' ? pos(pB, seenB)[0] : ln;
         const st = STATUS[m.st] || STATUS.on_time;
-        return `<button class="tm-pill tm-anim${S.sel === m.uid ? ' sel' : ''}${m.assumedPos ? ' assumed' : ''}" title="${esc(m.assumedPos ? `${m.where} — placed by plan; not yet confirmed` : m.where)}" data-act="${m.live ? 'pick' : 'hist'}" data-uid="${esc(m.uid)}" data-v="${m.wk}" data-dbl="${esc(m.uid)}"
+        return `<button class="tm-pill tm-anim${S.sel === m.uid ? ' sel' : ''}${m.assumedPos ? ' assumed' : ''}" title="${esc(m.assumedPos ? `${m.where} — placed by plan; not yet confirmed` : m.where)}" data-act="pick" data-uid="${esc(m.uid)}" data-v="${m.wk}" data-dbl="${esc(m.uid)}"
           aria-label="${esc(`${m.wkLabel} ${m.ref}, ${m.where}`)}" ${A(`transform:${tr};border:1.5px solid ${st.c};`, { left: [lb, ln] })}>
           <span style="display:inline-flex;color:${S.sel === m.uid ? INK : st.c}" aria-hidden="true">${modeIcon(m.mode, 13)}</span><span class="tm-mono tm-wk">${m.wkLabel}</span><span class="tm-mono">${esc(m.short)}</span></button>`;
       }).join('');
@@ -994,7 +994,7 @@
         const leftSide = xn > w * 0.68;
         const b = document.createElement('button');
         b.className = 'tm-anim';
-        b.setAttribute('data-act', m.live ? 'pick' : 'hist');
+        b.setAttribute('data-act', 'pick');
         b.setAttribute('data-uid', m.uid); b.setAttribute('data-v', m.wk); b.setAttribute('data-dbl', m.uid);
         b.setAttribute('aria-label', `${m.wkLabel} ${m.ref}, ${m.where}`);
         const sel = S.sel === m.uid;
@@ -2270,7 +2270,7 @@
       if (!el || !host.contains(el)) return;
       const uid = el.getAttribute('data-dbl');
       const m = S.board && model().all.find(x => x.uid === uid);
-      if (m && m.live) { S.sel = uid; S.panel = 'mv'; openContents(uid); }
+      if (m) { S.sel = uid; S.panel = 'mv'; openContents(uid); }
     });
     host.addEventListener('input', (ev) => {
       const t = ev.target;
