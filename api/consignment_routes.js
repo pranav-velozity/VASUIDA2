@@ -1378,13 +1378,18 @@ module.exports = function mountConsignments(deps) {
         }
       } catch (_) { /* table absent on a fresh database */ }
 
-      let lanesDone = 0, unitsPlanned = 0, unitsApplied = 0, vasDone = null;
+      // A lane none of whose POs ever arrived is not unfinished work — there was nothing to
+      // do. It is counted separately and never holds the week open.
+      let lanesDone = 0, lanesActive = 0, lanesNothing = 0, unitsPlanned = 0, unitsApplied = 0, vasDone = null;
       const ticketDone = new Map();
       for (const [t, tk] of tickets) {
         const ap = [...tk.pos].reduce((a, po) => a + ((applied.get(po) || {}).n || 0), 0);
         unitsPlanned += tk.planned; unitsApplied += ap;
         const auto = tk.planned > 0 && ap >= tk.planned;
         const tick = ticks.get(t) || null;
+        const arrived = [...tk.pos].some(po => received.has(po)) || ap > 0;
+        if (!arrived && !tick) { lanesNothing++; continue; }
+        lanesActive++;
         if (auto || tick) {
           lanesDone++;
           const lastWork = [...tk.pos].map(po => (applied.get(po) || {}).last).filter(Boolean).sort().pop() || null;
@@ -1393,9 +1398,9 @@ module.exports = function mountConsignments(deps) {
           if (at && (!vasDone || at > vasDone)) vasDone = at;
         }
       }
-      const vasComplete = tickets.size > 0 && lanesDone === tickets.size;
+      const vasComplete = lanesActive > 0 && lanesDone === lanesActive;
       const vasTarget = addDays(ws, 4);
-      const vasPct = tickets.size ? Math.round(100 * lanesDone / tickets.size) : 0;
+      const vasPct = lanesActive ? Math.round(100 * lanesDone / lanesActive) : 0;
       const unitsPct = unitsPlanned ? Math.round(100 * Math.min(unitsApplied, unitsPlanned) / unitsPlanned) : 0;
 
       let posClosed = 0, recvDone = null, latePos = 0;
@@ -1412,6 +1417,9 @@ module.exports = function mountConsignments(deps) {
         }
       }
       const recvComplete = allPos.length > 0 && posClosed === allPos.length;
+      // Once the work on what arrived is done and the week's VAS target has passed, receiving
+      // is closed at whatever it reached: the POs that never came moved weeks or never shipped.
+      const recvClosed = !recvComplete && vasComplete && today > vasTarget;
       // VAS against what was received: the tick means "done on whatever arrived", so once
       // every lane is complete the week is 100% by definition; until then, units applied over
       // the planned units of the POs that have actually been received.
@@ -1439,11 +1447,12 @@ module.exports = function mountConsignments(deps) {
       return {
         received: {
           pos: allPos.length, pos_received: received.size, pos_closed: posClosed, pct: recvPct, late_pos: latePos,
-          closed_by_tick: posClosed - received.size, target: recvTarget, done_at: recvComplete ? recvDone : null,
-          status: originStatus(recvComplete, recvPct, recvTarget, today),
+          closed_by_tick: posClosed - received.size, target: recvTarget, done_at: recvComplete ? recvDone : (recvClosed ? vasDone : null),
+          not_received: allPos.length - posClosed,
+          status: recvClosed ? 'closed' : originStatus(recvComplete, recvPct, recvTarget, today),
         },
         vas: {
-          lanes: tickets.size, lanes_complete: lanesDone, pct: vasPct,
+          lanes: lanesActive, lanes_complete: lanesDone, lanes_nothing_received: lanesNothing, pct: vasPct,
           units_planned: unitsPlanned, units_applied: unitsApplied, units_pct: unitsPct,
           pct_of_received: vasOfReceived, units_planned_received: plannedOfReceived,
           target: vasTarget, done_at: vasComplete ? vasDone : null,
@@ -1634,9 +1643,9 @@ module.exports = function mountConsignments(deps) {
         if (!ctx.planByWeek.has(ws)) ctx.planByWeek.set(ws, planRowsFor(ws, client));
         const o = originFor(ws, client, today, ctx.planByWeek.get(ws));
         if (o) {
-          const word = (s) => ({ complete: 'complete', in_progress: 'in progress', not_started: 'not started', at_risk: 'at risk', past_due: 'past due' })[s] || s;
+          const word = (s) => ({ complete: 'complete', closed: 'closed', in_progress: 'in progress', not_started: 'not started', at_risk: 'at risk', past_due: 'past due' })[s] || s;
           const rr = o.received, v = o.vas;
-          lines.push(`Receiving: ${rr.pct}% of planned POs — ${rr.pos_received} of ${pl(rr.pos, 'PO')} received${rr.closed_by_tick ? `, ${rr.closed_by_tick} closed by the lane completion tick` : ''}${rr.late_pos ? `, ${rr.late_pos} after their due date` : ''}; ${word(rr.status)}${rr.done_at ? ` ${fmtDay(rr.done_at)}` : ''} (target ${fmtDay(rr.target)}).`);
+          lines.push(`Receiving: ${rr.pct}% of planned POs — ${rr.pos_received} of ${pl(rr.pos, 'PO')} received${rr.status === 'closed' ? `, ${pl(rr.not_received, 'PO')} never arrived for this week` : ''}${rr.closed_by_tick ? `, ${rr.closed_by_tick} closed by the lane completion tick` : ''}${rr.late_pos ? `, ${rr.late_pos} after their due date` : ''}; ${word(rr.status)}${rr.done_at ? ` ${fmtDay(rr.done_at)}` : ''} (target ${fmtDay(rr.target)}).`);
           lines.push(`VAS: ${v.pct_of_received}% of what was received${v.status === 'complete' ? '' : ' so far'} (${v.lanes_complete} of ${pl(v.lanes, 'lane')} closed; ${fmtN(v.units_applied)} units applied within the week); ${word(v.status)}${v.done_at ? ` ${fmtDay(v.done_at)}` : ''} (target ${fmtDay(v.target)}).${(o.suppliers_behind || []).length ? ` Furthest behind: ${o.suppliers_behind.map(sb => `${sb.name} ${sb.pct}%`).join(', ')}.` : ''}`);
         }
       }
@@ -1682,9 +1691,9 @@ module.exports = function mountConsignments(deps) {
     if (owns) {
       origin = originFor(ws, client, today, ctx.planByWeek.get(ws) || planRowsFor(ws, client));
       if (origin) {
-        const word = (s) => ({ complete: 'complete', in_progress: 'in progress', not_started: 'not started', at_risk: 'at risk', past_due: 'past its target' })[s] || s;
+        const word = (s) => ({ complete: 'complete', closed: 'closed', in_progress: 'in progress', not_started: 'not started', at_risk: 'at risk', past_due: 'past its target' })[s] || s;
         const rr = origin.received, v = origin.vas;
-        lines.push(`Receiving: ${rr.pct}% of planned POs (${rr.pos_received} of ${rr.pos}) received, ${word(rr.status)}${rr.done_at ? ` ${fmtDay(rr.done_at)}` : ''}; target ${fmtDay(rr.target)}${rr.late_pos ? `; ${rr.late_pos} POs received after their due date` : ''}.`);
+        lines.push(`Receiving: ${rr.pct}% of planned POs (${rr.pos_received} of ${rr.pos}) received${rr.status === 'closed' ? ` — ${pl(rr.not_received, 'PO')} never arrived for this week` : ''}, ${word(rr.status)}${rr.done_at ? ` ${fmtDay(rr.done_at)}` : ''}; target ${fmtDay(rr.target)}${rr.late_pos ? `; ${rr.late_pos} POs received after their due date` : ''}.`);
         lines.push(`VAS: ${v.pct_of_received}% of what was received${v.status === 'complete' ? '' : ' so far'} (${v.lanes_complete} of ${pl(v.lanes, 'lane')} closed), ${word(v.status)}${v.done_at ? ` ${fmtDay(v.done_at)}` : ''}; target ${fmtDay(v.target)}.`);
       }
     }
@@ -1702,7 +1711,7 @@ module.exports = function mountConsignments(deps) {
     if (f.origin) {
       const rr = f.origin.received, v = f.origin.vas;
       const rDone = rr.status === 'complete', vDone = v.status === 'complete';
-      parts.push(`Receiving ${rr.pct}% of planned POs (${rr.pos_received} of ${rr.pos})${rDone ? `, complete${rr.done_at ? ` ${fmtDay(rr.done_at)}` : ''}` : ', still open'}.`);
+      parts.push(`Receiving ${rr.pct}% of planned POs (${rr.pos_received} of ${rr.pos})${rDone ? `, complete${rr.done_at ? ` ${fmtDay(rr.done_at)}` : ''}` : rr.status === 'closed' ? `; ${pl(rr.not_received, 'PO')} never arrived for this week, closed${rr.done_at ? ` ${fmtDay(rr.done_at)}` : ''}` : ', still open'}.`);
       parts.push(`VAS ${v.pct_of_received}% of what was received${vDone ? `, complete${v.done_at ? ` ${fmtDay(v.done_at)}` : ''}` : ' so far'}.`);
     }
     if (!n) parts.push('No containers or flights have been set up for this week yet.');
