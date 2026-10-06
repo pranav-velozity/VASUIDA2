@@ -150,6 +150,20 @@ module.exports = function mountConsignments(deps) {
   addColumn('consignment', 'carrier_est_at', 'TEXT');
   addColumn('consignment_rules', 'before_departure', 'TEXT');
 
+  // Saved sea rules that still carry the old one-day clearance-to-FC gap move to three. Done
+  // once; a value deliberately set to anything else is left alone.
+  try {
+    if (!db.prepare(`SELECT 1 x FROM consignment_rules WHERE facility = '__migration__' AND mode = 'Sea' AND client_id = '__destfc3__'`).get()) {
+      const r = db.prepare(`UPDATE consignment_rules SET dest_cleared_to_fc_days = 3, updated_at = ?
+                            WHERE mode = 'Sea' AND dest_cleared_to_fc_days = 1`).run(new Date().toISOString());
+      db.prepare(`INSERT INTO consignment_rules (client_id, facility, mode, packing_list_offset_days, origin_cleared_offset_days,
+                    departed_offset_days, arrived_to_dest_cleared_days, dest_cleared_to_fc_days, default_transit_days, updated_at)
+                  VALUES ('__destfc3__', '__migration__', 'Sea', 0, 0, 0, 0, 3, NULL, ?)`).run(new Date().toISOString());
+      console.log(`[consignments] clearance → FC gap set to 3 days on ${r.changes} saved sea rule(s)`);
+      global.__cgReplanOpen = true;
+    }
+  } catch (e) { console.warn('[consignments] destFc migration:', e.message); }
+
   // ── Where the movement runs ──
   // Sea ports come from tracking (port of loading / port of discharge) the first time the
   // shipment is reported, and transshipment ports from the transshipment events. Nobody types
@@ -220,7 +234,9 @@ module.exports = function mountConsignments(deps) {
   const DEFAULT_RULES = {
     // Sea: offsets forward from the Monday of the execution week. Packing Friday (+4),
     // cleared the Monday after (+7), departs Wednesday (+9). A rhythm, not an estimate.
-    Sea: { packing: 4, cleared: 7, departed: 9, arrDest: 2, destFc: 1, transit: 28 },
+    // Destination cleared → FC receipt is three days (was one): the FC dock is booked after
+    // clearance, and one day was never what happened.
+    Sea: { packing: 4, cleared: 7, departed: 9, arrDest: 2, destFc: 3, transit: 28 },
     // Air: offsets BACKWARD from the flight. Cleared the day before, packing list the day
     // before that. Departure is entered rather than derived, because it moves.
     Air: { beforeDeparture: { cleared: 1, packing: 2 }, arrDest: 1, destFc: 1, transit: 2 },
@@ -2092,6 +2108,21 @@ module.exports = function mountConsignments(deps) {
   });
 
   console.log('[consignments] model v1 mounted');
+  // Re-plan every open sea consignment once after the rule change, so the stored planned
+  // dates the worklist and alerts read match what the screen now calculates.
+  if (global.__cgReplanOpen) {
+    try {
+      const open = db.prepare(`SELECT c.consignment_uid FROM consignment c
+                                WHERE c.mode = 'Sea' AND c.status != 'closed' AND NOT EXISTS (
+                                  SELECT 1 FROM consignment_milestone m WHERE m.consignment_uid = c.consignment_uid
+                                    AND m.stage = 'fc_receipt' AND m.actual_at IS NOT NULL)`).all();
+      let n = 0;
+      for (const r of open) { try { refreshPlanned(r.consignment_uid); n++; } catch (_) {} }
+      console.log(`[consignments] re-planned ${n} open sea consignment(s) for the 3-day clearance → FC gap`);
+    } catch (e) { console.warn('[consignments] re-plan after destFc change:', e.message); }
+    global.__cgReplanOpen = false;
+  }
+
   router._internals = { computePlanned, refreshPlanned, shape, STAGES, DEFAULT_RULES, rulesFor, migrateWeek, clearLegacy,
     logEstimate, recordPorts, addViaPort, routeOf, statusOf, contentsFor, originFor, pulseTransit, weekFacts, verifySummary, plainSummary };
   return router;
