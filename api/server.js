@@ -21495,6 +21495,15 @@ app.listen(PORT, () => {
         },
         logger: console,
       });
+      // A failed run is written to the same log as a successful one, so "did it go?" has an
+      // answer in Pinpoint either way. Before this, a failure left no row at all.
+      wiring.logFailure = (row) => {
+        try {
+          db.prepare(`INSERT INTO email_send_log (kind, week_start, subject, trigger_source, status, error, sent_at)
+                      VALUES (?,?,?,?,?,?,?)`).run('weekly_general', row.week_start || null,
+            'Weekly reports — failed', 'cron', 'failed', String(row.error || '').slice(0, 1000), new Date().toISOString());
+        } catch (e) { console.warn('[weekly] could not log the failure:', e.message); }
+      };
 
       const job = require('./weekly_report_job')(Object.assign({}, wiring, {
         tz: process.env.WEEKLY_REPORT_TZ || 'America/Chicago',
@@ -21548,6 +21557,41 @@ app.listen(PORT, () => {
           });
         }
       });
+      // GET /weekly/status — what the job is set to do, the last sends and failures, and what is due.
+      app.get('/weekly/status', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+        try {
+          const rows = db.prepare(`SELECT sent_at, week_start, subject, trigger_source, to_internal, status, error, resend_message_id
+                                     FROM email_send_log WHERE kind = 'weekly_general' ORDER BY id DESC LIMIT 12`).all();
+          const lastOk = rows.find(r => r.status === 'success') || null;
+          const due = job.reportingWeek(new Date());
+          res.json({ ok: true,
+            enabled: true, dry_run: String(process.env.WEEKLY_REPORT_DRY_RUN || '').toLowerCase() === 'true',
+            schedule: { dow: Number(process.env.WEEKLY_REPORT_DOW || 0), hour: Number(process.env.WEEKLY_REPORT_HOUR || 13), tz: process.env.WEEKLY_REPORT_TZ || 'America/Chicago' },
+            recipients: { to: to.length, cc: cc.length, ops },
+            current_reporting_week: due, last_sent_week: lastOk ? lastOk.week_start : null,
+            sent_this_week: !!(lastOk && lastOk.week_start === due),
+            history: rows });
+        } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
+      });
+
+      // POST /weekly/run { week?, force? } — send the week by hand. Refuses a week already sent
+      // unless force is set, so a double send takes a deliberate choice.
+      app.post('/weekly/run', authenticateRequest, requireRole(['admin']), requireInternalOrg, auditLog('weekly_run'), async (req, res) => {
+        const b = req.body || {};
+        const wk = /^\d{4}-\d{2}-\d{2}$/.test(String(b.week || '')) ? String(b.week) : job.reportingWeek(new Date());
+        try {
+          const already = db.prepare(`SELECT sent_at FROM email_send_log WHERE kind = 'weekly_general' AND status = 'success' AND week_start = ? ORDER BY id DESC LIMIT 1`).get(wk);
+          if (already && !b.force) return res.status(409).json({ ok: false, error: 'already_sent', message: `Week ${wk} was sent ${already.sent_at}. Send again only with force.`, sent_at: already.sent_at });
+          const out = await job.run({ weekStart: wk, to, cc, ops, dryRun: !!b.dryRun, trigger: 'manual' });
+          res.json({ ok: true, week_start: out.weekStart, subject: out.subject, sent: !b.dryRun, dry_run: !!b.dryRun,
+            attachments: out.attachments.map(a => a.name), narrative_source: out.narrative_source, push: out.push });
+        } catch (e) {
+          console.error('[weekly] manual run failed:', e.message);
+          try { wiring.logFailure({ week_start: wk, error: String(e.message || e) }); } catch (_) {}
+          res.status(500).json({ ok: false, error: String(e.message || e) });
+        }
+      });
+
       job.start({ to, cc, ops, dryRun: String(process.env.WEEKLY_REPORT_DRY_RUN || '').toLowerCase() === 'true' });
       global.__weeklyJob = job;      // so a run can be triggered by hand from the console
     } catch (e) {

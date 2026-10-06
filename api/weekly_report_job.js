@@ -271,6 +271,7 @@ module.exports = function createWeeklyReportJob(deps) {
     }
 
     const apo = await buildApo(weekStart);
+    const omitted = [];     // reports with nothing to report this week — named in the email, not attached
     const attachments = [
       { name: workbook.filename, content: workbook.buffer, label: 'Pinpoint report' },
       { name: apo.filename, content: Buffer.from(apo.csv, 'utf8'), label: 'Advanced PO' },
@@ -286,6 +287,7 @@ module.exports = function createWeeklyReportJob(deps) {
     ]) {
       if (!fn) continue;
       const out = await fn();
+      if (out && out.none) { omitted.push({ label, note: out.note || 'Nothing to report this week' }); continue; }
       if (attachments.some(a => a.name === out.filename)) continue;   // never the same file twice
       attachments.push({ name: out.filename, content: out.buffer, label });
     }
@@ -321,6 +323,7 @@ module.exports = function createWeeklyReportJob(deps) {
     const narrative = await narrativeFor(figures);
     const counts = {};
     for (const a of attachments) counts[a.label] = a.name;
+    for (const o of omitted) counts[o.label] = o.note;
 
     const { subject, html, text } = renderEmail({
       weekStart, narrative, figures, freight: figures.freight || [], push, counts,
@@ -422,6 +425,7 @@ module.exports = function createWeeklyReportJob(deps) {
         await run(Object.assign({}, opts, { trigger: 'cron', at }));
       } catch (e) {
         log.error('[weekly] run failed:', e.message);
+        if (typeof deps.logFailure === 'function') { try { deps.logFailure({ week_start: reportingWeek(now()), error: String(e.message || e) }); } catch (_) {} }
         if (opts.ops && opts.ops.length) {
           try {
             await sendMail({ to: opts.ops, subject: '[failed] Weekly reports did not send',

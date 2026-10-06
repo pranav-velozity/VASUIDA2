@@ -120,7 +120,17 @@ module.exports = function createWiring(deps) {
     const cost = !!(opts && opts.cost);
     const q = `/report/supplier-discrepancy.xlsx?week=${encodeURIComponent(ws)}`
       + (cost ? `&cost=1&password=${encodeURIComponent(discrepancyPassword())}` : '');
-    const buf = await internal.buffer(q);
+    let buf;
+    try {
+      buf = await internal.buffer(q);
+    } catch (e) {
+      // A week with nothing to report is not a failure. The report endpoint answers 409
+      // no_data; the email says so in words and the other five attachments still go.
+      if (/-> 409 /.test(String(e.message || '')) && /no_data/.test(String(e.message || ''))) {
+        return { none: true, note: `No discrepancies recorded for week ${ws}` };
+      }
+      throw e;
+    }
     return { buffer: buf, filename: `Supplier_Discrepancy_${ws}${cost ? '_costed' : ''}.xlsx` };
   }
 
