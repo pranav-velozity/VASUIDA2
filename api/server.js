@@ -923,7 +923,14 @@ function tenancyResolve(orgId, clerkRole) {
     out.facility_codes = db.prepare('SELECT facility_code FROM org_facility WHERE clerk_org_id=?').all(orgId).map(r => r.facility_code);
     if (out.facility_codes.length) {
       const ph = out.facility_codes.map(() => '?').join(',');
-      out.client_ids = db.prepare(`SELECT DISTINCT client_id FROM client_facility WHERE facility_code IN (${ph})`).all(...out.facility_codes).map(r => r.client_id);
+      // A partner works at a facility for the clients served there — not for VelOzity's own
+      // house client, which is linked to every facility so internal staff see everything.
+      // Counting the house client made Kerry Shenzhen resolve to two clients and tripped the
+      // "which client?" refusal on every request.
+      out.client_ids = db.prepare(`SELECT DISTINCT cf.client_id FROM client_facility cf
+                                     JOIN client c ON c.id = cf.client_id
+                                    WHERE cf.facility_code IN (${ph}) AND c.kind != 'internal' AND c.active = 1`)
+        .all(...out.facility_codes).map(r => r.client_id);
     }
   }
 
