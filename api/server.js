@@ -12057,6 +12057,17 @@ const iconicPublisher = require('./iconic_publish')({
   logPush: _iconicLogSafe, alert: _iconicAlert,
 });
 
+// ── Project Elevate: THE ICONIC's daily FF tracker ──
+// The client's tracker rebuilt from Pinpoint every day: workbook by email, CSV to their
+// SFTP, and a sheet of what changed since the last send. 23:00 Sydney via the hourly poke
+// at POST /elevate/run (same lane secret as the other scheduled jobs), or by hand from
+// Transit Movements → Daily tracker. Mounted here because it publishes through the same
+// SFTP client as the Advanced PO.
+app.use('/elevate', require('./elevate_routes')({
+  express, db, authenticateRequest, requireRole, auditLog, curClient,
+  sendViaResend, iconicPublisher, ExcelJS, logger: console,
+}));
+
 app.post('/iconic/publish',
   authenticateRequest,
   requireRole(['admin']),
