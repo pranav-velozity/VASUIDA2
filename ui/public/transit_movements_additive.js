@@ -23,7 +23,7 @@
   'use strict';
   if (window.__TM_LOADED__) return;
   window.__TM_LOADED__ = true;
-  const TM_VERSION = '19';
+  const TM_VERSION = '20';
 
   // ── Palette (Pinpoint status colours) ──
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
@@ -1950,7 +1950,11 @@
 
   // ════ Render ════
   function render() {
-    if (!S.root) return;
+    // No page root means this page was never shown — but the movement panel can be open on
+    // top of another page (the daily client tracker opens it). Its actions all end here, so
+    // the overlays are still repainted; otherwise close, confirm and amend write their data
+    // and the panel never moves.
+    if (!S.root) { if (S.board) { try { renderOverlays(model()); } catch (_) {} } return; }
     if (S.view == null) S.view = 'map';          // one view for everyone; Routes a click away
     if (S.error && !S.board) {
       S.root.innerHTML = `<div class="tm-card" style="padding:28px;display:flex;flex-direction:column;gap:12px;align-items:flex-start">
@@ -2377,6 +2381,31 @@
     if (pg) { pg.classList.add('hidden'); pg.style.display = 'none'; }
     // Overlays live on <body>; they must not outlive the page.
     S.panel = null; S.sheet = null; S.notify = null; S.full = false; S.corrMore = false; S.report = null;
+    const ov = document.getElementById('tm-overlay'); if (ov) ov.innerHTML = '';
+    document.documentElement.style.overflow = '';
+  };
+
+  // ── Opened from another page (the daily client tracker) ──
+  // The movement panel renders into the body overlay with its own bindings, so it works
+  // wherever it is opened from. What it needs is a loaded board and a selected movement;
+  // what the caller owes it is a close when that page goes away — the overlay cannot know.
+  window.__openMovementPanel = async function (ref) {
+    styles();   // normally injected by mount(); without it the panel renders inline, unstyled
+    if (!S.board) { try { await load({ quiet: true }); } catch (_) {} }
+    if (!S.board) return false;
+    const M = model();
+    const r = String(ref || '').trim().toLowerCase();
+    const m = M.all.find(x => x.uid === ref)
+      || M.all.find(x => String(x.c.reference || '').trim().toLowerCase() === r)
+      || M.all.find(x => String(x.c.mbl || '').trim().toLowerCase() === r);
+    if (!m) return false;
+    S.sel = m.uid; S.panel = 'mv'; S.amend = null; S.legacy = null; S.corrMore = false;
+    renderOverlays(M);
+    return true;
+  };
+  window.__closeMovementPanel = function () {
+    if (!S.panel && !S.sheet && !S.notify && !S.full && !S.report) return;
+    S.panel = null; S.sheet = null; S.notify = null; S.full = false; S.corrMore = false; S.report = null; S.amend = null; S.legacy = null;
     const ov = document.getElementById('tm-overlay'); if (ov) ov.innerHTML = '';
     document.documentElement.style.overflow = '';
   };

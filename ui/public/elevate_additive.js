@@ -18,7 +18,7 @@
   'use strict';
   if (window.__ELEVATE_LOADED__) return;
   window.__ELEVATE_LOADED__ = true;
-  const VERSION = '5';
+  const VERSION = '6';
 
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
   const GREEN = '#C7EA46', AMBER = '#F5BD25', RED = '#990033', BLUE = '#1E9BD7', PURPLE = '#7C5CBF', GREY = '#8A8A8A';
@@ -70,7 +70,8 @@
   // ── State ──
   const S = { root: null, data: null, loading: false, error: null, loadedAt: 0, timer: null,
               confirm: false, sending: false, result: null, saving: {},
-              q: '', filter: 'all', sort: { key: 'ex_factory', dir: 1 }, pulsed: new Set(), posOpen: new Set() };
+              q: '', filter: 'all', sort: { key: 'ex_factory', dir: 1 }, pulsed: new Set(), posOpen: new Set(),
+              notesOpen: new Set(), panelFor: null, panelWatch: null };
 
   // ── Styles ──
   function styles() {
@@ -140,7 +141,17 @@
 .el-leg{display:inline-flex;align-items:center;gap:6px}
 .el-leg .bar{display:inline-block;width:3px;height:12px;border-radius:2px}
 .el-leg .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:${RED}}
-.el-notes{white-space:normal !important;min-width:320px;max-width:360px;position:sticky;right:0;z-index:2;background:#fff;box-shadow:-4px 0 6px -4px rgba(0,0,0,.12)}
+.el-notes{white-space:normal !important;min-width:200px;max-width:220px;position:sticky;right:0;z-index:2;background:#fff;box-shadow:-4px 0 6px -4px rgba(0,0,0,.12);cursor:pointer}
+.el-notes.open{min-width:320px;max-width:340px;cursor:default}
+.el-sum{display:flex;flex-direction:column;gap:3px}
+.el-sum .l{font-size:12px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.el-sum .l b{font-weight:600}
+.el-sum .m{font-size:11px;color:${MUTED}}
+.el-sum .m .has{color:${INK};font-weight:500}
+.el-collapse{background:none;border:0;padding:0;font-size:11px;color:${MUTED};text-decoration:underline;text-underline-offset:3px;margin-bottom:6px;display:block}
+.el-link{color:${INK};text-decoration:underline;text-decoration-color:#B8B8B4;text-underline-offset:3px;cursor:pointer;background:none;border:0;padding:0;font:inherit}
+.el-link:hover{text-decoration-color:${INK}}
+.el-flash{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:${INK};color:#fff;font-size:12.5px;padding:9px 14px;border-radius:8px;z-index:2147483000;box-shadow:0 6px 20px rgba(0,0,0,.18)}
 .el-table th.el-notes{z-index:4}
 .el-table tr:hover td.el-notes{background:#FAFAF8}
 .el-ctx{font-size:12px;color:#48484A;line-height:1.4;margin-bottom:3px}
@@ -339,6 +350,10 @@
       classes.push('num'); inner = v === '' || v == null ? '' : esc(v);
     } else if (EMPTY_K.has(key)) {
       classes.push('dim'); inner = v ? esc(v) : '—';
+    } else if ((key === 'mbl' || key === 'shipment') && v && (r.consignment_uids || []).length) {
+      // Opens the Transit Movements panel for this movement, where arrival is confirmed,
+      // dates amended, tracking caught up. An air split carries two uids; the first opens.
+      inner = `<button class="el-link" data-act="open" data-v="${esc(r.consignment_uids[0])}" title="Open the movement">${esc(v)}</button>`;
     } else {
       inner = esc(v);
     }
@@ -353,8 +368,18 @@
   }
 
   function notesCell(r, list) {
-    if (!list || !list.length) return `<td class="el-notes dim">—</td>`;
-    return `<td class="el-notes">${list.map(c => {
+    if (!list || !list.length) return `<td class="el-notes dim" style="cursor:default">—</td>`;
+    const rk = r.zendesk + '|' + r.transport;
+    if (!S.notesOpen.has(rk)) {
+      // Collapsed: one line per change, the fact only. Click to see the context and write.
+      const noted = list.filter(c => c.note).length;
+      return `<td class="el-notes" data-act="notes-open" data-v="${esc(rk)}" title="Click to see context and add a note">
+        <div class="el-sum">
+          ${list.slice(0, 2).map(c => `<div class="l"><b>${esc(c.label)}</b> ${c.old ? esc(val(c, 'old')) + ' → ' : ''}${esc(val(c, 'new')) || '—'}${c.anomaly ? ' <span class="el-flag">after delivery</span>' : ''}</div>`).join('')}
+          <div class="m">${list.length > 2 ? `+${list.length - 2} more · ` : ''}${noted ? `<span class="has">${noted} note${noted === 1 ? '' : 's'}</span>` : 'add a note'}</div>
+        </div></td>`;
+    }
+    return `<td class="el-notes open"><button class="el-collapse" data-act="notes-close" data-v="${esc(rk)}">collapse</button>${list.map(c => {
       const key = c.row_key + '::' + c.signature;
       const sv = S.saving[key];
       return `<div>
@@ -402,7 +427,7 @@
     </div>
   </div>
   ${rows.length ? `<div class="el-scroll"><table class="el-table">
-    <thead><tr>${fzHead}${shHead}<th class="el-notes">Context &amp; notes</th></tr></thead>
+    <thead><tr>${fzHead}${shHead}<th class="el-notes" style="cursor:default">Changes &amp; notes</th></tr></thead>
     <tbody>${body}</tbody></table></div>`
   : `<div class="el-empty">${S.q || S.filter !== 'all' ? 'Nothing matches.' : (d.last_sent ? 'No lines on the tracker yet.' : 'Nothing has departed since the start of the tracker window.')}</div>`}
 </div>`;
@@ -502,6 +527,52 @@
     await load({ quiet: true });
   }
 
+  // ── The movement panel, borrowed from Transit Movements ──
+  // It renders into a body overlay with its own bindings, so confirming an arrival or
+  // amending a date works from here exactly as it does there. Three things this page owes
+  // it: close it whenever this page goes away, refresh the row when it closes, and handle
+  // Escape — Transit Movements only listens for that while its own page is showing.
+  function flash(msg) {
+    let el = document.getElementById('el-flash');
+    if (!el) { el = document.createElement('div'); el.id = 'el-flash'; el.className = 'el-flash'; document.body.appendChild(el); }
+    el.textContent = msg; el.style.display = '';
+    clearTimeout(flash._t); flash._t = setTimeout(() => { el.style.display = 'none'; }, 2600);
+  }
+  async function openMovement(uid) {
+    if (typeof window.__openMovementPanel !== 'function') { flash('Transit Movements is still loading — try again in a moment.'); return; }
+    let ok = false;
+    try { ok = await window.__openMovementPanel(uid); } catch (_) { ok = false; }
+    if (!ok) { flash('Not on the Transit Movements board — delivered weeks drop off it.'); return; }
+    S.panelFor = uid;
+    watchPanel();
+  }
+  function closeMovement() {
+    if (typeof window.__closeMovementPanel === 'function') { try { window.__closeMovementPanel(); } catch (_) {} }
+    S.panelFor = null;
+    if (S.panelWatch) { S.panelWatch.disconnect(); S.panelWatch = null; }
+  }
+  function watchPanel() {
+    if (S.panelWatch) S.panelWatch.disconnect();
+    const ov = document.getElementById('tm-overlay');
+    if (!ov) return;
+    S.panelWatch = new MutationObserver(() => {
+      if (!S.panelFor) return;
+      if (!ov.querySelector('.tm-panel')) {
+        // Closed from inside — its own dim or close button. The row may have changed.
+        S.panelFor = null;
+        S.panelWatch.disconnect(); S.panelWatch = null;
+        load({ quiet: true });
+      }
+    });
+    S.panelWatch.observe(ov, { childList: true, subtree: true });
+  }
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape' || !S.panelFor) return;
+    const pg = document.getElementById('page-elevate');
+    if (!pg || pg.style.display === 'none') return;
+    closeMovement();
+  });
+
   // ── Events ──
   function bind(root) {
     root.addEventListener('click', (ev) => {
@@ -516,6 +587,9 @@
       else if (act === 'send-go') sendNow();
       else if (act === 'filter') { S.filter = b.getAttribute('data-v'); render(); }
       else if (act === 'pos') { const k = b.getAttribute('data-v'); if (S.posOpen.has(k)) S.posOpen.delete(k); else S.posOpen.add(k); render(); }
+      else if (act === 'notes-open') { S.notesOpen.add(b.getAttribute('data-v')); render(); }
+      else if (act === 'notes-close') { S.notesOpen.delete(b.getAttribute('data-v')); render(); }
+      else if (act === 'open') openMovement(b.getAttribute('data-v'));
       else if (act === 'sort') {
         const k = b.getAttribute('data-v');
         S.sort = S.sort.key === k ? { key: k, dir: -S.sort.dir } : { key: k, dir: 1 };
@@ -555,7 +629,7 @@
       const pg = document.getElementById('page-elevate');
       // Never refresh under someone's hands: a note being typed, or the send panel open.
       const ae = document.activeElement;
-      const busy = S.confirm || S.sending || (ae && ae.matches && (ae.matches('textarea.el-noteI') || ae.matches('input[data-search]')));
+      const busy = S.confirm || S.sending || S.panelFor || (ae && ae.matches && (ae.matches('textarea.el-noteI') || ae.matches('input[data-search]')));
       if (pg && pg.style.display !== 'none' && !document.hidden && !busy) load({ quiet: true });
     }, REFRESH_MS);
   }
@@ -583,6 +657,7 @@
     const pg = document.getElementById('page-elevate');
     if (pg) { pg.classList.add('hidden'); pg.style.display = 'none'; }
     S.confirm = false;
+    closeMovement();      // the borrowed panel lives on <body>; it must not outlive this page
   };
 
   // Transit Movements opens this through its report pills: openReport('__openElevate').
