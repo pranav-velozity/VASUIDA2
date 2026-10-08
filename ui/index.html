@@ -6486,7 +6486,8 @@ window.__openPrebookModal = function(){
 <script src="/public/lane_snapshot_additive.js?v=1" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 <!-- Transit Movements replaced the Live Map (map_live_additive.js is kept in the repo for rollback, not loaded). -->
-<script src="/public/transit_movements_additive.js?v=18" defer></script>
+<script src="/public/transit_movements_additive.js?v=19" defer></script>
+<script src="/public/elevate_additive.js?v=1" defer></script>
   <script src="/public/finance_additive.js?v=28" defer></script>
   <script src="/public/collaboration_additive.js?v=2" defer></script>
   <script src="/public/exec_pdf_additive.js?v=3" defer></script>
@@ -7111,7 +7112,7 @@ document.addEventListener('DOMContentLoaded', function(){
   // Helper: hide all pages
   function _pnHideAll(){
     // page-flow lives inside page-dashboard — hiding page-dashboard hides page-flow too
-    ['page-dashboard','page-intake','page-exec','page-receiving','page-reports','page-map','page-finance','page-d2d'].forEach(id=>{
+    ['page-dashboard','page-intake','page-exec','page-receiving','page-reports','page-map','page-finance','page-d2d','page-elevate'].forEach(id=>{
       const el=document.getElementById(id);
       if(el){el.classList.add('hidden');el.style.display='none';}
     });
@@ -7200,6 +7201,25 @@ document.addEventListener('DOMContentLoaded', function(){
         setTimeout(function(){ clearInterval(_mapInterval); }, 3000);
       }
       syncPinpointNav('#map');
+      return;
+    }
+    // ── Daily client tracker (route #elevate, page-elevate) — reached from Transit Movements ──
+    if(h==='#elevate'){
+      _pnHideAll();
+      if(typeof window.hideMapPage==='function') window.hideMapPage();
+      _pnSetHash('#elevate');
+      if(typeof window.showElevatePage==='function'){
+        window.showElevatePage();
+      } else {
+        var _elInterval = setInterval(function(){
+          if(typeof window.showElevatePage==='function'){
+            clearInterval(_elInterval);
+            window.showElevatePage();
+          }
+        }, 50);
+        setTimeout(function(){ clearInterval(_elInterval); }, 3000);
+      }
+      syncPinpointNav('#map');   // it belongs to Transit Movements in the nav
       return;
     }
 
