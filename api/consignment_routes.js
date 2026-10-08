@@ -234,13 +234,59 @@ module.exports = function mountConsignments(deps) {
   const DEFAULT_RULES = {
     // Sea: offsets forward from the Monday of the execution week. Packing Friday (+4),
     // cleared the Monday after (+7), departs Wednesday (+9). A rhythm, not an estimate.
-    // Destination cleared → FC receipt is three days (was one): the FC dock is booked after
-    // clearance, and one day was never what happened.
-    Sea: { packing: 4, cleared: 7, departed: 9, arrDest: 2, destFc: 3, transit: 28 },
+    // Destination cleared → FC receipt is four days: the FC dock is booked after clearance,
+    // and neither one day nor three was what happened.
+    //
+    // Transit 18 (was 28) and arrival → cleared 1 (was 2), set from what the lanes actually
+    // run. Monday to FC is now 32 days against the 34 the Advanced PO publishes to the
+    // client; it was 42, which had our own tracker disagreeing with our own PO by over a week.
+    Sea: { packing: 4, cleared: 7, departed: 9, arrDest: 1, destFc: 4, transit: 18 },
     // Air: offsets BACKWARD from the flight. Cleared the day before, packing list the day
     // before that. Departure is entered rather than derived, because it moves.
     Air: { beforeDeparture: { cleared: 1, packing: 2 }, arrDest: 1, destFc: 1, transit: 2 },
   };
+
+  // The sea figures these replaced, kept only so the migration below can recognise a stored
+  // rule nobody has deliberately changed. Never used for planning.
+  const SUPERSEDED_SEA = { arrDest: 2, destFc: 3, transit: 28 };
+
+  // ── Sea rule migration ──
+  // Rules live in a table, so changing the constant above does nothing for a client who has
+  // already saved a row. Rewrite only rows still carrying the superseded figures exactly; a
+  // row somebody edited is their decision and is left alone.
+  //
+  // Guarded by a sentinel in the same style as the destFc-3 migration above, and it runs the
+  // re-plan whether or not any stored row matched. That matters: a client with NO saved rule
+  // runs on DEFAULT_RULES, so nothing here changes, yet arrival → cleared (2 → 1) and cleared
+  // → FC (3 → 4) still move the landside planned dates of every open sea consignment — the
+  // carrier-quoted ones included, whose transit never moves. The screen recomputes live, but
+  // the worklist and the alerts read the stored planned_at, and those two would disagree.
+  try {
+    if (!db.prepare(`SELECT 1 x FROM consignment_rules
+                      WHERE facility = '__migration__' AND mode = 'Sea' AND client_id = '__sea1814__'`).get()) {
+      const r = db.prepare(`UPDATE consignment_rules
+                               SET arrived_to_dest_cleared_days = ?,
+                                   dest_cleared_to_fc_days      = ?,
+                                   default_transit_days         = ?,
+                                   updated_at                   = ?
+                             WHERE mode = 'Sea'
+                               AND arrived_to_dest_cleared_days = ?
+                               AND dest_cleared_to_fc_days = ?
+                               AND default_transit_days = ?`)
+        .run(DEFAULT_RULES.Sea.arrDest, DEFAULT_RULES.Sea.destFc, DEFAULT_RULES.Sea.transit,
+             new Date().toISOString(),
+             SUPERSEDED_SEA.arrDest, SUPERSEDED_SEA.destFc, SUPERSEDED_SEA.transit);
+      db.prepare(`INSERT INTO consignment_rules (client_id, facility, mode, packing_list_offset_days,
+                    origin_cleared_offset_days, departed_offset_days, arrived_to_dest_cleared_days,
+                    dest_cleared_to_fc_days, default_transit_days, updated_at)
+                  VALUES ('__sea1814__', '__migration__', 'Sea', 0, 0, 0, 0, 0, NULL, ?)`)
+        .run(new Date().toISOString());
+      console.log(`[consignments] sea rules moved to transit 18 / arr→cleared 1 / cleared→FC 4 on ${r.changes} saved row(s)`);
+      global.__cgReplanOpen = true;
+    }
+  } catch (e) {
+    console.warn('[consignments] sea rule migration skipped:', e.message);
+  }
 
   // CA1306/25SEP, SQ7823/23SEP — the flight date is in the reference. Read rather than asked
   // for again, since re-typing something already on screen is how it ends up wrong.
@@ -401,6 +447,99 @@ module.exports = function mountConsignments(deps) {
     }
   }
 
+  // ── The sea origin rhythm, recorded without asking ──
+  // Packing on the Friday and clearing the Monday after are a schedule this operation runs
+  // to, not events anybody observes or chases. Asking the team to tick them every week is
+  // precisely the unproductive entry the consignment model exists to end, and a tick nobody
+  // thought about is worth nothing in a report regardless.
+  //
+  // So for sea, once the planned day has passed, the stage records itself at that date.
+  // Four things keep that honest:
+  //
+  //   · never in advance. Recording a future date as fact is the original sin of the old
+  //     model — 157 departures with zero variance — and doing it here would repeat it.
+  //
+  //   · tagged `system:rhythm`, so a report can tell it apart from a person's confirmation
+  //     and never claims observed variance it does not have. Departure, arrival, clearance
+  //     and FC receipt are untouched: those are the legs that actually move.
+  //
+  //   · still editable. Anyone who knows packing ran late amends it and the amendment wins.
+  //     The sweep only ever acts on a stage still `assumed`, so it cannot overwrite a fact.
+  //
+  //   · in the ORIGIN's day, not UTC. Packing and clearing happen in China; left in UTC a
+  //     Friday packing records on the Saturday, which is how an on-time report goes quietly
+  //     wrong by a day.
+  const RHYTHM_STAGES = ['packing_list_ready', 'origin_cleared'];
+  const RHYTHM_USER = 'system:rhythm';
+  const RHYTHM_NOTE = 'Recorded from the sea origin rhythm, not observed. Amend if it ran differently.';
+  const RHYTHM_TZ = process.env.CONSIGNMENT_RHYTHM_TZ || 'Asia/Shanghai';
+
+  function rhythmToday() {
+    try {
+      return new Intl.DateTimeFormat('en-CA', { timeZone: RHYTHM_TZ,
+        year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    } catch (_) {
+      return new Date().toISOString().slice(0, 10);
+    }
+  }
+
+  function autoConfirmRhythm(uid) {
+    const c = db.prepare('SELECT * FROM consignment WHERE consignment_uid = ?').get(uid);
+    if (!c || c.mode !== 'Sea') return 0;
+
+    const today = rhythmToday();
+    const m = milestonesFor(uid);
+    const { planned } = computePlanned(c, m);
+    const now = new Date().toISOString();
+    let n = 0;
+
+    for (const stage of RHYTHM_STAGES) {
+      const existing = m[stage];
+      if (existing && existing.state !== 'assumed') continue;   // a fact is never overwritten
+      const day = planned[stage];
+      if (!day || day > today) continue;                        // not yet; never in advance
+      upsertMilestone.run({ uid, stage, planned: day, actual: day, state: 'confirmed',
+        user: RHYTHM_USER, detail: RHYTHM_NOTE, at: now });
+      n++;
+    }
+    return n;
+  }
+
+  // Run across the client's open sea consignments. Cheap, idempotent, and called on read
+  // because a consignment nobody opens still passes its Friday.
+  function sweepRhythm(client) {
+    try {
+      const rows = db.prepare(`SELECT consignment_uid FROM consignment
+                                WHERE client_id = ? AND mode = 'Sea' AND status != 'closed'`)
+        .all(client);
+      let n = 0;
+      for (const r of rows) n += autoConfirmRhythm(r.consignment_uid);
+      return n;
+    } catch (e) {
+      console.warn('[consignments] rhythm sweep skipped:', e.message);
+      return 0;
+    }
+  }
+
+  // ── Transit migration ──
+  // A consignment still carrying the superseded 28-day guess moves with the rule. A carrier
+  // quote never moves: transit_confirmed is the whole line between a guess and a promise,
+  // and baseline_transit_days is only ever set on the confirmed side of it.
+  try {
+    const pending = db.prepare(`SELECT consignment_uid FROM consignment
+                                 WHERE mode = 'Sea' AND transit_confirmed = 0
+                                   AND transit_days = ?`).all(SUPERSEDED_SEA.transit);
+    if (pending.length) {
+      db.prepare(`UPDATE consignment SET transit_days = ?
+                   WHERE mode = 'Sea' AND transit_confirmed = 0 AND transit_days = ?`)
+        .run(DEFAULT_RULES.Sea.transit, SUPERSEDED_SEA.transit);
+      for (const p of pending) refreshPlanned(p.consignment_uid);
+      console.log(`[consignments] ${pending.length} unquoted sea consignment(s) moved 28 → 18 days`);
+    }
+  } catch (e) {
+    console.warn('[consignments] transit migration skipped:', e.message);
+  }
+
   function shape(c) {
     const m = milestonesFor(c.consignment_uid);
     const { planned, departure_basis } = computePlanned(c, m);
@@ -427,6 +566,10 @@ module.exports = function mountConsignments(deps) {
           actual_at: row.actual_at || null,
           state: row.state || 'assumed',
           source_user: row.source_user || null,
+          // Recorded by the rhythm rather than by a person. Flagged explicitly so no screen
+          // or report has to string-match the user, and so "confirmed" can be shown for what
+          // it is: nobody looked, the schedule simply held.
+          auto: row.source_user === RHYTHM_USER,
           recorded_at: row.recorded_at || null,
         };
       }),
@@ -493,6 +636,7 @@ module.exports = function mountConsignments(deps) {
     try {
       const ws = String(req.query.week || '').trim();
       const client = curClient();
+      sweepRhythm(client);          // a consignment nobody opens still passed its Friday
       const rows = ws
         ? db.prepare(`SELECT * FROM consignment WHERE client_id = ? AND week_start = ?
                        ORDER BY mode, reference`).all(client, ws)
@@ -682,6 +826,8 @@ module.exports = function mountConsignments(deps) {
   router.get('/worklist', authenticateRequest, auditLog('view_consignment_worklist'), (req, res) => {
     try {
       const today = new Date().toISOString().slice(0, 10);
+      // Before deriving what needs a person, let the rhythm settle what does not.
+      sweepRhythm(curClient());
       const rows = db.prepare(`SELECT * FROM consignment WHERE client_id = ? AND status != 'closed'
                                 ORDER BY week_start DESC LIMIT 200`).all(curClient());
       const items = [];
@@ -1104,8 +1250,14 @@ module.exports = function mountConsignments(deps) {
     } catch (_) { /* no tracking on this deployment */ }
     for (const m of (milestones || [])) {
       if ((m.state === 'confirmed' || m.state === 'amended') && m.recorded_at && m.actual_at) {
-        out.push({ at: m.recorded_at, kind: 'confirmed', stage: m.stage, date: m.actual_at,
-                   text: `${STAGE_TEXT[m.stage]} ${m.state === 'amended' ? 'recorded' : 'confirmed'} for ${fmtDay(m.actual_at)}` });
+        // A rhythm stage says so. "Confirmed" in a timeline reads as a person having looked,
+        // and this feed is the one place someone goes to find out who said what.
+        const rhythm = m.source_user === RHYTHM_USER;
+        out.push({ at: m.recorded_at, kind: rhythm ? 'rhythm' : 'confirmed',
+                   stage: m.stage, date: m.actual_at,
+                   text: rhythm
+                     ? `${STAGE_TEXT[m.stage]} on the rhythm for ${fmtDay(m.actual_at)} — not observed`
+                     : `${STAGE_TEXT[m.stage]} ${m.state === 'amended' ? 'recorded' : 'confirmed'} for ${fmtDay(m.actual_at)}` });
       }
     }
     const seen = new Set();
@@ -2118,8 +2270,8 @@ module.exports = function mountConsignments(deps) {
                                     AND m.stage = 'fc_receipt' AND m.actual_at IS NOT NULL)`).all();
       let n = 0;
       for (const r of open) { try { refreshPlanned(r.consignment_uid); n++; } catch (_) {} }
-      console.log(`[consignments] re-planned ${n} open sea consignment(s) for the 3-day clearance → FC gap`);
-    } catch (e) { console.warn('[consignments] re-plan after destFc change:', e.message); }
+      console.log(`[consignments] re-planned ${n} open sea consignment(s) after a rule change`);
+    } catch (e) { console.warn('[consignments] re-plan after rule change:', e.message); }
     global.__cgReplanOpen = false;
   }
 
