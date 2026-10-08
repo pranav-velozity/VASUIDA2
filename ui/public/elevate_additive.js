@@ -18,7 +18,7 @@
   'use strict';
   if (window.__ELEVATE_LOADED__) return;
   window.__ELEVATE_LOADED__ = true;
-  const VERSION = '4';
+  const VERSION = '5';
 
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
   const GREEN = '#C7EA46', AMBER = '#F5BD25', RED = '#990033', BLUE = '#1E9BD7', PURPLE = '#7C5CBF', GREY = '#8A8A8A';
@@ -126,6 +126,7 @@
 .el-table tr:hover td.fz{background:#FAFAF8}
 .el-d{position:relative;padding-left:16px !important}
 .el-d::before{content:'';position:absolute;left:5px;top:7px;bottom:7px;width:3px;border-radius:2px;background:transparent}
+.el-d.ok::before{background:#7CB518}
 .el-d.fc{color:#2E6C8E}
 .el-d.fc::before{background:${BLUE}}
 .el-d.late{color:${RED}}
@@ -330,6 +331,9 @@
       } else if (forecast) {
         classes.push('fc');
         title = key === 'eta' ? `Forecast — ${esc(r.eta_basis || p)}.` : p === 'booked' ? 'Dock booked for this day; not yet delivered.' : 'Forecast from the plan.';
+      } else if (v) {
+        classes.push('ok');
+        title = 'Actual.';
       }
     } else if (NUM_K.has(key)) {
       classes.push('num'); inner = v === '' || v == null ? '' : esc(v);
@@ -392,7 +396,7 @@
     <div class="el-chips">${chip('all', 'All')}${chip('changed', 'Changed')}${chip('open', 'Open')}${chip('delivered', 'Delivered')}${counts.late ? chip('late', 'Late') : ''}${counts.attention ? chip('attention', 'Needs attention') : ''}</div>
     <div class="el-legend">
       <span class="el-leg"><span class="bar" style="background:${BLUE}"></span>forecast</span>
-      <span class="el-leg"><span class="bar" style="background:transparent;border-left:1px solid #C9C9C5"></span>actual</span>
+      <span class="el-leg"><span class="bar" style="background:#7CB518"></span>actual</span>
       <span class="el-leg"><span class="bar" style="background:${RED}"></span>later than promised</span>
       <span class="el-leg"><span class="dot"></span>changed since last send</span>
     </div>
@@ -427,7 +431,7 @@
       ${confirmPanel(d)}
       ${statsRow(d)}
       ${table(d)}
-      <div class="el-note">Sheet 1 is the tracker in THE ICONIC's layout, with context and notes in a final column after theirs. Sheet 2 lists the changes. The week column is on screen only — it would shift their column letters. Status is read off the dates every time; nothing here is stored except what was sent and the notes.</div>
+
     </div>`;
 
     if (typing) {
