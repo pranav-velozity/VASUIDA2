@@ -100,11 +100,7 @@
       for (const ms of (c.milestones || [])) {
         const cell = out.stages[ms.stage];
         if (!cell) continue;
-        // A rhythm-recorded sea stage is a schedule that held, not an observation. Counted as
-        // on-time it would put packing and origin clearance at 100% every week forever — a
-        // number that looks like performance and carries none. It belongs with the
-        // unconfirmed, because unobserved is exactly what it is.
-        if (ms.state === 'assumed' || ms.auto) { cell.unconfirmed++; out.unconfirmed++; continue; }
+        if (ms.state === 'assumed') { cell.unconfirmed++; out.unconfirmed++; continue; }
         out.recorded++;
         if (!ms.planned_at || !ms.actual_at) { cell.onTime++; continue; }
         const slip = Math.round(
