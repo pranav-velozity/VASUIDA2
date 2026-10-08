@@ -23,7 +23,7 @@
   'use strict';
   if (window.__TM_LOADED__) return;
   window.__TM_LOADED__ = true;
-  const TM_VERSION = '18';
+  const TM_VERSION = '19';
 
   // ── Palette (Pinpoint status colours) ──
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
@@ -634,6 +634,8 @@
     <nav aria-label="Related reports" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px">
       <span style="font-size:12px;color:${MUTED};margin-right:4px">Reports</span>
       ${rep('__openTransitHistory', 'Transit performance')}${rep('__openLastMileHistory', 'Last mile')}${rep('__openWeeklyHistory', 'Last 10 weeks')}
+      <span style="font-size:12px;color:${MUTED};margin:0 4px 0 10px">Client</span>
+      ${rep('__openElevate', 'Daily tracker')}
     </nav>
   </div>
   <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
