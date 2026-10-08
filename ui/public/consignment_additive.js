@@ -169,6 +169,8 @@
       .cg-ndate{font-family:ui-monospace,monospace;font-size:11px;}
       .cg-ndue{font-size:8.5px;font-weight:700;color:${LATE};text-transform:uppercase;letter-spacing:.05em;}
       .cg-namend{font-size:8.5px;font-weight:700;color:${WARN};text-transform:uppercase;letter-spacing:.05em;}
+      /* Quieter than 'amended' deliberately: a note on provenance, not a thing to act on. */
+      .cg-nauto{font-size:8.5px;font-weight:600;color:${LIGHT};text-transform:uppercase;letter-spacing:.05em;}
       .cg-node:hover .cg-dot{box-shadow:0 0 0 5px rgba(28,28,30,.07);}
 
       .cg-pop{margin-top:10px;background:#FAFAFB;border:.5px solid rgba(0,0,0,.08);
@@ -223,11 +225,16 @@
 
   const stageState = (ms) => {
     if (ms.state === 'amended') return 'amended';
+    // Recorded by the sea rhythm rather than by a person. Same ink, hollow dot: the stage
+    // genuinely is recorded, but a filled dot would say somebody looked and nobody did.
+    if (ms.auto && ms.state === 'confirmed') return 'auto';
     if (ms.state !== 'assumed') return 'done';
     if (ms.planned_at && ms.planned_at <= today()) return 'due';
     return 'future';
   };
-  const STATE_INK = { done: OK, amended: WARN, due: LATE, future: '#C7C7CC' };
+  const STATE_INK = { done: OK, auto: OK, amended: WARN, due: LATE, future: '#C7C7CC' };
+  const HOLLOW    = { auto: 1, future: 1 };     // drawn as an outline, not a filled dot
+  const RECORDED  = { done: 1, auto: 1, amended: 1 };  // has an actual_at worth showing
 
   // Where it has actually got to. The last stage recorded, not the next one pending: a tile
   // should say what is true before it says what is expected.
@@ -251,8 +258,8 @@
           const is = ms.stage === activeStage;
           return `
             <button class="cg-sdot" data-open="${esc(c.consignment_uid)}" data-stage="${esc(ms.stage)}"
-              title="${esc(STAGE_LABEL[ms.stage])} — ${esc(day(st === 'done' || st === 'amended' ? ms.actual_at : ms.planned_at))}"
-              style="background:${st === 'future' ? '#fff' : ink};border-color:${ink};
+              title="${esc(STAGE_LABEL[ms.stage])} — ${esc(day(RECORDED[st] ? ms.actual_at : ms.planned_at))}${st === 'auto' ? ' · on the rhythm, not observed' : ''}"
+              style="background:${HOLLOW[st] ? '#fff' : ink};border-color:${ink};
                      ${is ? 'transform:scale(1.35);' : ''}
                      ${st === 'due' ? 'box-shadow:0 0 0 3px rgba(153,0,51,.14);' : ''}"></button>`;
         }).join('')}
@@ -390,15 +397,16 @@
         ${c.milestones.map(ms => {
           const st = stageState(ms);
           const ink = STATE_INK[st];
-          const shown = (st === 'done' || st === 'amended') ? ms.actual_at : ms.planned_at;
+          const shown = RECORDED[st] ? ms.actual_at : ms.planned_at;
           return `
             <button class="cg-node" data-open="${esc(c.consignment_uid)}" data-stage="${esc(ms.stage)}">
-              <span class="cg-dot" style="background:${st === 'future' ? '#fff' : ink};border-color:${ink};
+              <span class="cg-dot" style="background:${HOLLOW[st] ? '#fff' : ink};border-color:${ink};
                     ${st === 'due' ? 'box-shadow:0 0 0 4px rgba(153,0,51,.12);' : ''}"></span>
               <span class="cg-nlabel" style="color:${st === 'future' ? LIGHT : DARK};">${esc(STAGE_LABEL[ms.stage])}</span>
               <span class="cg-ndate" style="color:${ink};">${esc(day(shown))}</span>
               ${st === 'due' ? '<span class="cg-ndue">due</span>' : ''}
               ${st === 'amended' ? '<span class="cg-namend">amended</span>' : ''}
+              ${st === 'auto' ? '<span class="cg-nauto" title="Recorded from the sea rhythm. Nobody observed it — amend if it ran differently.">rhythm</span>' : ''}
             </button>`;
         }).join('')}
       </div>`;
@@ -406,15 +414,27 @@
 
   function stagePopover(c, ms) {
     const st = stageState(ms);
-    const done = st === 'done' || st === 'amended';
+    const done = !!RECORDED[st];
     return `
       <div class="cg-pop">
         <div class="cg-poph">${esc(STAGE_LABEL[ms.stage])} &middot; ${esc(c.reference || 'not advised')}</div>
-        <div class="cg-pops">${done
+        <div class="cg-pops">${
+          st === 'auto'
+            ? `Recorded as <b>${esc(day(ms.actual_at))}</b> from the sea rhythm — nobody observed it.
+               Give the real day below if it ran differently.`
+            : done
           ? `Recorded as <b>${esc(day(ms.actual_at))}</b> (${esc(ms.state)}). Planned ${esc(day(ms.planned_at))}.`
           : `Planned for <b>${esc(day(ms.planned_at))}</b>. Nothing recorded yet.`}</div>
         <div class="cg-popact">
-          ${done
+          ${st === 'auto'
+            // Amend only. There is no Undo here on purpose: clearing a rhythm stage returns
+            // it to `assumed`, and the next sweep records it again — a button that undoes
+            // nothing is worse than no button. Correcting the date is the real action.
+            ? `<input class="cg-when" type="date" data-amend="${esc(c.consignment_uid)}"
+                      data-stage="${esc(ms.stage)}" value="${esc(ms.actual_at || ms.planned_at || '')}"
+                      title="Give the day it actually ran">
+               <span class="cg-or">it ran on a different day</span>`
+            : done
             ? `<button class="cg-btn ghost" data-clear="${esc(c.consignment_uid)}" data-stage="${esc(ms.stage)}">Undo</button>`
             : `<button class="cg-btn" data-ok="${esc(c.consignment_uid)}" data-stage="${esc(ms.stage)}"
                  ${ms.planned_at ? '' : 'disabled'}>Happened on plan</button>
