@@ -229,19 +229,33 @@ module.exports = function mountElevate(deps) {
   // Last mile lives in flow_week.data.lastmile_receipts, keyed by container_uid, which is the
   // container number — the consignment's reference.
   const _flowCache = new Map();
+  // The consignment's reference is Manage Containers' container_id; Last Mile keys its
+  // bookings by container_uid. Usually the same string, not always — server.js looks up by
+  // both, and so does this. The uid is found through the week's container list.
   function lastMileFor(facility, ws, reference) {
     if (!reference) return {};
     const k = facility + '|' + ws;
     if (!_flowCache.has(k)) {
-      let map = {};
+      let map = {}, uidOf = {};
       try {
         const r = db.prepare('SELECT data FROM flow_week WHERE facility = ? AND week_start = ?').get(facility, ws);
-        if (r) { const d = JSON.parse(r.data); if (d && d.lastmile_receipts && typeof d.lastmile_receipts === 'object') map = d.lastmile_receipts; }
+        if (r) {
+          const d = JSON.parse(r.data) || {};
+          if (d.lastmile_receipts && typeof d.lastmile_receipts === 'object') map = d.lastmile_receipts;
+          const wc = d.intl_weekcontainers;
+          const list = Array.isArray(wc) ? wc : (Array.isArray(wc && wc.containers) ? wc.containers : []);
+          for (const c of list) {
+            const id = String(c.container_id || c.container || '').trim();
+            const uid = String(c.container_uid || c.uid || '').trim();
+            if (id && uid) uidOf[id] = uid;
+          }
+        }
       } catch (_) {}
-      _flowCache.set(k, map);
+      _flowCache.set(k, { map, uidOf });
     }
-    const m = _flowCache.get(k);
-    return m[reference] || m[String(reference).trim()] || {};
+    const { map, uidOf } = _flowCache.get(k);
+    const ref = String(reference).trim();
+    return map[ref] || (uidOf[ref] && map[uidOf[ref]]) || {};
   }
 
   // ── Assemble: every consignment that has departed, one row per Zendesk per transport ──
@@ -305,11 +319,12 @@ module.exports = function mountElevate(deps) {
           origin_country: 'China',
           origin_city: originCity(c.facility),
           rolling_dw: '',
-          // provenance, for the change context — never written to the sheet
+          // provenance, for the change context and the screen — never written to the sheet
           _eta_actual: !!arrived, _delivery_actual: !!delivered, _delivered_on: delivered,
           _eta_source: arrived ? 'confirmed' : (c.carrier_eta ? 'carrier' : 'plan'),
           _delivery_source: delivered ? 'confirmed' : (booked ? 'booked' : 'plan'),
           _consignments: [c.reference || c.consignment_uid],
+          _week: isoWeek(c.week_start),
         };
 
         // A Zendesk on two consignments of the same mode (the rare air split): earliest ETD,
@@ -328,6 +343,8 @@ module.exports = function mountElevate(deps) {
         have.weight_kg = (have.weight_kg || 0) + (piece.weight_kg || 0) || null;
         have._eta_actual = have._eta_actual && piece._eta_actual;
         have._delivery_actual = have._delivery_actual && piece._delivery_actual;
+        if (!have._eta_actual && piece._eta_source === 'plan') have._eta_source = 'plan';
+        if (!have._delivery_actual && piece._delivery_source === 'plan') have._delivery_source = 'plan';
         have._consignments.push(...piece._consignments);
       }
     }
@@ -356,6 +373,21 @@ module.exports = function mountElevate(deps) {
       o[col.key] = v == null ? '' : v;
     }
     return o;
+  }
+
+  // What the page gets: the sheet's columns, plus the week and where each date came from.
+  // Neither of the extras is in the file — the week would shift THE ICONIC's column letters,
+  // and provenance is what the colour on screen says, not a thing the client needs in a cell.
+  function screenRow(r) {
+    return Object.assign(publicRow(r), {
+      ex_week: r._week ? `W${r._week}` : '',
+      prov: {
+        handover: r.handover ? 'actual' : '',
+        etd: 'actual',
+        eta: r._eta_actual ? 'actual' : (r._eta_source === 'carrier' ? 'carrier' : 'plan'),
+        delivery: r._delivery_actual ? 'actual' : (r._delivery_source === 'booked' ? 'booked' : 'plan'),
+      },
+    });
   }
 
   // ── Snapshots ──
@@ -472,23 +504,34 @@ module.exports = function mountElevate(deps) {
     wb.creator = 'VelOzity Pinpoint';
     wb.created = new Date();
 
+    // Notes per row for column AC: every change on the row since the last send, context
+    // and note together. AC sits after their last column, so their letters do not move.
+    const noteFor = new Map();
+    for (const c of changes) {
+      const bits = [c.context, c.note].filter(Boolean).join(' ');
+      if (!bits) continue;
+      noteFor.set(c.row_key, (noteFor.get(c.row_key) ? noteFor.get(c.row_key) + '\n' : '') + `${c.label}: ${bits}`);
+    }
+
     const ws = wb.addWorksheet('VOZ FF Tracker', { views: [{ state: 'frozen', ySplit: 3 }] });
-    ws.addRow(COLUMNS.map(c => c.band));
+    ws.addRow([...COLUMNS.map(c => c.band), 'VELOZITY']);
     ws.addRow([]);
-    const head = ws.addRow(COLUMNS.map(c => c.head));
+    const head = ws.addRow([...COLUMNS.map(c => c.head), 'VelOzity notes']);
     head.font = { bold: true };
     head.alignment = { wrapText: true, vertical: 'middle' };
     ws.getRow(1).font = { bold: true, color: { argb: 'FF6E6E73' }, size: 9 };
     for (const r of rows) {
       const p = publicRow(r);
-      const line = ws.addRow(COLUMNS.map(c => {
+      const line = ws.addRow([...COLUMNS.map(c => {
         const v = p[c.key];
         if (DATE_KEYS.has(c.key)) return v ? new Date(v + 'T00:00:00Z') : null;
         if (NUM_KEYS.has(c.key)) return v === '' ? null : Number(v);
         return v;
-      }));
+      }), noteFor.get(r.row_key) || '']);
       line.getCell(9).alignment = { wrapText: true, vertical: 'top' };   // PO #
+      line.getCell(COLUMNS.length + 1).alignment = { wrapText: true, vertical: 'top' };
     }
+    ws.getColumn(COLUMNS.length + 1).width = 48;
     COLUMNS.forEach((c, i) => {
       const col = ws.getColumn(i + 1);
       if (DATE_KEYS.has(c.key)) { col.numFmt = 'dd/mm/yyyy'; col.width = 12; }
@@ -653,7 +696,7 @@ module.exports = function mountElevate(deps) {
       const changes = diff(client, rows, last);
       const p = localParts();
       const forDate = p.h >= SEND_HOUR ? p.date : addDays(p.date, -1);
-      res.json({ ok: true, rows: rows.map(publicRow), changes, stats: stats(rows, changes),
+      res.json({ ok: true, rows: rows.map(screenRow), changes, stats: stats(rows, changes),
         last_sent: last ? { at: last.snapshot.taken_at, for_date: last.snapshot.for_date, rows: last.snapshot.row_count,
                             changes: last.snapshot.change_count, sftp: last.snapshot.sftp_path, trigger: last.snapshot.trigger } : null,
         schedule: { zone: TZ, hour: SEND_HOUR, local_now: `${p.date} ${String(p.h).padStart(2, '0')}:00`,
