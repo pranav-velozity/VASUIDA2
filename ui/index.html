@@ -602,7 +602,7 @@ window.__clerkOnLoad = function() {
         </span>
       </span>
       <a class="pn-nav-item" href="#exec" id="nav-exec" onclick="event.preventDefault();window.show('#exec')">Executive</a>
-      <a class="pn-nav-item" href="#map" id="nav-map" onclick="event.preventDefault();window.show('#map')">Transit Movements</a>
+      <a class="pn-nav-item" href="#map" id="nav-map" onclick="event.preventDefault();window.show('#map')">Live Map</a>
       <a class="pn-nav-item" href="#d2d" id="nav-d2d" style="display:none;" onclick="event.preventDefault();window.show('#d2d')">Shipments</a>
       <a class="pn-nav-item" href="#reports" id="nav-reports" onclick="event.preventDefault();window.show('#reports')">Reports &amp; Downloads</a>
       <a class="pn-nav-item" href="#finance" id="nav-finance" onclick="event.preventDefault();window.show('#finance')" style="display:none;">Finance</a>
@@ -6485,8 +6485,7 @@ window.__openPrebookModal = function(){
 <script src="/public/flow_live_additive.js?v=130" defer></script>
 <script src="/public/lane_snapshot_additive.js?v=1" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
-<!-- Transit Movements replaced the Live Map (map_live_additive.js is kept in the repo for rollback, not loaded). -->
-<script src="/public/transit_movements_additive.js?v=18" defer></script>
+<script src="/public/map_live_additive.js?v=3" defer></script>
   <script src="/public/finance_additive.js?v=28" defer></script>
   <script src="/public/collaboration_additive.js?v=2" defer></script>
   <script src="/public/exec_pdf_additive.js?v=3" defer></script>
@@ -6512,13 +6511,13 @@ window.__openPrebookModal = function(){
   <script src="/public/ehp_ops_additive.js?v=30" defer></script>
   <script src="/public/ehp_geo_additive.js?v=10" defer></script>
   <script src="/public/air_quotes_additive.js?v=19" defer></script>
-  <script src="/public/pulse_toggle_additive.js?v=3" defer></script>
+  <script src="/public/pulse_toggle_additive.js?v=2" defer></script>
   <script src="/public/air_quotes_internal_additive.js?v=20" defer></script>
   <script src="/public/supplier_invoices_additive.js?v=4" defer></script>
   <script src="/public/dept_owners_additive.js?v=1" defer></script>
   <script src="/public/tile_polish_additive.js?v=3" defer></script>
-    <script src="/public/transit_history_additive.js?v=2"></script>
-    <script src="/public/consignment_additive.js?v=15"></script>
+    <script src="/public/transit_history_additive.js?v=3"></script>
+    <script src="/public/consignment_additive.js?v=16"></script>
     <script src="/public/report_builder.js?v=1"></script>
     <script src="/public/apo_builder.js?v=1"></script>
   <script src="/public/weekly_history_additive.js?v=3" defer></script>
@@ -6853,36 +6852,13 @@ document.addEventListener('keydown',function(e){
 });
 
 // ── Pulse: add message to chat ──
-// Pulse replies are text, not HTML. They were inserted raw, so the model's **bold** showed
-// as asterisks — and anything HTML-like in a question, a supplier name or a reply would have
-// run as markup. Everything is escaped first; replies then get a small, safe set of
-// formatting: **bold**, "- " bullets, line breaks and paragraphs. Nothing else.
-function pulseFormat(text, role){
-  var s = String(text == null ? '' : text)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  if (role === 'user') return s.replace(/\n/g,'<br>');
-  s = s.replace(/^\s*#{1,6}\s*/gm, '');                                   // stray headings
-  s = s.replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>');           // **bold**
-  s = s.replace(/(^|[\s(])\*([^*\n]+?)\*(?=[\s).,;:!?]|$)/g, '$1$2');    // *italic* → plain
-  var out = [], para = [];
-  var flush = function(){ if (para.length) { out.push('<p style="margin:0 0 8px;">' + para.join('<br>') + '</p>'); para = []; } };
-  s.split('\n').forEach(function(line){
-    var t = line.trim();
-    if (!t) { flush(); return; }
-    var m = t.match(/^(?:[-•*]|\d+[.)])\s+(.*)$/);
-    if (m) { flush(); out.push('<div style="display:flex;gap:6px;margin:0 0 4px;"><span>•</span><span>' + m[1] + '</span></div>'); return; }
-    para.push(t);
-  });
-  flush();
-  return out.join('');
-}
 function pulseAddMessage(text, role){
   const chat = document.getElementById('pulse-chat');
   if(!chat) return;
   const from = role==='user' ? 'You' : 'Pulse';
   const div = document.createElement('div');
   div.className = 'pulse-msg ' + role;
-  div.innerHTML = '<div class="pulse-msg-from">'+from+'</div>'+pulseFormat(text, role);
+  div.innerHTML = '<div class="pulse-msg-from">'+from+'</div>'+text;
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
 }
@@ -7175,7 +7151,7 @@ document.addEventListener('DOMContentLoaded', function(){
       return;
     }
 
-    // ── Transit Movements (route #map, page-map) ──
+    // ── Live Map ──
     if(h==='#d2d'){
       _pnHideAll();
       _pnSetHash('#d2d');
