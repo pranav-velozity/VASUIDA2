@@ -18,7 +18,7 @@
   'use strict';
   if (window.__ELEVATE_LOADED__) return;
   window.__ELEVATE_LOADED__ = true;
-  const VERSION = '1';
+  const VERSION = '2';
 
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
   const GREEN = '#C7EA46', AMBER = '#F5BD25', RED = '#990033';
@@ -67,7 +67,8 @@
 
   // ── State ──
   const S = { root: null, data: null, loading: false, error: null, loadedAt: 0, timer: null,
-              showTracker: false, showDelivered: false, confirm: false, sending: false, result: null, saving: {} };
+              confirm: false, sending: false, result: null, saving: {},
+              q: '', filter: 'all', sort: { key: 'ex_factory', dir: 1 }, pulsed: new Set() };
 
   // ── Styles ──
   function styles() {
@@ -97,35 +98,56 @@
 .el-card{background:#fff;border:1px solid ${LINE};border-radius:12px;overflow:hidden}
 .el-cardh{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid ${LINE}}
 .el-h2{margin:0;font-size:15px;font-weight:600}
-.el-table{width:100%;border-collapse:collapse;font-size:13px}
-.el-table th{text-align:left;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:${MUTED};font-weight:500;padding:10px 12px;border-bottom:1px solid ${LINE};white-space:nowrap}
-.el-table td{padding:10px 12px;border-bottom:1px solid ${SOFT};vertical-align:top}
-.el-table tr:last-child td{border-bottom:0}
-.el-table td.num{text-align:right;font-variant-numeric:tabular-nums}
-.el-chip{display:inline-block;font-size:11px;font-weight:500;padding:2px 8px;border-radius:10px;background:${SOFT};color:${MUTED};white-space:nowrap}
-.el-was{color:${MUTED};text-decoration:line-through;text-decoration-color:#C9C9C5}
-.el-arrow{color:${MUTED};margin:0 6px}
-.el-now{font-weight:600}
-.el-ctx{font-size:12.5px;color:#48484A;line-height:1.4}
-.el-noteI{width:100%;border:1px solid transparent;background:${SOFT};border-radius:7px;padding:7px 9px;font-size:12.5px;line-height:1.35;resize:vertical;min-height:34px;outline:none}
+.el-tools{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid ${LINE}}
+.el-search{flex:1 1 260px;max-width:420px;height:36px;border:1px solid #D6D6D2;border-radius:8px;padding:0 12px 0 34px;font-size:13px;outline:none;background:#fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%235F5F5F' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E") 11px center no-repeat}
+.el-search:focus{border-color:#8A8A86}
+.el-chips{display:flex;gap:6px}
+.el-chipb{height:30px;padding:0 12px;border-radius:15px;border:1px solid #D6D6D2;background:#fff;font-size:12px;font-weight:500;display:inline-flex;align-items:center;gap:6px}
+.el-chipb[aria-pressed="true"]{background:${INK};color:#fff;border-color:${INK}}
+.el-chipb .n{font-size:11px;opacity:.7}
+.el-scroll{overflow:auto;max-height:70vh;position:relative}
+.el-table{border-collapse:separate;border-spacing:0;font-size:12.5px;min-width:100%}
+.el-table th{position:sticky;top:0;z-index:3;background:#fff;text-align:left;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:${MUTED};font-weight:500;padding:9px 10px;border-bottom:1px solid ${LINE};white-space:nowrap;cursor:pointer;user-select:none}
+.el-table th:hover{color:${INK}}
+.el-table th .arr{margin-left:4px;font-size:9px}
+.el-table th.num,.el-table td.num{text-align:right;font-variant-numeric:tabular-nums}
+.el-table td{padding:8px 10px;border-bottom:1px solid ${SOFT};vertical-align:top;white-space:nowrap;background:#fff}
+.el-table tr:hover td{background:#FAFAF8}
+.el-table td.pos{white-space:pre-line;font-size:11.5px;color:${MUTED};line-height:1.35}
+.el-table td.wrap{white-space:normal;min-width:180px;max-width:260px}
+.el-table td.dim{color:#C9C9C5}
+.el-table .fz{position:sticky;z-index:2;background:#fff}
+.el-table th.fz{z-index:4}
+.el-table .fz-last{box-shadow:4px 0 6px -4px rgba(0,0,0,.12)}
+.el-table tr:hover td.fz{background:#FAFAF8}
+.el-fc{background:#FFF8E6 !important;color:#6B4E00;border-radius:4px}
+.el-fc.cr{background:#FFF1CC !important}
+.el-chg{position:relative}
+.el-chg::before{content:'';position:absolute;left:0;top:6px;bottom:6px;width:3px;border-radius:2px;background:${RED}}
+.el-chg.pulse{animation:elPulse 2.2s ease-out 1}
+@keyframes elPulse{0%{box-shadow:inset 0 0 0 999px rgba(153,0,51,.18)}60%{box-shadow:inset 0 0 0 999px rgba(153,0,51,.06)}100%{box-shadow:none}}
+.el-notes{white-space:normal !important;min-width:320px;max-width:360px;position:sticky;right:0;z-index:2;background:#fff;box-shadow:-4px 0 6px -4px rgba(0,0,0,.12)}
+.el-table th.el-notes{z-index:4}
+.el-table tr:hover td.el-notes{background:#FAFAF8}
+.el-ctx{font-size:12px;color:#48484A;line-height:1.4;margin-bottom:3px}
+.el-ctx b{font-weight:600;color:${INK}}
+.el-noteI{width:100%;border:1px solid transparent;background:${SOFT};border-radius:7px;padding:5px 9px;font-size:12.5px;line-height:1.35;resize:vertical;min-height:28px;outline:none;display:block}
 .el-noteI:focus{border-color:#B8B8B4;background:#fff}
 .el-noteI::placeholder{color:#9C9C98}
-.el-saved{font-size:11px;color:${MUTED};margin-top:3px;height:14px}
-.el-flag{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:500;color:#7A5200;background:#FFF4D6;padding:3px 9px;border-radius:10px}
+.el-saved{font-size:11px;color:${MUTED};margin:2px 0 4px;min-height:0}
+.el-saved:empty{display:none}
+.el-notes>div+div{margin-top:8px}
+.el-flag{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:500;color:#7A5200;background:#FFF4D6;padding:2px 8px;border-radius:10px;white-space:nowrap}
 .el-empty{padding:28px 18px;font-size:13.5px;color:${MUTED};text-align:center}
 .el-confirm{background:#FAFAF8;border:1px solid ${LINE};border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:12px}
 .el-confirm .row{display:flex;gap:18px;flex-wrap:wrap;font-size:13px}
 .el-confirm .row b{font-weight:600}
 .el-result{font-size:13px;padding:12px 16px;border-radius:10px;background:#F0F7D9}
 .el-result.err{background:#FDECEF;color:${RED}}
-.el-toggle{background:none;border:0;padding:0;font-size:12.5px;color:${MUTED};text-decoration:underline;text-underline-offset:3px}
-.el-toggle:hover{color:${INK}}
-.el-tracker{overflow:auto;max-height:560px}
-.el-tracker .el-table th{position:sticky;top:0;background:#fff;z-index:1}
-.el-tracker td{white-space:nowrap}
-.el-tracker td.pos{white-space:pre-line;font-size:12px;color:${MUTED}}
-.el-pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:${MUTED}}
-.el-dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.el-legend{display:flex;gap:16px;align-items:center;font-size:11.5px;color:${MUTED};margin-left:auto}
+.el-legend i{display:inline-block;width:14px;height:10px;border-radius:3px;vertical-align:-1px;margin-right:5px}
+.el-pill{display:inline-flex;align-items:center;gap:6px;font-size:12px}
+.el-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
 @media (max-width:900px){.el{padding:16px 12px 40px}.el-head h1{font-size:28px}}
 `;
     document.head.appendChild(st);
@@ -205,78 +227,139 @@
     return `<div class="el-result">Sent ${esc(when(new Date().toISOString()))} to ${esc((r.to || []).join(', '))}${r.sftp_path ? ` · published ${esc(r.sftp_path)}` : ''}${r.error ? ` · <span style="color:${RED}">${esc(r.error)}</span>` : ''}. ${r.stats ? `${r.stats.changes} change${r.stats.changes === 1 ? '' : 's'} went with it.` : ''}</div>`;
   }
 
-  function changes(d) {
-    const list = d.changes || [];
-    const normal = list.filter(c => !c.anomaly), odd = list.filter(c => c.anomaly);
-    const row = (c) => {
-      const key = c.row_key + '::' + c.signature;
-      const sv = S.saving[key];
-      return `<tr>
-        <td><b>${esc(c.zendesk)}</b><div style="margin-top:3px"><span class="el-chip">${esc(c.transport)}</span></div></td>
-        <td><div style="font-weight:500">${esc(c.vendor)}</div><div style="font-size:12px;color:${MUTED};margin-top:2px">${esc(c.pos)}</div></td>
-        <td><span class="el-chip">${esc(c.label)}</span></td>
-        <td style="white-space:normal">${c.old ? `<span class="el-was">${esc(val(c, 'old'))}</span><span class="el-arrow">→</span>` : ''}<span class="el-now" style="${c.field === 'status' ? 'color:' + (STATUS_INK[c.new] || INK) : ''}">${esc(val(c, 'new')) || '—'}</span></td>
-        <td><div class="el-ctx">${esc(c.context)}</div></td>
-        <td>
-          <textarea class="el-noteI" rows="1" data-note="${esc(key)}" data-row="${esc(c.row_key)}" data-sig="${esc(c.signature)}"
-            placeholder="Why — what the client should know">${esc(c.note || '')}</textarea>
-          <div class="el-saved">${sv === 'saving' ? 'Saving…' : sv === 'saved' ? 'Saved' : sv === 'error' ? '<span style="color:' + RED + '">Could not save</span>' : ''}</div>
-        </td>
-      </tr>`;
-    };
-    const table = (rows) => `<table class="el-table" style="table-layout:fixed">
-      <colgroup><col style="width:92px"><col style="width:22%"><col style="width:150px"><col style="width:230px"><col><col style="width:26%"></colgroup>
-      <thead><tr><th>Zendesk</th><th>Vendor · PO</th><th>Field</th><th>Was → now</th><th>Context</th><th>Note to the client</th></tr></thead>
-      <tbody>${rows.map(row).join('')}</tbody></table>`;
+  // ── The one table ──
+  // Frozen identity on the left, THE ICONIC's 28 columns in their order, notes on the right.
+  const FROZEN = [
+    { key: 'ex_week',   head: 'Week',    w: 54 },
+    { key: 'zendesk',   head: 'Zendesk', w: 74 },
+    { key: 'transport', head: 'Mode',    w: 52 },
+    { key: 'status',    head: 'Status',  w: 132 },
+    { key: 'vendor',    head: 'Vendor',  w: 210 },
+  ];
+  const SHEET = [
+    ['vessel', 'Vessel'], ['ccl', 'CCL'], ['sca', 'SCA'], ['dor', 'DOR'], ['shipment', 'Shipment #'],
+    ['hbl', 'HBL'], ['mbl', 'MBL / CNTR'], ['pos', 'PO #'], ['ex_factory', 'Ex Factory'],
+    ['handover', 'Handover'], ['etd', 'ETD'], ['eta', 'ETA'], ['delivery', 'Delivery to FC'],
+    ['dw_week', 'Expected DW'], ['lt_d2d', 'Door to door'], ['lt_transit', 'Transit days'],
+    ['lt_port_fc', 'Port to FC'], ['lt_xf_fc', 'XF > FC'], ['weight_kg', 'Weight kg'],
+    ['cartons', 'CTNS'], ['units', 'Units'], ['origin_country', 'Origin country'],
+    ['origin_city', 'Origin city'], ['rolling_dw', 'Rolling DW in BC'],
+  ];
+  const DATE_K = new Set(['ex_factory', 'handover', 'etd', 'eta', 'delivery']);
+  const NUM_K = new Set(['lt_d2d', 'lt_transit', 'lt_port_fc', 'lt_xf_fc', 'weight_kg', 'cartons', 'units']);
+  const EMPTY_K = new Set(['ccl', 'sca', 'dor', 'rolling_dw']);
 
-    return `
-<div class="el-card">
-  <div class="el-cardh">
-    <div>
-      <h2 class="el-h2">What changed since the last send</h2>
-      <div class="el-note" style="margin-top:2px">Context is written from the record. Add the why; it goes on the Changes sheet and in the email beside the change.</div>
-    </div>
-    <span class="el-note">${list.length ? `${list.length} change${list.length === 1 ? '' : 's'}` : ''}</span>
-  </div>
-  ${list.length ? '' : `<div class="el-empty">${d.last_sent ? 'No changes since the last send. Tonight\'s email will say exactly that.' : 'Nothing to compare against yet. The first send sets the baseline.'}</div>`}
-  ${normal.length ? table(normal) : ''}
-  ${odd.length ? `
-    <div class="el-cardh" style="border-top:1px solid ${LINE};background:#FFFBF0">
-      <div><h2 class="el-h2">Changed after delivery</h2>
-        <div class="el-note" style="margin-top:2px">A delivered line has no next state, so a change on one is a question, not an update. Flagged for their review on the sheet.</div></div>
-      <span class="el-flag">${odd.length}</span>
-    </div>
-    ${table(odd)}` : ''}
-</div>`;
+  function changesByRow(d) {
+    const m = new Map();
+    for (const c of (d.changes || [])) {
+      if (!m.has(c.row_key)) m.set(c.row_key, []);
+      m.get(c.row_key).push(c);
+    }
+    return m;
   }
 
-  function tracker(d) {
+  function visibleRows(d, byRow) {
+    const q = S.q.trim().toLowerCase();
+    let rows = (d.rows || []).slice();
+    if (S.filter === 'changed') rows = rows.filter(r => byRow.has(r.zendesk + '|' + r.transport));
+    else if (S.filter === 'open') rows = rows.filter(r => r.status !== 'Delivered');
+    else if (S.filter === 'delivered') rows = rows.filter(r => r.status === 'Delivered');
+    if (q) rows = rows.filter(r => [r.zendesk, r.pos, r.vendor, r.mbl, r.vessel, r.shipment, r.hbl, r.status]
+      .join(' ').toLowerCase().includes(q));
+    const { key, dir } = S.sort;
+    const num = NUM_K.has(key);
+    rows.sort((a, b) => {
+      let x = a[key], y = b[key];
+      if (num) { x = x === '' ? -Infinity : Number(x); y = y === '' ? -Infinity : Number(y); }
+      else { x = String(x == null ? '' : x); y = String(y == null ? '' : y); }
+      const c = x < y ? -1 : x > y ? 1 : 0;
+      return (c || String(a.ex_factory).localeCompare(String(b.ex_factory)) || String(a.zendesk).localeCompare(String(b.zendesk))) * (c ? dir : 1);
+    });
+    return rows;
+  }
+
+  function cell(r, key, chg) {
+    const v = r[key];
+    const classes = [];
+    let inner;
+    if (key === 'status') {
+      const t = String(v).trim();
+      const ink = t === 'Delivered' ? GREEN : t === 'Delivery Booked' ? AMBER : t === 'Landed On Route' ? INK : '#C9C9C5';
+      inner = `<span class="el-pill"><span class="el-dot" style="background:${ink}"></span>${esc(t)}</span>`;
+    } else if (key === 'ex_week') {
+      inner = `<b>${esc(v)}</b>`;
+    } else if (key === 'zendesk') {
+      inner = `<b>${esc(v)}</b>`;
+    } else if (key === 'vendor') {
+      classes.push('wrap'); inner = esc(v);
+    } else if (key === 'pos') {
+      classes.push('pos'); inner = esc(v);
+    } else if (DATE_K.has(key)) {
+      inner = v ? esc(day(v)) : '<span style="color:#C9C9C5">—</span>';
+      const p = r.prov && r.prov[key];
+      if (v && p && p !== 'actual') { classes.push('el-fc'); if (p === 'carrier') classes.push('cr'); }
+    } else if (NUM_K.has(key)) {
+      classes.push('num'); inner = v === '' || v == null ? '' : esc(v);
+    } else if (EMPTY_K.has(key)) {
+      classes.push('dim'); inner = v ? esc(v) : '—';
+    } else {
+      inner = esc(v);
+    }
+    if (chg) {
+      classes.push('el-chg');
+      const sig = r.zendesk + '|' + r.transport + '::' + chg.signature;
+      if (!S.pulsed.has(sig)) { classes.push('pulse'); S.pulsed.add(sig); }
+    }
+    const title = chg ? ` title="${esc((chg.old ? val(chg, 'old') + ' → ' : '') + val(chg, 'new') + '. ' + chg.context)}"` : '';
+    return { cls: classes.join(' '), inner, title };
+  }
+
+  function notesCell(r, list) {
+    if (!list || !list.length) return `<td class="el-notes dim">—</td>`;
+    return `<td class="el-notes">${list.map(c => {
+      const key = c.row_key + '::' + c.signature;
+      const sv = S.saving[key];
+      return `<div>
+        <div class="el-ctx"><b>${esc(c.label)}</b> ${esc(c.context)}${c.anomaly ? ' <span class="el-flag">after delivery</span>' : ''}</div>
+        <textarea class="el-noteI" rows="1" data-note="${esc(key)}" data-row="${esc(c.row_key)}" data-sig="${esc(c.signature)}"
+          placeholder="Why — what the client should know">${esc(c.note || '')}</textarea>
+        <div class="el-saved">${sv === 'saving' ? 'Saving…' : sv === 'saved' ? 'Saved' : sv === 'error' ? '<span style="color:' + RED + '">Could not save</span>' : ''}</div>
+      </div>`;
+    }).join('')}</td>`;
+  }
+
+  function table(d) {
+    const byRow = changesByRow(d);
+    const rows = visibleRows(d, byRow);
     const all = d.rows || [];
-    const rows = S.showDelivered ? all : all.filter(r => r.status !== 'Delivered');
-    const delivered = all.length - all.filter(r => r.status !== 'Delivered').length;
+    const counts = { all: all.length, changed: byRow.size, open: all.filter(r => r.status !== 'Delivered').length, delivered: all.filter(r => r.status === 'Delivered').length };
+    const chip = (k, l) => `<button class="el-chipb" data-act="filter" data-v="${k}" aria-pressed="${S.filter === k}">${l}<span class="n">${counts[k]}</span></button>`;
+    const arrow = (k) => S.sort.key === k ? `<span class="arr">${S.sort.dir > 0 ? '▲' : '▼'}</span>` : '';
+
+    let left = 0;
+    const fzHead = FROZEN.map((c, i) => { const h = `<th class="fz${i === FROZEN.length - 1 ? ' fz-last' : ''}" style="left:${left}px;min-width:${c.w}px;max-width:${c.w}px" data-act="sort" data-v="${c.key}">${c.head}${arrow(c.key)}</th>`; left += c.w; return h; }).join('');
+    const shHead = SHEET.map(([k, h]) => `<th class="${NUM_K.has(k) ? 'num' : ''}" data-act="sort" data-v="${k}">${h}${arrow(k)}</th>`).join('');
+
+    const body = rows.map(r => {
+      const list = byRow.get(r.zendesk + '|' + r.transport) || [];
+      const chgOf = {}; for (const c of list) chgOf[c.field] = c;
+      let l = 0;
+      const fz = FROZEN.map((c, i) => { const x = cell(r, c.key, chgOf[c.key]); const td = `<td class="fz${i === FROZEN.length - 1 ? ' fz-last' : ''} ${x.cls}" style="left:${l}px;min-width:${c.w}px;max-width:${c.w}px"${x.title}>${x.inner}</td>`; l += c.w; return td; }).join('');
+      const sh = SHEET.map(([k]) => { const x = cell(r, k, chgOf[k]); return `<td class="${x.cls}"${x.title}>${x.inner}</td>`; }).join('');
+      return `<tr>${fz}${sh}${notesCell(r, list)}</tr>`;
+    }).join('');
+
     return `
 <div class="el-card">
-  <div class="el-cardh">
-    <div><h2 class="el-h2">The tracker as it stands</h2>
-      <div class="el-note" style="margin-top:2px">${all.length} lines, one per Zendesk per transport. This is sheet 1 of what they receive; all 28 columns are in the download.</div></div>
-    <div style="display:flex;gap:14px;align-items:center">
-      ${S.showTracker ? `<button class="el-toggle" data-act="toggle-delivered">${S.showDelivered ? `Hide ${delivered} delivered` : `Show ${delivered} delivered`}</button>` : ''}
-      <button class="el-toggle" data-act="toggle-tracker">${S.showTracker ? 'Collapse' : 'Expand'}</button>
-    </div>
+  <div class="el-tools">
+    <input class="el-search" type="search" placeholder="Zendesk, PO, vendor, container, vessel…" value="${esc(S.q)}" data-search="1">
+    <div class="el-chips">${chip('all', 'All')}${chip('changed', 'Changed')}${chip('open', 'Open')}${chip('delivered', 'Delivered')}</div>
+    <div class="el-legend"><span><i style="background:#FFF8E6;border:1px solid #F0E2B0"></i>forecast</span><span><i style="background:#fff;border:1px solid ${LINE}"></i>actual</span><span><i style="background:#fff;border-left:3px solid ${RED}"></i>changed since last send</span></div>
   </div>
-  ${S.showTracker ? `<div class="el-tracker"><table class="el-table">
-    <thead><tr><th>Zendesk</th><th>Mode</th><th>Vendor</th><th>PO #</th><th>Status</th><th>Vessel / flight</th><th>Container / MAWB</th><th>Ex factory</th><th>Handover</th><th>ETD</th><th>ETA</th><th>Delivery</th><th>Week</th><th class="num">Ctns</th><th class="num">Units</th></tr></thead>
-    <tbody>${rows.map(r => `<tr>
-      <td><b>${esc(r.zendesk)}</b></td><td>${esc(r.transport)}</td>
-      <td style="white-space:normal;min-width:220px;max-width:300px">${esc(r.vendor)}</td>
-      <td class="pos">${esc(r.pos)}</td>
-      <td><span class="el-pill"><span class="el-dot" style="background:${r.status === 'Delivered' ? GREEN : r.status.trim() === 'Delivery Booked' ? AMBER : r.status === 'Landed On Route' ? INK : '#C9C9C5'}"></span>${esc(String(r.status).trim())}</span></td>
-      <td>${esc(r.vessel)}</td><td>${esc(r.mbl)}</td>
-      <td>${esc(day(r.ex_factory))}</td><td>${esc(day(r.handover)) || '<span style="color:#C9C9C5">—</span>'}</td>
-      <td>${esc(day(r.etd))}</td><td>${esc(day(r.eta))}</td><td>${esc(day(r.delivery))}</td>
-      <td>${esc(r.dw_week)}</td>
-      <td class="num">${r.cartons === '' ? '' : esc(r.cartons)}</td><td class="num">${r.units === '' ? '' : esc(r.units)}</td>
-    </tr>`).join('')}</tbody></table></div>` : ''}
+  ${rows.length ? `<div class="el-scroll"><table class="el-table">
+    <thead><tr>${fzHead}${shHead}<th class="el-notes">Context &amp; notes</th></tr></thead>
+    <tbody>${body}</tbody></table></div>`
+  : `<div class="el-empty">${S.q || S.filter !== 'all' ? 'Nothing matches.' : (d.last_sent ? 'No lines on the tracker yet.' : 'Nothing has departed since the start of the tracker window.')}</div>`}
 </div>`;
   }
 
@@ -295,27 +378,31 @@
     // Keep what someone is typing. A refresh must not eat a half-written note.
     const active = document.activeElement;
     const typing = active && active.matches && active.matches('textarea.el-noteI') ? { key: active.getAttribute('data-note'), value: active.value, pos: active.selectionStart } : null;
+    const searching = active && active.matches && active.matches('input[data-search]') ? { pos: active.selectionStart } : null;
 
     S.root.innerHTML = `<div class="el">
       ${head(d)}
       ${resultLine()}
       ${confirmPanel(d)}
       ${statsRow(d)}
-      ${changes(d)}
-      ${tracker(d)}
-      <div class="el-note">Sheet 1 is the full tracker, 28 columns in THE ICONIC's layout. Sheet 2 is this list of changes with context and notes. Status is read off the dates every time; nothing on this page is stored except what was sent and the notes.</div>
+      ${table(d)}
+      <div class="el-note">Sheet 1 is the tracker in THE ICONIC's layout, with context and notes in a final column after theirs. Sheet 2 lists the changes. The week column is on screen only — it would shift their column letters. Status is read off the dates every time; nothing here is stored except what was sent and the notes.</div>
     </div>`;
 
     if (typing) {
       const t = S.root.querySelector(`textarea[data-note="${CSS.escape(typing.key)}"]`);
       if (t) { t.value = typing.value; t.focus(); try { t.setSelectionRange(typing.pos, typing.pos); } catch (_) {} }
     }
+    if (searching) {
+      const i = S.root.querySelector('input[data-search]');
+      if (i) { i.focus(); try { i.setSelectionRange(searching.pos, searching.pos); } catch (_) {} }
+    }
     S.root.querySelectorAll('textarea.el-noteI').forEach(autosize);
   }
 
   function autosize(t) {
     t.style.height = 'auto';
-    t.style.height = Math.max(34, t.scrollHeight) + 'px';
+    t.style.height = Math.max(28, t.scrollHeight) + 'px';
   }
 
   // ── Data ──
@@ -382,8 +469,20 @@
       else if (act === 'send-open') { S.confirm = true; S.result = null; render(); }
       else if (act === 'send-cancel') { S.confirm = false; render(); }
       else if (act === 'send-go') sendNow();
-      else if (act === 'toggle-tracker') { S.showTracker = !S.showTracker; render(); }
-      else if (act === 'toggle-delivered') { S.showDelivered = !S.showDelivered; render(); }
+      else if (act === 'filter') { S.filter = b.getAttribute('data-v'); render(); }
+      else if (act === 'sort') {
+        const k = b.getAttribute('data-v');
+        S.sort = S.sort.key === k ? { key: k, dir: -S.sort.dir } : { key: k, dir: 1 };
+        render();
+      }
+    });
+    let qT = null;
+    root.addEventListener('input', (ev) => {
+      const t = ev.target;
+      if (t && t.matches && t.matches('input[data-search]')) {
+        S.q = t.value;
+        clearTimeout(qT); qT = setTimeout(render, 120);
+      }
     });
     root.addEventListener('input', (ev) => {
       const t = ev.target;
@@ -409,7 +508,8 @@
     S.timer = setInterval(() => {
       const pg = document.getElementById('page-elevate');
       // Never refresh under someone's hands: a note being typed, or the send panel open.
-      const busy = S.confirm || S.sending || (document.activeElement && document.activeElement.matches && document.activeElement.matches('textarea.el-noteI'));
+      const ae = document.activeElement;
+      const busy = S.confirm || S.sending || (ae && ae.matches && (ae.matches('textarea.el-noteI') || ae.matches('input[data-search]')));
       if (pg && pg.style.display !== 'none' && !document.hidden && !busy) load({ quiet: true });
     }, REFRESH_MS);
   }
