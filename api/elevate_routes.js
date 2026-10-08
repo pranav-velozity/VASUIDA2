@@ -208,7 +208,12 @@ module.exports = function mountElevate(deps) {
       const s = sup.trim().toLowerCase();
       m = rows.filter(r => String(r.supplier_name || '').trim().toLowerCase() === s);
     }
-    if (f && m.some(r => r.freight_type)) m = m.filter(r => !r.freight_type || String(r.freight_type).trim().toLowerCase() === f);
+    // The key carries the MODE (Air / Sea); plan rows carry the raw freight string (AIR
+    // FREIGHT, AIR PALLET, SEA). Compared by mode — compared as strings, every air lane
+    // matched nothing and lost its POs, and with them its handover, cartons and units.
+    const modeOf = (v) => { const s = String(v || '').toLowerCase(); return /air/.test(s) ? 'air' : /sea|ocean|fcl|lcl/.test(s) ? 'sea' : s; };
+    const fm = modeOf(f);
+    if (fm && m.some(r => r.freight_type)) m = m.filter(r => !r.freight_type || modeOf(r.freight_type) === fm);
     return m;
   }
 
