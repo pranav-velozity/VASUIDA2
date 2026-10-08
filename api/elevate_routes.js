@@ -258,9 +258,49 @@ module.exports = function mountElevate(deps) {
     return map[ref] || (uidOf[ref] && map[uidOf[ref]]) || {};
   }
 
+  // Cartons, units and weight: what went into the box, from the mobile bins. One bin is one
+  // carton out; its units and weight are on the bin; the PO comes from the scans in it, as
+  // the Pulse context already computes. Planned target_qty is the fallback for units only,
+  // and only where nothing was binned — a row enters at departure, so that should be rare.
+  const _binCache = new Map();
+  function binsByPo(ws) {
+    if (_binCache.has(ws)) return _binCache.get(ws);
+    const out = new Map();
+    try {
+      const we = addDays(ws, 6);
+      const rows = db.prepare(`
+        SELECT b.mobile_bin, b.total_units, b.weight_kg, r.po_number
+        FROM bins b
+        LEFT JOIN (
+          SELECT TRIM(mobile_bin) AS mobile_bin, po_number, COUNT(*) AS scan_count
+          FROM records
+          WHERE date_local >= ? AND date_local <= ?
+            AND TRIM(COALESCE(mobile_bin,'')) <> '' AND TRIM(COALESCE(po_number,'')) <> ''
+          GROUP BY TRIM(mobile_bin), po_number
+        ) r ON TRIM(b.mobile_bin) = r.mobile_bin
+        WHERE b.week_start = ?
+        ORDER BY r.scan_count DESC`).all(ws, we, ws);
+      const seen = new Set();
+      for (const b of rows) {
+        const bin = String(b.mobile_bin || '').trim();
+        if (!bin || seen.has(bin)) continue;        // first row per bin is the PO with most scans
+        seen.add(bin);
+        const po = String(b.po_number || '').trim();
+        if (!po) continue;
+        if (!out.has(po)) out.set(po, { cartons: 0, units: 0, weight_kg: 0 });
+        const e = out.get(po);
+        e.cartons++;
+        e.units += Number(b.total_units || 0) || 0;
+        e.weight_kg += Number(b.weight_kg || 0) || 0;
+      }
+    } catch (e) { log.warn('[elevate] bins lookup failed:', e.message); }
+    _binCache.set(ws, out);
+    return out;
+  }
+
   // ── Assemble: every consignment that has departed, one row per Zendesk per transport ──
   function assemble(client) {
-    _planCache.clear(); _flowCache.clear();
+    _planCache.clear(); _flowCache.clear(); _binCache.clear();
     const cons = db.prepare(`SELECT * FROM consignment WHERE client_id = ? AND week_start >= ?
                               ORDER BY week_start, mode, reference`).all(client, FROM_WEEK);
     const msStmt = db.prepare('SELECT * FROM consignment_milestone WHERE consignment_uid = ?');
@@ -294,6 +334,10 @@ module.exports = function mountElevate(deps) {
         const rows = rowsForLane(lane_key, plan);
         const pos = [...new Set(rows.map(r => String(r.po_number || r.po || '').trim()).filter(Boolean))];
         const key = `${zendesk.trim()}|${transport}`;
+        const bins = binsByPo(c.week_start);
+        let cartons = 0, units = 0, weight = 0, binned = false;
+        for (const po of pos) { const b = bins.get(po); if (b) { binned = true; cartons += b.cartons; units += b.units; weight += b.weight_kg; } }
+        if (!binned) units = rows.reduce((a, r) => a + (Number(r.target_qty) || 0), 0);   // planned, as a fallback
 
         const piece = {
           row_key: key,
@@ -313,9 +357,10 @@ module.exports = function mountElevate(deps) {
           eta: arrived || etaForecast,
           // Delivered beats booked beats forecast: each is a firmer statement than the last.
           delivery: delivered || booked || fcForecast,
-          weight_kg: rows.reduce((a, r) => a + (Number(r.weight_kg || r.gross_weight_kg || r.weight) || 0), 0) || null,
-          cartons: rows.reduce((a, r) => a + (Number(r.cartons) || 0), 0) || null,
-          units: rows.reduce((a, r) => a + (Number(r.units || r.qty || r.quantity) || 0), 0) || null,
+          weight_kg: weight ? Math.round(weight * 10) / 10 : null,
+          cartons: cartons || null,
+          units: units || null,
+          _binned: binned,
           origin_country: 'China',
           origin_city: originCity(c.facility),
           rolling_dw: '',
@@ -325,6 +370,10 @@ module.exports = function mountElevate(deps) {
           _delivery_source: delivered ? 'confirmed' : (booked ? 'booked' : 'plan'),
           _consignments: [c.reference || c.consignment_uid],
           _week: isoWeek(c.week_start),
+          // Later than first promised, in days, against the frozen baseline FC date. Null
+          // where there is no baseline (no carrier quote was ever entered).
+          _late: c.baseline_fc_at ? dayDiff(ymd(c.baseline_fc_at), delivered || booked || fcForecast) : null,
+          _eta_basis: arrived ? 'confirmed' : (c.carrier_eta ? 'carrier estimate' : `plan: departed + ${c.transit_days} days`),
         };
 
         // A Zendesk on two consignments of the same mode (the rare air split): earliest ETD,
@@ -341,6 +390,8 @@ module.exports = function mountElevate(deps) {
         have.cartons = (have.cartons || 0) + (piece.cartons || 0) || null;
         have.units = (have.units || 0) + (piece.units || 0) || null;
         have.weight_kg = (have.weight_kg || 0) + (piece.weight_kg || 0) || null;
+        have._late = [have._late, piece._late].filter(x => x != null).sort((x, y) => y - x)[0] ?? null;
+        have._binned = have._binned || piece._binned;
         have._eta_actual = have._eta_actual && piece._eta_actual;
         have._delivery_actual = have._delivery_actual && piece._delivery_actual;
         if (!have._eta_actual && piece._eta_source === 'plan') have._eta_source = 'plan';
@@ -352,6 +403,11 @@ module.exports = function mountElevate(deps) {
     // Derived columns, from the dates and nothing else.
     const out = [];
     for (const r of byKey.values()) {
+      // A dock cannot be booked, let alone delivered, before the ship arrives. A forecast
+      // arrival after either is not a forecast, it is an arrival nobody has confirmed. The
+      // screen shows it so somebody does; the file does not send a date that cannot be true.
+      r._eta_impossible = !r._eta_actual && r.eta && r.delivery
+        && r._delivery_source !== 'plan' && r.eta > r.delivery;
       r.dw_week = r.delivery ? `Week ${isoWeek(r.delivery)}` : '';
       r.lt_d2d = dayDiff(r.handover, r.delivery);
       r.lt_transit = dayDiff(r.etd, r.eta);
@@ -370,6 +426,7 @@ module.exports = function mountElevate(deps) {
     for (const col of COLUMNS) {
       let v = r[col.key];
       if (col.key === 'pos') v = (r.pos || []).join('\n');
+      if (col.key === 'eta' && r._eta_impossible) v = '';
       o[col.key] = v == null ? '' : v;
     }
     return o;
@@ -381,6 +438,11 @@ module.exports = function mountElevate(deps) {
   function screenRow(r) {
     return Object.assign(publicRow(r), {
       ex_week: r._week ? `W${r._week}` : '',
+      eta: r.eta || '',                        // the page sees it even when the file will not
+      late_days: r._late,
+      eta_impossible: !!r._eta_impossible,
+      eta_basis: r._eta_basis,
+      qty_source: r._binned ? 'bins' : (r.units ? 'plan' : ''),
       prov: {
         handover: r.handover ? 'actual' : '',
         etd: 'actual',
@@ -495,7 +557,9 @@ module.exports = function mountElevate(deps) {
     const landed = rows.filter(r => r.status === STATUS.landed).length;
     const shipped = rows.filter(r => r.status === STATUS.shipped).length;
     return { rows: rows.length, delivered, open: rows.length - delivered, shipped, landed, booked,
-             changes: changes.length, anomalies: changes.filter(c => c.anomaly).length };
+             changes: changes.length, anomalies: changes.filter(c => c.anomaly).length,
+             attention: rows.filter(r => r._eta_impossible).length,
+             late: rows.filter(r => r._late != null && r._late >= 2 && r.status !== STATUS.delivered).length };
   }
 
   // ── The workbook and the CSV ──
@@ -507,6 +571,7 @@ module.exports = function mountElevate(deps) {
     // Notes per row for column AC: every change on the row since the last send, context
     // and note together. AC sits after their last column, so their letters do not move.
     const noteFor = new Map();
+    for (const r of rows) if (r._eta_impossible) noteFor.set(r.row_key, 'ETA: arrival date to be confirmed.');
     for (const c of changes) {
       const bits = [c.context, c.note].filter(Boolean).join(' ');
       if (!bits) continue;
