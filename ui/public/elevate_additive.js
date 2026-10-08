@@ -18,7 +18,7 @@
   'use strict';
   if (window.__ELEVATE_LOADED__) return;
   window.__ELEVATE_LOADED__ = true;
-  const VERSION = '2';
+  const VERSION = '3';
 
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
   const GREEN = '#C7EA46', AMBER = '#F5BD25', RED = '#990033';
@@ -68,7 +68,7 @@
   // ── State ──
   const S = { root: null, data: null, loading: false, error: null, loadedAt: 0, timer: null,
               confirm: false, sending: false, result: null, saving: {},
-              q: '', filter: 'all', sort: { key: 'ex_factory', dir: 1 }, pulsed: new Set() };
+              q: '', filter: 'all', sort: { key: 'ex_factory', dir: 1 }, pulsed: new Set(), posOpen: new Set() };
 
   // ── Styles ──
   function styles() {
@@ -113,7 +113,9 @@
 .el-table th.num,.el-table td.num{text-align:right;font-variant-numeric:tabular-nums}
 .el-table td{padding:8px 10px;border-bottom:1px solid ${SOFT};vertical-align:top;white-space:nowrap;background:#fff}
 .el-table tr:hover td{background:#FAFAF8}
-.el-table td.pos{white-space:pre-line;font-size:11.5px;color:${MUTED};line-height:1.35}
+.el-table td.pos{font-size:11.5px;color:${MUTED};line-height:1.35}
+.el-more{margin-left:6px;height:18px;padding:0 7px;border-radius:9px;border:1px solid #D6D6D2;background:#fff;font-size:10.5px;font-weight:500;color:${MUTED};vertical-align:1px}
+.el-more:hover{color:${INK};border-color:#B8B8B4}
 .el-table td.wrap{white-space:normal;min-width:180px;max-width:260px}
 .el-table td.dim{color:#C9C9C5}
 .el-table .fz{position:sticky;z-index:2;background:#fff}
@@ -293,7 +295,13 @@
     } else if (key === 'vendor') {
       classes.push('wrap'); inner = esc(v);
     } else if (key === 'pos') {
-      classes.push('pos'); inner = esc(v);
+      // One PO per line keeps the rows even; the rest sit behind a count until asked for.
+      classes.push('pos');
+      const list = String(v || '').split('\n').map(x => x.trim()).filter(Boolean);
+      const rk = r.zendesk + '|' + r.transport;
+      if (list.length <= 1) inner = esc(list[0] || '');
+      else if (S.posOpen.has(rk)) inner = `${list.map(esc).join('<br>')}<button class="el-more" data-act="pos" data-v="${esc(rk)}">less</button>`;
+      else inner = `${esc(list[0])}<button class="el-more" data-act="pos" data-v="${esc(rk)}" title="${esc(list.slice(1).join(', '))}">+${list.length - 1}</button>`;
     } else if (DATE_K.has(key)) {
       inner = v ? esc(day(v)) : '<span style="color:#C9C9C5">—</span>';
       const p = r.prov && r.prov[key];
@@ -470,6 +478,7 @@
       else if (act === 'send-cancel') { S.confirm = false; render(); }
       else if (act === 'send-go') sendNow();
       else if (act === 'filter') { S.filter = b.getAttribute('data-v'); render(); }
+      else if (act === 'pos') { const k = b.getAttribute('data-v'); if (S.posOpen.has(k)) S.posOpen.delete(k); else S.posOpen.add(k); render(); }
       else if (act === 'sort') {
         const k = b.getAttribute('data-v');
         S.sort = S.sort.key === k ? { key: k, dir: -S.sort.dir } : { key: k, dir: 1 };
