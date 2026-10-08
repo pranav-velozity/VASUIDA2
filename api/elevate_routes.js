@@ -374,6 +374,7 @@ module.exports = function mountElevate(deps) {
           _eta_source: arrived ? 'confirmed' : (c.carrier_eta ? 'carrier' : 'plan'),
           _delivery_source: delivered ? 'confirmed' : (booked ? 'booked' : 'plan'),
           _consignments: [c.reference || c.consignment_uid],
+          _uids: [c.consignment_uid],
           _week: isoWeek(c.week_start),
           // Later than first promised, in days, against the frozen baseline FC date. Null
           // where there is no baseline (no carrier quote was ever entered).
@@ -402,6 +403,7 @@ module.exports = function mountElevate(deps) {
         if (!have._eta_actual && piece._eta_source === 'plan') have._eta_source = 'plan';
         if (!have._delivery_actual && piece._delivery_source === 'plan') have._delivery_source = 'plan';
         have._consignments.push(...piece._consignments);
+        have._uids.push(...piece._uids);
       }
     }
 
@@ -443,6 +445,7 @@ module.exports = function mountElevate(deps) {
   function screenRow(r) {
     return Object.assign(publicRow(r), {
       ex_week: r._week ? `W${r._week}` : '',
+      consignment_uids: r._uids || [],
       eta: r.eta || '',                        // the page sees it even when the file will not
       late_days: r._late,
       eta_impossible: !!r._eta_impossible,
