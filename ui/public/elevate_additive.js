@@ -18,10 +18,12 @@
   'use strict';
   if (window.__ELEVATE_LOADED__) return;
   window.__ELEVATE_LOADED__ = true;
-  const VERSION = '3';
+  const VERSION = '4';
 
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
-  const GREEN = '#C7EA46', AMBER = '#F5BD25', RED = '#990033';
+  const GREEN = '#C7EA46', AMBER = '#F5BD25', RED = '#990033', BLUE = '#1E9BD7', PURPLE = '#7C5CBF', GREY = '#8A8A8A';
+  // Status, never yellow: yellow reads as a warning, and a booked dock is good news.
+  const STATUS_DOT = { 'Shipped': GREY, 'Landed On Route': INK, 'Delivery Booked': PURPLE, 'Delivered': GREEN };
   const REFRESH_MS = 3 * 60 * 1000;
 
   // ── API (same shape as Transit Movements) ──
@@ -122,12 +124,21 @@
 .el-table th.fz{z-index:4}
 .el-table .fz-last{box-shadow:4px 0 6px -4px rgba(0,0,0,.12)}
 .el-table tr:hover td.fz{background:#FAFAF8}
-.el-fc{background:#FFF8E6 !important;color:#6B4E00;border-radius:4px}
-.el-fc.cr{background:#FFF1CC !important}
+.el-d{position:relative;padding-left:16px !important}
+.el-d::before{content:'';position:absolute;left:5px;top:7px;bottom:7px;width:3px;border-radius:2px;background:transparent}
+.el-d.fc{color:#2E6C8E}
+.el-d.fc::before{background:${BLUE}}
+.el-d.late{color:${RED}}
+.el-d.late::before{background:${RED}}
+.el-d.bad{color:${RED};text-decoration:underline dotted;text-underline-offset:3px}
+.el-d.bad::before{background:${RED}}
 .el-chg{position:relative}
-.el-chg::before{content:'';position:absolute;left:0;top:6px;bottom:6px;width:3px;border-radius:2px;background:${RED}}
+.el-chg::after{content:'';position:absolute;right:5px;top:6px;width:7px;height:7px;border-radius:50%;background:${RED}}
 .el-chg.pulse{animation:elPulse 2.2s ease-out 1}
-@keyframes elPulse{0%{box-shadow:inset 0 0 0 999px rgba(153,0,51,.18)}60%{box-shadow:inset 0 0 0 999px rgba(153,0,51,.06)}100%{box-shadow:none}}
+@keyframes elPulse{0%{box-shadow:inset 0 0 0 999px rgba(153,0,51,.16)}60%{box-shadow:inset 0 0 0 999px rgba(153,0,51,.05)}100%{box-shadow:none}}
+.el-leg{display:inline-flex;align-items:center;gap:6px}
+.el-leg .bar{display:inline-block;width:3px;height:12px;border-radius:2px}
+.el-leg .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:${RED}}
 .el-notes{white-space:normal !important;min-width:320px;max-width:360px;position:sticky;right:0;z-index:2;background:#fff;box-shadow:-4px 0 6px -4px rgba(0,0,0,.12)}
 .el-table th.el-notes{z-index:4}
 .el-table tr:hover td.el-notes{background:#FAFAF8}
@@ -266,6 +277,8 @@
     if (S.filter === 'changed') rows = rows.filter(r => byRow.has(r.zendesk + '|' + r.transport));
     else if (S.filter === 'open') rows = rows.filter(r => r.status !== 'Delivered');
     else if (S.filter === 'delivered') rows = rows.filter(r => r.status === 'Delivered');
+    else if (S.filter === 'late') rows = rows.filter(r => r.late_days != null && r.late_days >= 2 && r.status !== 'Delivered');
+    else if (S.filter === 'attention') rows = rows.filter(r => r.eta_impossible);
     if (q) rows = rows.filter(r => [r.zendesk, r.pos, r.vendor, r.mbl, r.vessel, r.shipment, r.hbl, r.status]
       .join(' ').toLowerCase().includes(q));
     const { key, dir } = S.sort;
@@ -284,10 +297,10 @@
     const v = r[key];
     const classes = [];
     let inner;
+    let title = '';
     if (key === 'status') {
       const t = String(v).trim();
-      const ink = t === 'Delivered' ? GREEN : t === 'Delivery Booked' ? AMBER : t === 'Landed On Route' ? INK : '#C9C9C5';
-      inner = `<span class="el-pill"><span class="el-dot" style="background:${ink}"></span>${esc(t)}</span>`;
+      inner = `<span class="el-pill"><span class="el-dot" style="background:${STATUS_DOT[t] || '#C9C9C5'}"></span>${esc(t)}</span>`;
     } else if (key === 'ex_week') {
       inner = `<b>${esc(v)}</b>`;
     } else if (key === 'zendesk') {
@@ -303,9 +316,21 @@
       else if (S.posOpen.has(rk)) inner = `${list.map(esc).join('<br>')}<button class="el-more" data-act="pos" data-v="${esc(rk)}">less</button>`;
       else inner = `${esc(list[0])}<button class="el-more" data-act="pos" data-v="${esc(rk)}" title="${esc(list.slice(1).join(', '))}">+${list.length - 1}</button>`;
     } else if (DATE_K.has(key)) {
+      classes.push('el-d');
       inner = v ? esc(day(v)) : '<span style="color:#C9C9C5">—</span>';
       const p = r.prov && r.prov[key];
-      if (v && p && p !== 'actual') { classes.push('el-fc'); if (p === 'carrier') classes.push('cr'); }
+      const forecast = v && p && p !== 'actual';
+      const late = r.late_days != null && r.late_days >= 2 && (key === 'delivery' || key === 'eta') && String(r.status).trim() !== 'Delivered';
+      if (key === 'eta' && r.eta_impossible) {
+        classes.push('bad');
+        title = `Arrival not confirmed. ${esc(r.eta_basis || '')} gives ${esc(day(v))}, after the ${r.prov.delivery === 'actual' ? 'delivery' : 'booked dock'} on ${esc(day(r.delivery))}. Confirm the arrival on the movement; the file sends this ETA blank until then.`;
+      } else if (late) {
+        classes.push('late');
+        title = `${r.late_days} days later than first promised.${forecast ? ' Forecast — ' + esc(key === 'eta' ? r.eta_basis : p) + '.' : ''}`;
+      } else if (forecast) {
+        classes.push('fc');
+        title = key === 'eta' ? `Forecast — ${esc(r.eta_basis || p)}.` : p === 'booked' ? 'Dock booked for this day; not yet delivered.' : 'Forecast from the plan.';
+      }
     } else if (NUM_K.has(key)) {
       classes.push('num'); inner = v === '' || v == null ? '' : esc(v);
     } else if (EMPTY_K.has(key)) {
@@ -318,8 +343,9 @@
       const sig = r.zendesk + '|' + r.transport + '::' + chg.signature;
       if (!S.pulsed.has(sig)) { classes.push('pulse'); S.pulsed.add(sig); }
     }
-    const title = chg ? ` title="${esc((chg.old ? val(chg, 'old') + ' → ' : '') + val(chg, 'new') + '. ' + chg.context)}"` : '';
-    return { cls: classes.join(' '), inner, title };
+    if (chg) title = (chg.old ? val(chg, 'old') + ' → ' : '') + val(chg, 'new') + '. ' + esc(chg.context) + (title ? ' ' + title : '');
+    if ((key === 'cartons' || key === 'units' || key === 'weight_kg') && r.qty_source === 'plan') { classes.push('dim'); title = 'Planned quantity — nothing binned for these POs yet.'; }
+    return { cls: classes.join(' '), inner, title: title ? ` title="${title}"` : '' };
   }
 
   function notesCell(r, list) {
@@ -340,7 +366,9 @@
     const byRow = changesByRow(d);
     const rows = visibleRows(d, byRow);
     const all = d.rows || [];
-    const counts = { all: all.length, changed: byRow.size, open: all.filter(r => r.status !== 'Delivered').length, delivered: all.filter(r => r.status === 'Delivered').length };
+    const counts = { all: all.length, changed: byRow.size, open: all.filter(r => r.status !== 'Delivered').length, delivered: all.filter(r => r.status === 'Delivered').length,
+                     late: all.filter(r => r.late_days != null && r.late_days >= 2 && r.status !== 'Delivered').length,
+                     attention: all.filter(r => r.eta_impossible).length };
     const chip = (k, l) => `<button class="el-chipb" data-act="filter" data-v="${k}" aria-pressed="${S.filter === k}">${l}<span class="n">${counts[k]}</span></button>`;
     const arrow = (k) => S.sort.key === k ? `<span class="arr">${S.sort.dir > 0 ? '▲' : '▼'}</span>` : '';
 
@@ -361,8 +389,13 @@
 <div class="el-card">
   <div class="el-tools">
     <input class="el-search" type="search" placeholder="Zendesk, PO, vendor, container, vessel…" value="${esc(S.q)}" data-search="1">
-    <div class="el-chips">${chip('all', 'All')}${chip('changed', 'Changed')}${chip('open', 'Open')}${chip('delivered', 'Delivered')}</div>
-    <div class="el-legend"><span><i style="background:#FFF8E6;border:1px solid #F0E2B0"></i>forecast</span><span><i style="background:#fff;border:1px solid ${LINE}"></i>actual</span><span><i style="background:#fff;border-left:3px solid ${RED}"></i>changed since last send</span></div>
+    <div class="el-chips">${chip('all', 'All')}${chip('changed', 'Changed')}${chip('open', 'Open')}${chip('delivered', 'Delivered')}${counts.late ? chip('late', 'Late') : ''}${counts.attention ? chip('attention', 'Needs attention') : ''}</div>
+    <div class="el-legend">
+      <span class="el-leg"><span class="bar" style="background:${BLUE}"></span>forecast</span>
+      <span class="el-leg"><span class="bar" style="background:transparent;border-left:1px solid #C9C9C5"></span>actual</span>
+      <span class="el-leg"><span class="bar" style="background:${RED}"></span>later than promised</span>
+      <span class="el-leg"><span class="dot"></span>changed since last send</span>
+    </div>
   </div>
   ${rows.length ? `<div class="el-scroll"><table class="el-table">
     <thead><tr>${fzHead}${shHead}<th class="el-notes">Context &amp; notes</th></tr></thead>
