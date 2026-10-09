@@ -23,7 +23,7 @@
   'use strict';
   if (window.__TM_LOADED__) return;
   window.__TM_LOADED__ = true;
-  const TM_VERSION = '21';
+  const TM_VERSION = '22';
 
   // ── Palette (Pinpoint status colours) ──
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
@@ -518,7 +518,7 @@
 .tm-wk{font-size:10px;font-weight:600;padding:1px 4px;border-radius:3px;background:rgba(255,255,255,.16)}
 .tm-pill.sel .tm-wk{background:${INK};color:#fff}
 .tm-anim{transition:left 1.2s cubic-bezier(.2,.7,.2,1),width 1.2s cubic-bezier(.2,.7,.2,1),top 1.2s cubic-bezier(.2,.7,.2,1),opacity .5s ease}
-.tm-replaying .tm-anim{transition-duration:2.5s,2.5s,2.5s,.5s}
+.tm-replaying .tm-anim{transition-duration:3.5s,3.5s,3.5s,.5s}
 .tm-replay-cap{position:absolute;z-index:3;height:22px;padding:0 9px;border-radius:11px;background:${INK};color:#fff;font-size:11px;font-weight:600;white-space:nowrap;display:flex;align-items:center;gap:6px;animation:tmFade .4s ease}
 .tm-replay-banner{position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:2147483250;display:flex;align-items:center;gap:12px;height:44px;padding:0 10px 0 16px;border-radius:22px;background:${INK};color:#fff;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.25);animation:tmFade .25s ease}
 .tm-tl-grid{display:grid;grid-template-columns:280px minmax(0,1fr)}
@@ -1780,7 +1780,7 @@
     if (S.toast) html += `<div class="tm-toast" role="status">${esc(S.toast)}</div>`;
     if (S.replayStage) html += `<div class="tm-replay-banner" role="status">
         ${S.replayStage === 'playing' ? `<span class="tm-live" style="background:#fff"></span><span>Replaying yesterday → today · ${plural(S.replayIds ? S.replayIds.size : 0, 'change')}</span>`
-          : `<span>Done — ${plural(S.replayIds ? S.replayIds.size : 0, 'change')} since yesterday</span><button data-act="replay" style="height:30px;padding:0 12px;border-radius:15px;background:#fff;color:${INK};font-size:12px;font-weight:600">Replay again</button>`}
+          : `<span>${plural(S.replayIds ? S.replayIds.size : 0, 'change')} since yesterday — highlighted until you close this</span><button data-act="replay" style="height:30px;padding:0 12px;border-radius:15px;background:#fff;color:${INK};font-size:12px;font-weight:600">Replay again</button>`}
         <button data-act="replay-end" aria-label="Close" style="width:30px;height:30px;border-radius:15px;display:inline-flex;align-items:center;justify-content:center;color:#fff">${I.x(14)}</button></div>`;
     ov.innerHTML = html;
     ov.setAttribute('data-panel-key', panelKey);
@@ -2038,7 +2038,10 @@
   // A short briefing you can watch: the weeks involved open, the first changed row scrolls
   // into view, each change moves slowly from yesterday's position to today's with a caption
   // saying what it was, and a banner marks the start and the end.
-  const REPLAY_MS = 2800, REPLAY_DONE_MS = 8000;
+  // Motion takes REPLAY_MS; after that the highlights and captions STAY until the person
+  // closes the banner. It used to clear itself after eight seconds, which is not long enough
+  // to read five captions, let alone decide what to do about them.
+  const REPLAY_MS = 4000;
   function replay() {
     const M = S.board ? model() : null;
     const movedList = M ? M.all.filter(m => m.live && m.changedAny) : [];
@@ -2055,7 +2058,6 @@
     if (row) { try { row.closest('.tm-trow').scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) {} }
     clearTimeout(S.replayTimer); clearTimeout(S.replayTimer2);
     S.replayTimer = setTimeout(() => { if (S.root) S.root.classList.remove('tm-replaying'); S.replayStage = 'done'; if (S.board) renderOverlays(model()); }, REPLAY_MS);
-    S.replayTimer2 = setTimeout(endReplay, REPLAY_MS + REPLAY_DONE_MS);
   }
   function endReplay() {
     clearTimeout(S.replayTimer); clearTimeout(S.replayTimer2);
@@ -2393,6 +2395,7 @@
   window.hideMapPage = function () {
     const pg = document.getElementById('page-map');
     if (pg) { pg.classList.add('hidden'); pg.style.display = 'none'; }
+    if (S.replayStage) endReplay();     // a replay left open does not follow you to another page
     // Overlays live on <body>; they must not outlive the page.
     S.panel = null; S.sheet = null; S.notify = null; S.full = false; S.corrMore = false; S.report = null;
     const ov = document.getElementById('tm-overlay'); if (ov) ov.innerHTML = '';
