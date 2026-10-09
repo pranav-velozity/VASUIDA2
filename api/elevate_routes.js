@@ -45,6 +45,11 @@ module.exports = function mountElevate(deps) {
   const GRACE_DAYS = Number(process.env.ELEVATE_DELIVERED_GRACE_DAYS || 7);
   const FROM_WEEK = process.env.ELEVATE_FROM_WEEK || '2026-01-05';   // first Monday included
   const SFTP_ENABLED = String(process.env.ELEVATE_SFTP_ENABLED || '').toLowerCase() === 'true';
+  // Where the client goes to look. The email links the page, and every changed line links
+  // straight to its movement — the email does the navigating, which is how a habit starts.
+  const APP_URL = String(process.env.ELEVATE_APP_URL || 'https://pinpoint.velozity.com.au').replace(/\/+$/, '');
+  const boardUrl = () => `${APP_URL}/#map`;
+  const movementUrl = (uid) => uid ? `${APP_URL}/?mv=${encodeURIComponent(uid)}#map` : boardUrl();
 
   // ── Schema ──
   db.exec(`
@@ -528,7 +533,8 @@ module.exports = function mountElevate(deps) {
           const sig = `new`;
           changes.push({ row_key: r.row_key, zendesk: r.zendesk, transport: r.transport, field: 'new', label: 'New',
             old: '', new: r.status, signature: sig, context: `Departed ${fmtDay(r.etd)}; first appearance on the tracker.`,
-            note: notes.get(r.row_key + '::' + sig) || '', anomaly: false, vendor: r.vendor, pos: r.pos.join(', ') });
+            note: notes.get(r.row_key + '::' + sig) || '', anomaly: false, vendor: r.vendor, pos: r.pos.join(', '),
+            uid: (r._uids || [])[0] || null });
         }
         continue;
       }
@@ -541,7 +547,8 @@ module.exports = function mountElevate(deps) {
           old: a, new: b, signature: sig, context: describe(field, a, b, r),
           note: notes.get(r.row_key + '::' + sig) || '',
           // A delivered row that changes is a question, not an update.
-          anomaly: !!wasDelivered, vendor: r.vendor, pos: r.pos.join(', ') });
+          anomaly: !!wasDelivered, vendor: r.vendor, pos: r.pos.join(', '),
+          uid: (r._uids || [])[0] || null });
       }
     }
     // Rows that vanished since the last send: not silently. Reported once.
@@ -615,7 +622,7 @@ module.exports = function mountElevate(deps) {
     });
 
     const cs = wb.addWorksheet('Changes', { views: [{ state: 'frozen', ySplit: 1 }] });
-    cs.addRow(['Zendesk', 'Transport', 'Vendor', 'PO #', 'Field', 'Was', 'Now', 'Context', 'Note from VelOzity', 'Flag']).font = { bold: true };
+    cs.addRow(['Zendesk', 'Transport', 'Vendor', 'PO #', 'Field', 'Was', 'Now', 'Context', 'Note from VelOzity', 'Flag', 'Pinpoint']).font = { bold: true };
     if (!changes.length) {
       cs.addRow([`No changes since the last update. Position as at ${fmtLong(forDate)}.`]);
     }
@@ -623,9 +630,11 @@ module.exports = function mountElevate(deps) {
       cs.addRow([c.zendesk, c.transport, c.vendor, c.pos, c.label,
         DATE_KEYS.has(c.field) && c.old ? new Date(c.old + 'T00:00:00Z') : String(c.old).trim(),
         DATE_KEYS.has(c.field) && c.new ? new Date(c.new + 'T00:00:00Z') : String(c.new).trim(),
-        c.context, c.note || '', c.anomaly ? 'Changed after delivery — please check' : '']);
+        c.context, c.note || '', c.anomaly ? 'Changed after delivery — please check' : '',
+        c.uid ? { text: 'Open movement', hyperlink: movementUrl(c.uid) } : '']);
+      if (c.uid) cs.lastRow.getCell(11).font = { color: { argb: 'FF1C1C1E' }, underline: true };
     }
-    [10, 10, 28, 16, 18, 12, 12, 56, 44, 30].forEach((w, i) => { cs.getColumn(i + 1).width = w; });
+    [10, 10, 28, 16, 18, 12, 12, 56, 44, 30, 16].forEach((w, i) => { cs.getColumn(i + 1).width = w; });
     cs.getColumn(6).numFmt = 'dd/mm/yyyy'; cs.getColumn(7).numFmt = 'dd/mm/yyyy';
     cs.getColumn(8).alignment = { wrapText: true, vertical: 'top' };
     cs.getColumn(9).alignment = { wrapText: true, vertical: 'top' };
@@ -660,8 +669,9 @@ module.exports = function mountElevate(deps) {
     const text = [
       `Daily FF tracker — ${fmtLong(forDate)}`, '',
       `${st.rows} lines: ${st.delivered} delivered, ${st.open} open (${st.shipped} shipped, ${st.landed} landed, ${st.booked} dock booked).`,
+      '', `See every movement live in Pinpoint: ${boardUrl()}`, '',
       changes.length ? `${changes.length} change${changes.length === 1 ? '' : 's'} since the last update:` : 'No changes since the last update.',
-      ...top.map(c => `  · ${line(c)}${c.context ? ' — ' + c.context : ''}${c.note ? ' (' + c.note + ')' : ''}`),
+      ...top.map(c => `  · ${line(c)}${c.context ? ' — ' + c.context : ''}${c.note ? ' (' + c.note + ')' : ''}${c.uid ? `\n    ${movementUrl(c.uid)}` : ''}`),
       changes.length > top.length ? `  … and ${changes.length - top.length} more on the Changes sheet.` : '',
       st.anomalies ? `${st.anomalies} change${st.anomalies === 1 ? '' : 's'} on delivered lines — flagged on the Changes sheet for your review.` : '',
       '', `Attached: ${filename} (sheet 1 the full tracker, sheet 2 the changes).`,
@@ -675,17 +685,26 @@ module.exports = function mountElevate(deps) {
         <p style="font-size:14px;line-height:1.6;margin:16px 0 8px;">
           <b>${st.rows}</b> lines — ${st.delivered} delivered, <b>${st.open} open</b>
           (${st.shipped} shipped, ${st.landed} landed, ${st.booked} dock booked).</p>
+        <table role="presentation" cellspacing="0" cellpadding="0" style="margin:14px 0 18px;"><tr>
+          <td style="background:#1C1C1E;border-radius:8px;">
+            <a href="${esc(boardUrl())}" style="display:inline-block;padding:11px 18px;color:#fff;font-size:14px;font-weight:600;text-decoration:none;white-space:nowrap;">See every movement live in Pinpoint &rarr;</a>
+          </td>
+          <td style="padding-left:14px;font-size:12.5px;color:#6E6E73;line-height:1.45;">Where each container is right now &mdash; status, carrier tracking and the date first promised, updated as the carrier reports.</td>
+        </tr></table>
         ${changes.length ? `
         <div style="font-size:13px;font-weight:600;margin:14px 0 6px;">${changes.length} change${changes.length === 1 ? '' : 's'} since the last update</div>
         <table style="border-collapse:collapse;font-size:13px;width:100%;">
           ${top.map(c => `<tr>
-            <td style="padding:5px 8px 5px 0;border-top:1px solid #EEE;white-space:nowrap;vertical-align:top;"><b>${esc(c.zendesk)}</b> <span style="color:#6E6E73;">${esc(c.transport)}</span></td>
+            <td style="padding:5px 8px 5px 0;border-top:1px solid #EEE;white-space:nowrap;vertical-align:top;">${c.uid
+              ? `<a href="${esc(movementUrl(c.uid))}" style="color:#1C1C1E;font-weight:700;text-decoration:underline;text-decoration-color:#B8B8B4;">${esc(c.zendesk)}</a>`
+              : `<b>${esc(c.zendesk)}</b>`} <span style="color:#6E6E73;">${esc(c.transport)}</span></td>
             <td style="padding:5px 8px;border-top:1px solid #EEE;white-space:nowrap;vertical-align:top;">${esc(c.label)}</td>
             <td style="padding:5px 8px;border-top:1px solid #EEE;vertical-align:top;">${c.old ? esc(DATE_KEYS.has(c.field) ? fmtDay(c.old) : String(c.old).trim()) + ' → ' : ''}<b>${esc(DATE_KEYS.has(c.field) ? fmtDay(c.new) : String(c.new).trim())}</b></td>
             <td style="padding:5px 0 5px 8px;border-top:1px solid #EEE;color:#48484A;vertical-align:top;">${esc(c.context)}${c.note ? `<div style="color:#1C1C1E;margin-top:2px;">${esc(c.note)}</div>` : ''}</td>
           </tr>`).join('')}
         </table>
         ${changes.length > top.length ? `<div style="font-size:12px;color:#6E6E73;margin-top:6px;">… and ${changes.length - top.length} more on the Changes sheet.</div>` : ''}
+        <div style="font-size:12px;color:#6E6E73;margin-top:8px;">Click a Zendesk number to open that movement in Pinpoint.</div>
         ${st.anomalies ? `<div style="font-size:13px;margin-top:12px;padding:8px 10px;background:#FFF4E5;border-radius:6px;">${st.anomalies} change${st.anomalies === 1 ? '' : 's'} on delivered lines — flagged on the Changes sheet for your review.</div>` : ''}
         ` : `<p style="font-size:14px;color:#6E6E73;">No changes since the last update.</p>`}
         <div style="font-size:12px;color:#6E6E73;margin-top:18px;">${esc(filename)} — sheet 1 the full tracker, sheet 2 the changes.</div>
