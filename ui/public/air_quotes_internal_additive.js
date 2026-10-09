@@ -16,6 +16,7 @@
   const AMBER = '#B7791F', GREEN = '#1B7F3B', RED = '#B33F40';
 
   let _on = false, _data = null, _sel = null, _busy = false, _q = '';
+  let _weeks = null, _wkAnchor = null, _wkBusy = false;   // the four-week revenue strip
   const _expanded = new Set();
 
   const el = id => document.getElementById(id);
@@ -91,6 +92,24 @@
       .aqi-tabs{display:inline-flex;border:.5px solid rgba(0,0,0,.14);border-radius:8px;overflow:hidden;}
       .aqi-tabs button{border:0;background:#fff;color:${MID};font:600 11px inherit;padding:6px 14px;cursor:pointer;}
       .aqi-tabs button.on{background:${DARK};color:#fff;}
+      .aqi-wk{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;}
+      @media (max-width:1100px){ .aqi-wk{grid-template-columns:repeat(2,minmax(0,1fr));} }
+      .aqi-wkt{border:.5px solid rgba(0,0,0,.09);border-radius:10px;padding:10px 12px;background:#fff;}
+      .aqi-wkt.now{border-color:${BRAND};box-shadow:inset 0 0 0 .5px ${BRAND};}
+      .aqi-wkh{display:flex;justify-content:space-between;align-items:baseline;gap:8px;}
+      .aqi-wkw{font-size:13px;font-weight:700;color:${DARK};letter-spacing:-.01em;}
+      .aqi-wkr{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};}
+      .aqi-wkt.now .aqi-wkr{color:${BRAND};}
+      .aqi-wkd{font-size:10px;color:${LIGHT};margin-top:1px;}
+      .aqi-wkv{font-size:17px;font-weight:700;color:${DARK};letter-spacing:-.02em;margin-top:8px;}
+      .aqi-wkl{font-size:8px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};}
+      .aqi-wkrow{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-top:6px;font-size:11.5px;color:${DARK};}
+      .aqi-wkrow .k{font-size:10px;color:${MID};}
+      .aqi-wkp{font-size:10.5px;color:${MID};margin-top:7px;padding-top:6px;border-top:.5px dashed rgba(0,0,0,.1);}
+      .aqi-wknav{display:flex;align-items:center;gap:6px;}
+      .aqi-wkb{height:26px;min-width:26px;padding:0 8px;border-radius:7px;border:.5px solid rgba(0,0,0,.15);background:#fff;
+               font-size:11.5px;font-weight:500;color:${DARK};cursor:pointer;font-family:inherit;}
+      .aqi-wkb:disabled{opacity:.4;cursor:default;}
       .aqi-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;}
       @media (max-width:1100px){ .aqi-tiles{grid-template-columns:repeat(2,minmax(0,1fr));} }
       @media (max-width:620px){ .aqi-tiles{grid-template-columns:1fr;} }
@@ -284,6 +303,56 @@
     return needle.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.indexOf(t) >= 0);
   }
 
+  // ── Four weeks of air: last, this, next two. Revenue, cost, margin; approved only, with
+  // what is still awaiting a decision shown beneath rather than added in. ◀ ▶ walk the window
+  // a week at a time; "This week" brings it back.
+
+  const money0 = (v) => v == null ? '—' : 'USD ' + Math.round(Number(v)).toLocaleString();
+  const wkDay = (d) => new Date(d + 'T00:00:00Z').toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  function weeksHtml() {
+    const d = _weeks;
+    const nav = `<div class="aqi-wknav">
+      <button class="aqi-wkb" data-wk="-1" title="Earlier" ${_wkBusy ? 'disabled' : ''}>&#8249;</button>
+      <button class="aqi-wkb" data-wk="0" ${_wkBusy || !d || d.anchor === addDays(d.this_week, -7) ? 'disabled' : ''}>This week</button>
+      <button class="aqi-wkb" data-wk="1" title="Later" ${_wkBusy ? 'disabled' : ''}>&#8250;</button>
+    </div>`;
+    const head = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <div class="aqi-sec" style="margin:0;">Air by execution week &middot; approved quotes</div>${nav}</div>`;
+    if (!d) return `<div class="aqi-card" style="margin-bottom:16px;">${head}<div class="aqi-none">Loading…</div></div>`;
+    const tile = (w) => {
+      const a = w.approved, p = w.pending;
+      const rel = w.rel === 0 ? 'This week' : w.rel === -1 ? 'Last week' : w.rel === 1 ? 'Next week' : w.rel < 0 ? `${-w.rel} weeks ago` : `In ${w.rel} weeks`;
+      const mcol = a.margin_pct == null ? DARK : a.margin_pct >= 20 ? '#1B7F3B' : a.margin_pct >= 10 ? DARK : BRAND;
+      return `<div class="aqi-wkt${w.rel === 0 ? ' now' : ''}">
+        <div class="aqi-wkh"><span class="aqi-wkw">W${w.iso_week}</span><span class="aqi-wkr">${rel}</span></div>
+        <div class="aqi-wkd">w/c ${wkDay(w.week_start)} &middot; ${a.n} approved${w.declined ? ` &middot; ${w.declined} declined` : ''}</div>
+        <div class="aqi-wkl" style="margin-top:9px;">Revenue</div>
+        <div class="aqi-wkv" style="margin-top:1px;">${a.n ? money0(a.revenue) : '<span style="color:' + LIGHT + ';font-weight:500;">nothing approved</span>'}</div>
+        <div class="aqi-wkrow"><span class="k">Cost</span><span>${a.n ? money0(a.cost) : '—'}</span></div>
+        <div class="aqi-wkrow"><span class="k">Margin</span><span style="font-weight:700;color:${mcol};">${a.n ? money0(a.margin) : '—'}${a.margin_pct != null ? ` <span style="font-weight:500;color:${MID};">&middot; ${a.margin_pct}%</span>` : ''}</span></div>
+        ${p.n ? `<div class="aqi-wkp">+ ${p.n} awaiting decision &middot; ${money0(p.revenue)} if approved</div>` : ''}
+      </div>`;
+    };
+    return `<div class="aqi-card" style="margin-bottom:16px;">${head}<div class="aqi-wk">${d.weeks.map(tile).join('')}</div></div>`;
+  }
+  function addDays(d, n) { const x = new Date(d + 'T00:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
+  async function loadWeeks(anchor) {
+    _wkBusy = true; paintWeeks();
+    try { _weeks = await req('/air-quotes/internal/weeks' + (anchor ? '?anchor=' + encodeURIComponent(anchor) : '')); _wkAnchor = _weeks.anchor; }
+    catch (e) { _weeks = null; }
+    _wkBusy = false; paintWeeks();
+  }
+  // Repaint only the strip, so walking the weeks never disturbs the queue or the selection.
+  function paintWeeks() {
+    const host = el('aqi-weeks'); if (!host) return;
+    host.innerHTML = weeksHtml();
+    host.querySelectorAll('[data-wk]').forEach(b => b.addEventListener('click', () => {
+      const k = Number(b.getAttribute('data-wk'));
+      if (k === 0) return loadWeeks(null);
+      loadWeeks(addDays(_wkAnchor || (_weeks && _weeks.anchor) || new Date().toISOString().slice(0, 10), k * 7));
+    }));
+  }
+
   function render() {
     const body = el('aqi-body'); if (!body || !_data) return;
     const all = _data.quotes || [];
@@ -296,6 +365,7 @@
     const ins = _data.insights || [], bands = _data.win_bands || [];
     body.innerHTML = `
     ${tilesHtml()}
+    <div id="aqi-weeks">${weeksHtml()}</div>
     ${(ins.length || bands.length) ? `<div class="aqi-card" style="margin-bottom:16px;">
       <div class="aqi-sec">Pricing intelligence</div>
       ${ins.map(t => `<div style="font-size:12px;color:${DARK};line-height:1.55;margin-bottom:6px;">
@@ -362,6 +432,8 @@
       si.setSelectionRange(si.value.length, si.value.length);
     }
     el('aqi-clear')?.addEventListener('click', () => { _q = ''; render(); });
+    paintWeeks();
+    if (!_weeks && !_wkBusy) loadWeeks(null);
 
     body.querySelectorAll('[data-q]').forEach(r => r.addEventListener('click', () => {
       _sel = r.getAttribute('data-q'); render();
