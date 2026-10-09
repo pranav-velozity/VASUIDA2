@@ -15269,6 +15269,49 @@ app.delete('/air-quotes/:id', authenticateRequest, requireClientOrInternal, writ
 
 // ── Internal: the review queue ──
 // Admin only. This is the one surface where cost and margin are visible.
+// Four weeks of air revenue, cost and margin by EXECUTION week — last week, this week and
+// the two ahead by default; ?anchor=<Monday> moves the window. Approved quotes make the
+// figures; what is still awaiting a decision is shown beside them, never added in, so a
+// future week reads as what is booked plus what is in play rather than one blurred number.
+// Internal only: cost and margin live here.
+app.get('/air-quotes/internal/weeks', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+  try {
+    const c = String(req.query.client_id || curClient());
+    const mondayOf = (d) => { const x = new Date(d + 'T00:00:00Z'); const dow = x.getUTCDay(); x.setUTCDate(x.getUTCDate() - ((dow + 6) % 7)); return x.toISOString().slice(0, 10); };
+    const addD = (d, n) => { const x = new Date(d + 'T00:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+    const isoWeek = (d) => { const x = new Date(d + 'T00:00:00Z'); const day = x.getUTCDay() || 7; x.setUTCDate(x.getUTCDate() + 4 - day); const y0 = new Date(Date.UTC(x.getUTCFullYear(), 0, 1)); return Math.ceil((((x - y0) / 86400000) + 1) / 7); };
+    const todaySyd = new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Sydney', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    const thisWeek = mondayOf(todaySyd);
+    const anchor = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.anchor || '')) ? mondayOf(String(req.query.anchor)) : addD(thisWeek, -7);
+    const n = Math.min(8, Math.max(1, parseInt(req.query.n, 10) || 4));
+    const weeks = Array.from({ length: n }, (_, i) => addD(anchor, i * 7));
+
+    const rows = db.prepare(`SELECT q.week_start, q.state, q.sell_amount, k.cost_amount
+                             FROM air_quote q LEFT JOIN air_quote_cost k ON k.quote_id = q.id
+                             WHERE q.client_id = ? AND q.week_start >= ? AND q.week_start <= ?`)
+      .all(c, weeks[0], weeks[weeks.length - 1]);
+    const OPEN = new Set(['submitted', 'rfq_sent', 'costed', 'pending_review', 'quoted']);
+    const r2 = (v) => Math.round(v * 100) / 100;
+    const out = weeks.map(ws => {
+      const mine = rows.filter(r => r.week_start === ws);
+      const won = mine.filter(r => r.state === 'approved');
+      const open = mine.filter(r => OPEN.has(r.state));
+      const sell = won.reduce((a, r) => a + (Number(r.sell_amount) || 0), 0);
+      const cost = won.reduce((a, r) => a + (Number(r.cost_amount) || 0), 0);
+      const openSell = open.reduce((a, r) => a + (Number(r.sell_amount) || 0), 0);
+      return {
+        week_start: ws, iso_week: isoWeek(ws),
+        rel: ws === thisWeek ? 0 : Math.round((Date.parse(ws) - Date.parse(thisWeek)) / (7 * 86400000)),
+        approved: { n: won.length, revenue: r2(sell), cost: r2(cost), margin: r2(sell - cost),
+                    margin_pct: sell > 0 ? Math.round((sell - cost) / sell * 1000) / 10 : null },
+        pending:  { n: open.length, revenue: r2(openSell) },
+        declined: mine.filter(r => r.state === 'declined').length,
+      };
+    });
+    res.json({ client_id: c, this_week: thisWeek, anchor, currency: 'USD', weeks: out });
+  } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
 app.get('/air-quotes/internal', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
   try {
     const c = String(req.query.client_id || curClient());
