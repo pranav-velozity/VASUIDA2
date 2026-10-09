@@ -23,7 +23,7 @@
   'use strict';
   if (window.__TM_LOADED__) return;
   window.__TM_LOADED__ = true;
-  const TM_VERSION = '20';
+  const TM_VERSION = '21';
 
   // ── Palette (Pinpoint status colours) ──
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
@@ -2015,6 +2015,13 @@
         .then(r => alerts.push(...((r && r.alerts) || []))).catch(() => {})));
       S.board = board; S.alerts = alerts; S.loadedAt = Date.now();
       if (S.sel && S.sel !== 'none' && !board.consignments.some(c => c.consignment_uid === S.sel)) { S.sel = null; if (S.panel === 'mv') S.panel = null; }
+      // A deep link from the daily client email: ?mv=<uid>#map opens that movement once the
+      // board is here, then the parameter is dropped so a refresh does not reopen it.
+      if (S.pendingMv) {
+        const want = S.pendingMv; S.pendingMv = null;
+        if (board.consignments.some(c => c.consignment_uid === want)) { S.sel = want; S.panel = 'mv'; S.amend = null; S.legacy = null; }
+        try { const u = new URL(location.href); u.searchParams.delete('mv'); history.replaceState(null, '', u.pathname + u.search + u.hash); } catch (_) {}
+      }
       // The overnight replay plays once, on the first load, and only if something moved.
       const moved = (board.consignments || []).some(c => (c.changed_24h && Object.keys(c.changed_24h).length)
         || (c.milestones || []).some(m => m.actual_at && m.recorded_at && Date.parse(m.recorded_at) >= Date.now() - 86400000));
@@ -2358,6 +2365,7 @@
   }
 
   window.showMapPage = function () {
+    try { const mv = new URLSearchParams(location.search).get('mv'); if (mv) S.pendingMv = mv; } catch (_) {}
     let pg = document.getElementById('page-map');
     if (!pg) {
       pg = document.createElement('section');
@@ -2373,6 +2381,12 @@
     }
     pg.classList.remove('hidden');
     pg.style.display = 'block';
+    if (S.board && S.pendingMv) {
+      const want = S.pendingMv; S.pendingMv = null;
+      if (S.board.consignments.some(c => c.consignment_uid === want)) { S.sel = want; S.panel = 'mv'; S.amend = null; S.legacy = null; }
+      try { const u = new URL(location.href); u.searchParams.delete('mv'); history.replaceState(null, '', u.pathname + u.search + u.hash); } catch (_) {}
+      render();
+    }
     if (S.board) renderOverlays(model());
   };
 
