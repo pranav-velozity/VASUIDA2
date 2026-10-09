@@ -41,7 +41,7 @@ module.exports = function mountElevate(deps) {
   const log = logger || console;
 
   const TZ = process.env.ELEVATE_TZ || 'Australia/Sydney';
-  const SEND_HOUR = Number(process.env.ELEVATE_HOUR || 23);
+  const SEND_HOUR = Number(process.env.ELEVATE_HOUR || 6);     // 6am Sydney: in the inbox before the day starts
   const GRACE_DAYS = Number(process.env.ELEVATE_DELIVERED_GRACE_DAYS || 7);
   const FROM_WEEK = process.env.ELEVATE_FROM_WEEK || '2026-01-05';   // first Monday included
   const SFTP_ENABLED = String(process.env.ELEVATE_SFTP_ENABLED || '').toLowerCase() === 'true';
