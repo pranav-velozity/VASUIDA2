@@ -23,7 +23,7 @@
   'use strict';
   if (window.__TM_LOADED__) return;
   window.__TM_LOADED__ = true;
-  const TM_VERSION = '22';
+  const TM_VERSION = '23';
 
   // ── Palette (Pinpoint status colours) ──
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
@@ -147,6 +147,9 @@
     notify: null, nTo: [], nDraft: '', nErr: '', nSubject: null, nBody: null, nAttach: true, nSending: false, nRecipients: null,
     amend: null, busy: null, legacy: null,
     toast: '', toastTimer: null, playedReplay: false, phase: 'now', timer: null,
+    // Search: the typed text, the open results list, which result the arrow keys sit on, the
+    // server lookup in flight (its sequence number — a late reply for an older query is dropped).
+    q: '', qOpen: false, qIdx: 0, qLocal: [], qRemote: [], qSeq: 0, qBusy: false, qTimer: null,
   };
 
   // ════ Model ════
@@ -486,6 +489,22 @@
 .tm-btn{height:38px;padding:0 14px;border-radius:8px;border:1px solid #D6D6D2;background:#fff;font-size:12.5px;font-weight:500;display:inline-flex;align-items:center;gap:8px}
 .tm-btn-p{height:42px;padding:0 16px;border-radius:8px;background:${INK};color:#fff;font-size:13px;font-weight:500;display:inline-flex;align-items:center;gap:8px}
 .tm-btn-s{height:42px;padding:0 16px;border-radius:8px;background:#fff;border:1px solid #D6D6D2;font-size:13px;font-weight:500;display:inline-flex;align-items:center;gap:8px}
+.tm-srch{position:relative;display:flex;align-items:center;height:38px;min-width:300px;border:1px solid #D6D6D2;border-radius:8px;background:#fff;color:${MUTED};transition:border-color .15s ease,box-shadow .15s ease}
+.tm-srch:focus-within{border-color:${INK};box-shadow:0 0 0 3px rgba(30,30,30,.08);color:${INK}}
+.tm-srch>svg{position:absolute;left:11px;pointer-events:none}
+.tm-srch input{height:100%;width:100%;padding:0 30px 0 34px;border:0;background:transparent;font:inherit;font-size:13px;color:${INK};outline:none}
+.tm-srch input::placeholder{color:${MUTED}}
+.tm-srch input::-webkit-search-cancel-button,.tm-srch input::-webkit-search-decoration{-webkit-appearance:none;display:none}
+.tm-srch kbd{position:absolute;right:8px;height:20px;padding:0 6px;border-radius:5px;border:1px solid #D6D6D2;background:#F6F6F4;font:500 11px/18px 'Geist Mono',ui-monospace,Menlo,monospace;color:${MUTED};pointer-events:none}
+.tm-srch:focus-within kbd,.tm-srch.has-q kbd{display:none}
+.tm-srch .tm-srch-x{position:absolute;right:4px;width:28px;height:28px;border-radius:6px;display:none;align-items:center;justify-content:center;color:${MUTED}}
+.tm-srch.has-q .tm-srch-x{display:inline-flex}
+.tm-srch-res{position:absolute;top:calc(100% + 6px);right:0;z-index:40;width:460px;max-width:calc(100vw - 48px);max-height:380px;overflow-y:auto;background:#fff;border:1px solid ${LINE};border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.14),0 2px 6px rgba(0,0,0,.06);padding:6px}
+.tm-srch-hit{display:grid;grid-template-columns:18px minmax(0,1fr) auto;gap:10px;align-items:center;width:100%;padding:9px 10px;border-radius:7px;text-align:left}
+.tm-srch-hit[aria-selected="true"],.tm-srch-hit:hover{background:#F5F5F3}
+.tm-srch-why{font-size:11px;color:${MUTED};white-space:nowrap}
+.tm-srch-why b{color:${INK};font-weight:600}
+.tm-srch-empty{padding:14px 12px;font-size:13px;color:${MUTED}}
 .tm-seg{display:flex;background:#E7E7E4;border-radius:8px;padding:3px;gap:2px}
 .tm-seg button{height:32px;padding:0 14px;border-radius:6px;font-size:12.5px;font-weight:500;color:${MUTED}}
 .tm-seg button[aria-pressed="true"]{background:#fff;color:${INK};box-shadow:0 1px 2px rgba(0,0,0,.08)}
@@ -573,6 +592,7 @@
     arrow: () => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>`,
     tick: () => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`,
     dl: () => `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>`,
+    search: () => `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>`,
   };
   const modeIcon = (m, s) => m === 'air' ? I.plane(s) : m === 'sea' ? I.ship(s) : I.none(s);
   const dot = (key, size) => {
@@ -639,6 +659,7 @@
     </nav>
   </div>
   <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    ${renderSearch()}
     <button class="tm-btn" data-act="replay">${I.replay()} Replay since yesterday</button>
     <div class="tm-seg" role="group" aria-label="Mode">${seg('all', 'All')}${seg('sea', 'Sea')}${seg('air', 'Air')}</div>
     ${tracked ? `<div style="display:flex;align-items:center;gap:8px;height:40px;padding:0 14px;background:#fff;border:1px solid ${LINE};border-radius:8px;font-size:13px">
@@ -646,6 +667,168 @@
       <span style="font-weight:500">Pinpoint tracking</span><span style="color:${MUTED}">· updated ${esc(timeLabel(tracked))}</span></div>` : ''}
   </div>
 </div>`;
+  }
+
+  // ════ Search ════
+  // One box: container / AWB, Zendesk ticket, vendor or PO. References, tickets and vendors
+  // are on the board already, so they match as you type. POs live in the week's plan rows and
+  // come from GET /consignments/find after a short pause; a late reply for an older query is
+  // dropped. Choosing a hit opens the same movement panel a pill or a row opens. Typing never
+  // re-renders the page — only the results list is repainted — so the caret is never lost.
+  const SEARCH_WAIT = 280;
+  const SEARCH_MAX = 12;
+  const WHY = { reference: (h, m) => m.air ? 'AWB' : 'Container', mbl: () => 'Bill of lading', zendesk: (h) => `ZD <b>${esc(h.zendesk)}</b>`, po: (h) => `PO <b>${esc(h.po)}</b>`, supplier: () => 'Vendor' };
+
+  function renderSearch() {
+    return `<div class="tm-srch${S.q ? ' has-q' : ''}" role="combobox" aria-haspopup="listbox" aria-expanded="${S.qOpen}" aria-owns="tm-q-res">
+      ${I.search()}<input id="tm-q" type="search" autocomplete="off" spellcheck="false" placeholder="Container, AWB, Zendesk or PO" value="${esc(S.q)}" aria-label="Find a movement" aria-controls="tm-q-res">
+      <kbd>/</kbd><button class="tm-srch-x" data-act="srch-clear" aria-label="Clear search">${I.x(14)}</button>
+      ${S.qOpen ? renderSearchResults() : ''}</div>`;
+  }
+
+  function searchHits() {
+    const seen = new Set(), out = [];
+    for (const h of S.qLocal.concat(S.qRemote)) { if (!seen.has(h.uid)) { seen.add(h.uid); out.push(h); } }
+    return out.slice(0, SEARCH_MAX);
+  }
+
+  function renderSearchResults() {
+    const hits = searchHits();
+    if (!hits.length) {
+      if (S.qBusy) return `<div class="tm-srch-res" id="tm-q-res" role="listbox"><div class="tm-srch-empty">Looking up POs…</div></div>`;
+      if (S.q.trim().length < 2) return '';
+      const wk = S.board && S.board.from ? isoWeek(S.board.from) : '';
+      return `<div class="tm-srch-res" id="tm-q-res" role="listbox"><div class="tm-srch-empty">Nothing matches “${esc(S.q.trim())}”${wk ? ` in the weeks on this board (${esc(wk)} to next week)` : ''}.</div></div>`;
+    }
+    const M = model();
+    const rows = hits.map((h, i) => {
+      const m = M.all.find(x => x.uid === h.uid);
+      if (!m) return '';
+      const [sup = '', zd = ''] = String((m.c.lanes || [])[0] || '').split('||');
+      const sub = [m.wkLabel, h.supplier || sup || null, h.matched !== 'zendesk' && (h.zendesk || zd) ? `ZD ${h.zendesk || zd}` : null, m.lanes > 1 ? `+${m.lanes - 1} more ${m.lanes === 2 ? 'lane' : 'lanes'}` : null].filter(Boolean).join(' · ');
+      return `<button class="tm-srch-hit" role="option" id="tm-q-opt-${i}" aria-selected="${i === S.qIdx}" data-act="srch-pick" data-uid="${esc(h.uid)}" data-v="${i}">
+        <span style="color:${MUTED};display:inline-flex">${modeIcon(m.mode, 16)}</span>
+        <span style="display:flex;flex-direction:column;gap:2px;min-width:0">
+          <span style="display:flex;gap:8px;align-items:center;min-width:0"><span class="tm-mono" style="font-size:13px;font-weight:600;white-space:nowrap">${esc(m.ref)}</span>${dot(m.st, 7)}<span style="font-size:12px;color:${MUTED};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(m.where)}</span></span>
+          <span style="font-size:12px;color:${MUTED};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(sub)}</span></span>
+        <span class="tm-srch-why">${(WHY[h.matched] || (() => ''))(h, m)}</span></button>`;
+    }).join('');
+    return `<div class="tm-srch-res" id="tm-q-res" role="listbox">${rows}${S.qBusy ? `<div class="tm-srch-empty" style="padding-top:8px;padding-bottom:6px">Looking up POs…</div>` : ''}</div>`;
+  }
+
+  // Instant: what the board already knows.
+  function searchLocal(q) {
+    const M = model();
+    if (!M) return [];
+    const ql = q.toLowerCase();
+    const qn = /^\d+$/.test(q) ? Number(q) : null;
+    const zdEq = (t) => { const s = String(t || '').trim(); return s !== '' && (s === q || (qn != null && /^\d+$/.test(s) && Number(s) === qn)); };
+    const refs = [], zds = [], sups = [];
+    for (const m of M.all) {
+      const c = m.c;
+      if (c.reference && String(c.reference).toLowerCase().includes(ql)) { refs.push({ uid: m.uid, matched: 'reference' }); continue; }
+      if (c.mbl && String(c.mbl).toLowerCase().includes(ql)) { refs.push({ uid: m.uid, matched: 'mbl' }); continue; }
+      let hit = null;
+      for (const k of (c.lanes || [])) {
+        const [sup = '', zd = ''] = String(k).split('||');
+        if (zdEq(zd)) { hit = { uid: m.uid, matched: 'zendesk', zendesk: zd.trim(), supplier: sup.trim() }; break; }
+        if (!hit && ql.length >= 3 && sup.toLowerCase().includes(ql)) hit = { uid: m.uid, matched: 'supplier', zendesk: zd.trim(), supplier: sup.trim() };
+      }
+      if (hit) (hit.matched === 'zendesk' ? zds : sups).push(hit);
+    }
+    const newest = (a, b) => { const x = M.all.find(m => m.uid === a.uid), y = M.all.find(m => m.uid === b.uid); return (y ? y.wk : '').localeCompare(x ? x.wk : ''); };
+    return refs.sort(newest).concat(zds.sort(newest), sups.sort(newest));
+  }
+
+  // Deferred: POs, plus anything the local pass could not see.
+  async function searchRemote(q) {
+    const seq = ++S.qSeq;
+    S.qBusy = true;
+    try {
+      const from = S.board && S.board.from ? `&from=${encodeURIComponent(S.board.from)}` : '';
+      const r = await req('GET', `/consignments/find?q=${encodeURIComponent(q)}${from}`);
+      if (seq !== S.qSeq) return;
+      S.qRemote = (r.hits || []).map(h => ({ uid: h.uid, matched: h.matched, po: h.po || null, zendesk: h.zendesk || '', supplier: h.supplier || '' }));
+    } catch (e) {
+      if (seq !== S.qSeq) return;
+      S.qRemote = [];
+      console.warn('[transit] find failed', e);
+    }
+    S.qBusy = false; paintSearch();
+  }
+
+  function onSearchInput(v) {
+    S.q = v;
+    clearTimeout(S.qTimer);
+    const q = v.trim();
+    S.qSeq++;                       // anything in flight is for an older query
+    S.qBusy = false;
+    if (q.length < 2) { S.qLocal = []; S.qRemote = []; S.qOpen = false; S.qIdx = 0; paintSearch(); return; }
+    S.qLocal = searchLocal(q);
+    S.qRemote = [];
+    S.qOpen = true; S.qIdx = 0;
+    S.qBusy = true;                 // the server has not answered for this text yet
+    paintSearch();
+    S.qTimer = setTimeout(() => { if (S.q.trim() === q) searchRemote(q); }, SEARCH_WAIT);
+  }
+
+  // Repaint only the box's chrome and its results list — never the page.
+  function paintSearch() {
+    const box = S.root && S.root.querySelector('.tm-srch');
+    if (!box) return;
+    box.classList.toggle('has-q', !!S.q);
+    box.setAttribute('aria-expanded', String(S.qOpen));
+    const old = box.querySelector('.tm-srch-res');
+    if (old) old.remove();
+    if (S.qOpen) box.insertAdjacentHTML('beforeend', renderSearchResults());
+    const inp = box.querySelector('#tm-q');
+    if (inp) {
+      const opt = S.qOpen ? box.querySelector(`#tm-q-opt-${S.qIdx}`) : null;
+      if (opt) { inp.setAttribute('aria-activedescendant', opt.id); opt.scrollIntoView({ block: 'nearest' }); }
+      else inp.removeAttribute('aria-activedescendant');
+    }
+  }
+
+  function searchPick(uid) {
+    const M = model();
+    if (!M || !M.all.some(m => m.uid === uid)) return;
+    clearTimeout(S.qTimer); S.qSeq++; S.qBusy = false;
+    S.qOpen = false;
+    const inp = S.root && S.root.querySelector('#tm-q'); if (inp) inp.blur();   // the panel takes Escape now
+    S.sel = uid; S.panel = 'mv'; S.amend = null; S.legacy = null; S.corrMore = false;
+    render();
+  }
+
+  function searchClear(keepFocus) {
+    clearTimeout(S.qTimer); S.qSeq++;
+    S.q = ''; S.qLocal = []; S.qRemote = []; S.qOpen = false; S.qIdx = 0; S.qBusy = false;
+    const inp = S.root && S.root.querySelector('#tm-q');
+    if (inp) { inp.value = ''; if (keepFocus) inp.focus(); }
+    paintSearch();
+  }
+
+  function searchKey(ev, inp) {
+    const hits = searchHits();
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      if (!S.qOpen) { if (S.q.trim().length >= 2) { S.qOpen = true; paintSearch(); } ev.preventDefault(); return; }
+      if (!hits.length) return;
+      ev.preventDefault();
+      S.qIdx = (S.qIdx + (ev.key === 'ArrowDown' ? 1 : hits.length - 1)) % hits.length;
+      paintSearch(); return;
+    }
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      if (!S.qOpen && S.q.trim().length >= 2) { S.qOpen = true; paintSearch(); return; }
+      const h = hits[S.qIdx] || hits[0];
+      if (h) searchPick(h.uid);
+      return;
+    }
+    if (ev.key === 'Escape') {
+      ev.preventDefault(); ev.stopPropagation();
+      if (S.qOpen) { S.qOpen = false; paintSearch(); }
+      else if (S.q) searchClear(true);
+      else inp.blur();
+    }
   }
 
   // ════ Highlights ════
@@ -1973,11 +2156,13 @@
     const M = model();
     const H = highlights(M), A = attentionItems(M);
     const scrollX = (S.root.querySelector('[data-tm-tlscroll]') || {}).scrollLeft || 0;
+    const qEl = document.activeElement, qFocus = qEl && qEl.id === 'tm-q', qCaret = qFocus ? [qEl.selectionStart, qEl.selectionEnd] : null;
     S.root.innerHTML = renderHeader(M) + renderWeekPills(M) + renderHighlights(H, A)
       + (S.full ? '' : renderCorridor(M, false))
       + renderTimeline(M).replace('<div style="overflow-x:auto">', '<div style="overflow-x:auto" data-tm-tlscroll>');
     if (S.replayStage === 'playing') S.root.classList.add('tm-replaying');
     const tl = S.root.querySelector('[data-tm-tlscroll]'); if (tl) tl.scrollLeft = scrollX;
+    if (qFocus) { const q = S.root.querySelector('#tm-q'); if (q) { q.focus(); try { q.setSelectionRange(qCaret[0], qCaret[1]); } catch (_) {} } }
     renderOverlays(M);
     // The map is drawn after this render; it must see the phase this render was made in,
     // not whatever the animation has already moved on to.
@@ -2203,6 +2388,8 @@
       case 'cw': S.corrWk = v; S.corrMore = false; render(); break;
       case 'earlier-toggle': S.corrMore = !S.corrMore; render(); break;
       case 'pick': S.sel = uid; S.panel = 'mv'; S.amend = null; S.legacy = null; S.corrMore = false; render(); break;
+      case 'srch-pick': searchPick(uid); break;
+      case 'srch-clear': searchClear(true); break;
       case 'hist': openReport('__openTransitHistory', v); break;
       case 'wk-toggle': { const shut = (v in S.collapsed) ? !!S.collapsed[v] : true; S.collapsed = Object.assign({}, S.collapsed, { [v]: !shut }); render(); break; }
       case 'hl-all': S.hlAll = !S.hlAll; render(); break;
@@ -2274,12 +2461,16 @@
     host.__tmBound = true;
     host.addEventListener('click', (ev) => {
       const el = ev.target.closest('[data-act]');
+      if (S.qOpen && !ev.target.closest('.tm-srch')) { S.qOpen = false; paintSearch(); }
       if (!el || !host.contains(el)) {
         if (S.corrMore && !ev.target.closest('.tm-menu')) { S.corrMore = false; render(); }
         return;
       }
       if (el.disabled) return;
       act(el.getAttribute('data-act'), el, ev);
+    });
+    host.addEventListener('focusin', (ev) => {
+      if (ev.target.id === 'tm-q' && S.q.trim().length >= 2 && !S.qOpen && searchHits().length) { S.qOpen = true; paintSearch(); }
     });
     host.addEventListener('dblclick', (ev) => {
       const el = ev.target.closest('[data-dbl]');
@@ -2290,6 +2481,7 @@
     });
     host.addEventListener('input', (ev) => {
       const t = ev.target;
+      if (t.id === 'tm-q') { onSearchInput(t.value); return; }
       if (t.id === 'tm-to') { S.nDraft = t.value; if (S.nErr) { S.nErr = ''; } return; }
       if (t.id === 'tm-subj' || t.id === 'tm-body') {
         if (t.id === 'tm-subj') S.nSubject = t.value; else S.nBody = t.value;
@@ -2308,6 +2500,7 @@
     });
     host.addEventListener('keydown', (ev) => {
       const t = ev.target;
+      if (t.id === 'tm-q') { searchKey(ev, t); return; }
       if (t.id === 'tm-to') {
         if (ev.key === 'Enter' || ev.key === ',' || ev.key === ';') { ev.preventDefault(); S.nDraft = t.value; addRecipient(); }
         else if (ev.key === 'Backspace' && !t.value && S.nTo.length) { S.nTo = S.nTo.slice(0, -1); render(); focusTo(); }
@@ -2317,9 +2510,18 @@
 
   // Escape closes the topmost thing that is open, and only while this page is showing.
   document.addEventListener('keydown', (ev) => {
-    if (ev.key !== 'Escape' || !S.root || !S.root.isConnected) return;
+    if (!S.root || !S.root.isConnected) return;
     const pg = document.getElementById('page-map');
     if (!pg || pg.style.display === 'none') return;
+    // "/" focuses the search box, as long as nothing else is being typed into and nothing is open.
+    if (ev.key === '/' && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+      const a = document.activeElement, typing = a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || a.isContentEditable);
+      if (typing || S.panel || S.sheet || S.notify || S.report) return;
+      const inp = S.root.querySelector('#tm-q');
+      if (inp) { ev.preventDefault(); inp.focus(); inp.select(); }
+      return;
+    }
+    if (ev.key !== 'Escape') return;
     if (S.notify) S.notify = null;
     else if (S.sheet) S.sheet = null;
     else if (S.corrMore) S.corrMore = false;
