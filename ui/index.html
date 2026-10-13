@@ -599,6 +599,7 @@ window.__clerkOnLoad = function() {
         <span class="pn-nav-menu" id="nav-vas-menu">
           <a class="pn-nav-sub" id="nav-vas-labelling" onclick="event.preventDefault();window.pnVasGo&&window.pnVasGo('labelling')">Labelling<small>UID intake &amp; scanning</small></a>
           <a class="pn-nav-sub" id="nav-vas-fulfilment" onclick="event.preventDefault();window.pnVasGo&&window.pnVasGo('fulfilment')">Fulfilment<small>Inbound, assembly &amp; dispatch</small></a>
+          <a class="pn-nav-sub" id="nav-vas-uidlabels" onclick="event.preventDefault();window.pnVasGo&&window.pnVasGo('uidlabels')">UID labels<small>Print queue, one PDF per PO</small></a>
         </span>
       </span>
       <a class="pn-nav-item" href="#exec" id="nav-exec" onclick="event.preventDefault();window.show('#exec')">Executive</a>
@@ -6486,8 +6487,9 @@ window.__openPrebookModal = function(){
 <script src="/public/lane_snapshot_additive.js?v=1" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 <!-- Transit Movements replaced the Live Map (map_live_additive.js is kept in the repo for rollback, not loaded). -->
-<script src="/public/transit_movements_additive.js?v=22" defer></script>
+<script src="/public/transit_movements_additive.js?v=23" defer></script>
 <script src="/public/elevate_additive.js?v=6" defer></script>
+<script src="/public/uid_labels_additive.js?v=1" defer></script>
   <script src="/public/finance_additive.js?v=28" defer></script>
   <script src="/public/collaboration_additive.js?v=2" defer></script>
   <script src="/public/exec_pdf_additive.js?v=3" defer></script>
@@ -6506,6 +6508,7 @@ window.__openPrebookModal = function(){
   window.pnVasGo = function(which){
     var dd = document.getElementById('nav-vas-dd'); if(dd) dd.classList.remove('open');
     if(which === 'fulfilment'){ if(window.openEhpOps) window.openEhpOps(); return; }
+    if(which === 'uidlabels'){ if(window.show) window.show('#uid-labels'); return; }
     if(window.show) window.show('#intake');
   };
   </script>
@@ -6514,7 +6517,7 @@ window.__openPrebookModal = function(){
   <script src="/public/ehp_geo_additive.js?v=10" defer></script>
   <script src="/public/air_quotes_additive.js?v=19" defer></script>
   <script src="/public/pulse_toggle_additive.js?v=3" defer></script>
-  <script src="/public/air_quotes_internal_additive.js?v=20" defer></script>
+  <script src="/public/air_quotes_internal_additive.js?v=21" defer></script>
   <script src="/public/supplier_invoices_additive.js?v=4" defer></script>
   <script src="/public/dept_owners_additive.js?v=1" defer></script>
   <script src="/public/tile_polish_additive.js?v=3" defer></script>
@@ -7112,7 +7115,7 @@ document.addEventListener('DOMContentLoaded', function(){
   // Helper: hide all pages
   function _pnHideAll(){
     // page-flow lives inside page-dashboard — hiding page-dashboard hides page-flow too
-    ['page-dashboard','page-intake','page-exec','page-receiving','page-reports','page-map','page-finance','page-d2d','page-elevate'].forEach(id=>{
+    ['page-dashboard','page-intake','page-exec','page-receiving','page-reports','page-map','page-finance','page-d2d','page-elevate','page-uid-labels'].forEach(id=>{
       const el=document.getElementById(id);
       if(el){el.classList.add('hidden');el.style.display='none';}
     });
@@ -7220,6 +7223,26 @@ document.addEventListener('DOMContentLoaded', function(){
         setTimeout(function(){ clearInterval(_elInterval); }, 3000);
       }
       syncPinpointNav('#map');   // it belongs to Transit Movements in the nav
+      return;
+    }
+
+    // ── UID labels print queue (route #uid-labels, page-uid-labels) — VAS Ops ▾ → UID labels ──
+    if(h==='#uid-labels'){
+      _pnHideAll();
+      if(typeof window.hideMapPage==='function') window.hideMapPage();
+      _pnSetHash('#uid-labels');
+      if(typeof window.showUidLabelsPage==='function'){
+        window.showUidLabelsPage();
+      } else {
+        var _ulInterval = setInterval(function(){
+          if(typeof window.showUidLabelsPage==='function'){
+            clearInterval(_ulInterval);
+            window.showUidLabelsPage();
+          }
+        }, 50);
+        setTimeout(function(){ clearInterval(_ulInterval); }, 3000);
+      }
+      syncPinpointNav('#intake');   // it belongs to VAS Ops in the nav
       return;
     }
 
