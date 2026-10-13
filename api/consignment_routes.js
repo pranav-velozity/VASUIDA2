@@ -2084,6 +2084,81 @@ module.exports = function mountConsignments(deps) {
     }
   });
 
+  // ── Find a movement by container / AWB, Zendesk ticket, vendor or PO number ──
+  // The board already carries references and lane keys (supplier||zendesk||freight), so the
+  // screen matches those locally. POs live in the week's plan rows, which the board does not
+  // ship; this resolves a PO → its lane → the consignment(s) carrying it. Zendesk and reference
+  // are answered here too so a single call covers everything the local match missed.
+  // Scope: the same window as the board (from/to, default 10 weeks back to next week).
+  router.get('/find', authenticateRequest, auditLog('find_consignment'), (req, res) => {
+    try {
+      const client = curClient();
+      const q = String(req.query.q || '').trim();
+      if (q.length < 2) return res.json({ ok: true, q, hits: [] });
+      const thisMonday = mondayOf(todayLocal());
+      const addW = (ymd, n) => addDays(ymd, n * 7);
+      let from = ymdOk(req.query.from) ? mondayOf(req.query.from) : addW(thisMonday, -10);
+      let to = ymdOk(req.query.to) ? mondayOf(req.query.to) : addW(thisMonday, 1);
+      if (to < from) [from, to] = [to, from];
+      const ql = q.toLowerCase();
+      const qn = /^\d+$/.test(q) ? Number(q) : null;
+
+      const rows = db.prepare(`SELECT consignment_uid uid, reference, mode, week_start, carrier
+                                 FROM consignment WHERE client_id = ? AND week_start >= ? AND week_start <= ?`)
+        .all(client, from, to);
+      const byUid = new Map(rows.map(r => [r.uid, r]));
+      const lanes = db.prepare(`SELECT l.consignment_uid uid, l.lane_key k FROM consignment_lane l
+                                  JOIN consignment c ON c.consignment_uid = l.consignment_uid
+                                 WHERE c.client_id = ? AND c.week_start >= ? AND c.week_start <= ?`)
+        .all(client, from, to);
+      const lanesByUid = new Map();
+      for (const l of lanes) { if (!lanesByUid.has(l.uid)) lanesByUid.set(l.uid, []); lanesByUid.get(l.uid).push(l.k); }
+
+      const hits = new Map(); // uid → { ...row, matched: 'reference'|'zendesk'|'supplier'|'po', po, lane }
+      const add = (uid, matched, extra) => {
+        const r = byUid.get(uid);
+        if (!r || hits.has(uid)) return;
+        const ks = lanesByUid.get(uid) || [];
+        const lane = extra && extra.lane ? extra.lane : (ks[0] || '');
+        const [sup = '', zd = ''] = String(lane).split('||');
+        hits.set(uid, { uid, reference: r.reference || null, mode: r.mode, week_start: r.week_start,
+          carrier_name: r.carrier || null, supplier: sup, zendesk: zd, lanes: ks.length, matched, po: (extra && extra.po) || null });
+      };
+      const zdEq = (t) => { const s = String(t == null ? '' : t).trim(); return s !== '' && (s === q || (qn != null && !isNaN(Number(s)) && Number(s) === qn)); };
+
+      // 1. Reference (container / AWB) — contains.
+      for (const r of rows) if (r.reference && String(r.reference).toLowerCase().includes(ql)) add(r.uid, 'reference');
+      // 2. Zendesk (exact) and vendor (contains) from lane keys.
+      for (const l of lanes) {
+        const [sup = '', zd = ''] = String(l.k).split('||');
+        if (zdEq(zd)) add(l.uid, 'zendesk', { lane: l.k });
+        else if (ql.length >= 3 && sup.toLowerCase().includes(ql)) add(l.uid, 'supplier', { lane: l.k });
+      }
+      // 3. PO number — plan rows per week in the window, PO → lane → consignment.
+      if (ql.length >= 3) {
+        const weeks = [...new Set(rows.map(r => r.week_start))];
+        for (const ws of weeks) {
+          const plan = planRowsFor(ws, client);
+          if (!plan.length) continue;
+          const poRows = plan.filter(r => String(r.po_number || '').trim().toLowerCase().includes(ql));
+          if (!poRows.length) continue;
+          for (const l of lanes) {
+            const c = byUid.get(l.uid);
+            if (!c || c.week_start !== ws || hits.has(l.uid)) continue;
+            const inLane = rowsForLane(l.k, poRows);
+            if (inLane.length) add(l.uid, 'po', { lane: l.k, po: String(inLane[0].po_number).trim() });
+          }
+        }
+      }
+      const order = { reference: 0, zendesk: 1, po: 2, supplier: 3 };
+      const out = [...hits.values()].sort((a, b) => (order[a.matched] - order[b.matched]) || (a.week_start < b.week_start ? 1 : -1)).slice(0, 25);
+      res.json({ ok: true, q, from, to, hits: out });
+    } catch (e) {
+      console.error('[consignments] find failed:', e);
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
   function loadOwn(uid) {
     return db.prepare('SELECT * FROM consignment WHERE consignment_uid = ? AND client_id = ?').get(uid, curClient());
   }
