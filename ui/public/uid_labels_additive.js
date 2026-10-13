@@ -15,7 +15,7 @@
   'use strict';
   if (window.__UID_LABELS_LOADED__) return;
   window.__UID_LABELS_LOADED__ = true;
-  const VERSION = '4';
+  const VERSION = '5';
 
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
   const RED = '#990033', GREEN = '#7CB518', PURPLE = '#7C5CBF', AMBER = '#8A6D00';
@@ -204,8 +204,22 @@
       ${stat('Issued', fmtNum(d.totals.issued), short ? `<span style="color:${RED}">${plural(short, 'PO')} short</span>` : over ? `${plural(over, 'PO')} over plan` : 'matches the plan')}
       ${stat('Footwear · 36×76', fmtNum(fw.reduce((a, p) => a + p.issued, 0)), plural(fw.length, 'PO'))}
       ${stat('Standard · 76×36', fmtNum(st.reduce((a, p) => a + p.issued, 0)), plural(st.length, 'PO'))}
-      ${stat('Runs', fmtNum(d.runs.length), moved ? `${plural(moved, 'PO')} moved in` : d.runs[0] ? 'latest ' + when(d.runs[0].at) : 'nothing yet')}
+      ${stat('Runs', fmtNum(d.runs.length), d.runs[0] ? `latest #${d.runs[0].id} · ${when(d.runs[0].at)}${moved ? ` · ${plural(moved, 'PO')} moved in` : ''}` : 'nothing yet')}
+      ${emailTile(d.runs[0])}
     </div>`;
+  }
+  // Who issued the latest run and whether the warehouse was told — the audit trail, in one tile.
+  function emailTile(r) {
+    const stat = (k, v, s, c) => `<div class="ul-stat"><div class="k">${k}</div><div class="v" style="font-size:20px;padding-top:4px${c ? `;color:${c}` : ''}">${v}</div>${s ? `<div class="s">${s}</div>` : ''}</div>`;
+    if (!r) return stat('Warehouse email', '—', 'sent with each run');
+    const raw = person(r.by);
+    const m = /^(plan upload|Check plan now)(?:\s*·\s*(.*))?$/i.exec(raw);
+    const how = m ? (/^plan/i.test(m[1]) ? 'plan upload' : 'Check plan now') : (r.kind === 'extra' ? 'extras' : null);
+    const whoName = m ? (m[2] || '').trim() : raw;
+    const ctx = [`run #${r.id}`, how, whoName ? esc(whoName) : null].filter(Boolean).join(' · ');
+    if (r.emailed_at) return stat('Warehouse email', 'Sent', `${when(r.emailed_at)} · ${ctx}`, '#4A6A00');
+    if (r.email_error) return stat('Warehouse email', 'Not sent', `<span title="${esc(r.email_error)}">${esc(r.email_error)}</span> · ${ctx}`, RED);
+    return stat('Warehouse email', 'Sending…', ctx);
   }
 
   function runTitle(r) {
@@ -248,7 +262,7 @@
     return `<div class="ul-run">
       <button class="ul-runh" data-act="run-toggle" data-v="${r.id}" aria-expanded="${open}">
         <span class="id ul-mono">#${r.id}</span>
-        <span style="min-width:0"><div class="t">${runTitle(r)}</div><div class="m">${runMeta(r)}</div></span>
+        <span style="min-width:0"><div class="t">${runTitle(r)}</div>${r.summary && r.summary.reason ? `<div class="m">${esc(r.summary.reason)}</div>` : ''}</span>
         <span style="display:flex;align-items:center;gap:8px">${fw ? `<span class="ul-tag fw">${fmtNum(fw)} footwear</span>` : ''}${st ? `<span class="ul-tag st">${fmtNum(st)} standard</span>` : ''}${I.chev(open ? 180 : 0)}</span>
       </button>
       ${open ? `${files.length ? `<div class="ul-files">
