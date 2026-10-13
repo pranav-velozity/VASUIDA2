@@ -162,7 +162,18 @@ module.exports = function mountUidLabels(deps) {
     return 'W' + String(Math.ceil(((d - y0) / 86400000 + 1) / 7)).padStart(2, '0');
   };
   const deptOf = (po) => str(po).toUpperCase().slice(0, 4);
+  // Clerk's user object rides on req.user: a name or email reads far better on the page than
+  // the user id, which is all req.auth carries.
   const who = (req) => {
+    try {
+      const u = req && req.user;
+      if (u) {
+        const name = [u.firstName, u.lastName].filter(Boolean).join(' ').trim();
+        const email = (u.primaryEmailAddress && u.primaryEmailAddress.emailAddress)
+          || (u.emailAddresses && u.emailAddresses[0] && u.emailAddresses[0].emailAddress) || null;
+        if (name || email) return name || email;
+      }
+    } catch (_) {}
     const a = req && req.auth;
     return (a && (a.email || a.userEmail || a.userId || a.sub)) || 'user';
   };
@@ -802,7 +813,7 @@ module.exports = function mountUidLabels(deps) {
       const ws = mondayOf(req.params.ws);
       const rows = planRowsFor(ws, client);
       if (rows == null) return res.status(404).json({ ok: false, error: `No plan stored for ${isoWeek(ws)}.` });
-      const out = reconcile(client, ws, rows, who(req));
+      const out = reconcile(client, ws, rows, `Check plan now · ${who(req)}`);
       if (out.run_id) emailRun(out.run_id).catch(() => {});
       res.json(out);
     } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
