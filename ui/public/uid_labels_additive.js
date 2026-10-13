@@ -15,7 +15,7 @@
   'use strict';
   if (window.__UID_LABELS_LOADED__) return;
   window.__UID_LABELS_LOADED__ = true;
-  const VERSION = '2';
+  const VERSION = '3';
 
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
   const RED = '#990033', GREEN = '#7CB518', PURPLE = '#7C5CBF', AMBER = '#8A6D00';
@@ -58,7 +58,7 @@
 
   // ── State ──
   const S = { root: null, weeks: null, week: null, data: null, loading: false, error: null, loadedAt: 0, timer: null,
-              busy: null, toast: '', toastTimer: null, extra: null, codes: null, codesOpen: false, codesErr: '', runOpen: {}, posOpen: false, q: '' };
+              busy: null, toast: '', toastTimer: null, extra: null, codes: null, codesOpen: false, codesErr: '', runOpen: {}, posOpen: false, q: '', unsel: {} };
 
   // ── Styles ──
   function styles() {
@@ -120,6 +120,8 @@
 .ul-table td.act .ul-btn,.ul-table td.act .ul-btn-p{margin-left:6px}
 .ul-banner{display:flex;gap:10px;align-items:flex-start;padding:10px 18px 10px 72px;font-size:12.5px;color:${MUTED};border-top:1px solid ${SOFT}}
 .ul-banner b{color:${INK};font-weight:600}
+.ul-selbar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0 8px;flex-wrap:wrap}
+.ul-table input[type=checkbox]{width:15px;height:15px;accent-color:${INK};cursor:pointer;vertical-align:middle}
 .ul-search{height:34px;border:1px solid #D6D6D2;border-radius:8px;padding:0 12px;font-size:13px;outline:none;background:#fff;min-width:220px}
 .ul-search:focus{border-color:#8A8A86}
 .ul-extra{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 12px;background:#FAFAF8;border:1px solid ${LINE};border-radius:8px;margin:6px 0}
@@ -176,7 +178,8 @@
         <h1>UID labels</h1>
         <div class="ul-note">One PDF per PO. Each plan upload issues only the labels the week still lacks; the warehouse prints the latest run.</div>
         <div class="ul-chips" style="margin-top:8px"><span style="font-size:12px;color:${MUTED};margin-right:2px">Week</span>${chips}
-          <input class="ul-wkin" type="date" data-act="week-pick" value="${esc(S.week || '')}" aria-label="Any week"></div>
+          <input class="ul-wkin" type="date" data-act="week-pick" value="${esc(S.week || '')}" aria-label="Any week">
+          <input class="ul-search" placeholder="Find a PO or SKU" value="${esc(S.q)}" data-act="q" aria-label="Find a PO or SKU" style="margin-left:10px"></div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <button class="ul-btn" data-act="sample" data-v="standard">${I.dl()} Sample · standard</button>
@@ -227,17 +230,32 @@
     if (s.moved && s.moved.length) banners.push(`<b>${plural(s.moved.length, 'PO line')} moved</b> from ${[...new Set(s.moved.map(m => isoWeek(m.from)))].join(', ')} — nothing printed; choose below under the PO whether to download again or issue new.`);
     if (s.new_codes && s.new_codes.length) banners.push(`<b>New department code${s.new_codes.length === 1 ? '' : 's'}</b> ${s.new_codes.map(c => `<span class="ul-mono">${esc(c.code)}</span>`).join(', ')} printed as standard — set the format under Department codes if that is wrong.`);
     if (s.over && s.over.length) banners.push(`<b>${plural(s.over.length, 'PO line')}</b> now plan fewer units than already issued — nothing printed.`);
+    const q = S.q.trim().toLowerCase();
+    const shown = q ? files.filter(f => f.po.toLowerCase().includes(q)) : files;
+    const un = S.unsel[r.id] || new Set();
+    const selected = files.filter(f => !un.has(f.po));
+    const shownSel = shown.filter(f => !un.has(f.po)).length;
+    const allShown = shown.length > 0 && shownSel === shown.length, noneShown = shownSel === 0;
+    const zipBusy = S.busy === `zip:${r.id}`;
     return `<div class="ul-run">
       <button class="ul-runh" data-act="run-toggle" data-v="${r.id}" aria-expanded="${open}">
         <span class="id ul-mono">#${r.id}</span>
         <span style="min-width:0"><div class="t">${runTitle(r)}</div><div class="m">${runMeta(r)}</div></span>
         <span style="display:flex;align-items:center;gap:8px">${fw ? `<span class="ul-tag fw">${fmtNum(fw)} footwear</span>` : ''}${st ? `<span class="ul-tag st">${fmtNum(st)} standard</span>` : ''}${I.chev(open ? 180 : 0)}</span>
       </button>
-      ${open ? `${files.length ? `<div class="ul-files"><table class="ul-table"><thead><tr><th>PO</th><th>Format</th><th class="num">Labels</th><th>Printed again</th><th></th></tr></thead><tbody>
-        ${files.map(f => `<tr><td class="ul-mono" style="font-weight:600">${esc(f.po)}</td><td>${fmtTag(f.format)}</td><td class="num">${fmtNum(f.labels)}</td>
+      ${open ? `${files.length ? `<div class="ul-files">
+        <div class="ul-selbar">
+          <span style="font-size:12.5px;color:${MUTED}">${fmtNum(selected.length)} of ${fmtNum(files.length)} selected${q ? ` · ${fmtNum(shown.length)} match “${esc(S.q.trim())}”` : ''}</span>
+          <span style="display:flex;gap:8px;align-items:center">
+            <button class="ul-btn sm" data-act="sel-all" data-v="${r.id}" ${allShown ? 'disabled' : ''}>Select ${q ? 'matching' : 'all'}</button>
+            <button class="ul-btn sm" data-act="sel-none" data-v="${r.id}" ${noneShown ? 'disabled' : ''}>Deselect ${q ? 'matching' : 'all'}</button>
+            <button class="ul-btn-p sm" data-act="zip" data-v="${r.id}" ${zipBusy || !selected.length ? 'disabled' : ''}>${I.dl()} ${zipBusy ? 'Building zip…' : `Download ${selected.length === files.length ? 'all' : 'selected'} (${fmtNum(selected.length)})`}</button>
+          </span></div>
+        ${shown.length ? `<table class="ul-table"><thead><tr><th style="width:28px"><input type="checkbox" data-act="sel-toggle-all" data-v="${r.id}" ${allShown ? 'checked' : ''} aria-label="Select all shown"></th><th>PO</th><th>Format</th><th class="num">Labels</th><th>Printed again</th><th></th></tr></thead><tbody>
+        ${shown.map(f => `<tr><td><input type="checkbox" data-act="sel" data-run="${r.id}" data-po="${esc(f.po)}" ${un.has(f.po) ? '' : 'checked'} aria-label="Select ${esc(f.po)}"></td><td class="ul-mono" style="font-weight:600">${esc(f.po)}</td><td>${fmtTag(f.format)}</td><td class="num">${fmtNum(f.labels)}</td>
           <td style="color:${MUTED};font-size:12px">${f.reprints ? `${plural(f.reprints, 'time')} · ${when(f.last_reprint)}` : '—'}</td>
           <td class="act"><button class="ul-btn-p sm" data-act="dl" data-run="${r.id}" data-po="${esc(f.po)}" ${S.busy === `dl:${r.id}:${f.po}` ? 'disabled' : ''}>${I.dl()} ${S.busy === `dl:${r.id}:${f.po}` ? 'Building…' : 'PDF'}</button></td></tr>`).join('')}
-        </tbody></table></div>` : banners.length ? '' : `<div class="ul-banner">Nothing was printed in this run.</div>`}
+        </tbody></table>` : `<div class="ul-empty" style="padding:16px 10px">No PO in this run matches “${esc(S.q.trim())}”.</div>`}</div>` : banners.length ? '' : `<div class="ul-banner">Nothing was printed in this run.</div>`}
         ${banners.map(b => `<div class="ul-banner">${b}</div>`).join('')}
         ${r.email_error ? `<div class="ul-banner"><span class="ul-err">Email: ${esc(r.email_error)}</span><button class="ul-btn sm" data-act="email" data-v="${r.id}">Send again</button></div>` : ''}` : ''}
     </div>`;
@@ -275,8 +293,7 @@
         ${extraOpen ? `<tr><td colspan="8" style="white-space:normal;padding:4px 10px 10px">${renderExtra(p)}</td></tr>` : ''}`;
     };
     return `<div class="ul-card">
-      <div class="ul-cardh"><h2 class="ul-h2">Plan vs issued<small>${plural(d.pos.length, 'PO')} · extras are always new UIDs</small></h2>
-        <input class="ul-search" placeholder="PO or SKU" value="${esc(S.q)}" data-act="q" aria-label="Filter POs"></div>
+      <div class="ul-cardh"><h2 class="ul-h2">Plan vs issued<small>${q ? `${plural(rows.length, 'PO')} match “${esc(S.q.trim())}”` : `${plural(d.pos.length, 'PO')} · extras are always new UIDs`}</small></h2></div>
       ${rows.length ? `<div style="overflow:auto"><table class="ul-table"><thead><tr><th>PO</th><th>Dept</th><th>Format</th><th class="num">SKUs</th><th class="num">Planned</th><th class="num">Issued</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(line).join('')}</tbody></table></div>`
                     : `<div class="ul-empty">${d.pos.length ? 'No PO matches.' : 'Nothing in this week’s plan.'}</div>`}
     </div>`;
@@ -384,6 +401,33 @@
       }
       case 'email': try { const r = await req('POST', `/uid-labels/run/${v}/email`); toast(r.sent ? 'Email sent' : 'Not sent: ' + (r.reason || '')); loadWeek(true); } catch (e) { toast(e.message || String(e)); } break;
       case 'q': S.q = el.value; render(); break;
+      case 'sel': {
+        const run = Number(el.getAttribute('data-run')), po = el.getAttribute('data-po');
+        const un = new Set(S.unsel[run] || []); if (el.checked) un.delete(po); else un.add(po);
+        S.unsel = Object.assign({}, S.unsel, { [run]: un }); render(); break;
+      }
+      case 'sel-all': case 'sel-none': case 'sel-toggle-all': {
+        const run = Number(v); const r = S.data.runs.find(x => x.id === run); if (!r) break;
+        const q = S.q.trim().toLowerCase();
+        const shown = (r.files || []).filter(f => !q || f.po.toLowerCase().includes(q));
+        const un = new Set(S.unsel[run] || []);
+        const check = a === 'sel-all' || (a === 'sel-toggle-all' && el.checked);
+        for (const f of shown) { if (check) un.delete(f.po); else un.add(f.po); }
+        S.unsel = Object.assign({}, S.unsel, { [run]: un }); render(); break;
+      }
+      case 'zip': {
+        const run = Number(v); const r = S.data.runs.find(x => x.id === run); if (!r) break;
+        const un = S.unsel[run] || new Set();
+        const pos = (r.files || []).filter(f => !un.has(f.po)).map(f => f.po);
+        if (!pos.length) break;
+        S.busy = `zip:${run}`; render();
+        try {
+          const all = pos.length === (r.files || []).length;
+          await download(`/uid-labels/zip/${run}${all ? '' : `?pos=${encodeURIComponent(pos.join(','))}`}`, `UID_labels_run${run}.zip`);
+          toast(`Zip of ${plural(pos.length, 'PDF')} downloaded`);
+        } catch (e) { toast('Download failed: ' + (e.message || e)); }
+        S.busy = null; render(); break;
+      }
       case 'extra-open': {
         const po = el.getAttribute('data-po');
         if (S.extra && S.extra.po === po) { S.extra = null; render(); break; }
@@ -447,7 +491,7 @@
     host.addEventListener('change', (ev) => {
       const el = ev.target.closest('[data-act]'); if (!el) return;
       const a = el.getAttribute('data-act');
-      if (a === 'week-pick' || a === 'extra-sku') act(a, el, ev);
+      if (a === 'week-pick' || a === 'extra-sku' || a === 'sel' || a === 'sel-toggle-all') act(a, el, ev);
     });
     host.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter' && ev.target.id === 'ul-add-codes') { ev.preventDefault(); act('code-add', ev.target, ev); }
