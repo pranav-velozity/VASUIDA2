@@ -15,7 +15,7 @@
   'use strict';
   if (window.__UID_LABELS_LOADED__) return;
   window.__UID_LABELS_LOADED__ = true;
-  const VERSION = '1';
+  const VERSION = '2';
 
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
   const RED = '#990033', GREEN = '#7CB518', PURPLE = '#7C5CBF', AMBER = '#8A6D00';
@@ -82,7 +82,8 @@
 .ul-chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .ul-chip{height:30px;padding:0 12px;border-radius:15px;border:1px solid #D6D6D2;background:#fff;font-size:12px;font-weight:500;display:inline-flex;align-items:center;gap:6px}
 .ul-chip[aria-pressed="true"]{background:${INK};color:#fff;border-color:${INK}}
-.ul-chip .n{font-size:11px;opacity:.7}
+.ul-chip.has::after{content:'';width:5px;height:5px;border-radius:50%;background:${GREEN}}
+.ul-chip[aria-pressed="true"].has::after{background:#fff}
 .ul-chip.dot::before{content:'';width:7px;height:7px;border-radius:50%;background:${RED}}
 .ul-wkin{height:30px;border:1px solid #D6D6D2;border-radius:15px;padding:0 10px;font-size:12px;background:#fff;color:${MUTED}}
 .ul-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
@@ -163,10 +164,10 @@
     const set = new Set(weeks.map(w => w.week_start));
     if (S.week) set.add(S.week);
     set.add(thisMon);
-    const list = [...set].sort().reverse().slice(0, 8);
-    const chips = list.map(w => {
-      const n = (weeks.find(x => x.week_start === w) || {}).labels || 0;
-      return `<button class="ul-chip" data-act="week" data-v="${w}" aria-pressed="${S.week === w}">${isoWeek(w)}${n ? ` <span class="n">${fmtNum(n)}</span>` : ''}</button>`;
+    for (let i = 1; i <= 2; i++) set.add(addD(thisMon, -7 * i));
+    const chips = [...set].sort().reverse().slice(0, 8).map(w => {
+      const has = weeks.some(x => x.week_start === w && x.labels > 0);
+      return `<button class="ul-chip${has ? ' has' : ''}" data-act="week" data-v="${w}" aria-pressed="${S.week === w}" title="${esc(w)}">${isoWeek(w)}</button>`;
     }).join('');
     const newCodes = S.weeks ? S.weeks.new_codes : 0;
     return `<div class="ul-head">
@@ -212,7 +213,7 @@
   }
   function runMeta(r) {
     const bits = [when(r.at), r.by ? esc(r.by) : null];
-    if (r.emailed_at) bits.push('emailed'); else if (r.email_error) bits.push(`<span style="color:${RED}">email failed</span>`);
+    if (r.emailed_at) bits.push('emailed'); else if (r.email_error) bits.push(`<span style="color:${RED}" title="${esc(r.email_error)}">email not sent — ${esc(r.email_error)}</span>`);
     if (r.summary && r.summary.reason) bits.push(esc(r.summary.reason));
     return bits.filter(Boolean).join(' · ');
   }
