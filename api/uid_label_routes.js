@@ -347,6 +347,7 @@ module.exports = function mountUidLabels(deps) {
 
     const out = tx();
     if (!out) return { ok: true, run_id: null, labels: 0, moved: [], over, note: 'nothing to issue' };
+    if (total > 0) prewarm(client, out.runId);
     log.log(`[uid-labels] run #${out.runId} ${client} ${ws}: ${total} label(s) across ${out.summary.pos.length} PO(s)${moved.length ? `, ${moved.length} moved` : ''}${newCodes.size ? `, new codes ${[...newCodes].join(',')}` : ''}`);
     return { ok: true, run_id: out.runId, labels: total, ...out.summary };
   }
@@ -378,6 +379,7 @@ module.exports = function mountUidLabels(deps) {
       return runId;
     });
     const runId = tx();
+    prewarm(client, runId);
     log.log(`[uid-labels] extra run #${runId} ${client} ${ws}: ${qty} label(s) for ${po} / ${sku} by ${by}`);
     return runId;
   }
@@ -568,11 +570,23 @@ module.exports = function mountUidLabels(deps) {
     if (ean) fwText(doc, ean, W / 2, hrY, FW.bodyPt, 'center');
     const dividerY = hrY + FW.dividerGap;
     doc.save().lineWidth(0.4).strokeColor('#000').moveTo(0, dividerY).lineTo(W, dividerY).stroke().restore();
-    let textY = dividerY + FW.textTopGap;
     const maxW = W - 2 * FW.sideMargin;
-    for (const line of fwWrap(doc, L.product, maxW, FW.bodyPt, 2)) { fwText(doc, line, FW.sideMargin, textY, FW.bodyPt, 'left'); textY += FW.bodyPt * 1.4; }
-    if (L.color) { fwText(doc, L.color, FW.sideMargin, textY, FW.bodyPt, 'left'); textY += FW.bodyPt * 1.4; }
-    if (L.size) { fwText(doc, 'Size: ' + L.size, FW.sideMargin, textY, FW.bodyPt, 'left'); textY += FW.bodyPt * 1.4; }
+    const lines = fwWrap(doc, L.product, maxW, FW.bodyPt, 2);
+    if (L.color) lines.push(L.color);
+    if (L.size) lines.push('Size: ' + L.size);
+    // The original put the first baseline 9.5 mm under the divider regardless, so a two-line
+    // product name plus colour ran "Size:" under the bottom symbol. The gap is kept whenever
+    // the block fits and shrunk only as far as needed when it would not — labels that fitted
+    // before are drawn exactly as before.
+    const lineH = FW.bodyPt * 1.4;
+    const bottomDmTop = H - FW.bottomDmPad - FW.dmSize;
+    const lastBaselineMax = bottomDmTop - mm(1.2);            // descenders clear the symbol
+    let textY = dividerY + FW.textTopGap;
+    const lastBaseline = textY + (lines.length - 1) * lineH;
+    if (lines.length && lastBaseline > lastBaselineMax) {
+      textY = Math.max(dividerY + FW.bodyPt + mm(1.0), lastBaselineMax - (lines.length - 1) * lineH);
+    }
+    for (const line of lines) { fwText(doc, line, FW.sideMargin, textY, FW.bodyPt, 'left'); textY += lineH; }
 
     // Bottom symbol and SKU, mirrored.
     const bottomDmY = H - FW.bottomDmPad - dmBox;
@@ -609,6 +623,66 @@ module.exports = function mountUidLabels(deps) {
         } catch (e) { reject(e); }
       })();
     });
+  }
+
+  // Render a run's files one PO at a time right after the run is created. Each file is small
+  // work; doing them now means the email's "ready to print" is literally true and a whole-run
+  // zip never waits on rendering. Never runs two at once; failures are logged, never thrown.
+  const prewarmQueue = [];
+  let prewarming = false;
+  function prewarm(client, runId) {
+    prewarmQueue.push({ client, runId });
+    if (prewarming) return;
+    prewarming = true;
+    (async () => {
+      while (prewarmQueue.length) {
+        const { client: c, runId: id } = prewarmQueue.shift();
+        try {
+          const pos = db.prepare('SELECT DISTINCT po_number po FROM uid_label WHERE run_id = ? ORDER BY po_number').all(id).map(r => r.po);
+          const t0 = Date.now();
+          for (const po of pos) { await fileFor(c, id, po); await new Promise(r => setImmediate(r)); }
+          log.log(`[uid-labels] run #${id}: ${pos.length} PDF(s) rendered in ${Date.now() - t0} ms`);
+        } catch (e) { log.warn(`[uid-labels] prewarm run #${id} failed:`, e.message); }
+      }
+      prewarming = false;
+    })();
+  }
+
+  // A ZIP written by hand (STORE, no compression — PDFs are already deflated) so there is no
+  // new dependency and the whole thing streams: each file's header and bytes go out as they
+  // are ready, the central directory last. Data descriptors carry CRC and sizes after the data.
+  const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+  const crc32 = (buf) => { let c = 0xFFFFFFFF; for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+  const dosTime = (d) => ({ time: ((d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1)) & 0xFFFF, date: (((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate()) & 0xFFFF });
+  function zipStream(res, files /* async iterable of {name, bytes} */) {
+    const entries = []; let offset = 0; const now = dosTime(new Date());
+    const w = (b) => { res.write(b); offset += b.length; };
+    return (async () => {
+      for await (const f of files) {
+        const name = Buffer.from(f.name, 'utf8'), crc = crc32(f.bytes), size = f.bytes.length, at = offset;
+        const h = Buffer.alloc(30);
+        h.writeUInt32LE(0x04034b50, 0); h.writeUInt16LE(20, 4); h.writeUInt16LE(0x0808, 6); h.writeUInt16LE(0, 8);
+        h.writeUInt16LE(now.time, 10); h.writeUInt16LE(now.date, 12); h.writeUInt32LE(0, 14); h.writeUInt32LE(0, 18); h.writeUInt32LE(0, 22);
+        h.writeUInt16LE(name.length, 26); h.writeUInt16LE(0, 28);
+        w(h); w(name); w(f.bytes);
+        const dd = Buffer.alloc(16); dd.writeUInt32LE(0x08074b50, 0); dd.writeUInt32LE(crc, 4); dd.writeUInt32LE(size, 8); dd.writeUInt32LE(size, 12); w(dd);
+        entries.push({ name, crc, size, at });
+      }
+      const cdStart = offset;
+      for (const e of entries) {
+        const c = Buffer.alloc(46);
+        c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt16LE(0x0808, 8); c.writeUInt16LE(0, 10);
+        c.writeUInt16LE(now.time, 12); c.writeUInt16LE(now.date, 14); c.writeUInt32LE(e.crc, 16); c.writeUInt32LE(e.size, 20); c.writeUInt32LE(e.size, 24);
+        c.writeUInt16LE(e.name.length, 28); c.writeUInt16LE(0, 30); c.writeUInt16LE(0, 32); c.writeUInt16LE(0, 34); c.writeUInt16LE(0, 36); c.writeUInt32LE(0, 38); c.writeUInt32LE(e.at, 42);
+        w(c); w(e.name);
+      }
+      const cdSize = offset - cdStart;
+      const end = Buffer.alloc(22);
+      end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(0, 4); end.writeUInt16LE(0, 6); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10);
+      end.writeUInt32LE(cdSize, 12); end.writeUInt32LE(cdStart, 16); end.writeUInt16LE(0, 20);
+      w(end); res.end();
+      return entries.length;
+    })();
   }
 
   const labelRow = (r) => ({ uid: r.uid, po: r.po_number, sku: r.sku_code, style: r.style, ean: r.ean, product: r.product, color: r.color, size: r.size, format: r.format });
@@ -775,6 +849,32 @@ module.exports = function mountUidLabels(deps) {
       res.setHeader('X-Labels', String(f.labels));
       res.send(f.bytes);
     } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
+  });
+
+  // Selected POs of one run as a zip of their PDFs. ?pos=A,B,C limits it; default is every PO.
+  router.get('/zip/:runId', ...guard, auditLog('download_uid_labels_zip'), async (req, res) => {
+    try {
+      const client = curClient();
+      const runId = Number(req.params.runId);
+      const run = db.prepare('SELECT * FROM uid_label_run WHERE id = ? AND client_id = ?').get(runId, client);
+      if (!run) return res.status(404).json({ ok: false, error: 'No such run.' });
+      const all = db.prepare('SELECT DISTINCT po_number po FROM uid_label WHERE run_id = ? ORDER BY po_number').all(runId).map(r => r.po);
+      const want = str(req.query.pos) ? new Set(str(req.query.pos).split(',').map(x => x.trim()).filter(Boolean)) : null;
+      const pos = want ? all.filter(po => want.has(po)) : all;
+      if (!pos.length) return res.status(404).json({ ok: false, error: 'No POs selected.' });
+      const wk = isoWeek(run.week_start);
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', `attachment; filename="UID_labels_${wk}_run${runId}${want ? `_${pos.length}POs` : ''}.zip"`);
+      res.setHeader('X-Files', String(pos.length));
+      const fmtOf = new Map(db.prepare('SELECT po_number po, MIN(format) f FROM uid_label WHERE run_id = ? GROUP BY po_number').all(runId).map(r => [r.po, r.f]));
+      async function* files() {
+        for (const po of pos) {
+          const f = await fileFor(client, runId, po);
+          if (f) yield { name: `${safeName(po)}_${wk}_${fmtOf.get(po) === 'footwear' ? '36x76' : '76x36'}_run${runId}.pdf`, bytes: f.bytes };
+        }
+      }
+      await zipStream(res, files());
+    } catch (e) { if (!res.headersSent) res.status(500).json({ ok: false, error: String(e.message || e) }); else res.end(); }
   });
 
   // Every label ever issued for a PO in a week, as one PDF (all runs). For a re-print of the
