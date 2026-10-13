@@ -41,8 +41,13 @@
 
 const crypto = require('crypto');
 const PDFDocument = require('pdfkit');
+// bwip-js draws the DataMatrix and Code128 modules. The npm package is preferred; if the deploy
+// did not install it, the vendored copy of its Node build (one self-contained file, no
+// dependencies beyond Node itself) is used instead, so a PDF never depends on the build step.
 let bwipjs = null;
-try { bwipjs = require('bwip-js'); } catch (e) { bwipjs = null; }
+try { bwipjs = require('bwip-js'); } catch (e) {
+  try { bwipjs = require('./bwip_js_vendor.js'); } catch (e2) { bwipjs = null; }
+}
 
 module.exports = function mountUidLabels(deps) {
   const { express, db, authenticateRequest, requireRole, requireInternalOrg, auditLog, curClient,
