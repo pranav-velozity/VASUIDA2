@@ -6720,6 +6720,17 @@ app.put('/plan/weeks/:mondayISO',
   } catch (e) {
     console.error('[plan-upload→snapshots] failed (non-fatal):', e.message || e);
   }
+  // UID labels — issue only what the ledger lacks for this week (planned − issued per PO/SKU).
+  // Non-fatal: the plan is saved either way; the run and any problem show on the UID labels page.
+  try {
+    if (typeof uidLabels !== 'undefined' && uidLabels && typeof uidLabels.onPlanSaved === 'function') {
+      const by = (req.auth && (req.auth.email || req.auth.userEmail || req.auth.userId)) || 'plan upload';
+      const out = uidLabels.onPlanSaved(curClient(), monday, arr, `plan upload · ${by}`);
+      if (out && out.run_id) console.log(`[plan-upload→uid-labels] ${monday}: run #${out.run_id}, ${out.labels} label(s)`);
+    }
+  } catch (e) {
+    console.error('[plan-upload→uid-labels] failed (non-fatal):', e.message || e);
+  }
   return res.json(arr);
 });
 
@@ -12067,6 +12078,15 @@ app.use('/elevate', require('./elevate_routes')({
   express, db, authenticateRequest, requireRole, auditLog, curClient,
   sendViaResend, iconicPublisher, ExcelJS, logger: console,
 }));
+
+// ── UID labels: ledger, delta issuance on plan upload, print queue ──
+// Replaces the two standalone label generators. Mounted after the plan routes are defined
+// above; the upload handler calls uidLabels.onPlanSaved() once the plan is stored.
+const uidLabels = require('./uid_label_routes')({
+  express, db, authenticateRequest, requireRole, requireInternalOrg, auditLog, curClient,
+  sendViaResend, writeOpLimiter, logger: console,
+});
+app.use('/uid-labels', uidLabels);
 
 app.post('/iconic/publish',
   authenticateRequest,
