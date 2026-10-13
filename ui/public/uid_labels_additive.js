@@ -15,7 +15,7 @@
   'use strict';
   if (window.__UID_LABELS_LOADED__) return;
   window.__UID_LABELS_LOADED__ = true;
-  const VERSION = '3';
+  const VERSION = '4';
 
   const INK = '#121212', MUTED = '#5F5F5F', LINE = '#E3E3E0', SOFT = '#EFEFEC';
   const RED = '#990033', GREEN = '#7CB518', PURPLE = '#7C5CBF', AMBER = '#8A6D00';
@@ -52,7 +52,10 @@
   const todayLocal = () => { try { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Sydney' }).format(new Date()); } catch (_) { return new Date().toISOString().slice(0, 10); } };
   const isoWeek = (ymd) => { const d = toD(ymd); d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7)); const y0 = new Date(Date.UTC(d.getUTCFullYear(), 0, 1)); return 'W' + String(Math.ceil(((d - y0) / 86400000 + 1) / 7)).padStart(2, '0'); };
   const fmtShort = (v) => isDate(v) ? toD(v).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' }) : '';
-  const when = (iso) => { try { return new Date(String(iso).replace(' ', 'T') + (String(iso).endsWith('Z') ? '' : 'Z')).toLocaleString('en-AU', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Australia/Sydney' }); } catch (_) { return String(iso || ''); } };
+  // Shown in the viewer's own time zone — the warehouse sees Sydney, an admin abroad sees theirs.
+  const when = (iso) => { try { return new Date(String(iso).replace(' ', 'T') + (String(iso).endsWith('Z') ? '' : 'Z')).toLocaleString('en-AU', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }); } catch (_) { return String(iso || ''); } };
+  // A person's name or email; a raw auth id (runs stamped before names were recorded) is not worth showing.
+  const person = (s) => { const v = String(s || '').trim(); return !v || v === 'user' || /^user_[A-Za-z0-9]+$/.test(v) ? '' : v.replace(/\buser_[A-Za-z0-9]+\b/g, '').replace(/\s*·\s*$/, '').trim(); };
   const fmtNum = (n) => Number(n || 0).toLocaleString('en-AU');
   const plural = (n, w, p) => `${fmtNum(n)} ${n === 1 ? w : (p || w + 's')}`;
 
@@ -215,8 +218,13 @@
     return `Plan upload — ${plural(r.labels, 'label')} across ${plural((s.pos || []).length, 'PO')}`;
   }
   function runMeta(r) {
-    const bits = [when(r.at), r.by ? esc(r.by) : null];
-    if (r.emailed_at) bits.push('emailed'); else if (r.email_error) bits.push(`<span style="color:${RED}" title="${esc(r.email_error)}">email not sent — ${esc(r.email_error)}</span>`);
+    // trigger_by is "plan upload · who" or "Check plan now · who" (or just who, for extras).
+    const raw = person(r.by);
+    const m = /^(plan upload|Check plan now)(?:\s*·\s*(.*))?$/i.exec(raw);
+    const how = m ? (/^plan/i.test(m[1]) ? 'from the plan upload' : 'by Check plan now') : null;
+    const whoName = m ? (m[2] || '').trim() : raw;
+    const bits = [`Issued ${when(r.at)}`, how ? `${how}${whoName ? ` (${esc(whoName)})` : ''}` : (whoName ? `by ${esc(whoName)}` : null)];
+    if (r.emailed_at) bits.push('warehouse emailed'); else if (r.email_error) bits.push(`<span style="color:${RED}" title="${esc(r.email_error)}">email not sent — ${esc(r.email_error)}</span>`);
     if (r.summary && r.summary.reason) bits.push(esc(r.summary.reason));
     return bits.filter(Boolean).join(' · ');
   }
