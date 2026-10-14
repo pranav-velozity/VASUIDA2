@@ -23,6 +23,43 @@
   const el = (id) => document.getElementById(id);
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
   const api = () => window.__FLOW_API__ || null;
+  async function getJson(path) {
+    const base = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/, '');
+    let token = null;
+    if (window.Clerk?.session) { try { token = await window.Clerk.session.getToken(); } catch (_) {} }
+    const h = token ? { Authorization: 'Bearer ' + token } : {};
+    if (window.pinpointClient) h['x-pinpoint-client'] = window.pinpointClient;
+    const r = await fetch(base + path, { headers: h });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }
+  // Where each container stands with customs, from the consignments the Transit Movements
+  // board tracks: arrival and destination clearance (actual dates only), the planned arrival,
+  // and the terminal's last free day. Keyed by the container / AWB reference.
+  const refKey = (v) => String(v || '').toUpperCase().replace(/\s+/g, '');
+  async function clearanceMap(fromWeek) {
+    const out = new Map();
+    try {
+      const b = await getJson(`/consignments/board?from=${encodeURIComponent(fromWeek)}`);
+      for (const c of (b && b.consignments) || []) {
+        const ms = {}; for (const m of (c.milestones || [])) ms[m.stage] = m;
+        const act = (k) => (ms[k] && ms[k].actual_at) || null;
+        const plan = (k) => (ms[k] && ms[k].planned_at) || null;
+        const t = c.terminal || {};
+        const rec = { arrived: act('arrived'), cleared: act('dest_cleared'), eta: plan('arrived'), lfd: t.lfd || null, holds: (t.holds || []).length, mode: c.mode };
+        for (const ref of [c.reference, c.mbl]) if (ref) out.set(refKey(ref), rec);
+      }
+    } catch (e) { console.warn('[last-mile] clearance lookup failed', e); }
+    return out;
+  }
+  // A report row may name two AWBs ("CI0528/01OCT & CI0051/03OCT"); the first that is tracked wins.
+  function clearanceFor(map, container) {
+    for (const part of String(container || '').split(/\s*[&,]\s*/)) {
+      const hit = map.get(refKey(part)); if (hit) return hit;
+    }
+    return null;
+  }
+  const daysAgo = (ymd) => { const t = ms(ymd); return t == null ? null : Math.floor((Date.now() - t) / 86400000); };
 
   function isoWeek(ymd) {
     const d = new Date(ymd + 'T00:00:00Z'); const day = (d.getUTCDay() + 6) % 7;
@@ -75,6 +112,7 @@
         pod: !!r.pod_received,
         note: String(r.last_mile_note || '').trim(),
         legacy: !!(enteredAt && !bookedFor),        // scheduled before the picker existed
+        cl: null, needNow: false,                   // filled in once the clearance map is read
       });
     }
     return out;
@@ -109,7 +147,21 @@
     const passed = slotPassedMins(r);
     if (passed != null) return `<span style="font-size:11.5px;font-weight:600;color:${RED};">Slot passed</span>
       <div style="font-size:10px;color:${MID};">${esc(gap(passed))} ago, not delivered</div>`;
+    if (r.state === 'Not scheduled') return clearanceCell(r);
     return `<span style="color:${LIGHT};">—</span>`;
+  }
+  function clearanceCell(r) {
+    const c = r.cl;
+    if (!c) return `<span style="font-size:11px;color:${LIGHT};">Not tracked</span>`;
+    const lfd = c.lfd ? ` · last free day ${esc(fmtDay(String(c.lfd).slice(0, 10)))}` : '';
+    if (c.cleared) { const d = daysAgo(c.cleared); return `<span style="font-size:11.5px;font-weight:600;color:${RED};">Cleared ${d === 0 ? 'today' : d === 1 ? 'yesterday' : `${d}d ago`}</span>
+      <div style="font-size:10px;color:${MID};">needs a slot${lfd}${c.holds ? ` · ${c.holds} hold${c.holds === 1 ? '' : 's'}` : ''}</div>`; }
+    if (c.arrived) { const d = daysAgo(c.arrived); return `<span style="font-size:11.5px;font-weight:600;color:${RED};">Arrived ${d === 0 ? 'today' : d === 1 ? 'yesterday' : `${d}d ago`}</span>
+      <div style="font-size:10px;color:${MID};">clearance not confirmed · needs a slot${lfd}</div>`; }
+    if (c.eta) { const past = ms(c.eta) != null && ms(c.eta) < Date.now();
+      return `<span style="font-size:11px;color:${past ? AMBER : MID};">${past ? 'Arrival not confirmed' : 'In transit'}</span>
+      <div style="font-size:10px;color:${LIGHT};">${past ? 'was due' : 'due'} ${esc(fmtDay(String(c.eta).slice(0, 10)))}</div>`; }
+    return `<span style="font-size:11px;color:${MID};">In transit</span>`;
   }
 
   // ── The panel ──
@@ -150,6 +202,7 @@
     const onTime = measured.filter(r => r.variance.ok);
     const late = measured.filter(r => !r.variance.ok && r.variance.mins > 0);
     const notScheduled = all.filter(r => r.state === 'Not scheduled');
+    const needNow = notScheduled.filter(r => r.needNow);
     const scheduled = all.filter(r => r.state === 'Scheduled');
     const slotPassed = scheduled.filter(r => slotPassedMins(r) != null);
     const noPod = delivered.filter(r => !r.pod);
@@ -163,14 +216,15 @@
       </div>`;
 
     return `
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:18px;">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px;">
         ${card('Containers', all.length, `${delivered.length} delivered`)}
         ${card('On time', measured.length ? Math.round(onTime.length / measured.length * 100) + '%' : '—',
                measured.length ? `${onTime.length} of ${measured.length} measured` : 'no booked times yet',
                measured.length && onTime.length / measured.length < 0.8 ? RED : GREEN)}
         ${card('Late', measured.length ? `${late.length} of ${measured.length}` : '—', worst ? `measured deliveries · worst ${gap(worst.variance.mins)}, ${worst.container}` : (measured.length ? 'measured deliveries · none late' : 'no measured deliveries'), late.length ? RED : DARK)}
         ${card('Scheduled', scheduled.length, slotPassed.length ? `${slotPassed.length} past the booked slot, not delivered` : (scheduled.length ? 'slots booked, awaiting delivery' : 'nothing booked in'), slotPassed.length ? RED : DARK)}
-        ${card('Not scheduled', notScheduled.length, notScheduled.length ? 'no slot booked' : 'all booked in', notScheduled.length ? AMBER : DARK)}
+        ${card('Needs a slot now', needNow.length, needNow.length ? 'cleared or arrived, no delivery booked' : (notScheduled.length ? 'none — all unscheduled are still in transit' : 'all booked in'), needNow.length ? RED : DARK)}
+        ${card('Not yet cleared', notScheduled.length - needNow.length, notScheduled.length - needNow.length ? 'no slot yet, nothing to do until cleared' : 'nothing in transit without a slot', AMBER)}
         ${card('Delivered, no POD', noPod.length, noPod.length ? 'chase the paperwork' : 'all signed off', noPod.length ? AMBER : DARK)}
       </div>
       ${measured.length < delivered.length ? `
@@ -182,21 +236,23 @@
         </div>` : ''}`;
   }
 
+  // One column set for every table on the page, so the weeks read as one report.
+  const COLS = [['Container', '19%'], ['Vessel / flight', '14%'], ['Booked for', '13%'], ['Delivered', '12%'], ['Status', '10%'], ['Timing', '15%'], ['POD', '5%'], ['Note', '12%']];
   function table(rows) {
     if (!rows.length) return `<div style="font-size:12px;color:${MID};padding:14px 0;">Nothing in this week.</div>`;
     const cell = 'padding:9px 10px;font-size:11.5px;color:' + DARK + ';vertical-align:top;';
     return `
       <div style="background:#fff;border:.5px solid rgba(0,0,0,.08);border-radius:12px;overflow:hidden;">
-        <table style="width:100%;border-collapse:collapse;">
+        <table style="width:100%;border-collapse:collapse;table-layout:fixed;">
+          <colgroup>${COLS.map(c => `<col style="width:${c[1]}">`).join('')}</colgroup>
           <thead><tr style="background:#FBFBFC;">
-            ${['Container', 'Vessel / flight', 'Booked for', 'Delivered', 'Status', 'Timing', 'POD', 'Note']
-              .map((h, i) => `<th style="text-align:${i === 6 ? 'center' : 'left'};padding:9px 10px;font-size:9.5px;
-                   color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;font-weight:700;">${h}</th>`).join('')}
+            ${COLS.map((c, i) => `<th style="text-align:${i === 6 ? 'center' : 'left'};padding:9px 10px;font-size:9.5px;
+                   color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;font-weight:700;">${c[0]}</th>`).join('')}
           </tr></thead>
           <tbody>
             ${rows.map(r => `
               <tr style="border-top:.5px solid rgba(0,0,0,.05);">
-                <td style="${cell}font-family:ui-monospace,monospace;">${esc(r.container)}${r.size ? `<span style="color:${LIGHT};"> · ${esc(r.size)}ft</span>` : ''}</td>
+                <td style="${cell}font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(r.container)}">${esc(r.container)}${r.size ? `<span style="color:${LIGHT};"> · ${esc(r.size)}ft</span>` : ''}</td>
                 <td style="${cell}color:${MID};">${esc(r.vessel)}</td>
                 <td style="${cell}">
                   ${r.bookedFor ? esc(fmtWhen(r.bookedFor))
@@ -208,7 +264,7 @@
                 <td style="${cell}">${stateCell(r)}</td>
                 <td style="${cell}">${timingCell(r)}</td>
                 <td style="${cell}text-align:center;">${r.delivered ? (r.pod ? '✓' : `<span style="color:${AMBER};">missing</span>`) : `<span style="color:${LIGHT};">—</span>`}</td>
-                <td style="${cell}color:${MID};max-width:260px;">${esc(r.note)}</td>
+                <td style="${cell}color:${MID};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(r.note)}">${esc(r.note)}</td>
               </tr>`).join('')}
           </tbody>
         </table>
@@ -229,7 +285,7 @@
     }
     return `
       <div style="margin-bottom:22px;">
-        <div style="font-size:13px;font-weight:600;color:${DARK};margin-bottom:8px;">Booked in</div>
+        <div style="font-size:13px;font-weight:600;color:${DARK};margin-bottom:8px;">Booked in <span style="font-weight:400;color:${MID};">· next deliveries</span></div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;">
           ${[...byDay.entries()].map(([day, list]) => `
             <div style="background:#fff;border:.5px solid rgba(0,0,0,.08);border-radius:12px;padding:12px 14px;">
@@ -255,7 +311,9 @@
         r.bookedFor || '', r.enteredAt || '', r.delivered || '',
         r.variance ? r.variance.mins : '',
         r.state,
-        r.state === 'Delivered' ? (r.variance ? (r.variance.ok ? 'On time' : (r.variance.mins > 0 ? 'Late' : 'Early')) : 'Not measured') : (slotPassedMins(r) != null ? 'Slot passed' : ''),
+        r.state === 'Delivered' ? (r.variance ? (r.variance.ok ? 'On time' : (r.variance.mins > 0 ? 'Late' : 'Early')) : 'Not measured')
+          : slotPassedMins(r) != null ? 'Slot passed'
+          : r.state === 'Not scheduled' ? (r.needNow ? (r.cl.cleared ? 'Needs a slot — cleared ' + String(r.cl.cleared).slice(0, 10) : 'Needs a slot — arrived ' + String(r.cl.arrived).slice(0, 10)) : (r.cl ? 'Not yet cleared' : 'Not tracked')) : '',
         r.delivered ? (r.pod ? 'Yes' : 'No') : '',
         r.note,
       ].map(q).join(','));
@@ -309,29 +367,45 @@
       return;
     }
 
+    // Customs standing for every unscheduled container, from the Transit Movements board.
+    const clMap = await clearanceMap(list[list.length - 1]);
+    for (const r of all) {
+      r.cl = clearanceFor(clMap, r.container);
+      r.needNow = r.state === 'Not scheduled' && !!(r.cl && (r.cl.cleared || r.cl.arrived));
+    }
     const notScheduled = all.filter(r => r.state === 'Not scheduled');
+    const needNow = notScheduled.filter(r => r.needNow);
+    const notYet = notScheduled.filter(r => !r.needNow);
     body.innerHTML = `
       ${summary(all)}
-      ${comingUp(all)}
-      ${notScheduled.length ? `
+      ${needNow.length ? `
         <div style="margin-bottom:22px;">
-          <div style="font-size:13px;font-weight:600;color:${DARK};margin-bottom:3px;">Waiting on a slot</div>
-          <div style="font-size:11px;color:${MID};margin-bottom:8px;">Recorded against a week, with no delivery booked.</div>
-          ${table(notScheduled)}
+          <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:3px;"><span style="width:8px;height:8px;border-radius:50%;background:${RED};display:inline-block;"></span>
+            <span style="font-size:13px;font-weight:700;color:${RED};">Needs a slot now</span><span style="font-size:13px;color:${MID};">· ${needNow.length}</span></div>
+          <div style="font-size:11px;color:${MID};margin-bottom:8px;">Cleared customs, or arrived with clearance not yet confirmed, and no delivery booked. Book the dock before the last free day.</div>
+          <div style="border:1.5px solid ${RED};border-radius:12px;">${table(needNow)}</div>
+        </div>` : ''}
+      ${comingUp(all)}
+      ${notYet.length ? `
+        <div style="margin-bottom:22px;">
+          <div style="font-size:13px;font-weight:600;color:${DARK};margin-bottom:3px;">Not yet cleared <span style="font-weight:400;color:${MID};">· ${notYet.length}</span></div>
+          <div style="font-size:11px;color:${MID};margin-bottom:8px;">On a lane this week with no delivery booked, but still in transit or awaiting clearance — nothing to book yet. “Arrival not confirmed” means the milestone needs recording, not a slot.</div>
+          ${table(notYet)}
         </div>` : ''}
       ${weeks.map(wk => {
-        const rows = rowsFor(wk);
+        const rows = all.filter(r => r.ws === wk.ws);
         if (!rows.length) return '';
         const late = rows.filter(r => r.variance && !r.variance.ok && r.variance.mins > 0).length;
         const passed = rows.filter(r => slotPassedMins(r) != null).length;
         const deliveredN = rows.filter(r => r.state === 'Delivered').length;
+        const needN = rows.filter(r => r.needNow).length;
         return `
           <div style="margin-bottom:20px;">
             <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px;">
               <span style="font-size:12.5px;font-weight:700;color:${DARK};font-family:ui-monospace,monospace;">W${isoWeek(wk.ws)}</span>
               <span style="font-size:11.5px;color:${MID};">week of ${esc(fmtDay(wk.ws))}</span>
               <span style="flex:1;height:.5px;background:rgba(0,0,0,.08);"></span>
-              <span style="font-size:11px;color:${late || passed ? RED : LIGHT};">${rows.length} container${rows.length === 1 ? '' : 's'} · ${deliveredN} delivered${late ? ` · ${late} late` : ''}${passed ? ` · ${passed} past slot` : ''}</span>
+              <span style="font-size:11px;color:${late || passed || needN ? RED : LIGHT};">${rows.length} container${rows.length === 1 ? '' : 's'} · ${deliveredN} delivered${late ? ` · ${late} late` : ''}${passed ? ` · ${passed} past slot` : ''}${needN ? ` · ${needN} need a slot` : ''}</span>
             </div>
             ${table(rows)}
           </div>`;
