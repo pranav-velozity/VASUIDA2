@@ -39,7 +39,7 @@
       return new Date(t).toLocaleString('en-AU', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true });
     } catch (e) { return String(v).replace('T', ' '); }
   };
-  const gap = (m) => { const a = Math.abs(m); return a >= 60 ? `${Math.floor(a / 60)}h ${a % 60}m` : `${a}m`; };
+  const gap = (m) => { const a = Math.abs(m); if (a >= 1440) return `${Math.floor(a / 1440)}d ${Math.floor((a % 1440) / 60)}h`; return a >= 60 ? `${Math.floor(a / 60)}h ${a % 60}m` : `${a}m`; };
 
   // ── One row per container, per week ──
   function rowsFor(week) {
@@ -83,17 +83,33 @@
   const pill = (text, ink, bg) => `<span style="font-size:10.5px;font-weight:700;border-radius:6px;
     padding:2px 8px;color:${ink};background:${bg};white-space:nowrap;">${esc(text)}</span>`;
 
+  // Status is the state and nothing else: Not scheduled, Scheduled, Delivered. Early, on time and
+  // late are measurements of a delivery, so they live in their own column — a container cannot
+  // "be" late; a delivery can be late.
   function stateCell(r) {
-    if (r.state === 'Delivered') {
-      if (!r.variance) return pill('Delivered', GREEN, 'rgba(27,127,59,.10)') +
-        `<div style="font-size:10px;color:${LIGHT};margin-top:3px;">no booked time to measure</div>`;
-      return pill(r.variance.ok ? 'On time' : (r.variance.mins > 0 ? 'Late' : 'Early'),
-                  r.variance.ok ? GREEN : (r.variance.mins > 0 ? RED : AMBER),
-                  r.variance.ok ? 'rgba(27,127,59,.10)' : (r.variance.mins > 0 ? 'rgba(179,63,64,.10)' : 'rgba(183,121,31,.11)')) +
-        (r.variance.ok ? '' : `<div style="font-size:10px;color:${MID};margin-top:3px;">${gap(r.variance.mins)} ${r.variance.mins > 0 ? 'late' : 'early'}</div>`);
-    }
+    if (r.state === 'Delivered') return pill('Delivered', GREEN, 'rgba(27,127,59,.10)');
     if (r.state === 'Scheduled') return pill('Scheduled', '#1D5FA8', 'rgba(29,95,168,.10)');
     return pill('Not scheduled', AMBER, 'rgba(183,121,31,.11)');
+  }
+  // How far past a booked slot a still-undelivered container is; null until the slot has gone by.
+  function slotPassedMins(r) {
+    if (r.state !== 'Scheduled' || !r.bookedFor) return null;
+    const a = ms(r.bookedFor); if (a == null) return null;
+    const mins = Math.round((Date.now() - a) / 60000);
+    return mins > BUFFER_MIN ? mins : null;
+  }
+  function timingCell(r) {
+    if (r.state === 'Delivered') {
+      if (!r.variance) return `<span style="font-size:11px;color:${LIGHT};">Not measured</span>
+        <div style="font-size:10px;color:${LIGHT};">no booked time to compare</div>`;
+      if (r.variance.ok) return `<span style="font-size:11.5px;font-weight:600;color:${GREEN};">On time</span>`;
+      const late = r.variance.mins > 0;
+      return `<span style="font-size:11.5px;font-weight:600;color:${late ? RED : AMBER};">${late ? 'Late' : 'Early'} ${esc(gap(r.variance.mins))}</span>`;
+    }
+    const passed = slotPassedMins(r);
+    if (passed != null) return `<span style="font-size:11.5px;font-weight:600;color:${RED};">Slot passed</span>
+      <div style="font-size:10px;color:${MID};">${esc(gap(passed))} ago, not delivered</div>`;
+    return `<span style="color:${LIGHT};">—</span>`;
   }
 
   // ── The panel ──
@@ -107,8 +123,8 @@
         <div>
           <div style="font-size:15px;font-weight:700;color:${DARK};letter-spacing:-.01em;">Last mile &mdash; last ${WEEKS} weeks</div>
           <div style="font-size:11.5px;color:${MID};margin-top:2px;">
-            Every container, when it was booked in, when it landed, and how that compares.
-            On time means within ${BUFFER_MIN} minutes of the booked slot.</div>
+            Status is where a container stands: not scheduled, scheduled, delivered. Timing is how a
+            delivery compared with its booked slot &mdash; on time means within ${BUFFER_MIN} minutes.</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;">
           <button id="lm-csv" style="background:#fff;color:${DARK};border:.5px solid rgba(0,0,0,.14);border-radius:9px;
@@ -134,6 +150,8 @@
     const onTime = measured.filter(r => r.variance.ok);
     const late = measured.filter(r => !r.variance.ok && r.variance.mins > 0);
     const notScheduled = all.filter(r => r.state === 'Not scheduled');
+    const scheduled = all.filter(r => r.state === 'Scheduled');
+    const slotPassed = scheduled.filter(r => slotPassedMins(r) != null);
     const noPod = delivered.filter(r => !r.pod);
     const worst = late.slice().sort((a, b) => b.variance.mins - a.variance.mins)[0];
 
@@ -150,7 +168,8 @@
         ${card('On time', measured.length ? Math.round(onTime.length / measured.length * 100) + '%' : '—',
                measured.length ? `${onTime.length} of ${measured.length} measured` : 'no booked times yet',
                measured.length && onTime.length / measured.length < 0.8 ? RED : GREEN)}
-        ${card('Late', late.length, worst ? `worst ${gap(worst.variance.mins)} — ${worst.container}` : 'none', late.length ? RED : DARK)}
+        ${card('Late', measured.length ? `${late.length} of ${measured.length}` : '—', worst ? `measured deliveries · worst ${gap(worst.variance.mins)}, ${worst.container}` : (measured.length ? 'measured deliveries · none late' : 'no measured deliveries'), late.length ? RED : DARK)}
+        ${card('Scheduled', scheduled.length, slotPassed.length ? `${slotPassed.length} past the booked slot, not delivered` : (scheduled.length ? 'slots booked, awaiting delivery' : 'nothing booked in'), slotPassed.length ? RED : DARK)}
         ${card('Not scheduled', notScheduled.length, notScheduled.length ? 'no slot booked' : 'all booked in', notScheduled.length ? AMBER : DARK)}
         ${card('Delivered, no POD', noPod.length, noPod.length ? 'chase the paperwork' : 'all signed off', noPod.length ? AMBER : DARK)}
       </div>
@@ -159,7 +178,7 @@
              padding:10px 14px;margin-bottom:16px;font-size:11.5px;color:${DARK};">
           <b>${delivered.length - measured.length} of ${delivered.length} deliveries cannot be measured.</b>
           They were scheduled before a delivery time was captured, so there is only a record of when
-          someone pressed the button. They are shown as delivered, not as on time.
+          someone pressed the button. They count as delivered; their timing is not measured.
         </div>` : ''}`;
   }
 
@@ -170,8 +189,8 @@
       <div style="background:#fff;border:.5px solid rgba(0,0,0,.08);border-radius:12px;overflow:hidden;">
         <table style="width:100%;border-collapse:collapse;">
           <thead><tr style="background:#FBFBFC;">
-            ${['Container', 'Vessel / flight', 'Booked for', 'Delivered', 'How it went', 'POD', 'Note']
-              .map((h, i) => `<th style="text-align:${i === 5 ? 'center' : 'left'};padding:9px 10px;font-size:9.5px;
+            ${['Container', 'Vessel / flight', 'Booked for', 'Delivered', 'Status', 'Timing', 'POD', 'Note']
+              .map((h, i) => `<th style="text-align:${i === 6 ? 'center' : 'left'};padding:9px 10px;font-size:9.5px;
                    color:${LIGHT};text-transform:uppercase;letter-spacing:.06em;font-weight:700;">${h}</th>`).join('')}
           </tr></thead>
           <tbody>
@@ -187,6 +206,7 @@
                 </td>
                 <td style="${cell}">${r.delivered ? esc(fmtWhen(r.delivered)) : `<span style="color:${LIGHT};">—</span>`}</td>
                 <td style="${cell}">${stateCell(r)}</td>
+                <td style="${cell}">${timingCell(r)}</td>
                 <td style="${cell}text-align:center;">${r.delivered ? (r.pod ? '✓' : `<span style="color:${AMBER};">missing</span>`) : `<span style="color:${LIGHT};">—</span>`}</td>
                 <td style="${cell}color:${MID};max-width:260px;">${esc(r.note)}</td>
               </tr>`).join('')}
@@ -226,7 +246,7 @@
   }
 
   function csv(all) {
-    const head = ['Week', 'Week starting', 'Container', 'Vessel or flight', 'Booked for', 'Entered at', 'Delivered at', 'Minutes vs booked', 'Outcome', 'POD', 'Note'];
+    const head = ['Week', 'Week starting', 'Container', 'Vessel or flight', 'Booked for', 'Entered at', 'Delivered at', 'Minutes vs booked', 'Status', 'Timing', 'POD', 'Note'];
     const q = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
     const lines = [head.map(q).join(',')];
     for (const r of all) {
@@ -234,7 +254,8 @@
         'W' + isoWeek(r.ws), r.ws, r.container, r.vessel,
         r.bookedFor || '', r.enteredAt || '', r.delivered || '',
         r.variance ? r.variance.mins : '',
-        r.state === 'Delivered' ? (r.variance ? (r.variance.ok ? 'On time' : (r.variance.mins > 0 ? 'Late' : 'Early')) : 'Delivered, not measurable') : r.state,
+        r.state,
+        r.state === 'Delivered' ? (r.variance ? (r.variance.ok ? 'On time' : (r.variance.mins > 0 ? 'Late' : 'Early')) : 'Not measured') : (slotPassedMins(r) != null ? 'Slot passed' : ''),
         r.delivered ? (r.pod ? 'Yes' : 'No') : '',
         r.note,
       ].map(q).join(','));
@@ -302,13 +323,15 @@
         const rows = rowsFor(wk);
         if (!rows.length) return '';
         const late = rows.filter(r => r.variance && !r.variance.ok && r.variance.mins > 0).length;
+        const passed = rows.filter(r => slotPassedMins(r) != null).length;
+        const deliveredN = rows.filter(r => r.state === 'Delivered').length;
         return `
           <div style="margin-bottom:20px;">
             <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px;">
               <span style="font-size:12.5px;font-weight:700;color:${DARK};font-family:ui-monospace,monospace;">W${isoWeek(wk.ws)}</span>
               <span style="font-size:11.5px;color:${MID};">week of ${esc(fmtDay(wk.ws))}</span>
               <span style="flex:1;height:.5px;background:rgba(0,0,0,.08);"></span>
-              <span style="font-size:11px;color:${late ? RED : LIGHT};">${rows.length} container${rows.length === 1 ? '' : 's'}${late ? ` · ${late} late` : ''}</span>
+              <span style="font-size:11px;color:${late || passed ? RED : LIGHT};">${rows.length} container${rows.length === 1 ? '' : 's'} · ${deliveredN} delivered${late ? ` · ${late} late` : ''}${passed ? ` · ${passed} past slot` : ''}</span>
             </div>
             ${table(rows)}
           </div>`;
