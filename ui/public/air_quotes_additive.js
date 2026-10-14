@@ -234,16 +234,15 @@
     const tile = (label, value, sub) => `<div class="aq-tile">
       <div class="aq-tl">${esc(label)}</div><div class="aq-tv">${value}</div>
       <div class="aq-ts">${esc(sub || '')}</div></div>`;
+    // Three unit rates in one row. Counts, spend and approval rate are VelOzity's numbers,
+    // not the client's — they live on the internal Quote Review page.
     return `<div class="aq-tiles">
-        ${tile('Approved', nf(t.approved_count), 'last ' + t.window_weeks + ' weeks')}
-        ${tile('Total spend', money(t.total_spend, cur), '')}
         ${tile('Per chargeable kg', t.per_chargeable_kg == null ? '—' : money(t.per_chargeable_kg, cur), 'not per gross kg')}
         ${tile('Per carton', t.per_carton == null ? '—' : money(t.per_carton, cur), '')}
         ${tile('Per unit', t.per_unit == null ? '—' : money(t.per_unit, cur),
                t.per_unit == null ? 'no unit counts entered' : t.per_unit_basis + ' of ' + t.approved_count + ' quotes')}
-        ${tile('Approval rate', t.approval_rate_pct == null ? '—' : t.approval_rate_pct + '%', '')}
       </div>
-      <div class="aq-s" style="margin:2px 0 10px;">Averages cover approved quotes only, over a rolling ${t.window_weeks} weeks. Air rates move seasonally &mdash; read them against the trend, not as a fixed benchmark.</div>`;
+      <div class="aq-s" style="margin:2px 0 10px;">Averages cover approved quotes over a rolling ${t.window_weeks} weeks. Air rates move seasonally &mdash; read them against the trend, not as a fixed benchmark.</div>`;
   }
 
   function rowsHtml(list, showAction) {
