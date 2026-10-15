@@ -144,11 +144,13 @@
     // If Labelling is hidden, only show the VAS Ops parent when Fulfilment is available.
     const lab = document.getElementById('nav-vas-labelling');
     const ful = document.getElementById('nav-vas-fulfilment');
+    const uid = document.getElementById('nav-vas-uidlabels');   // UID labels: staff and partner warehouses
     const dd  = document.getElementById('nav-vas-dd');
     if (dd) {
       const labOn = lab && lab.style.display !== 'none';
       const fulOn = ful && ful.style.display !== 'none';
-      if (!labOn && !fulOn) dd.style.display = 'none';
+      const uidOn = uid && uid.style.display !== 'none';
+      if (!labOn && !fulOn && !uidOn) dd.style.display = 'none';
     }
   }
 

@@ -25,7 +25,7 @@
   'use strict';
   if (window.__UID_LABELS_LOADED__) return;
   window.__UID_LABELS_LOADED__ = true;
-  const VERSION = '6';
+  const VERSION = '7';
 
   const INK = '#121212', MUTED = '#6E6E73', LINE = '#E3E3E0', SOFT = '#EFEFEC', BG = '#F4F4F2';
   const BRAND = '#990033', LIME = '#C7EA46', YELLOW = '#F5BD25';
@@ -591,8 +591,8 @@
     if (pg) { pg.classList.add('hidden'); pg.style.display = 'none'; }
     if (S.setupOpen || S.menu) { S.setupOpen = false; S.menu = null; render(); }
   };
-  // The nav entry is internal-only, like the page: a client login never sees it.
-  function gateNav() { const a = document.getElementById('nav-vas-uidlabels'); if (a) a.style.display = window.pinpointIsInternal === true ? '' : 'none'; }
+  // The nav entry follows the page: VelOzity staff and partner warehouses (Kerry); never a client login.
+  function gateNav() { const a = document.getElementById('nav-vas-uidlabels'); if (a) a.style.display = (window.pinpointIsInternal === true || window.pinpointIsPartner === true) ? '' : 'none'; }
   gateNav(); window.addEventListener('tenancy:ready', gateNav);
 
   window.__uidLabels = { reload: () => load(), state: () => S, version: VERSION };
