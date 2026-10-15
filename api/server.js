@@ -79,6 +79,7 @@ const PARTNER_ALLOW_EXACT = new Set([
 ]);
 const PARTNER_ALLOW_PREFIX = [
   '/partner/',              // anything built specifically for partners
+  '/uid-labels/',           // the warehouse (Kerry Shenzhen) prints the UID labels
 ];
 
 // Endpoints over the single-tenant operational tables. Everything here reads plans, records,
@@ -12082,8 +12083,20 @@ app.use('/elevate', require('./elevate_routes')({
 // ── UID labels: ledger, delta issuance on plan upload, print queue ──
 // Replaces the two standalone label generators. Mounted after the plan routes are defined
 // above; the upload handler calls uidLabels.onPlanSaved() once the plan is stored.
+// The warehouse that prints these is a partner organisation (Kerry Shenzhen), so the page
+// is for VelOzity staff and partners — never a client login.
+function requireInternalOrPartner(req, res, next) {
+  try {
+    const t = tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole);
+    if (!t || (t.org_type !== 'internal' && t.org_type !== 'partner')) {
+      console.warn(`[uid-labels] route refused for org_type=${t && t.org_type} org=${req.auth && req.auth.orgId}`);
+      return res.status(403).json({ error: 'not_available', message: 'UID labels are not available for this organisation.' });
+    }
+    return next();
+  } catch (e) { return res.status(403).json({ error: 'not_available' }); }
+}
 const uidLabels = require('./uid_label_routes')({
-  express, db, authenticateRequest, requireRole, requireInternalOrg, auditLog, curClient,
+  express, db, authenticateRequest, requireRole, requireInternalOrg: requireInternalOrPartner, auditLog, curClient,
   sendViaResend, writeOpLimiter, logger: console,
 });
 app.use('/uid-labels', uidLabels);
