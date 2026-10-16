@@ -938,9 +938,46 @@ module.exports = function mountConsignments(deps) {
       for (const k of lanes) if (!lanesSeen.has(k)) orphans.push(k);
     }
 
+    // Non-VAS consolidations exist only as a lane flagged is_non_vas in the blob — no plan row,
+    // and usually no container typed against them. From the cutover week they must be on the
+    // board like everything else, so each one becomes a consignment of its own: mode from the
+    // lane key, no reference yet (it shows as "not advised" until the warehouse enters it),
+    // and the lane attached so its units and POs come through.
+    const nonVas = [];
+    for (const r of rows) {
+      let blob; try { blob = JSON.parse(r.data); } catch (_) { continue; }
+      const lanes = (blob && blob.intl_lanes && typeof blob.intl_lanes === 'object') ? blob.intl_lanes : {};
+      for (const [k, lane] of Object.entries(lanes)) {
+        if (!lane || !lane.is_non_vas) continue;
+        if (lanesSeen.has(k)) continue;                       // a container already carries it
+        const already = db.prepare(`SELECT 1 FROM consignment_lane WHERE lane_key = ? AND week_start = ? AND client_id = ?`).get(k, ws, client);
+        if (already) { skipped.push({ lane_key: k, reason: 'non-VAS lane already on a consignment' }); continue; }
+        const mode = /air/i.test(String(k).split('||')[2] || '') ? 'Air' : 'Sea';
+        const rule = rulesFor(client, r.facility, mode);
+        const uid = randomUUID();
+        if (!dry) {
+          db.prepare(`INSERT INTO consignment (consignment_uid, client_id, week_start, facility,
+                        mode, reference, size_ft, carrier, vessel, transit_days, status, updated_at)
+                      VALUES (@uid,@client,@ws,@facility,@mode,NULL,NULL,NULL,NULL,@transit,'planned',@now)`)
+            .run({ uid, client, ws, facility: r.facility || null, mode,
+                   transit: rule.default_transit_days || null, now: new Date().toISOString() });
+          db.prepare(`INSERT OR IGNORE INTO consignment_lane (consignment_uid, lane_key, week_start, client_id) VALUES (?,?,?,?)`)
+            .run(uid, k, ws, client);
+          refreshPlanned(uid);
+        }
+        lanesSeen.set(k, 1);
+        const i = orphans.indexOf(k); if (i >= 0) orphans.splice(i, 1);
+        nonVas.push({ consignment_uid: dry ? null : uid, lane_key: k, mode, units: Number(lane.units_total) || 0,
+                      po_list: String(lane.po_list || ''), ticket_ref: String(lane.ticket_ref || '') });
+        made.push({ consignment_uid: dry ? null : uid, reference: 'not advised', mode, lanes: 1, non_vas: true,
+                    transit_days_defaulted: rule.default_transit_days || null });
+      }
+    }
+
     return {
       week_start: ws, dry_run: dry,
       consignments_created: made.length, consignments: made,
+      non_vas_created: nonVas,
       skipped, split_lanes: split, unassigned_lanes: orphans,
       note: 'Existing lane dates were not imported as actuals: they are copies of the plan, '
           + 'not observations. Every stage starts assumed.',
@@ -1037,6 +1074,187 @@ module.exports = function mountConsignments(deps) {
       res.status(500).json({ ok: false, error: String(e.message || e) });
     }
   });
+  // ═══════════════════════════════════════════════════════
+  // Cutover — the Week Hub's Transit & Clearing tile reads consignments from this week on.
+  //
+  // Before the cutover the tile computed itself in the browser from seven date fields per
+  // lane, stored in localStorage and mirrored into the week blob. From the cutover week the
+  // same tile, the lanes full-screen, the 10-week history and the Transit & Clearing Status
+  // workbook all read this one rollup, built from the same consignments, milestones and
+  // terminal feed as Transit Movements. The payload is deliberately shaped like what the
+  // browser used to compute (lanes carrying a `manual` of date fields, plus week containers),
+  // so every existing reader keeps working and only the source changes.
+  // ═══════════════════════════════════════════════════════
+  const CUTOVER_WEEK = /^\d{4}-\d{2}-\d{2}$/.test(String(process.env.CONSIGNMENT_CUTOVER_WEEK || ''))
+    ? String(process.env.CONSIGNMENT_CUTOVER_WEEK) : '2026-10-12';   // W42 2026
+
+  // The lane key exactly as the Week Hub builds it: supplier || zendesk || mode.
+  const planModeOf = (v) => {
+    const s = String(v || '').trim(); if (!s) return 'Sea';
+    const low = s.toLowerCase();
+    if (low.includes('sea') || low.includes('ocean')) return 'Sea';
+    if (low.includes('air')) return 'Air';
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  };
+  const planLaneKey = (r) => {
+    const sup = String(r.supplier_name ?? r.supplier ?? r.vendor ?? '').trim() || 'Unknown';
+    const tk = String(r.zendesk_ticket ?? r.zendesk ?? r.ticket ?? '').trim() || 'NO_TICKET';
+    return `${sup}||${tk}||${planModeOf(r.freight_type ?? r.freight ?? r.mode)}`;
+  };
+
+  // The legacy field names the browser's tile and the workbook read, filled from milestones.
+  const LEGACY_FIELD = { packing_list_ready: 'packing_list_ready_at', origin_cleared: 'origin_customs_cleared_at',
+                         departed: 'departed_at', arrived: 'arrived_at', dest_cleared: 'dest_customs_cleared_at' };
+
+  function weekStatus(ws, client, today) {
+    const active = ws >= CUTOVER_WEEK;
+    const rows = db.prepare(`SELECT * FROM consignment WHERE client_id = ? AND week_start = ? ORDER BY created_at`).all(client, ws);
+    const plan = planRowsFor(ws, client);
+
+    // Plan lanes, with their units and POs, in the Week Hub's key.
+    const lanes = new Map();
+    for (const r of plan) {
+      const po = String(r.po_number || '').trim(); if (!po) continue;
+      const k = planLaneKey(r);
+      if (!lanes.has(k)) {
+        const [supplier, ticket, freight] = k.split('||');
+        lanes.set(k, { key: k, supplier, ticket, freight, plannedUnits: 0, plannedPOs: new Set(), in_plan: true,
+                       consignments: [], manual: {}, level: 'gray', health: null });
+      }
+      const l = lanes.get(k); l.plannedPOs.add(po); l.plannedUnits += Number(r.target_qty || 0) || 0;
+    }
+
+    // Non-VAS lanes carry their units in the week blob, not the plan.
+    const blobLane = {};
+    try {
+      for (const r of db.prepare('SELECT data FROM flow_week WHERE week_start = ?').all(ws)) {
+        let blob; try { blob = JSON.parse(r.data); } catch (_) { continue; }
+        const il = (blob && blob.intl_lanes && typeof blob.intl_lanes === 'object') ? blob.intl_lanes : {};
+        for (const [k, v] of Object.entries(il)) if (v && typeof v === 'object') blobLane[k] = Object.assign(blobLane[k] || {}, v);
+      }
+    } catch (_) { /* no blob */ }
+
+    const consignments = [], containers = [];
+    let holds = 0, sea = 0, air = 0, lastMilestoneAt = null;
+    const missing = { docs: 0, origin: 0, depart: 0, arrive: 0, dest: 0 };
+    const levelOf = (h) => {
+      if (!h) return 'gray';
+      if (h.held || h.key === 'delayed') return 'red';
+      if (h.key === 'behind') return 'yellow';
+      if (h.key === 'not_booked') return dayDiff(ws, today) > 21 ? 'yellow' : 'gray';
+      return 'green';                           // on_time, and no_quote (a data flag, not lateness)
+    };
+    const rank = { gray: 0, green: 1, yellow: 2, red: 3 };
+    const worst = (a, b) => (rank[b] > rank[a] ? b : a);
+    const earliest = (a, b) => (!a ? b : !b ? a : (b < a ? b : a));
+    const latest = (a, b) => (!a ? b : !b ? a : (b > a ? b : a));
+
+    for (const c of rows) {
+      const sh = shape(c);
+      const term = terminalFor(c.consignment_uid);
+      const health = statusOf(c, sh, term, today);
+      const level = levelOf(health);
+      if (c.mode === 'Air') air++; else sea++;
+      if (health.held) holds++;
+
+      // Confirmed facts only. An assumed milestone is the plan, and the tile must not show
+      // the plan as something that happened — that is the defect the migration removes.
+      const dates = {};
+      for (const m of sh.milestones) {
+        if (m.state !== 'assumed' && m.actual_at) {
+          if (LEGACY_FIELD[m.stage]) dates[LEGACY_FIELD[m.stage]] = m.actual_at;
+          if (!lastMilestoneAt || m.actual_at > lastMilestoneAt) lastMilestoneAt = m.actual_at;
+        }
+      }
+      // The first stage without a confirmed date, the way the tile counts "missing".
+      if (!dates.packing_list_ready_at) missing.docs++;
+      else if (!dates.origin_customs_cleared_at) missing.origin++;
+      else if (!dates.departed_at) missing.depart++;
+      else if (!dates.arrived_at) missing.arrive++;
+      else if (!dates.dest_customs_cleared_at) missing.dest++;
+
+      const manual = Object.assign({}, dates, {
+        eta_fc: sh.eta_fc || '',
+        latest_arrival_date: (term && term.lfd) || '',
+        customs_hold: !!health.held,
+        shipmentNumber: c.shipment_ref || '', hbl: c.hbl || '', mbl: c.mbl || '',
+        note: health.why || '',
+      });
+
+      const item = {
+        consignment_uid: c.consignment_uid, reference: c.reference || null, mode: c.mode, size_ft: c.size_ft || null,
+        vessel: c.vessel || null, carrier: c.carrier || null, status: c.status,
+        lanes: sh.lanes, health: { key: health.key, label: health.label, why: health.why, held: !!health.held, late: health.late, lfd_in: health.lfd_in },
+        level, terminal: term ? { lfd: term.lfd || null, holds: term.holds || [], available_at: term.available_at || null } : null,
+        milestones: sh.milestones, eta_fc: sh.eta_fc || null, confidence: sh.confidence || null,
+        transit_confirmed: !!c.transit_confirmed, dates: manual,
+      };
+      consignments.push(item);
+      containers.push({ container_uid: c.consignment_uid, container_id: c.reference || '', vessel: c.vessel || '',
+                        size_ft: c.mode === 'Air' ? 'AIR' : (c.size_ft || ''), carrier: c.carrier || '',
+                        lane_keys: sh.lanes.slice(), mode: c.mode, pos: '' });
+
+      const keys = sh.lanes.length ? sh.lanes : [`__unassigned__||${c.reference || c.consignment_uid}||${c.mode}`];
+      for (const k of keys) {
+        if (!lanes.has(k)) {
+          const [supplier, ticket, freight] = k.split('||');
+          const b = blobLane[k] || {};
+          const noLane = supplier === '__unassigned__';
+          lanes.set(k, { key: k, supplier: noLane ? (c.reference || 'Not advised') : supplier,
+                         ticket: noLane ? 'NO_TICKET' : ticket, freight: freight || c.mode,
+                         plannedUnits: Number(b.units_total) || 0,
+                         plannedPOs: new Set(String(b.po_list || '').split(',').map(x => x.trim()).filter(Boolean)),
+                         in_plan: false, is_non_vas: !noLane, no_lane: noLane,
+                         consignments: [], manual: {}, level: 'gray', health: null });
+        }
+        const l = lanes.get(k);
+        l.consignments.push(c.consignment_uid);
+        l.level = worst(l.level, level);
+        if (!l.health || rank[level] >= rank[levelOf(l.health)]) l.health = item.health;
+        const m = l.manual;
+        for (const f of ['packing_list_ready_at', 'origin_customs_cleared_at', 'departed_at']) m[f] = earliest(m[f], dates[f]);
+        for (const f of ['arrived_at', 'dest_customs_cleared_at']) m[f] = latest(m[f], dates[f]);
+        m.eta_fc = latest(m.eta_fc, manual.eta_fc);
+        m.latest_arrival_date = latest(m.latest_arrival_date, manual.latest_arrival_date);
+        m.customs_hold = !!(m.customs_hold || manual.customs_hold);
+        for (const f of ['shipmentNumber', 'hbl', 'mbl']) if (manual[f]) m[f] = m[f] ? (m[f].includes(manual[f]) ? m[f] : `${m[f]}, ${manual[f]}`) : manual[f];
+        if (manual.note && !(m.note || '').includes(manual.note)) m.note = m.note ? `${m.note} | ${manual.note}` : manual.note;
+        m.reference = m.reference ? `${m.reference}, ${c.reference || 'not advised'}` : (c.reference || 'not advised');
+      }
+    }
+
+    // A plan lane nothing carries yet. Quiet while the week is young; a flag once the goods
+    // should have left.
+    let unassigned = 0;
+    for (const l of lanes.values()) {
+      if (!l.consignments.length) { unassigned++; l.level = dayDiff(ws, today) > 21 ? 'yellow' : 'gray'; l.manual.note = 'No consignment on the board yet'; }
+      if (l.plannedPOs instanceof Set) l.plannedPOs = [...l.plannedPOs];
+    }
+    const laneList = [...lanes.values()];
+    const level = laneList.reduce((a, l) => worst(a, l.level), 'gray');
+
+    // Containers typed into the old week blob that are not on the board yet.
+    let migrationPending = 0, nonVasPending = 0;
+    try { const d = migrateWeek(ws, { dryRun: true }); migrationPending = d.consignments_created || 0; nonVasPending = (d.non_vas_created || []).length; } catch (_) {}
+
+    return {
+      ok: true, week_start: ws, today, active, cutover_week: CUTOVER_WEEK, source: active ? 'consignments' : 'lanes',
+      level, holds, sea_count: sea, air_count: air, last_milestone_at: lastMilestoneAt,
+      missing_docs: missing.docs, missing_origin_clear: missing.origin, missing_depart: missing.depart,
+      missing_arrive: missing.arrive, missing_dest_clear: missing.dest,
+      lanes: laneList, containers, consignments,
+      unassigned_lanes: unassigned, migration_pending: migrationPending, non_vas_pending: nonVasPending,
+    };
+  }
+
+  router.get('/week-status', authenticateRequest, auditLog('view_transit_week_status'), (req, res) => {
+    try {
+      const ws = ymdOk(req.query.week) ? mondayOf(req.query.week) : null;
+      if (!ws) return res.status(400).json({ ok: false, error: 'week is required (YYYY-MM-DD).' });
+      res.json(weekStatus(ws, curClient(), todayLocal()));
+    } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
+  });
+
 
   // ════════════════════════════════════════════════════════════════════════════════════════
   // Transit Movements — the screen that replaced the Live Map.
@@ -2355,7 +2573,7 @@ module.exports = function mountConsignments(deps) {
     global.__cgReplanOpen = false;
   }
 
-  router._internals = { computePlanned, refreshPlanned, shape, STAGES, DEFAULT_RULES, rulesFor, migrateWeek, clearLegacy,
+  router._internals = { computePlanned, refreshPlanned, shape, STAGES, DEFAULT_RULES, rulesFor, migrateWeek, clearLegacy, weekStatus, CUTOVER_WEEK,
     logEstimate, recordPorts, addViaPort, routeOf, statusOf, contentsFor, originFor, pulseTransit, weekFacts, verifySummary, plainSummary };
   return router;
 };
