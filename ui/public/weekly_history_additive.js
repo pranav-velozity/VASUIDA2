@@ -108,8 +108,8 @@
         const who = [...stuck.entries()].sort((a, b) => b[1] - a[1]).map(([s2, n]) => `${s2} (${n} lane${n === 1 ? '' : 's'})`);
         const upcoming = due(I.originMin) != null && now < due(I.originMin);
         add('intl', 'Transit & Clearing', lvl(I),
-            `${nf(open)} of ${nf(lanes.length)} lanes open${holds ? ` · ${holds} customs hold${holds === 1 ? '' : 's'}` : ''}`,
-            open ? `${parts.join(' · ')}${who.length ? ` — ${topN(who, 2)}` : ''}` : 'Record the remaining dates', upcoming);
+            `${nf(open)} of ${nf(lanes.length)} lanes open${holds ? ` · ${holds} ${I.source === 'consignments' ? 'terminal' : 'customs'} hold${holds === 1 ? '' : 's'}` : ''}`,
+            open ? `${parts.join(' · ')}${who.length ? ` — ${topN(who, 2)}` : ''}` : (I.source === 'consignments' ? 'Confirm the remaining milestones in Transit Movements' : 'Record the remaining dates'), upcoming);
       }
     }
 
@@ -128,7 +128,7 @@
       const lm = (M.levels && M.levels.lastMile) || 'gray';
       const upcoming = due(M.baselines && M.baselines.lastMileMin) != null && now < due(M.baselines.lastMileMin);
       if (c.lastmile && c.lastmile.open === 'no containers recorded') {
-        add('lastmile', 'Last Mile', lm, 'No containers recorded yet', 'Add this week\'s containers in Transit & Clearing', upcoming);
+        add('lastmile', 'Last Mile', lm, 'No containers recorded yet', (r.intl && r.intl.source === 'consignments') ? 'Add this week\'s containers or AWBs in Transit Movements' : 'Add this week\'s containers in Transit & Clearing', upcoming);
       } else if (c.lastmile && c.lastmile.open) {
         add('lastmile', 'Last Mile', lm, 'Air lane without a delivery record', 'Record the air pallet and its delivery', upcoming);
       } else if (containers.length) {

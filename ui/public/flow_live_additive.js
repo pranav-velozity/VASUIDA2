@@ -572,6 +572,26 @@ function iconContainer() {
     return [];
   }
 
+  // ── Consignment cutover ──
+  // From the cutover week (W42 2026, server-configured) Transit & Clearing is read from the
+  // consignments the Transit Movements board maintains, not from lane date fields typed here.
+  // The server hands back the same shape this module used to compute, so the tile, the lanes
+  // full-screen and the history keep working; only the editing moves to Transit Movements.
+  window.__cgWeekStatus = window.__cgWeekStatus || {};
+  async function loadCgWeekStatus(ws) {
+    try {
+      const r = await api(`/consignments/week-status?week=${encodeURIComponent(ws)}`);
+      if (r && r.ok) { window.__cgWeekStatus[ws] = r; return r; }
+    } catch (e) { /* older API: the lane model keeps working */ }
+    return window.__cgWeekStatus[ws] || null;
+  }
+  function cgStatus(ws) { return window.__cgWeekStatus[ws] || null; }
+  function cgActive(ws) { const c = cgStatus(ws); return !!(c && c.active); }
+  function openTransitMovements() {
+    try { if (typeof window.show === 'function') return window.show('#map'); } catch (_) {}
+    location.hash = '#map';
+  }
+
   async function loadReceiving(ws) {
     // Receiving module uses /receiving?weekStart=... and /receiving/weeks/:ws for saves.
     try { const r = await api(`/receiving?weekStart=${encodeURIComponent(ws)}`); return asArray(r); } catch {}
@@ -1358,10 +1378,25 @@ function saveWeekSignoff(ws, next) {
       cartonsOutByLane.set(key, (cartonsOutByLane.get(key) || 0) + (cnt || 0));
     }
 
+    const cg = cgActive(ws) ? cgStatus(ws) : null;
+    const cgLane = new Map();
+    if (cg) {
+      // Lanes the board knows that the plan does not: non-VAS consolidations and
+      // consignments nobody has assigned a lane to yet. They appear so the tile is complete.
+      for (const l of (cg.lanes || [])) {
+        cgLane.set(l.key, l);
+        if (!lanes.has(l.key) && !l.in_plan) {
+          lanes.set(l.key, { key: l.key, supplier: normalizeSupplier(l.supplier), ticket: l.ticket, freight: l.freight,
+                             plannedUnits: Number(l.plannedUnits) || 0, plannedPOs: new Set(l.plannedPOs || []),
+                             is_non_vas: !!l.is_non_vas, no_lane: !!l.no_lane });
+        }
+      }
+    }
+
     // Inject non-VAS consolidation lanes — these live only in intl storage
     // (no plan row backs them). Scan localStorage for keys under this ws and
     // add any lane with is_non_vas=true that isn't already in the Map.
-    try {
+    if (!cg) try {
       const prefix = `flow:${_cacheClient()}:intl:${ws}:`;
       for (let i = 0; i < localStorage.length; i++) {
         const storageKey = localStorage.key(i);
@@ -1399,7 +1434,11 @@ function saveWeekSignoff(ws, next) {
     let seaCount = 0, airCount = 0;
     let missingDocs = 0, missingOriginClear = 0, missingDepart = 0, missingArrive = 0, missingDestClear = 0;
     for (const lane of lanes.values()) {
-      const manual = loadIntlLaneManual(ws, lane.key);
+      const cgl = cg ? (cgLane.get(lane.key) || null) : null;
+      // From the cutover week the dates are confirmed milestones from the board; before it,
+      // whatever was typed into the lane.
+      const manual = cg ? Object.assign({}, cgl ? cgl.manual : { note: 'No consignment on the board yet' }, { source: 'consignments' })
+                        : loadIntlLaneManual(ws, lane.key);
 
       let packingListReadyAt = manual.packing_list_ready_at ? new Date(manual.packing_list_ready_at) : null;
       let originClearedAt = manual.origin_customs_cleared_at ? new Date(manual.origin_customs_cleared_at) : null;
@@ -1429,7 +1468,11 @@ function saveWeekSignoff(ws, next) {
 
       let level = 'green';
 
-      if (customsHold) {
+      if (cg) {
+        // The board's own reading: held or delayed is red, behind is amber, a plan lane with
+        // nothing on the board goes amber once the goods should have left.
+        level = cgl ? (cgl.level || 'gray') : (daysBetween(originMax, now) > 0 ? 'yellow' : 'gray');
+      } else if (customsHold) {
         level = 'red';
       } else {
         // Step 1: Packing list ready (docs)
@@ -1474,6 +1517,8 @@ function saveWeekSignoff(ws, next) {
       const appliedUnits = lane.is_non_vas
         ? (Number(manual.units_total) || lane.plannedUnits || 0)
         : Math.round(appliedByLane.get(lane.key) || 0);
+      const consignmentRefs = cgl ? String(cgl.manual && cgl.manual.reference || '') : '';
+      const health = cgl ? cgl.health : null;
       const cartonsOut = Math.round(cartonsOutByLane.get(lane.key) || 0);
 
       laneRows.push({
@@ -1490,6 +1535,9 @@ function saveWeekSignoff(ws, next) {
         originReadyAt,
         departedAt,
         customsHold,
+        consignmentRefs,
+        health,
+        consignments: cgl ? (cgl.consignments || []) : [],
       });
     }
 
@@ -1497,6 +1545,9 @@ function saveWeekSignoff(ws, next) {
     const agg = laneRows.reduce((acc, r) => worstLevel(acc, r.level), 'green');
 
     return {
+      source: cg ? 'consignments' : 'lanes',
+      migrationPending: cg ? (Number(cg.migration_pending) || 0) : 0,
+      unassignedLanes: cg ? (Number(cg.unassigned_lanes) || 0) : 0,
       level: agg,
       originMin,
       originMax,
@@ -1646,6 +1697,7 @@ function computeManualNodeStatuses(ws, tz) {
 
     const lane = (ctx.lanes || []).find(l => l && l.key === laneKey);
     if (!lane) return;
+    if (cgActive(ws)) return openLaneReadOnly(ws, tz, lane);
 
     const manual = loadIntlLaneManual(ws, laneKey) || {};
     const root = ensureLaneModal();
@@ -1849,10 +1901,64 @@ function computeManualNodeStatuses(ws, tz) {
 
 
 
+  // ── Lane view from the cutover week: what the board says, nothing to type ──
+  function openLaneReadOnly(ws, tz, lane) {
+    const cg = cgStatus(ws) || {};
+    const root = ensureLaneModal();
+    const ticket = lane.ticket && lane.ticket !== 'NO_TICKET' ? String(lane.ticket) : '';
+    root.querySelector('#flow-lane-modal-title').textContent = `${lane.supplier} • ${lane.freight}${ticket ? ` • Zendesk ${ticket}` : ''}`;
+    root.querySelector('#flow-lane-modal-sub').textContent = 'Recorded in Transit Movements';
+    root.querySelector('#flow-lane-modal-status').innerHTML = `
+      <span class="dot ${dot(lane.level)}"></span>
+      <span class="text-xs px-2 py-0.5 rounded-full border ${pill(lane.level)} whitespace-nowrap ml-2">${statusLabel(lane.level)}</span>`;
+
+    const uids = new Set(lane.consignments || []);
+    const items = (cg.consignments || []).filter(c => uids.has(c.consignment_uid));
+    const STAGE = { packing_list_ready: 'Packing list', origin_cleared: 'Origin cleared', departed: 'Departed',
+                    arrived: 'Arrived', dest_cleared: 'Dest cleared', fc_receipt: 'FC receipt' };
+    const d = (v) => { const x = String(v || '').slice(0, 10); if (!x) return '—'; const dt = new Date(x + 'T00:00:00Z'); return isNaN(dt) ? x : dt.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' }); };
+    const card = (c) => {
+      const h = c.health || {};
+      const lv = c.level || 'gray';
+      const term = c.terminal || null;
+      return `
+        <div class="rounded-xl border p-3 mb-3">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="text-sm font-semibold">${escapeHtml(c.reference || 'Not advised')} <span class="text-xs text-gray-500 font-normal">· ${escapeHtml(c.mode)}${c.size_ft ? ' · ' + escapeHtml(String(c.size_ft)) + (String(c.size_ft).toUpperCase() === 'AIR' ? '' : 'ft') : ''}${c.vessel ? ' · ' + escapeHtml(c.vessel) : ''}</span></div>
+              <div class="text-xs text-gray-500 mt-0.5">${escapeHtml(h.why || '')}</div>
+            </div>
+            <span class="text-xs px-2 py-0.5 rounded-full border ${pill(lv)} whitespace-nowrap">${escapeHtml(h.label || statusLabel(lv))}</span>
+          </div>
+          ${term && (term.lfd || (term.holds || []).length) ? `<div class="text-xs mt-2 ${(term.holds || []).length ? 'text-red-700' : 'text-gray-600'}">${(term.holds || []).length ? 'Terminal hold: ' + escapeHtml(term.holds.join(', ')) + ' · ' : ''}${term.lfd ? 'Last free day ' + d(term.lfd) : ''}</div>` : ''}
+          <table class="w-full text-sm mt-2">
+            <thead><tr><th class="th text-left py-1 pr-2">Milestone</th><th class="th text-left py-1 pr-2">Planned</th><th class="th text-left py-1 pr-2">Actual</th><th class="th text-left py-1">State</th></tr></thead>
+            <tbody>${(c.milestones || []).map(m => `<tr class="border-t"><td class="py-1.5 pr-2">${escapeHtml(STAGE[m.stage] || m.stage)}</td><td class="py-1.5 pr-2 text-gray-600">${d(m.planned_at)}</td><td class="py-1.5 pr-2 ${m.state === 'assumed' ? 'text-gray-400' : 'font-medium'}">${m.state === 'assumed' ? '—' : d(m.actual_at)}</td><td class="py-1.5 text-xs ${m.state === 'assumed' ? 'text-gray-400' : (m.state === 'amended' ? 'text-amber-700' : 'text-green-700')}">${m.state === 'assumed' ? 'planned' : (m.state + (m.auto ? ' · on schedule' : ''))}</td></tr>`).join('')}</tbody>
+          </table>
+        </div>`;
+    };
+
+    const body = root.querySelector('#flow-lane-modal-body');
+    if (body) body.innerHTML = `
+      <div class="rounded-xl border p-3 mb-3 flex items-center justify-between gap-3" style="background:#FAF5F7;border-color:#E9D5DD;">
+        <div class="text-sm text-gray-700">Dates for this lane come from the consignment on the board. To confirm or amend a milestone, add a container or AWB, or record a hold, use Transit Movements.</div>
+        <button type="button" class="px-3 py-1.5 text-sm rounded-md text-white whitespace-nowrap" style="background:#990033;" id="flow-lane-ro-open">Open Transit Movements</button>
+      </div>
+      ${items.length ? items.map(card).join('') : `<div class="rounded-xl border p-3 text-sm text-gray-500">No consignment carries this lane yet. Create one in Transit Movements and attach the lane.</div>`}
+      <div class="text-xs text-gray-500 mt-2">${escapeHtml(String(lane.plannedPOsCount || (lane.plannedPOs || []).length || 0))} PO(s) · ${escapeHtml(String(Math.round(lane.plannedUnits || 0)))} units planned</div>`;
+    const openBtn = root.querySelector('#flow-lane-ro-open');
+    if (openBtn) openBtn.onclick = (e) => { e.preventDefault(); root.classList.add('hidden'); openTransitMovements(); };
+    const saveBtn = root.querySelector('#flow-lane-save'); if (saveBtn) saveBtn.style.display = 'none';
+    root.classList.remove('hidden');
+    root.setAttribute('aria-hidden', 'false');
+  }
+
   // ── Container Manager Modal ──
   // Full-screen modal to add/edit containers, assign Zendesk tickets (auto-fills POs),
   // and visualise what's been assigned. Replaces the inline container editor.
   function openContainerManager(ws, tz) {
+    // From the cutover week containers are consignments, kept on the board.
+    if (cgActive(ws)) return openTransitMovements();
     const ctx = window.__FLOW_INTL_CTX__ || null;
     if (!ctx) return;
 
@@ -2191,7 +2297,9 @@ function computeManualNodeStatuses(ws, tz) {
 
     const root = ensureLaneModal();
     root.querySelector('#flow-lane-modal-title').textContent = 'Transit & Clearing — Lanes (Full screen)';
-    root.querySelector('#flow-lane-modal-sub').textContent = 'All lanes for this week • Click a supplier to open the lane editor.';
+    root.querySelector('#flow-lane-modal-sub').textContent = cgActive(ws)
+      ? 'All lanes for this week • Dates come from Transit Movements • Click a supplier to see its consignment.'
+      : 'All lanes for this week • Click a supplier to open the lane editor.';
     root.querySelector('#flow-lane-modal-status').innerHTML = '';
 
     const fmtDT = (v) => {
@@ -2806,8 +2914,9 @@ function flowNodeCompletion(ws, receiving, vas, intl, manual) {
       }
     } else if (passed(intl && intl.originMax)) out.intl = { na: true };
 
-    const wc = loadIntlWeekContainers(ws);
-    const containers = Array.isArray(wc && wc.containers) ? wc.containers : [];
+    const wc = cgActive(ws) ? null : loadIntlWeekContainers(ws);
+    const containers = cgActive(ws) ? (((cgStatus(ws) || {}).containers) || [])
+                                    : (Array.isArray(wc && wc.containers) ? wc.containers : []);
     const rc = loadLastMileReceipts(ws) || {};
     const receipts = Object.values((rc && rc.receipts) || rc || {}).filter(Boolean);
     // Same test the Last Mile panel uses, so the node and the panel's "Open x / y" agree.
@@ -4950,16 +5059,20 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => {
     if (sel.node === 'intl') {
       const lanes = (intl.lanes || []).slice();
       const subtitle = `Planned ${fmtInTZ(intl.originMin, tz)} – ${fmtInTZ(intl.originMax, tz)} • Actual ${intl.lastMilestoneAt ? fmtInTZ(intl.lastMilestoneAt, tz) : '—'}`;
-      const wcState = loadIntlWeekContainers(ws);
-      const weekContainers = (wcState && Array.isArray(wcState.containers)) ? wcState.containers : [];
+      const cgOn = cgActive(ws);
+      const cgSt = cgOn ? (cgStatus(ws) || {}) : null;
+      const wcState = cgOn ? null : loadIntlWeekContainers(ws);
+      const weekContainers = cgOn ? (Array.isArray(cgSt.containers) ? cgSt.containers : [])
+                                  : ((wcState && Array.isArray(wcState.containers)) ? wcState.containers : []);
 
       const totalPlanned = lanes.reduce((a, r) => a + (r.plannedUnits || 0), 0);
       const totalApplied = lanes.reduce((a, r) => a + (r.appliedUnits || 0), 0);
       const totalOut = lanes.reduce((a, r) => a + (r.cartonsOut || 0), 0);
 
       const insights = [
+        cgOn ? `Read from Transit Movements — confirmed milestones only${intl.unassignedLanes ? ` • <b>${intl.unassignedLanes}</b> lane(s) not yet on a consignment` : ''}` : null,
         `${lanes.length} active lanes (Supplier × Zendesk × Freight)`,
-        intl.holds ? `<b>${intl.holds}</b> lane(s) flagged for customs hold` : 'No customs holds flagged',
+        intl.holds ? `<b>${intl.holds}</b> ${cgOn ? 'consignment(s) held at the terminal' : 'lane(s) flagged for customs hold'}` : (cgOn ? 'No terminal holds' : 'No customs holds flagged'),
         (intl.missingDocs || intl.missingOriginClear) ? `<b>${(intl.missingDocs || 0)}</b> missing docs • <b>${(intl.missingOriginClear || 0)}</b> not cleared (origin)` : null,
         `Planned <b>${Math.round(totalPlanned).toLocaleString()}</b> units • Applied <b>${Math.round(totalApplied).toLocaleString()}</b> units`,
       ];
@@ -4995,6 +5108,7 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => {
         const containers = weekContainers
           .filter(c => Array.isArray(c?.lane_keys) && c.lane_keys.includes(l.key))
           .filter(c => {
+            if (cgOn) return true;            // a consignment without a reference yet still counts
             const cid = String(c?.container_id || c?.container || '').trim();
             const ves = String(c?.vessel || '').trim();
             const pos = String(c?.pos || '').trim();
@@ -5014,23 +5128,32 @@ const supRows = (vas.supplierRows || []).slice(0, 12).map(x => {
       const selectedKey = sel.sub && String(sel.sub).includes('||') ? sel.sub : (lanes[0]?.key || null);
       const selected = selectedKey ? lanes.find(x => x.key === selectedKey) : null;
 
-      const editor = selected ? intlLaneEditor(ws, tz, intl, selected) : `
+      const editor = selected ? (cgOn ? intlLaneReadOnlyCard(ws, tz, selected) : intlLaneEditor(ws, tz, intl, selected)) : `
         <div class="mt-3 rounded-xl border p-3 text-sm text-gray-500">No lanes found in the uploaded Plan for this week.</div>
       `;
+
+      // Containers typed into the old week form that are not on the board yet. One click
+      // brings them across (the same migration the API runs per week), then the tile re-reads.
+      const migrate = (cgOn && intl.migrationPending > 0) ? `
+        <div class="mt-3 rounded-xl border p-3 flex items-center justify-between gap-3" style="background:#FFF8E6;border-color:#F1DDA3;">
+          <div class="text-sm text-gray-800"><b>${intl.migrationPending}</b> container${intl.migrationPending === 1 ? '' : 's'} from the old Transit & Clearing form ${intl.migrationPending === 1 ? 'is' : 'are'} not on the board yet${cgSt && cgSt.non_vas_pending ? ` (incl. ${cgSt.non_vas_pending} non-VAS consolidation${cgSt.non_vas_pending === 1 ? '' : 's'})` : ''}.</div>
+          <button type="button" id="flow-cg-migrate" class="px-3 py-1.5 text-sm rounded-md text-white whitespace-nowrap" style="background:#990033;">Bring ${intl.migrationPending === 1 ? 'it' : 'them'} across</button>
+        </div>` : '';
 
             // Expose latest Intl context for UI handlers (modal, etc.)
       try { window.__FLOW_INTL_CTX__ = { ws, tz, lanes, weekContainers, intl }; } catch {}
 
 detail.innerHTML = [
         header('Transit & Clearing', intl.level, subtitle),
-        bullets(insights),
+        bullets(insights.filter(Boolean)),
+        migrate,
         kpis,
         `<div class="mt-3 rounded-xl border p-3">
           <div class="flex items-center justify-between gap-2">
             <div class="text-sm font-semibold text-gray-700">Lanes</div>
             <div style="display:flex;gap:6px;">
-              <button type="button" id="flow-nonvas-add" style="font-size:10px;color:#1C1C1E;background:#fff;border:0.5px solid rgba(0,0,0,0.15);border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;" title="Add a consolidation lane for non-VAS units (e.g. freight-only, no VAS processing)">+ Non-VAS Lane</button>
-              <button type="button" id="flow-containers-btn" style="font-size:10px;color:#fff;background:#1C1C1E;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;">Manage Containers</button>
+              ${cgOn ? '' : `<button type="button" id="flow-nonvas-add" style="font-size:10px;color:#1C1C1E;background:#fff;border:0.5px solid rgba(0,0,0,0.15);border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;" title="Add a consolidation lane for non-VAS units (e.g. freight-only, no VAS processing)">+ Non-VAS Lane</button>`}
+              <button type="button" id="flow-containers-btn" style="font-size:10px;color:#fff;background:#1C1C1E;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;">${cgOn ? 'Open Transit Movements' : 'Manage Containers'}</button>
               <button type="button" id="flow-lanes-fullscreen" style="font-size:10px;color:#fff;background:#990033;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-family:inherit;font-weight:500;">Full screen</button>
             </div>
           </div>
@@ -5040,6 +5163,24 @@ detail.innerHTML = [
       ].join('');
 
       wireIntlDetail(ws, selectedKey);
+      const mig = detail.querySelector('#flow-cg-migrate');
+      if (mig && !mig.dataset.bound) {
+        mig.dataset.bound = '1';
+        mig.addEventListener('click', async (e) => {
+          e.preventDefault();
+          mig.disabled = true; mig.textContent = 'Bringing across…';
+          try {
+            const r = await api('/consignments/migrate', { method: 'POST', body: JSON.stringify({ week_start: ws, dry_run: false }) });
+            await loadCgWeekStatus(ws);
+            refresh();
+            const nv = (r && r.non_vas_created || []).length;
+            alert(`${(r && r.consignments_created) || 0} consignment(s) created on the board${nv ? ` (${nv} non-VAS)` : ''}.${(r && r.unassigned_lanes || []).length ? `\n\nStill without a consignment: ${r.unassigned_lanes.join(', ')}` : ''}`);
+          } catch (err) {
+            mig.disabled = false; mig.textContent = 'Bring them across';
+            alert('Migration failed: ' + (err && err.message || err));
+          }
+        });
+      }
       return;
     }
 
@@ -5052,8 +5193,11 @@ detail.innerHTML = [
       const laneByKey = {};
       for (const l of lanes) laneByKey[l.key] = l;
 
-      const wcState = loadIntlWeekContainers(ws);
-      const weekContainers = (wcState && Array.isArray(wcState.containers)) ? wcState.containers : [];
+      // From the cutover week the containers are the board's consignments; receipts stay keyed
+      // by container uid, which from then on is the consignment uid.
+      const wcState = cgActive(ws) ? null : loadIntlWeekContainers(ws);
+      const weekContainers = cgActive(ws) ? (((cgStatus(ws) || {}).containers) || [])
+                                          : ((wcState && Array.isArray(wcState.containers)) ? wcState.containers : []);
 
       const contRows = [];
       for (let i = 0; i < weekContainers.length; i++) {
@@ -5102,7 +5246,7 @@ detail.innerHTML = [
 
       const insights = [
         'Track delivery per container / AWB (derived from Intl lanes).',
-        contRows.length ? `${contRows.filter(r => r.delivery_local).length}/${contRows.length} containers have a delivery date.` : 'Add containers under Transit & Clearing to start tracking Last Mile.',
+        contRows.length ? `${contRows.filter(r => r.delivery_local).length}/${contRows.length} containers have a delivery date.` : (cgActive(ws) ? 'Add the container or AWB in Transit Movements to start tracking Last Mile.' : 'Add containers under Transit & Clearing to start tracking Last Mile.'),
       ];
 
       const kpis = `
@@ -5153,7 +5297,7 @@ detail.innerHTML = [
       const selected = selectedKey ? contRows.find(x => x.key === selectedKey) : null;
 
       const editor = selected ? lastMileEditor(ws, tz, selected) : `
-        <div class="mt-3 rounded-xl border p-3 text-sm text-gray-500">No containers found. Add containers under Transit & Clearing.</div>
+        <div class="mt-3 rounded-xl border p-3 text-sm text-gray-500">No containers found. ${cgActive(ws) ? 'Add the container or AWB in Transit Movements.' : 'Add containers under Transit & Clearing.'}</div>
       `;
 
       detail.innerHTML = [
@@ -5188,6 +5332,42 @@ detail.innerHTML = [
   }
 
   
+  // From the cutover week the inline panel shows the lane's consignment(s) instead of inputs.
+  function intlLaneReadOnlyCard(ws, tz, lane) {
+    const cg = cgStatus(ws) || {};
+    const uids = new Set(lane.consignments || []);
+    const items = (cg.consignments || []).filter(c => uids.has(c.consignment_uid));
+    const STAGE = { packing_list_ready: 'Packing list', origin_cleared: 'Origin cleared', departed: 'Departed',
+                    arrived: 'Arrived', dest_cleared: 'Dest cleared', fc_receipt: 'FC receipt' };
+    const d = (v) => { const x = String(v || '').slice(0, 10); if (!x) return '—'; const dt = new Date(x + 'T00:00:00Z'); return isNaN(dt) ? x : dt.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' }); };
+    const ticket = lane.ticket && lane.ticket !== 'NO_TICKET' ? lane.ticket : '';
+    const row = (c) => {
+      const h = c.health || {};
+      const lv = c.level || 'gray';
+      const term = c.terminal || null;
+      const cells = (c.milestones || []).map(m => `<td class="py-1.5 pr-2 ${m.state === 'assumed' ? 'text-gray-400' : 'font-medium'}" title="${escapeAttr(STAGE[m.stage] || m.stage)} · planned ${d(m.planned_at)}${m.state === 'assumed' ? '' : ' · ' + m.state}">${m.state === 'assumed' ? '<span class="text-[10px]">plan ' + d(m.planned_at) + '</span>' : d(m.actual_at)}</td>`).join('');
+      return `<tr class="border-t align-top">
+        <td class="py-1.5 pr-2"><div class="font-semibold">${escapeHtml(c.reference || 'Not advised')}</div><div class="text-[11px] text-gray-500">${escapeHtml(c.mode)}${c.size_ft && String(c.size_ft).toUpperCase() !== 'AIR' ? ' · ' + escapeHtml(String(c.size_ft)) + 'ft' : ''}${c.vessel ? ' · ' + escapeHtml(c.vessel) : ''}</div></td>
+        ${cells}
+        <td class="py-1.5"><span class="text-xs px-2 py-0.5 rounded-full border ${pill(lv)} whitespace-nowrap" title="${escapeAttr(h.why || '')}">${escapeHtml(h.label || statusLabel(lv))}</span>${term && (term.holds || []).length ? `<div class="text-[11px] text-red-700 mt-1">Hold: ${escapeHtml(term.holds.join(', '))}</div>` : ''}${term && term.lfd ? `<div class="text-[11px] text-gray-500 mt-1">LFD ${d(term.lfd)}</div>` : ''}</td>
+      </tr>`;
+    };
+    return `
+      <div class="mt-3 rounded-xl border p-3">
+        <div class="flex items-center justify-between gap-2">
+          <div>
+            <div class="text-sm font-semibold text-gray-700">${escapeHtml(lane.supplier)}${ticket ? ` • Zendesk ${escapeHtml(ticket)}` : ''} • ${escapeHtml(lane.freight || '')}</div>
+            <div class="text-[11px] text-gray-500">Confirmed milestones from Transit Movements. Planned dates shown in grey until someone confirms them.</div>
+          </div>
+          <button type="button" id="flow-cg-open" class="px-3 py-1.5 text-xs rounded-md text-white whitespace-nowrap" style="background:#990033;" onclick="window.show ? window.show('#map') : (location.hash='#map')">Open Transit Movements</button>
+        </div>
+        ${items.length ? `<div class="mt-2 overflow-auto"><table class="w-full text-sm">
+          <thead><tr class="text-[11px] text-gray-500"><th class="text-left py-1 pr-2">Consignment</th>${Object.values(STAGE).map(x => `<th class="text-left py-1 pr-2">${x}</th>`).join('')}<th class="text-left py-1">Status</th></tr></thead>
+          <tbody>${items.map(row).join('')}</tbody></table></div>`
+          : `<div class="mt-2 text-sm text-gray-500">No consignment carries this lane yet. Create one in Transit Movements and attach the lane.</div>`}
+      </div>`;
+  }
+
   function intlLaneEditor(ws, tz, intl, lane) {
     const manual = lane.manual || {};
     const ticket = lane.ticket && lane.ticket !== 'NO_TICKET' ? lane.ticket : '';
@@ -6953,6 +7133,7 @@ async function refresh() {
         loadPlan(ws),
         loadReceiving(ws),
         loadRecords(ws, tz),
+        loadCgWeekStatus(ws),
       ]);
       planRows = asArray(planRows);
       receivingRows = asArray(receivingRows);
@@ -7090,7 +7271,7 @@ if (signoff.vasComplete) {
     try { await primeFlowWeekFromBackend(ws); } catch (e) {}
     let planRows = [], receivingRows = [], records = [];
     try {
-      [planRows, receivingRows, records] = await Promise.all([loadPlan(ws), loadReceiving(ws), loadRecords(ws, tz)]);
+      [planRows, receivingRows, records] = await Promise.all([loadPlan(ws), loadReceiving(ws), loadRecords(ws, tz), loadCgWeekStatus(ws)]);
       planRows = asArray(planRows); receivingRows = asArray(receivingRows); records = asArray(records);
     } catch (e) {}
     const receiving = computeReceivingStatus(ws, tz, planRows, receivingRows, records);
@@ -7104,8 +7285,9 @@ if (signoff.vasComplete) {
     vas.planMet = (vas.plannedUnits || 0) > 0 ? (vas.appliedUnits || 0) >= ((vas.plannedUnits || 0) * 0.98) : true;
     if (signoff.receivingComplete) receiving.level = receiving.planMet ? 'green' : (receiving.level === 'red' ? 'red' : 'yellow');
     if (signoff.vasComplete) vas.level = vas.planMet ? 'green' : (vas.level === 'red' ? 'red' : 'yellow');
-    const wc = loadIntlWeekContainers(ws);
-    const containers = Array.isArray(wc && wc.containers) ? wc.containers : [];
+    const wc = cgActive(ws) ? null : loadIntlWeekContainers(ws);
+    const containers = cgActive(ws) ? (((cgStatus(ws) || {}).containers) || [])
+                                    : (Array.isArray(wc && wc.containers) ? wc.containers : []);
     const rc = loadLastMileReceipts(ws) || {};
     const receipts = Object.values((rc && rc.receipts) || rc || {}).filter(Boolean);
     // receiptMap keeps the container keys, so the history can name WHICH containers are still
