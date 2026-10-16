@@ -1441,9 +1441,33 @@ module.exports = function mountConsignments(deps) {
     return { kind: /transshipment/.test(ev) ? 'transshipment' : 'context', text: t.charAt(0).toUpperCase() + t.slice(1) };
   }
 
-  function eventsFor(uid, milestones) {
+  function eventsFor(uid, milestones, c) {
     const out = [];
     let haveEstimateLog = false;
+    // Last mile: the dock booking and the delivery live in the week blob, keyed by the
+    // container uid — which from the cutover is the consignment uid. Surfaced here so the
+    // feed can say "delivery scheduled" rather than a generic "confirmed".
+    try {
+      if (c && c.week_start) {
+        for (const r of db.prepare('SELECT data, updated_at FROM flow_week WHERE week_start = ?').all(c.week_start)) {
+          let blob; try { blob = JSON.parse(r.data); } catch (_) { continue; }
+          const rc = blob && blob.lastmile_receipts && (blob.lastmile_receipts[uid]
+                      || (c.reference && Object.values(blob.lastmile_receipts).find(x => x && String(x.container_id || '').trim() === String(c.reference).trim())));
+          if (!rc) continue;
+          const stamp = (v) => { const t = String(v || '').replace(' ', 'T'); return /^\d{4}-\d{2}-\d{2}/.test(t) ? (t.length === 10 ? t + 'T00:00:00' : t) : null; };
+          if (rc.scheduled_for) {
+            const at = stamp(rc.scheduled_local) || stamp(rc.scheduled_for) || String(r.updated_at || '');
+            out.push({ at, kind: 'scheduled', date: String(rc.scheduled_for).slice(0, 10), when: rc.scheduled_for,
+                       text: `Delivery scheduled for ${fmtDay(String(rc.scheduled_for).slice(0, 10))}` });
+          }
+          if (rc.delivery_local) {
+            out.push({ at: stamp(rc.delivery_local) || String(r.updated_at || ''), kind: 'delivered', date: String(rc.delivery_local).slice(0, 10),
+                       text: `Delivered ${fmtDay(String(rc.delivery_local).slice(0, 10))}` });
+          }
+          break;
+        }
+      }
+    } catch (_) { /* no blob for this week */ }
     try {
       const est = db.prepare(`SELECT field, old_value, new_value, recorded_at FROM consignment_estimate_log
                                WHERE consignment_uid = ? ORDER BY id DESC LIMIT 10`).all(uid);
@@ -1701,7 +1725,7 @@ module.exports = function mountConsignments(deps) {
       baseline_plan: baselinePlan(c),
       estimate_prev: { carrier_eta: prevOf('carrier_eta'), carrier_etd: prevOf('carrier_etd') },
       changed_24h: changed,
-      events: eventsFor(c.consignment_uid, sh.milestones),
+      events: eventsFor(c.consignment_uid, sh.milestones, c),
       contents_summary: contents,
       last_notification: last,
     };
