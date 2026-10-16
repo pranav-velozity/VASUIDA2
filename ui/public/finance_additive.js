@@ -65,7 +65,7 @@ function statusBadge(status){
   const cfg={draft:{bg:'rgba(174,174,178,0.15)',color:MID,label:'Draft'},sent:{bg:'rgba(50,130,246,0.12)',color:BLUE,label:'Sent'},paid:{bg:'rgba(52,199,89,0.12)',color:GREEN,label:'Paid'},overdue:{bg:'rgba(153,0,51,0.12)',color:BRAND,label:'Overdue'}}[status]||{bg:BG,color:MID,label:status};
   return `<span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:10px;font-weight:600;background:${cfg.bg};color:${cfg.color};">${cfg.label}</span>`;
 }
-function typeIcon(t){return t==='VAS'?'⚙️':t==='SEA'?'🚢':'✈️';}
+function typeIcon(t){return t==='VAS'?'⚙️':t==='SEA'?'🚢':t==='MISC'?'🧾':'✈️';}
 function el(id){return document.getElementById(id);}
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
@@ -763,7 +763,7 @@ function renderInvoiceGrid(){
   const ws=_finState.week;
   const weekInvs=_finState.invoices.filter(i=>i.week_start===ws);
   const TYPES=_finState.invTypes||['VAS','SEA','AIR'];
-  cont.style.gridTemplateColumns='repeat('+Math.min(3,TYPES.length)+',1fr)';
+  cont.style.gridTemplateColumns='repeat('+Math.min(4,TYPES.length)+',1fr)';
   cont.innerHTML=TYPES.map(type=>{
     const inv=weekInvs.find(i=>i.type===type);
     if(inv){
@@ -771,7 +771,7 @@ function renderInvoiceGrid(){
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
           <div style="display:flex;align-items:center;gap:8px;">
             <span style="font-size:20px;">${typeIcon(type)}</span>
-            <div><div style="font-size:12px;font-weight:600;color:${DARK};">${type}</div><div style="font-size:10px;color:${LIGHT};">${esc(inv.ref_number)}</div></div>
+            <div><div style="font-size:12px;font-weight:600;color:${DARK};">${type==='MISC'?'Miscellaneous':type}</div><div style="font-size:10px;color:${LIGHT};">${esc(inv.ref_number)}</div></div>
           </div>${statusBadge(inv.status)}
         </div>
         <div style="font-size:24px;font-weight:700;color:${DARK};margin-bottom:6px;">${fmtUSD(inv.total)}</div>
@@ -789,8 +789,8 @@ function renderInvoiceGrid(){
     return`<div class="fin-card" style="cursor:pointer;border:1.5px dashed rgba(0,0,0,0.1);text-align:center;transition:all .15s;" onmouseenter="this.style.borderColor='${BRAND}'" onmouseleave="this.style.borderColor='rgba(0,0,0,0.1)'" onclick="window._finCreateInvoice('${type}','${ws}')">
       <div style="padding:28px 0;">
         <div style="font-size:28px;margin-bottom:8px;">${typeIcon(type)}</div>
-        <div style="font-size:12px;font-weight:600;color:${MID};margin-bottom:4px;">${type} Invoice</div>
-        <div style="font-size:10px;color:${LIGHT};margin-bottom:12px;">Not yet created</div>
+        <div style="font-size:12px;font-weight:600;color:${MID};margin-bottom:4px;">${type==='MISC'?'Miscellaneous':type} Invoice</div>
+        <div style="font-size:10px;color:${LIGHT};margin-bottom:12px;">${type==='MISC'?'Over-and-above charges · optional':'Not yet created'}</div>
         <span style="background:${BRAND};color:#fff;border-radius:20px;padding:5px 16px;font-size:11px;font-weight:600;">+ Create</span>
       </div>
     </div>`;
@@ -837,7 +837,14 @@ function renderInvoiceEditor(inv){
   const mainL=lines.filter(l=>!l.gst_free&&!l.is_misc);
   const custL=lines.filter(l=>l.gst_free&&!l.is_misc);
   const miscL=lines.filter(l=>l.is_misc);
-  while(miscL.length<2)miscL.push({description:'',unit_label:'',rate:0,quantity:0,total:0,gst_free:0,is_misc:1});
+  const isMisc=type==='MISC';
+  if(isMisc){
+    // MISC: free-typed lines are the main lines; one optional GST-free (customs) line; no "Miscellaneous" sub-section
+    while(mainL.length<4)mainL.push({description:'',unit_label:'',rate:0,quantity:0,total:0,gst_free:0,is_misc:0});
+    if(!custL.length)custL.push({description:'Customs / GST-free',unit_label:'',rate:0,quantity:0,total:0,gst_free:1,is_misc:0});
+  } else {
+    while(miscL.length<2)miscL.push({description:'',unit_label:'',rate:0,quantity:0,total:0,gst_free:0,is_misc:1});
+  }
   window._finCurrentLines=[...mainL,...miscL,...custL].map(l=>({...l}));
 
   function lineHtml(l,idx){
@@ -855,11 +862,11 @@ function renderInvoiceEditor(inv){
   }
   const nM=mainL.length,nMi=miscL.length;
   const allL=window._finCurrentLines;
-  const col=type==='VAS'?`<th>Service</th><th>Unit</th><th>Rate</th><th>Qty</th><th style="text-align:right">Total</th>`:`<th>Description</th><th>Rate</th><th>Qty/KG</th><th style="text-align:right">Total</th>`;
+  const col=type==='VAS'?`<th>Service</th><th>Unit</th><th>Rate</th><th>Qty</th><th style="text-align:right">Total</th>`:`<th>Description</th><th>Rate</th><th>${isMisc?'Qty':'Qty/KG'}</th><th style="text-align:right">Total</th>`;
 
   openPanel(`
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-      <div><div style="font-size:15px;font-weight:700;color:${DARK};">${typeIcon(type)} ${type} Invoice</div><div style="font-size:11px;color:${LIGHT};">${weekLabel(inv.week_start)}</div></div>
+      <div><div style="font-size:15px;font-weight:700;color:${DARK};">${typeIcon(type)} ${type==='MISC'?'Miscellaneous':type} Invoice</div><div style="font-size:11px;color:${LIGHT};">${weekLabel(inv.week_start)}</div></div>
       <button onclick="window._finClosePanel()" style="width:28px;height:28px;border-radius:8px;border:none;background:${BG};color:${MID};font-size:14px;cursor:pointer;">✕</button>
     </div>
     <div style="display:grid;grid-template-columns:1fr auto;gap:10px;margin-bottom:14px;">
@@ -883,6 +890,7 @@ function renderInvoiceEditor(inv){
         </tbody>
       </table>
     </div>
+    ${isMisc?`<div style="margin:-4px 0 12px;"><button class="fin-btn fin-btn-ghost" style="font-size:11px;" onclick="window._finAddLine()">+ Add line</button></div>`:''}
     <div style="background:${BG};border-radius:10px;padding:12px 14px;margin-bottom:14px;">
       <div style="display:flex;justify-content:space-between;font-size:11px;color:${MID};margin-bottom:4px;"><span>Subtotal</span><span id="ft-sub">${fmtUSD(inv.subtotal)}</span></div>
       <div style="display:flex;justify-content:space-between;font-size:11px;color:${MID};margin-bottom:4px;"><span>GST (10%)</span><span id="ft-gst">${fmtUSD(inv.gst)}</span></div>
@@ -915,11 +923,30 @@ function renderInvoiceEditor(inv){
     const S=el('ft-sub'),G=el('ft-gst'),C=el('ft-cus'),Tt=el('ft-tot');
     if(S)S.textContent=fmtUSD(sub);if(G)G.textContent=fmtUSD(gst);if(C)C.textContent=fmtUSD(cus);if(Tt)Tt.textContent=fmtUSD(T);
   };
+  // MISC only: add another free line, keeping everything typed so far
+  window._finAddLine=function(){
+    const L=window._finCurrentLines||[];
+    L.forEach((_,i)=>window._finLCh(i));
+    const main=L.filter(l=>!l.gst_free&&!l.is_misc),rest=L.filter(l=>l.gst_free||l.is_misc);
+    main.push({description:'',unit_label:'',rate:0,quantity:0,total:0,gst_free:0,is_misc:0});
+    const cur={...inv,ref_number:el('fin-inv-ref')?.value||inv.ref_number,status:el('fin-inv-status')?.value||inv.status,
+      invoice_date:el('fin-inv-date')?.value||inv.invoice_date,due_date:el('fin-inv-due')?.value||inv.due_date,
+      notes:el('fin-inv-notes')?.value??inv.notes,lines:[...main,...rest]};
+    const sub=Math.round(cur.lines.filter(l=>!l.gst_free).reduce((s,l)=>s+(parseFloat(l.total)||0),0)*100)/100;
+    cur.customs=cur.lines.filter(l=>l.gst_free).reduce((s,l)=>s+(parseFloat(l.total)||0),0);
+    cur.subtotal=sub;cur.gst=Math.round(sub*0.10*100)/100;cur.total=Math.round((sub+cur.gst+cur.customs)*100)/100;
+    renderInvoiceEditor(cur);
+  };
 }
 
 window._finSaveInv=async function(id,type,weekStart){
   const L=window._finCurrentLines||[],ws=safeDate(weekStart)||_finState.week;
-  const mL=L.filter(l=>!l.gst_free&&!l.is_misc),cL=L.filter(l=>l.gst_free&&!l.is_misc),xL=L.filter(l=>l.is_misc&&l.description);
+  let mL=L.filter(l=>!l.gst_free&&!l.is_misc),cL=L.filter(l=>l.gst_free&&!l.is_misc);const xL=L.filter(l=>l.is_misc&&l.description);
+  if(type==='MISC'){ // drop untouched padding rows; keep the customs line only when it carries an amount
+    mL=mL.filter(l=>(l.description||'').trim()||parseFloat(l.total)||0);
+    cL=cL.filter(l=>parseFloat(l.total)||0);
+    if(!mL.length&&!cL.length){alert('Add at least one line before saving a Miscellaneous invoice.');return;}
+  }
   const customs=cL.reduce((s,l)=>s+(parseFloat(l.total)||0),0),misc_total=xL.reduce((s,l)=>s+(parseFloat(l.total)||0),0);
   const refOverride=el('fin-inv-ref')?.value?.trim()||'';
   const payload={type,week_start:ws,invoice_date:el('fin-inv-date')?.value||isoToday(),due_date:el('fin-inv-due')?.value||'',status:el('fin-inv-status')?.value||'draft',notes:el('fin-inv-notes')?.value||'',customs,misc_total,lines:[...mL,...xL,...cL],ref_override:refOverride};
