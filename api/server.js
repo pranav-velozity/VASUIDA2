@@ -1077,7 +1077,7 @@ function sqlDefaultLiteral(v) {
 
 // Valid invoice types for a client: the ICONIC-shaped set, plus anything on its rate card.
 function validInvoiceTypes(clientId) {
-  const base = ['VAS', 'SEA', 'AIR'];
+  const base = ['VAS', 'SEA', 'AIR', 'MISC'];
   try {
     const codes = db.prepare(`SELECT service_code FROM client_rate WHERE client_id=? AND active=1`).all(clientId)
       .map(r => String(r.service_code || '').toUpperCase());
@@ -7185,9 +7185,10 @@ function genInvoiceRef(type, weekStart, existingCount) {
   const weekCode = `W${wk}${yyyy}`;
 
   // VAS: INVVAS_TIC_W312026-1   Sea: VOZ_TIC_INSD2D_W312026-1   Air: VOZ_TIC_INAD2D_W312026-1
-  // The counter resets per client per week, so two clients never collide.
+  // Misc: VOZ_TIC_MISC_W312026-1.  The counter resets per client per week, so two clients never collide.
   const prefix = type === 'VAS' ? `INVVAS_${code}`
                : type === 'SEA' ? `VOZ_${code}_INSD2D`
+               : type === 'MISC' ? `VOZ_${code}_MISC`
                                 : `VOZ_${code}_INAD2D`;
   const pattern = `${prefix}_${weekCode}-%`;
   const existing = db.prepare(
@@ -7246,6 +7247,7 @@ app.post('/finance/invoices', authenticateRequest, requireRole(['admin']), requi
     if (!type || !week_start) return res.status(400).json({ error: 'type and week_start required' });
     const existing = db.prepare('SELECT COUNT(*) as n FROM fin_invoices WHERE type = ? AND week_start = ? AND client_id = ?')
                        .get(type, week_start, curClient());
+    if (type === 'MISC' && existing.n > 0) return res.status(409).json({ error: 'A Miscellaneous invoice already exists for this week — edit it instead.' });
     const id = uuidv4();
     const ref = (ref_override && ref_override.trim()) ? ref_override.trim() : genInvoiceRef(type, week_start, existing.n);
     // Calculate totals — exclude gst_free lines from taxable subtotal
@@ -7559,6 +7561,11 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
           air_units: airUnits, subtotal:_labelTotal, gst:0, total:customs + _labelTotal });
       }
     }
+    if (type === 'MISC') {
+      // Over-and-above charges have no source in Pinpoint: the invoice starts empty and the
+      // lines are typed. Customs stays available (a one-off duty recovery is a common case).
+      return res.json({ type: 'MISC', week_start, lines: [], customs: 0, notes: '', subtotal: 0, gst: 0, total: 0 });
+    }
     res.status(400).json({ error: 'Unknown type' });
   } catch(e) { res.status(500).json({ error: String(e.message||e) }); }
 });
@@ -7746,7 +7753,7 @@ function finCollect(from, to) {
   const out = [];              // { month, section, key, amount }
   const incomplete = new Set(), nonUsd = [];
   const usd = (c) => String(c || 'USD').toUpperCase() === 'USD';
-  const LINE_OF = { AIR: 'AIR', SEA: 'SEA', VAS: 'VAS' };
+  const LINE_OF = { AIR: 'AIR', SEA: 'SEA', VAS: 'VAS', MISC: 'MISC' };
 
   for (const inv of db.prepare(`SELECT * FROM fin_invoices WHERE status <> 'draft'
                                 AND COALESCE(invoice_date, week_start) BETWEEN ? AND ?`).all(from, to)) {
@@ -7808,7 +7815,7 @@ function finStatementRows(entries, colKeyOf) {
   const has = (id) => keys.some(c => get(id, c));
 
   const REV = [['AIR', 'Air freight'], ['SEA', 'Sea freight'], ['VAS', 'Value-added services'],
-               ['CUSTOMS', 'Customs recoveries'], ['OTHER', 'Other revenue']];
+               ['MISC', 'Miscellaneous charges'], ['CUSTOMS', 'Customs recoveries'], ['OTHER', 'Other revenue']];
   const COGS = [['AIR', 'Air freight'], ['SEA', 'Sea freight'], ['VAS', 'Value-added services'],
                 ['CUSTOMS', 'Duties & customs'], ['OTHER', 'Other direct costs']];
   // Every row carries an id. "Air freight" appears under both Revenue and Cost of sales, so
@@ -8393,7 +8400,9 @@ function renderInvoicePdfBuffer(inv) {
     doc.fontSize(8).font('Helvetica-Bold').fillColor(MID).text('Week:', 370, 124);
     doc.fontSize(8).font('Helvetica').fillColor(DARK).text(inv.week_start || '—', 440, 124);
     doc.fontSize(8).font('Helvetica-Bold').fillColor(MID).text('Payment Terms:', 370, 134);
-    doc.fontSize(8).font('Helvetica').fillColor(DARK).text(type === 'VAS' ? '30 Days' : '7 Days', 440, 134);
+    // Misc terms are whatever the due date says; the others keep their fixed wording.
+    const _termDays = (() => { try { const a = new Date(inv.invoice_date + 'T00:00:00Z'), b = new Date(inv.due_date + 'T00:00:00Z'); const d = Math.round((b - a) / 86400000); return isFinite(d) && d > 0 ? d : null; } catch (_) { return null; } })();
+    doc.fontSize(8).font('Helvetica').fillColor(DARK).text(type === 'MISC' ? (_termDays ? `${_termDays} Days` : 'On receipt') : (type === 'VAS' ? '30 Days' : '7 Days'), 440, 134);
 
     // Thin rule
     doc.moveTo(50, 148).lineTo(545, 148).lineWidth(0.5).strokeColor('#E5E5EA').stroke();
@@ -8432,8 +8441,11 @@ function renderInvoicePdfBuffer(inv) {
     // wording set behaves exactly as before.
     const _custom = String((type === 'VAS' ? _bill.desc_vas
                           : type === 'SEA' ? _bill.desc_sea
+                          : type === 'MISC' ? _bill.desc_misc
                           : _bill.desc_air) || '').trim();
     const descText = _custom ? _custom
+      : type === 'MISC'
+      ? `Services provided to ${_party} by VelOzity as detailed below.`
       : type === 'VAS'
       ? `Services provided to ${_party} by VelOzity: VAS base processing, outbound activities, additional labelling, and carton replacement labour as detailed below.`
       : type === 'SEA'
@@ -8731,7 +8743,7 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), requireInter
       const mk = `${y}-${String(m).padStart(2,'0')}`;
       months[mk] = {
         month_key: mk,
-        revenue: 0, rev_vas: 0, rev_sea: 0, rev_air: 0,
+        revenue: 0, rev_vas: 0, rev_sea: 0, rev_air: 0, rev_misc: 0,
         expenses: 0, exp_labour: 0, exp_freight: 0, exp_overhead: 0,
         units_vas: vasUnitsByMonth[mk] || 0,
         units_sea: seaUnitsByMonth[mk] || 0,
@@ -8756,6 +8768,7 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), requireInter
       if (inv.type === 'VAS') months[mk].rev_vas += net;
       else if (inv.type === 'SEA') months[mk].rev_sea += net;
       else if (inv.type === 'AIR') months[mk].rev_air += net;
+      else if (inv.type === 'MISC') months[mk].rev_misc += net;
     }
 
     // ── 7. Allocate expenses to channel pools by category ──
@@ -8784,7 +8797,7 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), requireInter
     for (const mk of Object.keys(months)) {
       const m = months[mk];
       // Round all money fields
-      ['revenue','rev_vas','rev_sea','rev_air','expenses','exp_labour','exp_freight','exp_overhead'].forEach(k => {
+      ['revenue','rev_vas','rev_sea','rev_air','rev_misc','expenses','exp_labour','exp_freight','exp_overhead'].forEach(k => {
         m[k] = Math.round(m[k] * 100) / 100;
       });
       m.net = Math.round((m.revenue - m.expenses) * 100) / 100;
@@ -8829,7 +8842,7 @@ app.get('/finance/pl', authenticateRequest, requireRole(['admin']), requireInter
 
     // ── 9. YTD totals ──
     const ytd = Object.values(months).reduce((acc, m) => ({
-      revenue: acc.revenue + m.revenue, rev_vas: acc.rev_vas + m.rev_vas,
+      revenue: acc.revenue + m.revenue, rev_vas: acc.rev_vas + m.rev_vas, rev_misc: (acc.rev_misc || 0) + (m.rev_misc || 0),
       rev_sea: acc.rev_sea + m.rev_sea, rev_air: acc.rev_air + m.rev_air,
       expenses: acc.expenses + m.expenses, exp_labour: acc.exp_labour + m.exp_labour,
       exp_freight: acc.exp_freight + m.exp_freight, exp_overhead: acc.exp_overhead + m.exp_overhead,
@@ -19799,6 +19812,7 @@ function clientInvoiceTypes(clientId) {
   const types = ['VAS'];                       // every client bills service work
   // 'CONFIG' is deliberately absent: those rows are settings, not something to invoice.
   if (has('freight_lanes') || has('transit_clearing')) { types.push('SEA', 'AIR'); }
+  types.push('MISC');                          // over-and-above charges, any client
   return types;
 }
 
@@ -20074,7 +20088,7 @@ CREATE TABLE IF NOT EXISTS client_billing (
 
 try {
   const c = db.prepare("PRAGMA table_info(client_billing)").all().map(x => x.name);
-  for (const col of ['desc_vas', 'desc_sea', 'desc_air']) {
+  for (const col of ['desc_vas', 'desc_sea', 'desc_air', 'desc_misc']) {
     if (!c.includes(col)) db.exec(`ALTER TABLE client_billing ADD COLUMN ${col} TEXT`);
   }
   if (!c.includes('destination_facility')) {
@@ -20095,7 +20109,7 @@ function clientBilling(clientId) {
   try { const c = db.prepare('SELECT name FROM client WHERE id=?').get(clientId); if (c) name = c.name; } catch (e) {}
   return { client_id: clientId, legal_name: name, abn: null, address: null,
            invoice_emails: null, invoice_cc: null, destination_facility: null,
-           desc_vas: null, desc_sea: null, desc_air: null, incomplete: true };
+           desc_vas: null, desc_sea: null, desc_air: null, desc_misc: null, incomplete: true };
 }
 
 app.get('/finance/client-billing', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
@@ -20114,13 +20128,14 @@ app.post('/finance/client-billing', authenticateRequest, requireRole(['admin']),
     const exists = db.prepare('SELECT id FROM client WHERE id=?').get(id);
     if (!exists) return res.status(400).json({ error: 'unknown client' });
     db.prepare(`INSERT INTO client_billing (client_id, legal_name, abn, address, invoice_emails, invoice_cc,
-                  destination_facility, desc_vas, desc_sea, desc_air, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?, datetime('now'))
+                  destination_facility, desc_vas, desc_sea, desc_air, desc_misc, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?, datetime('now'))
                 ON CONFLICT(client_id) DO UPDATE SET
                   legal_name=excluded.legal_name, abn=excluded.abn, address=excluded.address,
                   invoice_emails=excluded.invoice_emails, invoice_cc=excluded.invoice_cc,
                   destination_facility=excluded.destination_facility,
                   desc_vas=excluded.desc_vas, desc_sea=excluded.desc_sea, desc_air=excluded.desc_air,
+                  desc_misc=excluded.desc_misc,
                   updated_at=datetime('now')`)
       .run(id, String(b.legal_name || '').trim() || null, String(b.abn || '').trim() || null,
            String(b.address || '').trim() || null,
@@ -20129,7 +20144,8 @@ app.post('/finance/client-billing', authenticateRequest, requireRole(['admin']),
            String(b.destination_facility || '').trim() || null,
            String(b.desc_vas || '').trim() || null,
            String(b.desc_sea || '').trim() || null,
-           String(b.desc_air || '').trim() || null);
+           String(b.desc_air || '').trim() || null,
+           String(b.desc_misc || '').trim() || null);
     res.json({ ok: true, client_id: id, billing: clientBilling(id) });
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
