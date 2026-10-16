@@ -40,6 +40,10 @@
     packing_list_ready: 'Packing list ready', origin_cleared: 'Origin cleared', departed: 'Departed',
     arrived: 'Arrived', dest_cleared: 'Destination cleared', fc_receipt: 'Received at FC',
   };
+  const CONFIRMED_TAG = {
+    packing_list_ready: 'Packed', origin_cleared: 'Origin cleared', departed: 'Departed',
+    arrived: 'Arrived', dest_cleared: 'Cleared', fc_receipt: 'Received at FC',
+  };
   const STAGE_VERB = {
     packing_list_ready: 'packing list', origin_cleared: 'origin clearance', departed: 'departure',
     arrived: 'arrival', dest_cleared: 'destination clearance', fc_receipt: 'FC receipt',
@@ -389,7 +393,13 @@
           items.push({ k: 'actual', t: e.t, sev: 'good', tag: word === 'Available for pickup' ? 'Available' : word, head: e.text, phrase: `${word.toLowerCase()} ${e.date ? fmtDay(e.date) : ''}`.trim(), short: `${word.toLowerCase()} ${e.date ? fmtShort(e.date) : ''}`.trim() });
         } else if (e.kind === 'hold') items.push({ k: 'hold', t: e.t, sev: 'high', tag: 'Hold', head: e.text, phrase: `hold at the terminal${e.lfd ? ` · last free day ${fmtDay(e.lfd)}` : ''}`, short: 'hold reported' });
         else if (e.kind === 'lfd') items.push({ k: 'lfd', t: e.t, sev: 'medium', tag: 'LFD', head: e.text, phrase: e.lfd ? `last free day ${fmtDay(e.lfd)}` : 'last free day set', short: e.lfd ? `last free day ${fmtShort(e.lfd)}` : 'last free day set' });
-        else if (e.kind === 'confirmed') items.push({ k: 'confirmed', t: e.t, sev: 'good', tag: 'Confirmed', head: e.text, phrase: `${(STAGE_VERB[e.stage] || 'milestone')} confirmed${e.date ? ` · ${fmtDay(e.date)}` : ''}`, short: `${(STAGE_VERB[e.stage] || 'milestone')} confirmed` });
+        else if (e.kind === 'confirmed') {
+          // The pill says what happened, not that somebody clicked: Departed, Arrived, Cleared.
+          const tag = CONFIRMED_TAG[e.stage] || 'Confirmed';
+          items.push({ k: 'confirmed', t: e.t, sev: 'good', tag, head: e.text, phrase: `${(STAGE_VERB[e.stage] || 'milestone')} confirmed${e.date ? ` · ${fmtDay(e.date)}` : ''}`, short: `${(STAGE_VERB[e.stage] || 'milestone')} confirmed` });
+        }
+        else if (e.kind === 'scheduled') items.push({ k: 'confirmed', t: e.t, sev: 'good', tag: 'Delivery scheduled', head: e.text, phrase: `delivery scheduled${e.date ? ` · ${fmtDay(e.date)}` : ''}`, short: `delivery ${e.date ? fmtShort(e.date) : 'scheduled'}` });
+        else if (e.kind === 'delivered') items.push({ k: 'actual', t: e.t, sev: 'good', tag: 'Delivered', head: e.text, phrase: `delivered${e.date ? ` ${fmtDay(e.date)}` : ''}`, short: `delivered${e.date ? ` ${fmtShort(e.date)}` : ''}` });
         else if (e.kind === 'transshipment') items.push({ k: 'transshipment', t: e.t, sev: 'low', tag: 'Transship', head: e.text, phrase: 'transshipment', short: 'transshipment' });
         else items.push({ k: 'other', t: e.t, sev: 'low', tag: '', head: e.text, phrase: e.text.charAt(0).toLowerCase() + e.text.slice(1), short: e.text.toLowerCase() });
       }
