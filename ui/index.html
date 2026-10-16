@@ -6483,7 +6483,7 @@ window.__openPrebookModal = function(){
 })();
 </script>
 <script src="/public/receiving_live_additive.js?v=27" defer></script>
-<script src="/public/flow_live_additive.js?v=130" defer></script>
+<script src="/public/flow_live_additive.js?v=131" defer></script>
 <script src="/public/lane_snapshot_additive.js?v=1" defer></script>
 <script src="/public/intake.js?v=1" defer></script>
 <!-- Transit Movements replaced the Live Map (map_live_additive.js is kept in the repo for rollback, not loaded). -->
@@ -6525,7 +6525,7 @@ window.__openPrebookModal = function(){
     <script src="/public/consignment_additive.js?v=16"></script>
     <script src="/public/report_builder.js?v=1"></script>
     <script src="/public/apo_builder.js?v=1"></script>
-  <script src="/public/weekly_history_additive.js?v=3" defer></script>
+  <script src="/public/weekly_history_additive.js?v=4" defer></script>
     <script src="/public/lastmile_history_additive.js?v=4" defer></script>
   <script src="/public/d2d_hub_additive.js?v=63" defer></script>
   <script src="/public/fulfilment_weekhub_additive.js?v=19" defer></script>
@@ -7451,14 +7451,29 @@ async function downloadConsolidatedReport() {
 
 // ── Shared: fetch and merge flow_week data (lanes + containers) for a given week ──
 async function _fetchFlowData(ws) {
+  const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
+  let token = null;
+  if(window.Clerk?.session){ try{ token = await window.Clerk.session.getToken(); }catch(_){} }
+  // From the cutover week (W42 2026) the workbook reads the consignments on the Transit
+  // Movements board — confirmed milestones, terminal holds, last free day — not lane fields.
+  try {
+    const sr = await fetch(`${apiBase}/consignments/week-status?week=${encodeURIComponent(ws)}`, {
+      headers: Object.assign({}, token ? {'Authorization':'Bearer '+token} : {})
+    });
+    if (sr.ok) {
+      const st = await sr.json();
+      if (st && st.ok && st.active) {
+        const lanes = (st.lanes || []).map(l => ({ key: l.key, supplier: l.supplier || '', zendesk: (l.ticket && l.ticket !== 'NO_TICKET') ? l.ticket : '',
+                                                  freight: l.freight || '', manual: l.manual || {} }));
+        return { lanes, containers: Array.isArray(st.containers) ? st.containers : [] };
+      }
+    }
+  } catch(_) { /* older API: fall through to the lane blob */ }
   const ctx = window.__FLOW_INTL_CTX__;
   if (ctx && ctx.ws === ws && Array.isArray(ctx.lanes)) {
     return { lanes: ctx.lanes, containers: Array.isArray(ctx.weekContainers) ? ctx.weekContainers : [] };
   }
   // Fallback: fetch from backend
-  const apiBase = (document.querySelector('meta[name="api-base"]')?.content||'').replace(/\/+$/,'');
-  let token = null;
-  if(window.Clerk?.session){ try{ token = await window.Clerk.session.getToken(); }catch(_){} }
   const resp = await fetch(`${apiBase}/flow/week/${encodeURIComponent(ws)}/all`, {
     headers: Object.assign({}, token ? {'Authorization':'Bearer '+token} : {})
   });
@@ -7704,7 +7719,7 @@ async function downloadTransitClearing() {
     ]);
 
     if(!containers.length){
-      alert('No container data found for week ' + ws + '. Please ensure containers are configured in Transit & Clearing.');
+      alert('No container data found for week ' + ws + '. Add the containers or AWBs in Transit Movements (W42 onward) or Transit & Clearing (earlier weeks).');
       return;
     }
 
