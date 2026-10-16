@@ -7251,6 +7251,12 @@ if (signoff.vasComplete) {
     }
   });
 
+  // A movement created, edited or confirmed in the consignments panel changes the tile.
+  window.addEventListener('consignments:changed', () => {
+    const hash = (location.hash || '').toLowerCase();
+    if (hash === '#flow' || hash.startsWith('#flow')) refresh();
+  });
+
   window.addEventListener('hashchange', () => {
     ensureFlowPageExists();
     showHideByHash();

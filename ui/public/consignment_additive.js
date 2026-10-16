@@ -42,6 +42,8 @@
   const today = () => new Date().toISOString().slice(0, 10);
 
   let _week = null, _data = [], _busy = false;
+  let _lanes = [];           // this week's plan lanes (and non-VAS lanes), from /consignments/week-status
+  let _facility = '';        // where this week's movements are going
   const _expanded = {};        // which tiles are showing their full journey
   const _open = {};            // which stage each tile has open
 
@@ -79,6 +81,19 @@
       .cg-field{border:.5px solid rgba(0,0,0,.16);border-radius:8px;padding:6px 9px;
         font-size:12px;font-family:inherit;width:100%;}
       .cg-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+      .cg-lanes{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:6px 14px;margin-top:8px;}
+      .cg-lane{display:flex;align-items:center;gap:8px;font-size:11.5px;padding:5px 8px;border-radius:8px;
+        border:.5px solid rgba(0,0,0,.08);cursor:pointer;}
+      .cg-lane:hover{background:#FAFAFB;}
+      .cg-lane.is-taken{opacity:.55;}
+      .cg-lane input{margin:0;}
+      .cg-lane .cg-dim{margin-left:auto;white-space:nowrap;}
+      .cg-seg{display:inline-flex;background:#EDEDEA;border-radius:8px;padding:2px;gap:2px;}
+      .cg-seg button{height:26px;padding:0 12px;border-radius:6px;border:0;background:none;font:500 12px inherit;
+        font-family:inherit;color:${MID};cursor:pointer;}
+      .cg-seg button.on{background:${DARK};color:#fff;}
+      .cg-nonvas{margin-top:10px;padding:10px 12px;border-radius:10px;background:rgba(139,92,246,.07);
+        border:.5px solid rgba(139,92,246,.25);}
 
       /* Tiles: one per movement, wide enough to read, narrow enough that a week fits on a
          screen without scrolling. */
@@ -447,6 +462,86 @@
       </div>`;
   }
 
+  // ── Lanes: which of this week's plan lanes ride this movement ──
+  // Shown as a checklist, filtered to the movement's mode. A lane already on another movement
+  // is greyed and names it; it can still be ticked (the rare air part-shipment), never blocked.
+  function laneList(mode, chosen, selfUid) {
+    const picked = new Set(chosen || []);
+    const refOf = (uid) => { const c = _data.find(x => x.consignment_uid === uid); return c ? (c.reference || 'not advised') : ''; };
+    const rows = _lanes.filter(l => !l.no_lane && (l.freight || 'Sea') === mode);
+    if (!rows.length) return `<div class="cg-sub" style="margin-top:8px;">No ${mode.toLowerCase()} lanes in this week\u2019s plan.</div>`;
+    return `<div class="cg-lanes">${rows.map(l => {
+      const others = (l.consignments || []).filter(u => u !== selfUid);
+      const ticket = l.ticket && l.ticket !== 'NO_TICKET' ? l.ticket : '';
+      return `<label class="cg-lane ${others.length && !picked.has(l.key) ? 'is-taken' : ''}">
+        <input type="checkbox" data-lane="${esc(l.key)}" ${picked.has(l.key) ? 'checked' : ''}>
+        <span class="cg-ell" style="max-width:150px;" title="${esc(l.supplier)}">${esc(l.supplier)}</span>
+        ${ticket ? `<span class="cg-dim">${esc(ticket)}</span>` : ''}
+        ${l.is_non_vas ? '<span class="cg-pill" style="background:rgba(139,92,246,.12);color:#7A4FBF;">non-VAS</span>' : ''}
+        <span class="cg-dim">${Number(l.plannedUnits || 0).toLocaleString()} u${others.length ? ` \u00b7 on ${esc(others.map(refOf).filter(Boolean).join(', ') || 'another movement')}` : ''}</span>
+      </label>`; }).join('')}</div>`;
+  }
+  const lanesPicked = (root) => [...root.querySelectorAll('[data-lane]')].filter(i => i.checked).map(i => i.getAttribute('data-lane'));
+
+  const nf = (label, key, val, ph, type) => `
+      <label style="display:block;">
+        <span class="cg-slabel">${esc(label)}</span>
+        <input class="cg-field" data-f="${key}" value="${esc(val || '')}" placeholder="${esc(ph || '')}" ${type ? `type="${type}"` : ''}>
+      </label>`;
+  function newFields(mode) {
+    const f = nf;
+    return mode === 'Air' ? `
+          ${f('AWB / flight ref', 'reference', '', 'CI0528/18OCT')}
+          ${f('Flight date', 'departure_planned', '', '', 'date')}
+          ${f('Flight / airline', 'vessel', '', 'Singapore Airlines')}
+          ${f('Carrier / forwarder', 'carrier', '', '')}
+          ${f('Transit days (quoted)', 'transit_days', '', 'e.g. 2', 'number')}`
+        : `
+          ${f('Container #', 'reference', '', 'MSKU1234567')}
+          <label style="display:block;"><span class="cg-slabel">Size</span>
+            <select class="cg-field" data-f="size_ft"><option value="">\u2014</option><option>20</option><option>40</option><option>40HQ</option><option>45</option></select></label>
+          ${f('Vessel / voyage', 'vessel', '', 'MAERSK ALTAIR 442S')}
+          ${f('Carrier', 'carrier', '', 'Maersk')}
+          ${f('Carrier code (SCAC)', 'scac', '', 'EGLV, MAEU, CMDU\u2026')}
+          ${f('Transit days (quoted)', 'transit_days', '', 'e.g. 26', 'number')}`;
+  }
+  function newForm() {
+    const f = nf;
+    return `
+      <div class="cg-card" id="cg-new" data-mode="Sea" style="border-left:3px solid ${BRAND};">
+        <div class="cg-head">
+          <div>
+            <div class="cg-h">New movement</div>
+            <div class="cg-sub">A container or a flight, and the lanes it carries. Its dates are planned from the
+              week\u2019s rhythm and the quoted transit, and confirmed as they happen.</div>
+          </div>
+          <span class="cg-seg"><button type="button" data-mode-pick="Sea" class="on">Sea</button><button type="button" data-mode-pick="Air">Air</button></span>
+        </div>
+        <div id="cg-new-fields" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:12px;">${newFields('Sea')}</div>
+        <div style="margin-top:14px;">
+          <span class="cg-slabel">Lanes on this movement</span>
+          <div id="cg-new-lanes">${laneList('Sea', [], null)}</div>
+        </div>
+        <div class="cg-nonvas">
+          <label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;cursor:pointer;">
+            <input type="checkbox" id="cg-nv-on" style="margin:0;"> Also carries freight that is not in the plan (non-VAS consolidation)
+          </label>
+          <div id="cg-nv" style="display:none;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-top:10px;">
+            ${f('Supplier', 'nv_supplier', '', '')}
+            ${f('Zendesk / ticket', 'nv_ticket', '', '')}
+            ${f('Units', 'nv_units', '', '', 'number')}
+            ${f('PO numbers (comma-separated)', 'nv_pos', '', '')}
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:12px;align-items:center;">
+          <button class="cg-btn" data-create="1">Create movement</button>
+          <button class="cg-btn ghost" data-close="1">Cancel</button>
+          <span style="flex:1;"></span>
+          <span class="cg-sub">A lane already on another movement is greyed; ticking it anyway records a split.</span>
+        </div>
+      </div>`;
+  }
+
   function editor(c) {
     const f = (label, key, val, ph) => `
       <label style="display:block;">
@@ -469,6 +564,10 @@
           ${f('Shipment #', 'shipment_ref', c.shipment_ref)}
           ${f('HBL', 'hbl', c.hbl)}
           ${f('MBL', 'mbl', c.mbl)}
+        </div>
+        <div style="margin-top:14px;">
+          <span class="cg-slabel">Lanes on this movement</span>
+          <div id="cg-edit-lanes">${laneList(c.mode, c.lanes || [], c.consignment_uid)}</div>
         </div>
         <div style="display:flex;gap:8px;margin-top:12px;align-items:center;">
           <button class="cg-btn" data-save="1">Save</button>
@@ -542,14 +641,16 @@
         <div class="cg-card">
           <div class="cg-head">
             <span class="cg-h">Consignments</span>
-            <span class="cg-sub">${_data.length} movement${_data.length === 1 ? '' : 's'} &middot;
-              dates belong to the movement, lanes inherit them</span>
+            <span class="cg-sub" style="flex:1;">${_data.length} movement${_data.length === 1 ? '' : 's'} &middot;
+              dates belong to the movement, lanes inherit them${_lanes.filter(l => !l.no_lane && !(l.consignments || []).length).length
+                ? ` &middot; <b>${_lanes.filter(l => !l.no_lane && !(l.consignments || []).length).length}</b> lane${_lanes.filter(l => !l.no_lane && !(l.consignments || []).length).length === 1 ? '' : 's'} not on a movement yet` : ''}</span>
+            <button class="cg-btn" data-new="1">+ Container / AWB</button>
           </div>
           ${_data.length ? `<div class="cg-grid">${_data.map(tile).join('')}</div>`
             : `<div class="cg-empty">
-                 <div class="cg-sub">No consignments for this week. If containers are assigned in
-                   Container Manager, bring them across — dates start unconfirmed either way.</div>
-                 <button class="cg-btn" data-migrate="1">Check this week</button>
+                 <div class="cg-sub">No movements for this week yet. Add a container or AWB and tick the lanes it
+                   carries, or bring across anything typed into the old Transit &amp; Clearing form.</div>
+                 <button class="cg-btn ghost" data-migrate="1">Check the old form</button>
                </div>`}
           <div id="cg-admin"></div>
         </div>
@@ -587,7 +688,11 @@
     const act = async (fn) => {
       if (_busy) return;
       _busy = true;
-      try { await fn(); await load(root); }
+      try {
+        await fn(); await load(root);
+        // The Week Hub tile reads the same movements; tell it so it does not wait for a reload.
+        try { window.dispatchEvent(new CustomEvent('consignments:changed', { detail: { week: currentWeek() } })); } catch (_) {}
+      }
       catch (e) {
         const msg = String(e.message || e);
         alert(/details_required/.test(msg)
@@ -705,6 +810,54 @@
         { stage: inp.getAttribute('data-stage'), actual_at: inp.value }));
     });
 
+    // ── New movement ──
+    const newBtn = root.querySelector('[data-new]');
+    if (newBtn) newBtn.onclick = () => {
+      const slot = root.querySelector('#cg-editor-slot');
+      slot.innerHTML = newForm();
+      try { slot.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (_) {}
+      const form = slot.querySelector('#cg-new');
+      const modeOf = () => form.getAttribute('data-mode') || 'Sea';
+      form.querySelectorAll('[data-mode-pick]').forEach(b => b.onclick = () => {
+        const m = b.getAttribute('data-mode-pick');
+        form.setAttribute('data-mode', m);
+        form.querySelectorAll('[data-mode-pick]').forEach(x => x.classList.toggle('on', x === b));
+        // Re-render the fields and the lane list for the other mode; the form is still empty.
+        form.querySelector('#cg-new-fields').innerHTML = newFields(m);
+        form.querySelector('#cg-new-lanes').innerHTML = laneList(m, [], null);
+      });
+      const nv = form.querySelector('#cg-nv-on');
+      nv.onchange = () => { form.querySelector('#cg-nv').style.display = nv.checked ? 'grid' : 'none'; };
+      form.querySelector('[data-close]').onclick = () => { slot.innerHTML = ''; };
+      form.querySelector('[data-create]').onclick = () => act(async () => {
+        const mode = modeOf();
+        const body = { week_start: currentWeek(), facility: _facility || null, mode, status: 'planned', lanes: lanesPicked(form) };
+        form.querySelectorAll('#cg-new-fields [data-f]').forEach(i => {
+          const k = i.getAttribute('data-f');
+          body[k] = k === 'transit_days' ? (i.value === '' ? null : Number(i.value)) : String(i.value || '').trim();
+        });
+        if (!body.reference) throw new Error(mode === 'Air' ? 'Enter the AWB or flight reference.' : 'Enter the container number.');
+        // Freight outside the plan: the lane is created first, then attached like any other.
+        if (nv.checked) {
+          const g = (k) => String((form.querySelector(`[data-f="${k}"]`) || {}).value || '').trim();
+          const sup = g('nv_supplier'), tk = g('nv_ticket'), units = Number(g('nv_units')), pos = g('nv_pos');
+          if (!sup || !tk || !(units > 0)) throw new Error('Non-VAS freight needs a supplier, a ticket and the units.');
+          const key = `${sup}||${tk}||${mode}`;
+          await post(`/flow/week/${encodeURIComponent(currentWeek())}?facility=${encodeURIComponent(_facility || '')}`,
+            { intl_lanes: { [key]: { is_non_vas: true, units_total: units, po_list: pos, ticket_ref: tk } } });
+          if (!body.lanes.includes(key)) body.lanes.push(key);
+        }
+        if (!body.lanes.length && !confirm('No lanes ticked \u2014 create the movement with nothing on it?')) return;
+        const saved = await post('/consignments', body);
+        const sc = (saved && saved.consignment) || {};
+        // Ocean with an MBL starts tracking straight away, as the editor does.
+        if (sc.consignment_uid && mode === 'Sea' && body.mbl) {
+          try { await post('/t49/subscribe', { consignment_uid: sc.consignment_uid, scac: body.scac || '' }); } catch (_) {}
+        }
+        slot.innerHTML = '';
+      });
+    };
+
     root.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => {
       const c = _data.find(x => x.consignment_uid === b.getAttribute('data-edit'));
       if (!c) return;
@@ -715,7 +868,7 @@
       slot.querySelector('[data-close]').onclick = () => { slot.innerHTML = ''; };
       slot.querySelector('[data-save]').onclick = () => act(async () => {
         const body = { consignment_uid: c.consignment_uid, week_start: c.week_start,
-                       facility: c.facility, mode: c.mode, status: c.status };
+                       facility: c.facility, mode: c.mode, status: c.status, lanes: lanesPicked(slot) };
         slot.querySelectorAll('[data-f]').forEach(i => {
           const k = i.getAttribute('data-f');
           body[k] = k === 'transit_days' ? (i.value === '' ? null : Number(i.value)) : i.value.trim();
@@ -775,6 +928,15 @@
       // Shared with the Control Tower exception strip, which would otherwise repeat the fetch.
       window.__cgConsignments = _data;
       window.__cgWeek = ws;
+
+      // This week's lanes, for the picker and the "not on a movement yet" count.
+      try {
+        const st = await call(`/consignments/week-status?week=${encodeURIComponent(ws || '')}`);
+        _lanes = (st && st.lanes) || [];
+      } catch (_) { _lanes = []; }
+      _facility = (_data.find(c => c.facility) || {}).facility
+        || ((window.state && Array.isArray(window.state.plan)) ? (window.state.plan.map(p => String(p.facility_name || p.facility || '').trim()).find(Boolean) || '') : '')
+        || _facility || '';
 
       // Alerts are a separate reading of the same data. A failure here must not take the
       // panel down with it — the tiles are useful on their own.
