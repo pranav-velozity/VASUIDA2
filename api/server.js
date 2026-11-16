@@ -21673,7 +21673,7 @@ app.listen(PORT, () => {
           const rows = db.prepare(`SELECT sent_at, week_start, subject, trigger_source, to_internal, status, error, resend_message_id
                                      FROM email_send_log WHERE kind = 'weekly_general' ORDER BY id DESC LIMIT 12`).all();
           const lastOk = rows.find(r => r.status === 'success') || null;
-          const due = job.reportingWeek(new Date());
+          const due = job.targetWeek(new Date());
           res.json({ ok: true,
             enabled: true, dry_run: String(process.env.WEEKLY_REPORT_DRY_RUN || '').toLowerCase() === 'true',
             schedule: { dow: Number(process.env.WEEKLY_REPORT_DOW || 0), hour: Number(process.env.WEEKLY_REPORT_HOUR || 13), tz: process.env.WEEKLY_REPORT_TZ || 'America/Chicago' },
@@ -21688,7 +21688,7 @@ app.listen(PORT, () => {
       // unless force is set, so a double send takes a deliberate choice.
       app.post('/weekly/run', authenticateRequest, requireRole(['admin']), requireInternalOrg, auditLog('weekly_run'), async (req, res) => {
         const b = req.body || {};
-        const wk = /^\d{4}-\d{2}-\d{2}$/.test(String(b.week || '')) ? String(b.week) : job.reportingWeek(new Date());
+        const wk = /^\d{4}-\d{2}-\d{2}$/.test(String(b.week || '')) ? String(b.week) : job.targetWeek(new Date());
         try {
           const already = db.prepare(`SELECT sent_at FROM email_send_log WHERE kind = 'weekly_general' AND status = 'success' AND week_start = ? ORDER BY id DESC LIMIT 1`).get(wk);
           if (already && !b.force) return res.status(409).json({ ok: false, error: 'already_sent', message: `Week ${wk} was sent ${already.sent_at}. Send again only with force.`, sent_at: already.sent_at });

@@ -66,6 +66,20 @@ module.exports = function createWeeklyReportJob(deps) {
     return d.toISOString().slice(0, 10);
   };
 
+  // The week a run started at `at` should report. On the send day it is the week that `at`
+  // falls in — Sunday 1pm Chicago closes it. Any later day of the week is a catch-up for a
+  // send that was missed, and the week to send is still the one that closed on that Sunday,
+  // not the one that has just begun. Reporting the new week was the defect behind a month of
+  // "missing sheets" failures: the Monday 00:00 tick ran for a week with no scans in it yet,
+  // and that failure then counted as the week's send, so the real Sunday run skipped it.
+  function targetWeek(at) {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' }).formatToParts(at);
+    const wd = parts.find(p => p.type === 'weekday').value;
+    const dow = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[wd];
+    const wk = reportingWeek(at);
+    return dow === SEND_DOW ? wk : addDays(wk, -7);
+  }
+
   function isoWeek(ymd) {
     const d = new Date(ymd + 'T00:00:00Z');
     const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
@@ -395,7 +409,7 @@ module.exports = function createWeeklyReportJob(deps) {
     const dow = dowMap[wd];
     const past = dow === SEND_DOW ? hr >= SEND_HOUR : dow > SEND_DOW;
     if (!past) return false;
-    return reportingWeek(at) !== lastRunWeek;      // one send per reporting week
+    return targetWeek(at) !== lastRunWeek;         // one send per reporting week
   }
 
   function start(options) {
@@ -409,37 +423,45 @@ module.exports = function createWeeklyReportJob(deps) {
         if (lastRunWeek) log.log('[weekly] last sent week on record: ' + lastRunWeek);
       } catch (e) { log.warn('[weekly] could not read the send log:', e.message); }
     }
+    // A failed week is retried, not written off: once every RETRY_HOURS until it goes or the
+    // next week takes over. Each attempt is logged and ops hear about each one, so the retry
+    // is not silent — but neither is it every 15 minutes.
+    const RETRY_HOURS = Number.isFinite(deps.retryHours) ? deps.retryHours : 6;
+    let failedWeek = null, retryAt = 0;
     const tick = async () => {
+      let wk = null;
       try {
         const at = now();
         if (!shouldRunAt(at, lastRunWeek)) return;
+        wk = targetWeek(at);
+        if (wk === failedWeek && at.getTime() < retryAt) return;
 
         // Checked again against the log rather than trusting memory alone.
-        const wk = reportingWeek(at);
         if (typeof deps.lastSentWeek === 'function') {
           try {
             if (deps.lastSentWeek() === wk) { lastRunWeek = wk; return; }
           } catch (_) { /* if the log cannot be read, memory is the fallback */ }
         }
-        lastRunWeek = wk;
-        await run(Object.assign({}, opts, { trigger: 'cron', at }));
+        await run(Object.assign({}, opts, { trigger: 'cron', at, weekStart: wk }));
+        lastRunWeek = wk; failedWeek = null;
       } catch (e) {
-        log.error('[weekly] run failed:', e.message);
-        if (typeof deps.logFailure === 'function') { try { deps.logFailure({ week_start: reportingWeek(now()), error: String(e.message || e) }); } catch (_) {} }
+        failedWeek = wk; retryAt = now().getTime() + RETRY_HOURS * 3600000;
+        log.error('[weekly] run failed:', e.message, '— retrying in ' + RETRY_HOURS + 'h');
+        if (typeof deps.logFailure === 'function') { try { deps.logFailure({ week_start: wk || targetWeek(now()), error: String(e.message || e) }); } catch (_) {} }
         if (opts.ops && opts.ops.length) {
           try {
-            await sendMail({ to: opts.ops, subject: '[failed] Weekly reports did not send',
-              text: 'The weekly reporting job failed.\n\n' + String(e.stack || e.message || e),
-              html: '<p>The weekly reporting job failed.</p><pre>' + String(e.message || e) + '</pre>' });
+            await sendMail({ to: opts.ops, subject: `[failed] Weekly reports did not send — week ${wk || '?'}`,
+              text: `The weekly reporting job failed for week ${wk || '?'}. It will retry in ${RETRY_HOURS} hours; to send by hand, POST /weekly/run as an admin.\n\n` + String(e.stack || e.message || e),
+              html: `<p>The weekly reporting job failed for week <b>${wk || '?'}</b>. It will retry in ${RETRY_HOURS} hours; to send by hand, POST /weekly/run as an admin.</p><pre>` + String(e.message || e) + '</pre>' });
           } catch (_) { /* the log is the last resort */ }
         }
       }
     };
     const timer = setInterval(tick, 15 * 60 * 1000);
     if (timer.unref) timer.unref();
-    log.log('[weekly] scheduled — Sundays 13:00 ' + TZ);
+    log.log('[weekly] scheduled — Sundays 13:00 ' + TZ + ' (a missed send is caught up for the week that closed)');
     return { stop: () => clearInterval(timer), tick };
   }
 
-  return { run, start, shouldRunAt, reportingWeek, isoWeek, validateApo, renderEmail, templateNarrative };
+  return { run, start, shouldRunAt, reportingWeek, targetWeek, isoWeek, validateApo, renderEmail, templateNarrative };
 };
