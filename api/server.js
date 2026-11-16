@@ -7419,10 +7419,28 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
         if (size === 20) return _r20;
         return _r40;                       // 40ft is the default where size is unstated
       };
-      // Load flow/container data
+      // Load flow/container data.
+      // From the cutover week (12 Oct 2026) movements live on the Transit Movements board,
+      // not in the week blob, so the invoice reads consignments: one line per sea container,
+      // one per air lane, exactly as before — the source moved, the lines did not. Earlier
+      // weeks still read the blob they were invoiced from.
       const flowRows = db.prepare('SELECT data FROM flow_week WHERE week_start = ?').all(week_start);
       const containers = [];
-      for (const row of flowRows) {
+      let _cgLanes = null;
+      try {
+        const _cg = (typeof consignmentRoutes !== 'undefined' && consignmentRoutes && consignmentRoutes._internals) || {};
+        if (typeof _cg.weekStatus === 'function' && week_start >= String(_cg.CUTOVER_WEEK || '9999-12-31')) {
+          const st = _cg.weekStatus(week_start, _c2, todayChicagoISO());
+          for (const c of (st.containers || [])) {
+            const air = String(c.mode || '').toLowerCase() === 'air';
+            if (type === 'SEA' && !air) containers.push({ container_id: c.container_id || '', size_ft: c.size_ft || '', vessel: c.vessel || '', lane_keys: c.lane_keys || [], is_air: false });
+            if (type === 'AIR' && air) containers.push({ container_id: c.container_id || '', size_ft: 'AIR', vessel: c.vessel || '', lane_keys: c.lane_keys || [], is_air: true });
+          }
+          _cgLanes = (st.lanes || []).filter(l => !l.no_lane)
+            .map(l => ({ key: l.key, supplier: l.supplier || '', zendesk: l.ticket || '', freight: l.freight || '', manual: l.manual || {} }));
+        }
+      } catch (e) { console.warn('[finance] consignment prefill unavailable, using week blob:', e.message); _cgLanes = null; }
+      if (!_cgLanes) for (const row of flowRows) {
         try {
           const d = JSON.parse(row.data || '{}');
           const wc = d.intl_weekcontainers;
@@ -7441,8 +7459,8 @@ app.get('/finance/prefill/:type/:week_start', authenticateRequest, requireRole([
         } catch {}
       }
       // Also get intl_lanes for zendesk/supplier info
-      const lanes = [];
-      for (const row of flowRows) {
+      const lanes = _cgLanes ? _cgLanes.slice() : [];
+      if (!_cgLanes) for (const row of flowRows) {
         try {
           const d = JSON.parse(row.data || '{}');
           const il = d.intl_lanes || {};
