@@ -2616,6 +2616,35 @@ module.exports = function mountConsignments(deps) {
     }
   });
 
+  // ── Remove a movement that was created by mistake ──
+  // Exists for Pulse's undo of create_movement (10-minute window). Refused once anything real
+  // has attached to it: a confirmed or carrier-recorded stage, a tracking link, a last-mile
+  // record. Deleting is otherwise human-only, by design.
+  router.delete('/:uid', authenticateRequest, requireRole(['admin']), auditLog('delete_consignment'), (req, res) => {
+    try {
+      const uid = String(req.params.uid || '').trim();
+      const c = db.prepare('SELECT * FROM consignment WHERE consignment_uid = ? AND client_id = ?').get(uid, curClient());
+      if (!c) return res.status(404).json({ ok: false, error: 'No such consignment.' });
+      const real = db.prepare(`SELECT COUNT(*) n FROM consignment_milestone WHERE consignment_uid = ? AND state IN ('confirmed','amended','carrier')`).get(uid).n;
+      if (real) return res.status(409).json({ ok: false, error: 'This movement has recorded milestones; it cannot be removed.' });
+      let linked = 0; try { linked = db.prepare('SELECT COUNT(*) n FROM t49_link WHERE consignment_uid = ?').get(uid).n; } catch (_) {}
+      if (linked) return res.status(409).json({ ok: false, error: 'This movement is being tracked; it cannot be removed.' });
+      for (const r of db.prepare('SELECT data FROM flow_week WHERE week_start = ?').all(c.week_start)) {
+        try { const b = JSON.parse(r.data); if (b && b.lastmile_receipts && b.lastmile_receipts[uid]) return res.status(409).json({ ok: false, error: 'This movement has a last-mile record; it cannot be removed.' }); } catch (_) {}
+      }
+      const tx = db.transaction(() => {
+        db.prepare('DELETE FROM consignment_lane WHERE consignment_uid = ?').run(uid);
+        db.prepare('DELETE FROM consignment_milestone WHERE consignment_uid = ?').run(uid);
+        try { db.prepare('DELETE FROM consignment_estimate_log WHERE consignment_uid = ?').run(uid); } catch (_) {}
+        db.prepare('DELETE FROM consignment WHERE consignment_uid = ?').run(uid);
+      });
+      tx();
+      res.json({ ok: true, removed: uid });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
   router._internals = { computePlanned, refreshPlanned, shape, STAGES, DEFAULT_RULES, rulesFor, migrateWeek, clearLegacy, weekStatus, CUTOVER_WEEK,
     logEstimate, recordPorts, addViaPort, routeOf, statusOf, contentsFor, originFor, pulseTransit, weekFacts, verifySummary, plainSummary };
   return router;

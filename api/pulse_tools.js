@@ -494,6 +494,169 @@ module.exports = function makePulseTools(deps) {
         return r.ok ? { ok: true, receipt: 'Alert is open again' } : { error: r.error };
       },
     },
+    // ── Phase 3b: Confirm-tier tools. Nothing below runs until the person says yes. ──
+    {
+      name: 'create_movement',
+      description: 'Add a new container (sea) or flight (air) to a week and put lanes on it. Give the week, mode, reference (container number or flight), vessel or airline, carrier-quoted transit days, size (20/40/40HQ for sea) and the lanes by supplier name or Zendesk ticket. Lanes must exist in that week\'s plan. The person must approve before it runs.',
+      input_schema: { type: 'object', properties: { week: { type: 'string', description: 'YYYY-MM-DD Monday, "W47", "this week", "next week"' }, mode: { type: 'string', enum: ['Sea', 'Air'] }, reference: { type: 'string', description: 'container number or flight/AWB' }, vessel: { type: 'string', description: 'vessel and voyage, or airline' }, transit_days: { type: 'number' }, size_ft: { type: 'string', description: '20 | 40 | 40HQ, sea only' }, lanes: { type: 'array', items: { type: 'string' }, description: 'supplier names or Zendesk tickets' } }, required: ['week', 'mode', 'reference', 'lanes'] },
+      tier: 'confirm', roles: ['admin'], write: true,
+      summary: (a, pre) => `Create ${a.mode === 'Air' ? 'flight' : 'container'} ${a.reference} in ${pre && pre.iso || a.week}${a.vessel ? ` on ${a.vessel}` : ''}${a.transit_days ? `, ${a.transit_days}-day transit` : ''}, carrying ${pre && pre.laneLabels ? pre.laneLabels.join(', ') : (a.lanes || []).join(', ')}`,
+      async prepare(a, ctx) {
+        const ws = resolveWeek(a.week, ctx); if (!ws) return { error: 'could not read that week' };
+        const ref = String(a.reference || '').trim(); if (!ref) return { error: 'reference required' };
+        const dup = await callRoute(ctx, 'GET', `/consignments/find?q=${encodeURIComponent(ref)}`);
+        const hits = dup.ok ? (dup.data.hits || []) : [];
+        if (hits.some(h => String(h.reference || '').toLowerCase() === ref.toLowerCase() && h.week_start === ws)) return { error: `${ref} already exists in ${isoWeek(ws)}; use amend_movement` };
+        const ln = await resolveLanes(ctx, ws, a.mode, a.lanes); if (ln.error) return ln;
+        return { ws, iso: isoWeek(ws), laneKeys: ln.keys, laneLabels: ln.labels, facility: ln.facility };
+      },
+      async run(a, ctx) {
+        const pre = await this.prepare(a, ctx); if (pre.error) return pre;
+        const body = { week_start: pre.ws, facility: pre.facility, mode: a.mode === 'Air' ? 'Air' : 'Sea', reference: String(a.reference).trim(), vessel: a.vessel || null,
+          transit_days: Number.isFinite(Number(a.transit_days)) ? Number(a.transit_days) : undefined, size_ft: a.mode === 'Air' ? null : (a.size_ft || null), lanes: pre.laneKeys };
+        const r = await callRoute(ctx, 'POST', '/consignments', body); if (!r.ok) return { error: r.error };
+        const c = r.data.consignment || {};
+        return { ok: true, receipt: `Created ${body.mode === 'Air' ? 'flight' : 'container'} ${body.reference} in ${pre.iso} with ${pre.laneLabels.length} lane${pre.laneLabels.length === 1 ? '' : 's'}${body.transit_days ? '' : ' (no carrier transit yet — dates are the rule default)'}`, uid: c.consignment_uid, undo: { kind: 'create', uid: c.consignment_uid } };
+      },
+      async undo(rec, ctx) {
+        const r = await callRoute(ctx, 'DELETE', `/consignments/${encodeURIComponent(rec.uid)}`);
+        return r.ok ? { ok: true, receipt: 'Removed the movement again' } : { error: r.error };
+      },
+    },
+    {
+      name: 'amend_movement',
+      description: 'Change an existing movement: its reference (container number / flight), vessel or airline, carrier-quoted transit days, size, or add/remove lanes (by supplier or ticket). Only the fields given change. The person must approve before it runs.',
+      input_schema: { type: 'object', properties: { movement: { type: 'string', description: 'current container number, AWB, ticket or uid' }, reference: { type: 'string' }, vessel: { type: 'string' }, transit_days: { type: 'number' }, size_ft: { type: 'string' }, add_lanes: { type: 'array', items: { type: 'string' } }, remove_lanes: { type: 'array', items: { type: 'string' } } }, required: ['movement'] },
+      tier: 'confirm', roles: ['admin'], write: true,
+      summary: (a, pre) => `Change ${pre && pre.label || a.movement}: ${(pre && pre.changes || ['(no change given)']).join('; ')}`,
+      async prepare(a, ctx) {
+        const mv = await resolveMovement(ctx, a.movement); if (mv.error) return mv;
+        const c = mv.c, changes = [];
+        if (a.reference && String(a.reference).trim() !== (c.reference || '')) changes.push(`reference → ${String(a.reference).trim()}`);
+        if (a.vessel && a.vessel !== (c.vessel || '')) changes.push(`${c.mode === 'Air' ? 'airline' : 'vessel'} → ${a.vessel}`);
+        if (Number.isFinite(Number(a.transit_days)) && Number(a.transit_days) !== Number(c.transit_days)) changes.push(`transit ${c.transit_confirmed ? c.transit_days + ' → ' : ''}${a.transit_days} days`);
+        if (a.size_ft && a.size_ft !== (c.size_ft || '')) changes.push(`size → ${a.size_ft}`);
+        let addKeys = [], removeKeys = [];
+        if (Array.isArray(a.add_lanes) && a.add_lanes.length) { const ln = await resolveLanes(ctx, c.week_start, c.mode, a.add_lanes); if (ln.error) return ln; addKeys = ln.keys.filter(k => !(c.lanes || []).includes(k)); if (addKeys.length) changes.push(`add ${ln.labels.join(', ')}`); }
+        if (Array.isArray(a.remove_lanes) && a.remove_lanes.length) {
+          const want = a.remove_lanes.map(x => String(x).trim().toLowerCase());
+          removeKeys = (c.lanes || []).filter(k => { const [sup, tk] = k.split('||'); return want.includes(sup.toLowerCase()) || want.includes(tk.toLowerCase()); });
+          if (removeKeys.length !== want.length) return { error: `could not match every lane to remove on ${mv.label}; it carries: ${(c.lanes || []).map(k => k.split('||')[0] + ' (' + k.split('||')[1] + ')').join(', ')}` };
+          changes.push(`remove ${removeKeys.map(k => k.split('||')[0]).join(', ')}`);
+        }
+        if (!changes.length) return { error: `nothing to change on ${mv.label}` };
+        return { label: mv.label, uid: mv.uid, c, changes, addKeys, removeKeys };
+      },
+      async run(a, ctx) {
+        const pre = await this.prepare(a, ctx); if (pre.error) return pre;
+        const c = pre.c;
+        const lanes = (c.lanes || []).filter(k => !pre.removeKeys.includes(k)).concat(pre.addKeys);
+        const body = fullBody(c, { reference: a.reference ? String(a.reference).trim() : c.reference, vessel: a.vessel || c.vessel, size_ft: a.size_ft || c.size_ft,
+          transit_days: Number.isFinite(Number(a.transit_days)) ? Number(a.transit_days) : c.transit_days, lanes });
+        const r = await callRoute(ctx, 'POST', '/consignments', body); if (!r.ok) return { error: r.error };
+        return { ok: true, receipt: `Changed ${pre.label}: ${pre.changes.join('; ')}`, undo: { kind: 'movement', body: fullBody(c, { lanes: c.lanes || [] }), label: pre.label } };
+      },
+      async undo(rec, ctx) {
+        const r = await callRoute(ctx, 'POST', '/consignments', rec.body);
+        return r.ok ? { ok: true, receipt: `${rec.label} is back as it was` } : { error: r.error };
+      },
+    },
+    {
+      name: 'issue_extra_labels',
+      description: 'Print extra UID labels for one PO and SKU in a week (lost or torn labels, or a quantity change). The run is emailed to the warehouse as usual. Labels cannot be unprinted, so make sure the PO, SKU and quantity are exactly what the person said. The person must approve before it runs.',
+      input_schema: { type: 'object', properties: { week: { type: 'string' }, po: { type: 'string' }, sku: { type: 'string' }, qty: { type: 'integer' }, reason: { type: 'string' } }, required: ['week', 'po', 'sku', 'qty'] },
+      tier: 'confirm', roles: ['admin'], write: true,
+      summary: (a, pre) => `Print ${a.qty} extra UID label${Number(a.qty) === 1 ? '' : 's'} for PO ${a.po}, SKU ${a.sku} in ${pre && pre.iso || a.week}${a.reason ? ` (${a.reason})` : ''} — this cannot be undone`,
+      async prepare(a, ctx) {
+        const ws = resolveWeek(a.week, ctx); if (!ws) return { error: 'could not read that week' };
+        const qty = Math.floor(Number(a.qty)); if (!(qty >= 1 && qty <= 5000)) return { error: 'qty must be 1–5000' };
+        const plan = await callRoute(ctx, 'GET', `/plan/weeks/${ws}`);
+        const rows = plan.ok && Array.isArray(plan.data) ? plan.data : [];
+        const po = String(a.po || '').trim().toUpperCase(), sku = String(a.sku || '').trim();
+        const hit = rows.find(r => String(r.po_number || '').trim().toUpperCase() === po && String(r.sku_code || r.sku || '').trim() === sku);
+        if (!hit) return { error: `PO ${po} with SKU ${sku} is not in the ${isoWeek(ws)} plan${rows.some(r => String(r.po_number || '').trim().toUpperCase() === po) ? ' (the PO is there with other SKUs)' : ''}` };
+        return { ws, iso: isoWeek(ws), po, sku, qty };
+      },
+      async run(a, ctx) {
+        const pre = await this.prepare(a, ctx); if (pre.error) return pre;
+        const r = await callRoute(ctx, 'POST', '/uid-labels/extra', { week: pre.ws, po: pre.po, sku: pre.sku, qty: pre.qty, reason: a.reason ? `Pulse: ${a.reason}` : 'Pulse: requested by voice/chat' });
+        if (!r.ok) return { error: r.error };
+        return { ok: true, receipt: `Printed ${pre.qty} extra label${pre.qty === 1 ? '' : 's'} for PO ${pre.po} / ${pre.sku} in ${pre.iso} (run #${r.data.run_id}); the warehouse has been emailed` };
+      },
+    },
+    {
+      name: 'set_department_format',
+      description: 'Set which UID label format a department code uses: footwear or standard. Codes are 4 characters (e.g. WFDA). Use when someone says a department is footwear, or a new code was flagged. The person must approve before it runs.',
+      input_schema: { type: 'object', properties: { code: { type: 'string' }, format: { type: 'string', enum: ['footwear', 'standard'] } }, required: ['code', 'format'] },
+      tier: 'confirm', roles: ['admin'], write: true,
+      summary: (a, pre) => `Set department ${String(a.code || '').toUpperCase()} to ${a.format} labels${pre && pre.prev ? ` (currently ${pre.prev})` : (pre && pre.prev === null ? ' (new code)' : '')}`,
+      async prepare(a, ctx) {
+        const code = String(a.code || '').trim().toUpperCase(); if (!/^[A-Z0-9]{4}$/.test(code)) return { error: 'a department code is 4 letters/digits' };
+        const r = await callRoute(ctx, 'GET', '/uid-labels/formats'); if (!r.ok) return { error: r.error };
+        const rows = Array.isArray(r.data) ? r.data : (r.data.codes || r.data.formats || r.data.rows || []);
+        const cur = rows.find(x => String(x.code).toUpperCase() === code);
+        if (cur && cur.format === a.format) return { error: `${code} is already ${a.format}` };
+        return { code, prev: cur ? cur.format : null };
+      },
+      async run(a, ctx) {
+        const pre = await this.prepare(a, ctx); if (pre.error) return pre;
+        const r = await callRoute(ctx, 'POST', '/uid-labels/formats', { code: pre.code, format: a.format }); if (!r.ok) return { error: r.error };
+        return { ok: true, receipt: `Department ${pre.code} now prints ${a.format} labels`, undo: { kind: 'format', code: pre.code, prev: pre.prev } };
+      },
+      async undo(rec, ctx) {
+        const r = rec.prev ? await callRoute(ctx, 'POST', '/uid-labels/formats', { code: rec.code, format: rec.prev }) : await callRoute(ctx, 'DELETE', `/uid-labels/formats/${rec.code}`);
+        return r.ok ? { ok: true, receipt: rec.prev ? `${rec.code} is back to ${rec.prev}` : `${rec.code} mapping removed again` } : { error: r.error };
+      },
+    },
+    {
+      name: 'move_po',
+      description: 'Move a purchase order from one week\'s plan to another (all its SKU lines). Refuses if any of it has already been received in the original week. UID labels already printed travel with the PO — nothing is reprinted. The person must approve before it runs.',
+      input_schema: { type: 'object', properties: { po: { type: 'string' }, to_week: { type: 'string', description: 'YYYY-MM-DD Monday, "W48", "next week"' }, from_week: { type: 'string', description: 'optional; found from the plans if omitted' } }, required: ['po', 'to_week'] },
+      tier: 'confirm', roles: ['admin'], write: true,
+      summary: (a, pre) => `Move PO ${String(a.po || '').toUpperCase()}${pre ? ` (${pre.rows.length} line${pre.rows.length === 1 ? '' : 's'}, ${pre.units} units, ${pre.supplier})` : ''} from ${pre && pre.fromIso || a.from_week || '?'} to ${pre && pre.toIso || a.to_week}`,
+      async prepare(a, ctx) {
+        const po = String(a.po || '').trim().toUpperCase(); if (!po) return { error: 'PO required' };
+        const to = resolveWeek(a.to_week, ctx); if (!to) return { error: 'could not read the destination week' };
+        let from = a.from_week ? resolveWeek(a.from_week, ctx) : null;
+        if (!from) {
+          // Look back 6 weeks and ahead 6 for the PO.
+          const base = mondayOf(ctx.today); const found = [];
+          for (let i = -6; i <= 6; i++) { const ws = addDays(base, i * 7); if (ws === to) continue; const r = await callRoute(ctx, 'GET', `/plan/weeks/${ws}`); if (r.ok && Array.isArray(r.data) && r.data.some(x => String(x.po_number || '').trim().toUpperCase() === po)) found.push(ws); }
+          if (!found.length) return { error: `PO ${po} is not in any plan within six weeks of today (other than ${isoWeek(to)})` };
+          if (found.length > 1) return { error: `PO ${po} is in ${found.map(isoWeek).join(' and ')}; say which week to move it from` };
+          from = found[0];
+        }
+        if (from === to) return { error: 'the PO is already in that week' };
+        const [pa, pb, rr] = await Promise.all([callRoute(ctx, 'GET', `/plan/weeks/${from}`), callRoute(ctx, 'GET', `/plan/weeks/${to}`), callRoute(ctx, 'GET', `/receiving?weekStart=${from}`)]);
+        if (!pa.ok || !pb.ok) return { error: (pa.error || pb.error) };
+        const planA = Array.isArray(pa.data) ? pa.data : [], planB = Array.isArray(pb.data) ? pb.data : [];
+        const rows = planA.filter(x => String(x.po_number || '').trim().toUpperCase() === po);
+        if (!rows.length) return { error: `PO ${po} is not in the ${isoWeek(from)} plan` };
+        if (planB.some(x => String(x.po_number || '').trim().toUpperCase() === po)) return { error: `PO ${po} is already in the ${isoWeek(to)} plan` };
+        const rec = (rr.ok ? (Array.isArray(rr.data) ? rr.data : (rr.data.rows || [])) : []).filter(x => String(x.po_number || '').trim().toUpperCase() === po);
+        if (rec.length) return { error: `PO ${po} has receiving recorded in ${isoWeek(from)} (${rec.reduce((s, x) => s + (Number(x.cartons_received) || 0), 0)} cartons); it cannot be moved` };
+        const units = rows.reduce((s, x) => s + (Number(x.target_qty) || 0), 0);
+        return { po, from, to, fromIso: isoWeek(from), toIso: isoWeek(to), rows, planA, planB, units, supplier: String(rows[0].supplier_name || rows[0].supplier || '').trim() || 'unknown supplier' };
+      },
+      async run(a, ctx) {
+        const pre = await this.prepare(a, ctx); if (pre.error) return pre;
+        const facility = (q) => { const f = String(((pre.rows[0] || {}).facility_name || (pre.rows[0] || {}).facility || '')).trim(); return f ? `?facility=${encodeURIComponent(f)}` : ''; };
+        // Destination first: if that save fails nothing has left the original week.
+        const rb = await callRoute(ctx, 'PUT', `/plan/weeks/${pre.to}${facility()}`, pre.planB.concat(pre.rows)); if (!rb.ok) return { error: `could not add to ${pre.toIso}: ${rb.error}` };
+        const ra = await callRoute(ctx, 'PUT', `/plan/weeks/${pre.from}${facility()}`, pre.planA.filter(x => String(x.po_number || '').trim().toUpperCase() !== pre.po));
+        if (!ra.ok) { await callRoute(ctx, 'PUT', `/plan/weeks/${pre.to}${facility()}`, pre.planB); return { error: `could not remove from ${pre.fromIso}: ${ra.error} (destination restored)` }; }
+        // A lane left with no POs stays on whatever container it was assigned to; say so.
+        const laneKey = `${pre.supplier}||${String(pre.rows[0].zendesk_ticket || '').trim()}`;
+        const laneLeft = pre.planA.some(x => String(x.po_number || '').trim().toUpperCase() !== pre.po && `${String(x.supplier_name || x.supplier || '').trim()}||${String(x.zendesk_ticket || '').trim()}` === laneKey);
+        return { ok: true, receipt: `Moved PO ${pre.po} (${pre.units} units, ${pre.supplier}) from ${pre.fromIso} to ${pre.toIso}${laneLeft ? '' : `; the ${pre.supplier} lane in ${pre.fromIso} now has no POs — check its container in Transit Movements`}`,
+          undo: { kind: 'move_po', po: pre.po, from: pre.from, to: pre.to, planA: pre.planA, planB: pre.planB, facility: facility() } };
+      },
+      async undo(rec, ctx) {
+        const ra = await callRoute(ctx, 'PUT', `/plan/weeks/${rec.from}${rec.facility}`, rec.planA); if (!ra.ok) return { error: ra.error };
+        const rb = await callRoute(ctx, 'PUT', `/plan/weeks/${rec.to}${rec.facility}`, rec.planB); if (!rb.ok) return { error: rb.error };
+        return { ok: true, receipt: `PO ${rec.po} is back in ${isoWeek(rec.from)}` };
+      },
+    },
   ];
 
   // ── Write-tool helpers ──
@@ -503,6 +666,31 @@ module.exports = function makePulseTools(deps) {
   const fmtWhen = (dt) => { const s = String(dt || ''); return s.length > 10 ? `${fmtShort(s)} ${s.slice(11, 16)}` : fmtShort(s); };
   const localNow = () => { const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Sydney', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date()); const g = (t) => (p.find(x => x.type === t) || {}).value; return `${g('year')}-${g('month')}-${g('day')}T${g('hour') === '24' ? '00' : g('hour')}:${g('minute')}`; };
 
+  // Lanes named by supplier or ticket → lane keys from the week's plan (via week status).
+  async function resolveLanes(ctx, ws, mode, names) {
+    const want = (Array.isArray(names) ? names : [names]).map(x => String(x || '').trim()).filter(Boolean);
+    if (!want.length) return { error: 'at least one lane (supplier or ticket) is required' };
+    const st = await callRoute(ctx, 'GET', `/consignments/week-status?week=${ws}`); if (!st.ok) return { error: st.error };
+    const lanes = (st.data.lanes || []).filter(l => !mode || String(l.freight || '').toLowerCase() === String(mode).toLowerCase() || !l.freight);
+    const keys = [], labels = [], missing = [];
+    for (const w of want) {
+      const wl = w.toLowerCase();
+      const hit = lanes.filter(l => String(l.ticket || '').toLowerCase() === wl || String(l.supplier || '').toLowerCase() === wl || String(l.supplier || '').toLowerCase().startsWith(wl));
+      if (hit.length === 1) { keys.push(hit[0].key); labels.push(`${hit[0].supplier} (${hit[0].ticket})`); }
+      else if (hit.length > 1) return { error: `“${w}” matches ${hit.length} lanes in ${isoWeek(ws)}: ${hit.map(l => l.supplier + ' ' + l.ticket).join(', ')} — give the ticket` };
+      else missing.push(w);
+    }
+    if (missing.length) return { error: `no ${mode || ''} lane in the ${isoWeek(ws)} plan for: ${missing.join(', ')}`, lanes_in_week: take(lanes.map(l => `${l.supplier} (${l.ticket}, ${l.freight})`), 12) };
+    let facility = '';
+    try { const plan = await callRoute(ctx, 'GET', `/plan/weeks/${ws}`); facility = (Array.isArray(plan.data) ? plan.data : []).map(r => String(r.facility_name || r.facility || '').trim()).find(Boolean) || ''; } catch (_) {}
+    if (!facility) { const cs = st.data.consignments || []; facility = (cs.find(c => c.facility) || {}).facility || 'VOZ_KY'; }
+    return { keys, labels, facility };
+  }
+  // The consignment POST overwrites every field it knows, so an amendment must resend them all.
+  function fullBody(c, patch) {
+    return Object.assign({ consignment_uid: c.consignment_uid, week_start: c.week_start, facility: c.facility, mode: c.mode, reference: c.reference, size_ft: c.size_ft, carrier: c.carrier,
+      vessel: c.vessel, transit_days: c.transit_days, departure_planned: c.departure_planned, shipment_ref: c.shipment_ref, hbl: c.hbl, mbl: c.mbl, status: c.status, lanes: c.lanes || [] }, patch);
+  }
   // A movement named any way a person would: uid, container, AWB, ticket. One match or an
   // error that lists the candidates — a write must never guess between two containers.
   async function resolveMovement(ctx, text) {
@@ -582,9 +770,11 @@ module.exports = function makePulseTools(deps) {
     if (r.startsWith('admin')) return 'admin';
     return 'ops';
   }
+  // PULSE_WRITES=off on Render hides every write tool at once — the kill switch for Phase 3.
+  const writesOff = () => /^(off|0|false|no)$/i.test(String(process.env.PULSE_WRITES || ''));
   function toolsFor(ctx) {
     const rk = roleKey(ctx);
-    return TOOLS.filter(t => (!t.internalOnly || ctx.isInternal) && t.roles.includes(rk));
+    return TOOLS.filter(t => (!t.internalOnly || ctx.isInternal) && t.roles.includes(rk) && !(t.write && writesOff()));
   }
   function anthropicTools(ctx) {
     return toolsFor(ctx).map(t => ({ name: t.name, description: t.description, input_schema: t.input_schema }));

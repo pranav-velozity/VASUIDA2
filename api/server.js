@@ -1726,6 +1726,7 @@ app.post('/pulse/chat',
     }
     // style: 'spoken' writes for the ear (voice modes); default writes for the screen.
     const _style = String(req.body?.style || '').toLowerCase() === 'spoken' ? 'spoken' : 'text';
+    const _dryRun = req.body?.dry_run === true;   // evaluation runs: writes are described, never done
 
     const userRole = req.auth?.orgRole || '';
     const roleLabel = {
@@ -1739,7 +1740,7 @@ app.post('/pulse/chat',
     // told plainly that Pulse cannot change things for them, so it never pretends to.
     const _canWrite = roleLabel === 'Admin' && (() => { try { const t = tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole); return !t || !t.org_type || t.org_type === 'internal'; } catch (_) { return true; } })();
     const _writeGuide = _canWrite
-      ? 'You can also ACT with the write tools: notes, milestone confirmations, last-mile scheduled/delivered, alert acknowledgements, and recording a stated milestone date. Look the movement up first if you are not sure which one is meant; never guess between two. Some tools run at once and return a receipt — repeat the receipt in one sentence. Others return {proposed:true}: nothing has happened yet; reply with ONE short sentence asking for approval ("Shall I record departure for MSKU… as 16 Oct?") and nothing else. If a tool refuses with needs_confirmation, ask the person for the date rather than inventing one. Never claim something was done unless a tool returned a receipt.'
+      ? 'You can also ACT with the write tools: notes, milestone confirmations, last-mile scheduled/delivered, alert acknowledgements, recording a stated milestone date, creating or changing a container/flight and its lanes, extra UID labels, department label formats, and moving a PO between weeks. Look the movement up first if you are not sure which one is meant; never guess between two. Some tools run at once and return a receipt — repeat the receipt in one sentence. Others return {proposed:true}: nothing has happened yet; reply with ONE short sentence asking for approval ("Shall I record departure for MSKU… as 16 Oct?") and nothing else. If a tool refuses with needs_confirmation, ask the person for the date rather than inventing one. Never claim something was done unless a tool returned a receipt.'
       : 'You cannot change anything for this user — for changes, guide them to the screen (e.g. "Confirm that in Transit Movements").';
     const facility = pulseContext?.facility || currentWeek?.facility || '';
     const weeks    = Array.isArray(pulseContext?.weeks) ? pulseContext.weeks : [];
@@ -1965,16 +1966,18 @@ app.post('/pulse/chat',
       // and the model is told nothing has happened yet.
       const results = await Promise.all(toolUses.map(async (tu) => {
         const meta = pulseTools.findTool(tu.name, toolCtx);
-        if (meta && meta.tier === 'confirm') {
+        // dry_run (the evaluation script): every write becomes a proposal with no token, so
+        // the model's choice and arguments can be scored without anything changing.
+        if (meta && meta.write && (meta.tier === 'confirm' || _dryRun)) {
           const pre = typeof meta.prepare === 'function' ? await meta.prepare(tu.input, toolCtx).catch(e => ({ error: String(e.message || e) })) : null;
           if (pre && pre.error) {
             trace.push({ tool: tu.name, args: tu.input, ok: false, ms: 0 });
             return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(pre), is_error: true };
           }
           const summary = meta.summary ? meta.summary(tu.input, pre) : tu.name;
-          const token = _pulseProposals.add({ tool: tu.name, args: tu.input, summary, userId: toolCtx.userId, client: toolCtx.client });
-          trace.push({ tool: tu.name, args: tu.input, ok: true, ms: 0, proposed: true });
-          actions.push({ kind: 'proposed', token, tool: tu.name, summary, expires_in: PROPOSAL_TTL_MS / 1000 });
+          const token = _dryRun ? null : _pulseProposals.add({ tool: tu.name, args: tu.input, summary, userId: toolCtx.userId, client: toolCtx.client });
+          trace.push({ tool: tu.name, args: tu.input, ok: true, ms: 0, proposed: true, dry_run: _dryRun || undefined });
+          if (!_dryRun) actions.push({ kind: 'proposed', token, tool: tu.name, summary, expires_in: PROPOSAL_TTL_MS / 1000 });
           _pulseAudit.run(req.auth?.userId || 'anonymous', req.auth?.orgId || null, req.auth?.orgRole || null,
             'pulse_propose_' + tu.name, '/pulse/chat', 'TOOL', req.ip || '', 'pulse', JSON.stringify({ client: toolCtx.client, args: tu.input, summary }).slice(0, 2000), 202, null);
           return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify({ proposed: true, summary, note: 'Nothing has happened yet. The user must approve. Reply with one short sentence asking for approval and nothing else.' }) };
