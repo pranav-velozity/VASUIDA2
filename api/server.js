@@ -1735,6 +1735,12 @@ app.post('/pulse/chat',
       'org:api_auth':      'API'
     }[userRole] || 'User';
 
+    // Write tools exist only for VelOzity admins (Phase 3, agreed 19 Nov). Everyone else is
+    // told plainly that Pulse cannot change things for them, so it never pretends to.
+    const _canWrite = roleLabel === 'Admin' && (() => { try { const t = tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole); return !t || !t.org_type || t.org_type === 'internal'; } catch (_) { return true; } })();
+    const _writeGuide = _canWrite
+      ? 'You can also ACT with the write tools: notes, milestone confirmations, last-mile scheduled/delivered, alert acknowledgements, and recording a stated milestone date. Look the movement up first if you are not sure which one is meant; never guess between two. Some tools run at once and return a receipt — repeat the receipt in one sentence. Others return {proposed:true}: nothing has happened yet; reply with ONE short sentence asking for approval ("Shall I record departure for MSKU… as 16 Oct?") and nothing else. If a tool refuses with needs_confirmation, ask the person for the date rather than inventing one. Never claim something was done unless a tool returned a receipt.'
+      : 'You cannot change anything for this user — for changes, guide them to the screen (e.g. "Confirm that in Transit Movements").';
     const facility = pulseContext?.facility || currentWeek?.facility || '';
     const weeks    = Array.isArray(pulseContext?.weeks) ? pulseContext.weeks : [];
     const currWk   = currentWeek?.week_start || (weeks.length ? weeks[weeks.length-1].week_start : '');
@@ -1756,7 +1762,7 @@ app.post('/pulse/chat',
       lines.push('Stock consumption is DERIVED, not counted: each envelope uses a fixed number of sticks split across flavours, and true per-flavour usage is only established at each stock count. Treat on-hand figures as estimates between counts.');
       lines.push('You have aggregate data only. You do NOT have order-level detail, customer names or delivery addresses, and must never speculate about them.');
       lines.push('Be concise and direct. Lead with numbers. Do not hedge when the data is clear.');
-      lines.push('You can look things up with the tools you have been given. You cannot change anything yet — guide users to the UI for changes (e.g. "Create a batch in VAS Ops → Fulfilment → Assembly").');
+      lines.push('You can look things up with the tools you have been given. ' + _writeGuide);
       lines.push('');
     } else {
       lines.push('You are Pulse, the AI operations assistant for VelOzity Pinpoint — a real-time warehouse UID operations platform.');
@@ -1766,7 +1772,7 @@ app.post('/pulse/chat',
       lines.push('You have the last 4 weeks of receiving and VAS detail below, and the last 30 days of transit (containers and flights) from Pinpoint. Use them to answer specifically and accurately.');
       lines.push('Be concise and direct. Lead with numbers. Do not hedge when the data is clear.');
       lines.push('You have TOOLS. The context below is a starting picture only; when a question names a week, a container, an AWB, a ticket, a PO or a supplier, or asks for a figure, CALL THE TOOL and answer from its result rather than from memory of the context. Prefer one well-chosen tool call over several. Say when a tool returned nothing.');
-      lines.push('You cannot change anything yet — for changes, guide users to the UI (e.g. "Confirm that in Transit Movements").');
+      lines.push(_writeGuide);
       lines.push('');
     }
 
@@ -1937,6 +1943,7 @@ app.post('/pulse/chat',
     const anthropic = getAnthropic();
     const MAX_ROUNDS = 6;
     const trace = [];                       // what Pulse looked up, shown in the UI
+    const actions = [];                     // receipts and proposals for the UI to render
     const turnBlocks = [];                  // this turn's tool exchange, kept for the session
     let reply = null, stop = null;
     for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -1954,14 +1961,39 @@ app.post('/pulse/chat',
         break;
       }
       // Run every tool the model asked for in this round, in parallel, each audited.
+      // Reads and Auto-tier writes run now; a Confirm-tier write is parked behind a token
+      // and the model is told nothing has happened yet.
       const results = await Promise.all(toolUses.map(async (tu) => {
+        const meta = pulseTools.findTool(tu.name, toolCtx);
+        if (meta && meta.tier === 'confirm') {
+          const pre = typeof meta.prepare === 'function' ? await meta.prepare(tu.input, toolCtx).catch(e => ({ error: String(e.message || e) })) : null;
+          if (pre && pre.error) {
+            trace.push({ tool: tu.name, args: tu.input, ok: false, ms: 0 });
+            return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(pre), is_error: true };
+          }
+          const summary = meta.summary ? meta.summary(tu.input, pre) : tu.name;
+          const token = _pulseProposals.add({ tool: tu.name, args: tu.input, summary, userId: toolCtx.userId, client: toolCtx.client });
+          trace.push({ tool: tu.name, args: tu.input, ok: true, ms: 0, proposed: true });
+          actions.push({ kind: 'proposed', token, tool: tu.name, summary, expires_in: PROPOSAL_TTL_MS / 1000 });
+          _pulseAudit.run(req.auth?.userId || 'anonymous', req.auth?.orgId || null, req.auth?.orgRole || null,
+            'pulse_propose_' + tu.name, '/pulse/chat', 'TOOL', req.ip || '', 'pulse', JSON.stringify({ client: toolCtx.client, args: tu.input, summary }).slice(0, 2000), 202, null);
+          return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify({ proposed: true, summary, note: 'Nothing has happened yet. The user must approve. Reply with one short sentence asking for approval and nothing else.' }) };
+        }
         const r = await pulseTools.runTool(tu.name, tu.input, toolCtx);
-        trace.push({ tool: tu.name, args: tu.input, ok: r.ok, ms: r.ms });
+        trace.push({ tool: tu.name, args: tu.input, ok: r.ok, ms: r.ms, write: !!(meta && meta.write) });
         try {
           _pulseAudit.run(req.auth?.userId || 'anonymous', req.auth?.orgId || null, req.auth?.orgRole || null,
-            'pulse_tool_' + tu.name, '/pulse/chat', 'TOOL', req.ip || '', 'pulse', JSON.stringify({ client: toolCtx.client, args: tu.input }).slice(0, 2000), r.ok ? 200 : 500, r.ok ? null : String(r.result && r.result.error || 'failed'));
+            'pulse_tool_' + tu.name, '/pulse/chat', 'TOOL', req.ip || '', 'pulse', JSON.stringify({ client: toolCtx.client, args: tu.input, receipt: r.result && r.result.receipt }).slice(0, 2000), r.ok ? 200 : 500, r.ok ? null : String(r.result && r.result.error || ''));
         } catch (_) {}
-        return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(r.result), is_error: !r.ok };
+        let content = r.result;
+        if (meta && meta.write && r.ok && r.result && r.result.receipt) {
+          // The receipt goes to the user as a card with an undo link; the undo record itself
+          // stays on the server so the model never sees or forges it.
+          const undo_token = r.result.undo ? _pulseUndo.add({ tool: tu.name, record: r.result.undo, userId: toolCtx.userId, client: toolCtx.client, receipt: r.result.receipt }) : null;
+          actions.push({ kind: 'done', tool: tu.name, summary: r.result.receipt, undo_token, undo_until: undo_token ? Date.now() + UNDO_TTL_MS : null });
+          content = { done: true, receipt: r.result.receipt };
+        }
+        return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(content), is_error: !r.ok };
       }));
       const assistantBlocks = response.content.map(b => b.type === 'tool_use' ? { type: 'tool_use', id: b.id, name: b.name, input: b.input } : { type: 'text', text: b.text });
       convo.push({ role: 'assistant', content: assistantBlocks });
@@ -1975,7 +2007,7 @@ app.post('/pulse/chat',
       if (sess.turns.length > 6) sess.turns = sess.turns.slice(-6);
       _pulseSessions.set(sessKey, sess);
     }
-    res.json({ reply, spoken: _style === 'spoken' ? pulseTools.speakable(reply) : undefined, tools: trace, style: _style });
+    res.json({ reply, spoken: _style === 'spoken' ? pulseTools.speakable(reply) : undefined, tools: trace, actions, style: _style });
 
   } catch(e) {
     console.error('[/pulse/chat]', e);
@@ -12123,6 +12155,67 @@ const _pulseAudit = { run(userId, orgId, orgRole, action, resource, method, ip, 
     _auditWrite({ auth: { userId, orgId, orgRole }, path: resource, method, ip, headers: { 'user-agent': ua }, body: body ? { pulse: body } : null }, { statusCode: status }, action, error);
   } catch (_) {}
 } };
+// ── Pulse actions (Phase 3): proposals awaiting a yes, and undo records ──
+// Both live in memory on this instance: a proposal is good for 2 minutes, an undo for 10.
+// A restart forgets them, which fails safe — nothing runs without a fresh yes.
+const PROPOSAL_TTL_MS = 2 * 60 * 1000, UNDO_TTL_MS = 10 * 60 * 1000;
+function _tokenStore(ttl) {
+  const m = new Map();
+  const sweep = () => { const now = Date.now(); for (const [k, v] of m) if (v.expires < now) m.delete(k); };
+  setInterval(sweep, 60 * 1000).unref();
+  return {
+    add(v) { sweep(); const token = require('crypto').randomBytes(18).toString('base64url'); m.set(token, { ...v, expires: Date.now() + ttl }); return token; },
+    take(token) { sweep(); const v = m.get(token); if (v) m.delete(token); return v || null; },      // single use
+    peek(token) { sweep(); return m.get(token) || null; },
+  };
+}
+const _pulseProposals = _tokenStore(PROPOSAL_TTL_MS);
+const _pulseUndo = _tokenStore(UNDO_TTL_MS);
+function _pulseToolCtx(req) {
+  const t = (() => { try { return tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole); } catch (_) { return null; } })();
+  const role = { 'org:admin_auth': 'Admin', 'org:supplier_auth': 'Facility', 'org:client_auth': 'Client', 'org:api_auth': 'API' }[req.auth?.orgRole || ''] || 'User';
+  return { authorization: req.headers['authorization'] || '', client: curClient(), role, isInternal: !t || !t.org_type || t.org_type === 'internal',
+    isPartner: !!(t && t.org_type === 'partner'), today: todayChicagoISO(), userId: req.auth?.userId || null, timeoutMs: 12000 };
+}
+// Yes to a proposed action. The token is single-use, bound to the user who was asked, and the
+// tool runs with THIS request's token — so it is still the person's own permissions.
+app.post('/pulse/confirm', authenticateRequest, aiLimiter, async (req, res) => {
+  if (!aiAllowed(req, res)) return;
+  const token = String((req.body || {}).token || '');
+  const p = _pulseProposals.peek(token);
+  if (!p) return res.status(410).json({ error: 'expired', message: 'That request has expired or was already handled — ask Pulse again.' });
+  if (p.userId && p.userId !== (req.auth?.userId || null)) return res.status(403).json({ error: 'not_yours', message: 'Only the person Pulse asked can confirm this.' });
+  _pulseProposals.take(token);
+  const ctx = _pulseToolCtx(req);
+  if (p.client && ctx.client && p.client !== ctx.client) return res.status(409).json({ error: 'client_changed', message: 'The client selection changed since Pulse asked. Ask again.' });
+  const r = await pulseTools.runTool(p.tool, p.args, ctx);
+  _pulseAudit.run(ctx.userId || 'anonymous', req.auth?.orgId || null, req.auth?.orgRole || null, 'pulse_confirm_' + p.tool, '/pulse/confirm', 'POST', req.ip || '', req.headers['user-agent'] || '',
+    JSON.stringify({ client: ctx.client, args: p.args, receipt: r.result && r.result.receipt }).slice(0, 2000), r.ok ? 200 : 500, r.ok ? null : String(r.result && r.result.error || ''));
+  if (!r.ok) return res.status(422).json({ error: 'failed', message: String(r.result && r.result.error || 'The action failed.'), tool: p.tool });
+  const undo_token = r.result && r.result.undo ? _pulseUndo.add({ tool: p.tool, record: r.result.undo, userId: ctx.userId, client: ctx.client, receipt: r.result.receipt }) : null;
+  res.json({ ok: true, receipt: (r.result && r.result.receipt) || 'Done.', tool: p.tool, undo_token, undo_until: undo_token ? Date.now() + UNDO_TTL_MS : null });
+});
+// Cancel a proposal, so a stale token cannot be confirmed later from the same card.
+app.post('/pulse/cancel', authenticateRequest, (req, res) => {
+  const p = _pulseProposals.take(String((req.body || {}).token || ''));
+  if (p) _pulseAudit.run(req.auth?.userId || 'anonymous', req.auth?.orgId || null, req.auth?.orgRole || null, 'pulse_cancel_' + p.tool, '/pulse/cancel', 'POST', req.ip || '', req.headers['user-agent'] || '', JSON.stringify({ args: p.args }).slice(0, 2000), 200, null);
+  res.json({ ok: true, cancelled: !!p });
+});
+app.post('/pulse/undo', authenticateRequest, aiLimiter, async (req, res) => {
+  if (!aiAllowed(req, res)) return;
+  const token = String((req.body || {}).token || '');
+  const u = _pulseUndo.peek(token);
+  if (!u) return res.status(410).json({ error: 'expired', message: 'Undo is no longer available for that action (10-minute window).' });
+  if (u.userId && u.userId !== (req.auth?.userId || null)) return res.status(403).json({ error: 'not_yours', message: 'Only the person who did this can undo it.' });
+  _pulseUndo.take(token);
+  const ctx = _pulseToolCtx(req);
+  const r = await pulseTools.undoTool(u.tool, u.record, ctx);
+  _pulseAudit.run(ctx.userId || 'anonymous', req.auth?.orgId || null, req.auth?.orgRole || null, 'pulse_undo_' + u.tool, '/pulse/undo', 'POST', req.ip || '', req.headers['user-agent'] || '',
+    JSON.stringify({ client: ctx.client, undid: u.receipt }).slice(0, 2000), r.ok ? 200 : 500, r.ok ? null : String(r.result && r.result.error || ''));
+  if (!r.ok) return res.status(422).json({ error: 'failed', message: String(r.result && r.result.error || 'Could not undo.') });
+  res.json({ ok: true, receipt: (r.result && r.result.receipt) || 'Undone.' });
+});
+
 // ── Pulse voice (Phase 2): /pulse/transcribe, /pulse/speak, /pulse/voice/status ──
 // Vendor keys stay on the server; the browser only ever sees text and audio. See pulse_voice.js.
 require('./pulse_voice')({ app, db, authenticateRequest, aiLimiter, aiAllowed, audit: _pulseAudit, log: console });

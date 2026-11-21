@@ -2597,6 +2597,25 @@ module.exports = function mountConsignments(deps) {
     global.__cgReplanOpen = false;
   }
 
+  // ── One movement, with what tracking has seen of it ──
+  // Pulse's write tools read this before acting: the milestone states, and the raw tracking
+  // events so "confirm departure" can be refused when nothing shows the vessel left.
+  router.get('/:uid', authenticateRequest, auditLog('view_consignment'), (req, res) => {
+    try {
+      const uid = String(req.params.uid || '').trim();
+      const c = db.prepare('SELECT * FROM consignment WHERE consignment_uid = ? AND client_id = ?').get(uid, curClient());
+      if (!c) return res.status(404).json({ ok: false, error: 'No such consignment.' });
+      let events = [];
+      try {
+        events = db.prepare(`SELECT received_at, event, outcome FROM t49_event WHERE applied_to = ? AND event IS NOT NULL
+                             ORDER BY id DESC LIMIT 40`).all(uid).map(e => ({ at: e.received_at, event: e.event, outcome: e.outcome }));
+      } catch (_) { /* tracking tables absent */ }
+      res.json({ ok: true, consignment: shape(c), tracking: { events } });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  });
+
   router._internals = { computePlanned, refreshPlanned, shape, STAGES, DEFAULT_RULES, rulesFor, migrateWeek, clearLegacy, weekStatus, CUTOVER_WEEK,
     logEstimate, recordPorts, addViaPort, routeOf, statusOf, contentsFor, originFor, pulseTransit, weekFacts, verifySummary, plainSummary };
   return router;

@@ -135,6 +135,7 @@ module.exports = function makePulseTools(deps) {
         if (!r.ok) return { error: r.error };
         const c = r.data.consignment || r.data;
         const out = shapeMovement(c);
+        if (r.data.tracking) out.tracking = r.data.tracking;
         out.events = take((c.events || []).map(e => ({ at: String(e.at || '').slice(0, 16), kind: e.kind, text: e.text })), 12);
         out.notes = take((c.notes || []).map(n => ({ at: String(n.created_at || n.at || '').slice(0, 16), by: n.author || n.by || null, text: String(n.text || n.body || '').slice(0, 300) })), 8);
         return out;
@@ -272,14 +273,18 @@ module.exports = function makePulseTools(deps) {
     },
     {
       name: 'get_alerts',
-      description: 'Open alerts on movements: delivery date moved, milestone unconfirmed past its date, transit running on a guess. Each with the suggested action.',
-      input_schema: { type: 'object', properties: {} },
+      description: 'Open alerts on movements for a week: delivery date moved, milestone unconfirmed past its date, transit running on a guess. Each carries the uid, kind and signature needed to acknowledge it.',
+      input_schema: { type: 'object', properties: { week: { type: 'string', description: 'YYYY-MM-DD Monday, "W46", "this week" (default), "last week"' } } },
       tier: 'read', roles: ['admin', 'ops', 'client', 'partner'],
       async run(a, ctx) {
-        const r = await callRoute(ctx, 'GET', '/alerts');
+        const ws = resolveWeek(a.week || 'this week', ctx); if (!ws) return { error: 'could not read that week' };
+        const r = await callRoute(ctx, 'GET', `/alerts?week=${ws}`);
         if (!r.ok) return { error: r.error };
         const items = Array.isArray(r.data) ? r.data : (r.data.alerts || r.data.items || []);
-        return { count: items.length, alerts: take(items.map(x => ({ kind: x.kind || x.rule, reference: x.reference, week: x.week_start, iso: isoWeek(x.week_start), text: x.text || x.title, action: x.action || x.suggested_action || null, since: String(x.created_at || x.at || '').slice(0, 10) })), 30) };
+        const open = items.filter(x => !x.acknowledged_at);
+        return { week: ws, iso: isoWeek(ws), count: open.length, acknowledged: items.length - open.length,
+          alerts: take(open.map(x => ({ uid: x.consignment_uid, kind: x.kind, signature: x.signature, severity: x.severity, reference: x.reference,
+            text: x.headline || x.text || x.title, detail: x.detail || null, action: x.action || x.suggested_action || null })), 30) };
       },
     },
     {
@@ -372,7 +377,191 @@ module.exports = function makePulseTools(deps) {
         return { year: y, months, totals: r.data.totals || r.data.aggregate || null };
       },
     },
+    // ══════════════════════════════════════════════════════════════════════════════════════
+    // WRITE TOOLS (Phase 3). Each is a thin wrapper over the route a person would call from
+    // the screen, run as that person. `tier` decides what happens when the model asks for it:
+    //   auto    — runs at once; the receipt and an undo link go back to the user
+    //   confirm — nothing runs; the user sees "Pulse wants to: …" and must say yes
+    // `summary(args, pre)` is the sentence read back; `undo(record, ctx)` reverses a run.
+    // Admin only at launch (agreed 19 Nov). Adding a role is a one-word change per tool.
+    // ══════════════════════════════════════════════════════════════════════════════════════
+    {
+      name: 'add_note',
+      description: 'Add a short note to a movement (container or flight). The note shows on the Last Mile panel and in the weekly history. Use when someone says "note that…" or "make a note on…". Not for changing dates or statuses.',
+      input_schema: { type: 'object', properties: { movement: { type: 'string', description: 'container number, AWB, Zendesk ticket or movement uid' }, note: { type: 'string' } }, required: ['movement', 'note'] },
+      tier: 'auto', roles: ['admin'], write: true,
+      summary: (a, pre) => `Add a note to ${pre && pre.label || a.movement}: “${String(a.note || '').trim()}”`,
+      async run(a, ctx) {
+        const note = String(a.note || '').trim(); if (!note) return { error: 'note is empty' };
+        const mv = await resolveMovement(ctx, a.movement); if (mv.error) return mv;
+        const rc = await readReceipts(ctx, mv); if (rc.error) return rc;
+        const prev = rc.receipts[mv.uid] ? JSON.parse(JSON.stringify(rc.receipts[mv.uid])) : null;
+        const stamp = `[Pulse ${fmtShort(ctx.today)}] ${note}`;
+        const cur = String((prev && prev.last_mile_note) || '').trim();
+        rc.receipts[mv.uid] = { ...(prev || {}), container_id: (prev && prev.container_id) || mv.reference || '', last_mile_note: cur ? `${cur} | ${stamp}` : stamp, _updatedAt: new Date().toISOString() };
+        const w = await writeReceipts(ctx, mv, rc.receipts); if (w.error) return w;
+        return { ok: true, receipt: `Noted on ${mv.label}: “${note}”`, undo: { kind: 'receipt', uid: mv.uid, week: mv.week, facility: mv.facility, prev } };
+      },
+      undo: (rec, ctx) => restoreReceipt(ctx, rec),
+    },
+    {
+      name: 'confirm_milestone',
+      description: 'Confirm a movement stage happened on its planned date — only when Pinpoint already has evidence: tracking shows the vessel departed/arrived/was released, the origin stages that run to schedule, or a last-mile delivery already recorded. If there is no evidence the tool refuses and tells you to use amend_milestone with the date the person gives. Stages: packing_list_ready, origin_cleared, departed, arrived, dest_cleared, fc_receipt.',
+      input_schema: { type: 'object', properties: { movement: { type: 'string', description: 'container number, AWB, Zendesk ticket or uid' }, stage: { type: 'string', enum: ['packing_list_ready', 'origin_cleared', 'departed', 'arrived', 'dest_cleared', 'fc_receipt'] } }, required: ['movement', 'stage'] },
+      tier: 'auto', roles: ['admin'], write: true,
+      summary: (a, pre) => `Confirm ${STAGE_LABEL[a.stage] || a.stage} for ${pre && pre.label || a.movement} as planned`,
+      async run(a, ctx) {
+        const stage = String(a.stage || ''); if (!STAGE_LABEL[stage]) return { error: 'unknown stage' };
+        const mv = await resolveMovement(ctx, a.movement); if (mv.error) return mv;
+        const m = (mv.c.milestones || []).find(x => x.stage === stage) || {};
+        if (m.state && m.state !== 'assumed') return { error: `${STAGE_LABEL[stage]} for ${mv.label} is already recorded as ${m.state}${m.actual_at ? ' on ' + String(m.actual_at).slice(0, 10) : ''}`, already: true };
+        if (!mv.c.transit_confirmed) return { error: `${mv.label} has no carrier transit quote yet, so its planned dates are a guess; enter the details in Transit Movements first`, needs_confirmation: true };
+        const ev = await corroboration(ctx, mv, stage);
+        if (!ev) return { error: `No evidence in Pinpoint that ${STAGE_LABEL[stage]} happened for ${mv.label}. Ask the person for the date and use amend_milestone.`, needs_confirmation: true, hint: 'amend_milestone' };
+        const r = await callRoute(ctx, 'POST', `/consignments/${encodeURIComponent(mv.uid)}/milestone`, { stage, note: `Pulse: ${ev}` });
+        if (!r.ok) return { error: r.error };
+        const row = ((r.data.consignment || {}).milestones || []).find(x => x.stage === stage) || {};
+        return { ok: true, receipt: `Confirmed ${STAGE_LABEL[stage]} for ${mv.label} as ${fmtShort(row.actual_at || m.planned_at)} (${ev})`, undo: { kind: 'milestone', uid: mv.uid, stage, prev: { state: m.state || 'assumed', actual_at: m.actual_at || null, note: m.source_detail || null } } };
+      },
+      undo: (rec, ctx) => restoreMilestone(ctx, rec),
+    },
+    {
+      name: 'amend_milestone',
+      description: 'Record that a movement stage happened on a given date (confirming or correcting it) when a person states the date. The person must approve before it runs. Stages: packing_list_ready, origin_cleared, departed, arrived, dest_cleared, fc_receipt.',
+      input_schema: { type: 'object', properties: { movement: { type: 'string' }, stage: { type: 'string', enum: ['packing_list_ready', 'origin_cleared', 'departed', 'arrived', 'dest_cleared', 'fc_receipt'] }, date: { type: 'string', description: 'YYYY-MM-DD' }, note: { type: 'string' } }, required: ['movement', 'stage', 'date'] },
+      tier: 'confirm', roles: ['admin'], write: true,
+      summary: (a, pre) => `Record ${STAGE_LABEL[a.stage] || a.stage} for ${pre && pre.label || a.movement} as ${fmtShort(a.date)}${a.note ? ` (${a.note})` : ''}`,
+      async prepare(a, ctx) { const mv = await resolveMovement(ctx, a.movement); return mv.error ? mv : { label: mv.label, uid: mv.uid }; },
+      async run(a, ctx) {
+        const stage = String(a.stage || ''); if (!STAGE_LABEL[stage]) return { error: 'unknown stage' };
+        if (!ymdOk(a.date)) return { error: 'date must be YYYY-MM-DD' };
+        const mv = await resolveMovement(ctx, a.movement); if (mv.error) return mv;
+        const m = (mv.c.milestones || []).find(x => x.stage === stage) || {};
+        const r = await callRoute(ctx, 'POST', `/consignments/${encodeURIComponent(mv.uid)}/milestone`, { stage, actual_at: a.date, note: a.note ? `Pulse: ${a.note}` : 'Pulse: stated by user', clear: false });
+        if (!r.ok) return { error: r.error };
+        return { ok: true, receipt: `Recorded ${STAGE_LABEL[stage]} for ${mv.label} as ${fmtShort(a.date)}`, undo: { kind: 'milestone', uid: mv.uid, stage, prev: { state: m.state || 'assumed', actual_at: m.actual_at || null, note: m.source_detail || null } } };
+      },
+      undo: (rec, ctx) => restoreMilestone(ctx, rec),
+    },
+    {
+      name: 'mark_last_mile',
+      description: 'Record last-mile status for a movement: "scheduled" with the dock booking date and time, or "delivered" (received at the fulfilment centre). Use when someone says the dock is booked or the container has been delivered.',
+      input_schema: { type: 'object', properties: { movement: { type: 'string' }, status: { type: 'string', enum: ['scheduled', 'delivered'] }, when: { type: 'string', description: 'scheduled: YYYY-MM-DDTHH:MM local; delivered: YYYY-MM-DD or YYYY-MM-DDTHH:MM (default now)' }, note: { type: 'string' } }, required: ['movement', 'status'] },
+      tier: 'auto', roles: ['admin'], write: true,
+      summary: (a, pre) => a.status === 'delivered' ? `Mark ${pre && pre.label || a.movement} delivered${a.when ? ' on ' + fmtShort(a.when) : ''}` : `Mark ${pre && pre.label || a.movement} delivery scheduled for ${fmtWhen(a.when)}`,
+      async run(a, ctx) {
+        const status = String(a.status || '');
+        if (status === 'scheduled' && !/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/.test(String(a.when || ''))) return { error: 'scheduled needs when as YYYY-MM-DDTHH:MM' };
+        if (a.when && !/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/.test(String(a.when))) return { error: 'when must be YYYY-MM-DD or YYYY-MM-DDTHH:MM' };
+        const mv = await resolveMovement(ctx, a.movement); if (mv.error) return mv;
+        const rc = await readReceipts(ctx, mv); if (rc.error) return rc;
+        const prev = rc.receipts[mv.uid] ? JSON.parse(JSON.stringify(rc.receipts[mv.uid])) : null;
+        const now = localNow();
+        const base = { ...(prev || {}), container_id: (prev && prev.container_id) || mv.reference || '', _updatedAt: new Date().toISOString() };
+        if (a.note) base.last_mile_note = [String((prev && prev.last_mile_note) || '').trim(), `[Pulse ${fmtShort(ctx.today)}] ${a.note}`].filter(Boolean).join(' | ');
+        let receipt;
+        if (status === 'scheduled') {
+          const when = String(a.when).length === 10 ? a.when + 'T09:00' : a.when;
+          Object.assign(base, { scheduled_for: when, scheduled_local: (prev && prev.scheduled_local) || now, rescheduled_local: prev && prev.scheduled_for ? now : undefined, status: 'Scheduled' });
+          receipt = `${prev && prev.scheduled_for ? 'Rebooked' : 'Scheduled'} delivery of ${mv.label} for ${fmtWhen(when)}`;
+        } else {
+          const when = a.when ? (String(a.when).length === 10 ? a.when + 'T' + now.slice(11, 16) : a.when) : now;
+          Object.assign(base, { delivery_local: when, status: 'Delivered', pod_received: true });
+          receipt = `Marked ${mv.label} delivered ${fmtShort(when)}`;
+        }
+        rc.receipts[mv.uid] = base;
+        const w = await writeReceipts(ctx, mv, rc.receipts); if (w.error) return w;
+        return { ok: true, receipt, undo: { kind: 'receipt', uid: mv.uid, week: mv.week, facility: mv.facility, prev } };
+      },
+      undo: (rec, ctx) => restoreReceipt(ctx, rec),
+    },
+    {
+      name: 'acknowledge_alert',
+      description: 'Acknowledge an open alert (from get_alerts) so it stops showing as open: someone has dealt with it. Needs the alert uid, kind and signature exactly as get_alerts returned them.',
+      input_schema: { type: 'object', properties: { uid: { type: 'string' }, kind: { type: 'string' }, signature: { type: 'string' } }, required: ['uid', 'kind', 'signature'] },
+      tier: 'auto', roles: ['admin'], write: true,
+      summary: (a, pre) => `Acknowledge the ${ALERT_LABEL[a.kind] || a.kind} alert on ${pre && pre.label || a.uid}`,
+      async run(a, ctx) {
+        const uid = String(a.uid || '').trim(), kind = String(a.kind || ''), sig = String(a.signature || '');
+        if (!uid || !kind) return { error: 'uid and kind required' };
+        const r = await callRoute(ctx, 'POST', '/alerts/ack', { consignment_uid: uid, kind, signature: sig });
+        if (!r.ok) return { error: r.error };
+        let label = uid; try { const mv = await resolveMovement(ctx, uid); if (!mv.error) label = mv.label; } catch (_) {}
+        return { ok: true, receipt: `Acknowledged the ${ALERT_LABEL[kind] || kind} alert on ${label}`, undo: { kind: 'alert', uid, alert_kind: kind, signature: sig } };
+      },
+      async undo(rec, ctx) {
+        const r = await callRoute(ctx, 'POST', '/alerts/ack', { consignment_uid: rec.uid, kind: rec.alert_kind, signature: rec.signature, clear: true });
+        return r.ok ? { ok: true, receipt: 'Alert is open again' } : { error: r.error };
+      },
+    },
   ];
+
+  // ── Write-tool helpers ──
+  const STAGE_LABEL = { packing_list_ready: 'packing list ready', origin_cleared: 'origin cleared', departed: 'departure', arrived: 'arrival', dest_cleared: 'destination clearance', fc_receipt: 'FC receipt' };
+  const ALERT_LABEL = { fc_moved: 'delivery date moved', unconfirmed: 'milestone unconfirmed', no_quote: 'no carrier quote' };
+  const fmtShort = (ymd) => { const s = String(ymd || '').slice(0, 10); const d = new Date(s + 'T00:00:00Z'); return isNaN(d) ? s : d.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' }); };
+  const fmtWhen = (dt) => { const s = String(dt || ''); return s.length > 10 ? `${fmtShort(s)} ${s.slice(11, 16)}` : fmtShort(s); };
+  const localNow = () => { const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Sydney', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date()); const g = (t) => (p.find(x => x.type === t) || {}).value; return `${g('year')}-${g('month')}-${g('day')}T${g('hour') === '24' ? '00' : g('hour')}:${g('minute')}`; };
+
+  // A movement named any way a person would: uid, container, AWB, ticket. One match or an
+  // error that lists the candidates — a write must never guess between two containers.
+  async function resolveMovement(ctx, text) {
+    const q = String(text || '').trim(); if (!q) return { error: 'which movement? give a container number, AWB, ticket or uid' };
+    const get = async (uid) => { const r = await callRoute(ctx, 'GET', `/consignments/${encodeURIComponent(uid)}`); return r.ok ? r.data : null; };
+    let d = /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(q) || /^cg[_-]/i.test(q) ? await get(q) : null;
+    if (!d) {
+      const f = await callRoute(ctx, 'GET', `/consignments/find?q=${encodeURIComponent(q)}`);
+      if (!f.ok) return { error: f.error };
+      let hits = Array.isArray(f.data) ? f.data : (f.data.hits || f.data.results || []);
+      const exact = hits.filter(h => String(h.reference || '').trim().toLowerCase() === q.toLowerCase());
+      if (exact.length) hits = exact;
+      if (!hits.length) return { error: `no movement matches “${q}” in the last 10 weeks` };
+      if (hits.length > 1) return { error: `“${q}” matches ${hits.length} movements; say which`, candidates: take(hits.map(h => ({ uid: h.uid || h.consignment_uid, reference: h.reference, mode: h.mode, week: h.week_start, iso: isoWeek(h.week_start) })), 6) };
+      d = await get(hits[0].uid || hits[0].consignment_uid);
+      if (!d) return { error: 'could not load that movement' };
+    }
+    const c = d.consignment || d;
+    return { uid: c.consignment_uid, c, tracking: d.tracking || null, reference: c.reference || '', week: c.week_start, facility: c.facility || '', mode: c.mode,
+      label: c.reference ? `${c.mode === 'Air' ? 'flight' : 'container'} ${c.reference}` : `the unadvised ${String(c.mode || '').toLowerCase()} movement in ${isoWeek(c.week_start)}` };
+  }
+  // Evidence that a stage happened, or null. The rule agreed 21 Nov: Auto-tier confirms only
+  // where tracking (or a recorded delivery) shows it; the two origin stages run to schedule.
+  async function corroboration(ctx, mv, stage) {
+    if (stage === 'packing_list_ready' || stage === 'origin_cleared') return 'origin schedule';
+    const evs = ((mv.tracking && mv.tracking.events) || []).map(e => String(e.event || ''));
+    const has = (re) => evs.some(e => re.test(e));
+    if (stage === 'departed' && has(/vessel_departed$/)) return 'tracking shows the vessel departed';
+    if (stage === 'arrived' && has(/vessel_arrived$|vessel_discharged$/)) return 'tracking shows the vessel arrived';
+    if (stage === 'dest_cleared' && has(/\.available$|full_out$/)) return 'tracking shows the container released';
+    if (stage === 'fc_receipt') { const rc = await readReceipts(ctx, mv); const r = !rc.error && rc.receipts[mv.uid]; if (r && r.delivery_local) return `delivered ${fmtShort(r.delivery_local)} per last mile`; }
+    return null;
+  }
+  async function readReceipts(ctx, mv) {
+    if (!mv.facility) return { error: `${mv.label} has no facility recorded, so its last-mile record cannot be found` };
+    const r = await callRoute(ctx, 'GET', `/flow/week/${mv.week}?facility=${encodeURIComponent(mv.facility)}`);
+    if (!r.ok) return { error: r.error };
+    const data = (r.data && r.data.data) || {};
+    const receipts = (data.lastmile_receipts && typeof data.lastmile_receipts === 'object') ? data.lastmile_receipts : {};
+    return { receipts, data };
+  }
+  async function writeReceipts(ctx, mv, receipts) {
+    const r = await callRoute(ctx, 'POST', `/flow/week/${mv.week}?facility=${encodeURIComponent(mv.facility)}`, { lastmile_receipts: receipts });
+    return r.ok ? { ok: true } : { error: r.error };
+  }
+  async function restoreReceipt(ctx, rec) {
+    const mv = { uid: rec.uid, week: rec.week, facility: rec.facility, label: rec.uid };
+    const rc = await readReceipts(ctx, mv); if (rc.error) return rc;
+    if (rec.prev) rc.receipts[rec.uid] = rec.prev; else delete rc.receipts[rec.uid];
+    const w = await writeReceipts(ctx, mv, rc.receipts); if (w.error) return w;
+    return { ok: true, receipt: 'Put the last-mile record back as it was' };
+  }
+  async function restoreMilestone(ctx, rec) {
+    const body = rec.prev && rec.prev.state !== 'assumed' && rec.prev.actual_at
+      ? { stage: rec.stage, actual_at: rec.prev.actual_at, note: rec.prev.note || undefined }
+      : { stage: rec.stage, clear: true };
+    const r = await callRoute(ctx, 'POST', `/consignments/${encodeURIComponent(rec.uid)}/milestone`, body);
+    return r.ok ? { ok: true, receipt: body.clear ? `${STAGE_LABEL[rec.stage]} is back to planned (unconfirmed)` : `${STAGE_LABEL[rec.stage]} is back to ${fmtShort(rec.prev.actual_at)}` } : { error: r.error };
+  }
 
   // Week text → Monday. Accepts a date, "W46", "this week", "last week".
   function resolveWeek(text, ctx) {
@@ -446,5 +635,14 @@ module.exports = function makePulseTools(deps) {
       .replace(/[*_#`>]/g, '');
   }
 
-  return { TOOLS, toolsFor, anthropicTools, runTool, resolveWeek, isoWeek, mondayOf, SPOKEN_GUIDE, speakable, callRoute };
+  const findTool = (name, ctx) => toolsFor(ctx).find(x => x.name === name) || null;
+  // Undo a previous run, through the tool that made it.
+  async function undoTool(name, record, ctx) {
+    const t = findTool(name, ctx);
+    if (!t || typeof t.undo !== 'function') return { ok: false, result: { error: 'this action cannot be undone' } };
+    const started = Date.now();
+    try { const out = await t.undo(record, ctx); return { ok: !out || !out.error, result: out, ms: Date.now() - started }; }
+    catch (e) { return { ok: false, result: { error: String(e.message || e) }, ms: Date.now() - started }; }
+  }
+  return { TOOLS, toolsFor, anthropicTools, runTool, undoTool, findTool, resolveWeek, isoWeek, mondayOf, SPOKEN_GUIDE, speakable, callRoute };
 };
