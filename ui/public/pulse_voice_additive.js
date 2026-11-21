@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Pulse voice v1 (Phase 2) ──
+/* ── VelOzity Pinpoint — Pulse voice v2 (Phase 2) ──
    Hands-free Pulse. The Spoken switch on the Pulse bar (from pulse_agent_additive.js) now does
    what its name says: on, Pulse listens through the microphone and answers out loud; off, it is
    the typed assistant it always was. There are no buttons to hold.
@@ -20,6 +20,13 @@
    Tap the status pill while Pulse is talking to stop it. Say "say that again" to hear the last
    answer once more without asking the model.
 
+   THE PANEL STAYS OUT OF THE WAY
+   Voice never opens the chat panel — in a meeting the screen behind it is what people are
+   looking at. Heard questions and spoken answers are still written to the panel for whoever
+   opens it later; meanwhile the pill on the bar shows the first line of each answer for a few
+   seconds, and tapping it opens the panel at the full text. Typing still opens the panel, as it
+   always has, and the #meet room laptop keeps it open on purpose.
+
    FALLBACKS
    If the server has no transcription key it says so once (503) and the browser's own speech
    recognition takes over; if it has no voice key, the browser's own voice reads the answer.
@@ -33,13 +40,14 @@
   const BRAND = '#990033', MID = '#6E6E73', LIGHT = '#AEAEB2', DARK = '#1C1C1E', OK = '#1F7A4D', BAD = '#B42318';
   const WAKE = /^\s*(?:hey|hi|ok|okay|hello)?[\s,]*(?:pulse|paulse|pals|pulls|pause)\b[\s,.:!?-]*/i;   // what transcribers make of "Pulse"
   const AGAIN = /^(?:pulse[\s,]*)?(?:say that again|repeat that|say again|what was that|pardon|come again)\W*$/i;
-  const MIN_CLIP_MS = 450, MAX_CLIP_MS = 20000, AFTER_SPEAK_MS = 350;
+  const MIN_CLIP_MS = 450, MAX_CLIP_MS = 20000, AFTER_SPEAK_MS = 350, SNIPPET_MS = 15000;
 
   const css = `
     .pv-mode{display:none;align-items:center;border:.5px solid rgba(0,0,0,.14);border-radius:8px;overflow:hidden;font-size:10.5px;color:${MID};margin-right:8px;user-select:none;}
     .pv-mode span{padding:3px 8px;cursor:pointer;line-height:1;} .pv-mode span.on{background:${BRAND};color:#fff;}
     .pv-mode.show{display:inline-flex;}
-    .pv-pill{display:none;align-items:center;gap:7px;font-size:11px;color:${MID};padding:3px 10px 3px 7px;border-radius:12px;border:.5px solid rgba(0,0,0,.1);background:#fff;white-space:nowrap;margin-right:8px;max-width:260px;overflow:hidden;text-overflow:ellipsis;}
+    .pv-pill{display:none;align-items:center;gap:7px;font-size:11px;color:${MID};padding:3px 10px 3px 7px;border-radius:12px;border:.5px solid rgba(0,0,0,.1);background:#fff;white-space:nowrap;margin-right:8px;max-width:340px;overflow:hidden;text-overflow:ellipsis;}
+    .pv-pill .pv-txt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;} .pv-pill.snippet{cursor:pointer;color:${DARK};}
     .pv-pill.show{display:inline-flex;}
     .pv-pill .pv-dot{width:8px;height:8px;border-radius:50%;background:${LIGHT};flex:none;transition:transform .12s;}
     .pv-pill.listening .pv-dot{background:${OK};} .pv-pill.hearing .pv-dot{background:${OK};transform:scale(1.5);}
@@ -54,7 +62,7 @@
   const V = window._pulseVoice = {
     on: false, mode: 'solo', state: 'off', detail: '', caps: null,
     stream: null, ctx: null, analyser: null, src: null, timer: null, rec: null, chunks: [], clipStart: 0,
-    busy: false, audio: null, lastSpoken: '', useWebSpeech: false, recog: null, pausedUntil: 0, lastError: '',
+    busy: false, audio: null, lastSpoken: '', useWebSpeech: false, recog: null, pausedUntil: 0, lastError: '', snippet: '', snippetTimer: null,
     log: [],
   };
   try { V.mode = localStorage.getItem('pulse_voice_mode') === 'meeting' ? 'meeting' : 'solo'; } catch (_) {}
@@ -83,7 +91,7 @@
     modeEl.querySelectorAll('span').forEach(s => { s.onclick = () => setMode(s.dataset.m); });
     pill = document.createElement('div'); pill.id = 'pv-pill'; pill.className = 'pv-pill';
     pill.innerHTML = '<span class="pv-dot"></span><span class="pv-txt"></span>';
-    pill.onclick = () => { if (V.state === 'speaking') stopSpeaking(); };
+    pill.onclick = () => { if (V.state === 'speaking') stopSpeaking(); else if (pill.classList.contains('snippet')) openPanel(); };
     spk.insertAdjacentElement('afterend', modeEl); spk.insertAdjacentElement('afterend', pill);
     paintMode();
     // The Spoken switch is owned by pulse_agent_additive; follow its on/off class.
@@ -97,6 +105,8 @@
     if (V.on && V.state === 'listening') setState('listening');
   }
   function setState(s, detail) {
+    if (s === 'listening' && !detail && V.snippet && V.snippetTimer) detail = V.snippet;   // keep the last answer visible for its 15 s
+    if (s !== 'listening' && s !== 'off') { if (s !== 'hearing') { clearTimeout(V.snippetTimer); V.snippetTimer = null; V.snippet = ''; } }
     V.state = s; V.detail = detail || '';
     const label = {
       off: '', starting: 'Starting microphone…',
@@ -104,7 +114,7 @@
       hearing: 'Hearing you…', transcribing: 'Working out what you said…', thinking: 'Thinking…', speaking: 'Speaking — tap to stop',
       error: detail || 'Voice unavailable', paused: detail || 'Paused',
     }[s] || s;
-    if (pill) { pill.className = 'pv-pill ' + s + (V.on ? ' show' : ''); pill.querySelector('.pv-txt').textContent = (detail && s !== 'error' && s !== 'paused') ? detail : label; pill.title = detail || label; }
+    if (pill) { pill.className = 'pv-pill ' + s + (V.on ? ' show' : '') + (s === 'listening' && detail && detail === V.snippet ? ' snippet' : ''); pill.querySelector('.pv-txt').textContent = (detail && s !== 'error' && s !== 'paused') ? detail : label; pill.title = detail || label; }
     if (modeEl) modeEl.classList.toggle('show', V.on);
     window.dispatchEvent(new CustomEvent('pulse:voice', { detail: { state: s, detail: V.detail, mode: V.mode } }));
   }
@@ -263,7 +273,10 @@
     window._pulseStyle = 'spoken';
     input.value = text;
     V.busy = true; setState('thinking');
-    const p = window.pulseSend();
+    // pulseSend opens the panel for typed questions; a heard one must not. The call is
+    // synchronous up to its first await, so the swap only covers that call.
+    const tp = window.togglePulse; window.togglePulse = function () {};
+    let p; try { p = window.pulseSend(); } finally { window.togglePulse = tp; }
     // Mark the user bubble as heard rather than typed.
     setTimeout(() => { const chat = document.getElementById('pulse-chat'); const u = chat && chat.querySelectorAll('.pulse-msg.user'); if (u && u.length) u[u.length - 1].classList.add('pv-heard'); }, 0);
     try { await p; } catch (_) {}
@@ -282,7 +295,7 @@
     V.lastSpoken = text;
     stopSpeaking(true);
     V.busy = true; setState('speaking');
-    const done = () => { V.audio = null; V.busy = false; V.pausedUntil = Date.now() + AFTER_SPEAK_MS; if (V.on) setState('listening'); else setState('off'); };
+    const done = () => { V.audio = null; V.busy = false; V.pausedUntil = Date.now() + AFTER_SPEAK_MS; if (V.on) showSnippet(text); else setState('off'); };
     if (!V.caps) { try { const r = await get('/pulse/voice/status'); V.caps = r.ok ? await r.json() : { stt: false, tts: false }; } catch (_) { V.caps = { stt: false, tts: false }; } }
     if (V.caps.tts) {
       try {
@@ -300,6 +313,17 @@
       } catch (e) { console.warn('[Pulse voice] speak:', e.message || e); }
     }
     speakWithBrowser(text, done);
+  }
+  // After an answer, with the panel closed, the bar shows the first line of it for a while.
+  function panelOpen() { const p = document.getElementById('pulse-panel'); return !!(p && p.classList.contains('open')); }
+  function openPanel() { if (typeof window.togglePulse === 'function') window.togglePulse(true); const c = document.getElementById('pulse-chat'); if (c) c.scrollTop = c.scrollHeight; clearSnippet(); }
+  function clearSnippet() { clearTimeout(V.snippetTimer); V.snippetTimer = null; V.snippet = ''; if (V.on && V.state === 'listening') setState('listening'); }
+  function showSnippet(text) {
+    if (panelOpen() || !text) { setState('listening'); return; }
+    const first = String(text).split(/(?<=[.!?])\s+/)[0] || text;
+    V.snippet = first.length > 72 ? first.slice(0, 70).replace(/\s\S*$/, '') + '…' : first;
+    setState('listening', V.snippet);
+    clearTimeout(V.snippetTimer); V.snippetTimer = setTimeout(clearSnippet, SNIPPET_MS);
   }
   function speakWithBrowser(text, done) {
     if (!window.speechSynthesis) { done(); return; }
@@ -326,7 +350,7 @@
     if (spk && !spk.classList.contains('on')) spk.click();    // the agent module flips style; our observer starts the mic
   }
 
-  Object.assign(V, { start, stop, setMode, handleUtterance, speak, stopSpeaking, mount });
+  Object.assign(V, { start, stop, setMode, handleUtterance, speak, stopSpeaking, mount, openPanel, panelOpen });
 
   // Mount once the agent module has put the Spoken switch on the bar (it retries for ~10 s).
   let tries = 0; const t = setInterval(() => { if (mount()) { clearInterval(t); setTimeout(meetRoute, 300); } else if (++tries > 60) clearInterval(t); }, 250);
