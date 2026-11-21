@@ -26,6 +26,9 @@
   // Endpoints that reach the model. Matched on the path, so query strings do not matter.
   const AI_PATHS = [
     '/pulse/chat',
+    '/pulse/transcribe',                      // Pulse voice (Phase 2): speech in, speech out
+    '/pulse/speak',
+    '/pulse/voice/status',
     '/ai/pulse',
     '/finance/insights',
     '/report/cost-utilisation/insights',
