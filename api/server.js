@@ -78,6 +78,7 @@ const PARTNER_ALLOW_EXACT = new Set([
   '/health', '/healthz',
 ]);
 const PARTNER_ALLOW_PREFIX = [
+  '/pulse/',                 // Pulse itself; what it can look up for a partner is gated tool by tool
   '/partner/',              // anything built specifically for partners
   '/uid-labels/',           // the warehouse (Kerry Shenzhen) prints the UID labels
 ];
@@ -1723,6 +1724,8 @@ app.post('/pulse/chat',
     if (!messages || !Array.isArray(messages) || !messages.length) {
       return res.status(400).json({ error: 'messages array required' });
     }
+    // style: 'spoken' writes for the ear (voice modes); default writes for the screen.
+    const _style = String(req.body?.style || '').toLowerCase() === 'spoken' ? 'spoken' : 'text';
 
     const userRole = req.auth?.orgRole || '';
     const roleLabel = {
@@ -1753,7 +1756,7 @@ app.post('/pulse/chat',
       lines.push('Stock consumption is DERIVED, not counted: each envelope uses a fixed number of sticks split across flavours, and true per-flavour usage is only established at each stock count. Treat on-hand figures as estimates between counts.');
       lines.push('You have aggregate data only. You do NOT have order-level detail, customer names or delivery addresses, and must never speculate about them.');
       lines.push('Be concise and direct. Lead with numbers. Do not hedge when the data is clear.');
-      lines.push('You are read-only — guide users to the UI for any changes (e.g. "Create a batch in VAS Ops → Fulfilment → Assembly").');
+      lines.push('You can look things up with the tools you have been given. You cannot change anything yet — guide users to the UI for changes (e.g. "Create a batch in VAS Ops → Fulfilment → Assembly").');
       lines.push('');
     } else {
       lines.push('You are Pulse, the AI operations assistant for VelOzity Pinpoint — a real-time warehouse UID operations platform.');
@@ -1762,7 +1765,8 @@ app.post('/pulse/chat',
       lines.push('You help the VelOzity operations team understand warehouse performance across receiving, VAS processing, transit, and FC delivery.');
       lines.push('You have the last 4 weeks of receiving and VAS detail below, and the last 30 days of transit (containers and flights) from Pinpoint. Use them to answer specifically and accurately.');
       lines.push('Be concise and direct. Lead with numbers. Do not hedge when the data is clear.');
-      lines.push('You are read-only — guide users to the UI for any changes (e.g. "Update that in Week Hub → Transit & Clearing").');
+      lines.push('You have TOOLS. The context below is a starting picture only; when a question names a week, a container, an AWB, a ticket, a PO or a supplier, or asks for a figure, CALL THE TOOL and answer from its result rather than from memory of the context. Prefer one well-chosen tool call over several. Say when a tool returned nothing.');
+      lines.push('You cannot change anything yet — for changes, guide users to the UI (e.g. "Confirm that in Transit Movements").');
       lines.push('');
     }
 
@@ -1895,30 +1899,83 @@ app.post('/pulse/chat',
     const staticBlock  = staticLines.join('\n').trim();
     const dynamicBlock = dynamicLines.join('\n').trim();
 
-    const anthropic = getAnthropic();
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1200,
-      system: [
-        // Static ops data — cached for the session (content identical across turns)
-        ...(staticBlock ? [{
-          type: 'text',
-          text: staticBlock,
-          cache_control: { type: 'ephemeral' }
-        }] : []),
-        // Dynamic context — small, changes per request, not cached
-        ...(dynamicBlock ? [{
-          type: 'text',
-          text: dynamicBlock,
-        }] : []),
-      ],
-      messages: messages.map(m => ({ role: m.role, content: m.content })),
-    }, {
-      headers: { 'anthropic-beta': 'prompt-caching-2024-07-31' }
-    });
+    // ── Tool context: who is asking, as what, for which client ──
+    // Pulse's tools call Pinpoint's own routes with this user's token, so the route guards
+    // decide what each call may see. The tool LIST is also filtered here by org type and
+    // role, so a client session is never shown a finance tool to begin with.
+    const _tenant = (() => { try { return tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole); } catch (_) { return null; } })();
+    const toolCtx = {
+      authorization: req.headers['authorization'] || '',
+      client: curClient(),
+      role: roleLabel,
+      isInternal: !_tenant || !_tenant.org_type || _tenant.org_type === 'internal',
+      isPartner: !!(_tenant && _tenant.org_type === 'partner'),
+      today: todayChicagoISO(),
+      userId: req.auth?.userId || null,
+      timeoutMs: 12000,
+    };
+    const toolDefs = pulseTools.anthropicTools(toolCtx);
+    const sysBlocks = [
+      ...(staticBlock ? [{ type: 'text', text: staticBlock, cache_control: { type: 'ephemeral' } }] : []),
+      ...(dynamicBlock ? [{ type: 'text', text: dynamicBlock }] : []),
+      ...(_style === 'spoken' ? [{ type: 'text', text: pulseTools.SPOKEN_GUIDE }] : []),
+    ];
 
-    const reply = response.content.find(b => b.type === 'text')?.text || 'No response.';
-    res.json({ reply });
+    // Session memory: the browser sends the visible thread; the server keeps the tool
+    // results of recent turns so "and the other one?" has something to refer to. Keyed by
+    // user + client, kept for the day, capped so it cannot grow without bound.
+    const sessKey = `${toolCtx.userId || 'anon'}|${toolCtx.client}|${toolCtx.today}`;
+    const sess = _pulseSessions.get(sessKey) || { turns: [] };
+    const convo = messages.map(m => ({ role: m.role, content: m.content }));
+    // Replay the last few tool exchanges ahead of the newest user message, so the model can
+    // see what it looked up previously without the browser having to carry it.
+    if (sess.turns.length && convo.length > 1) {
+      const priorTools = sess.turns.slice(-3).flatMap(t => t.blocks);
+      convo.splice(convo.length - 1, 0, ...priorTools);
+    }
+
+    const anthropic = getAnthropic();
+    const MAX_ROUNDS = 6;
+    const trace = [];                       // what Pulse looked up, shown in the UI
+    const turnBlocks = [];                  // this turn's tool exchange, kept for the session
+    let reply = null, stop = null;
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      const response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: _style === 'spoken' ? 400 : 1200,
+        system: sysBlocks,
+        tools: toolDefs,
+        messages: convo,
+      }, { headers: { 'anthropic-beta': 'prompt-caching-2024-07-31' } });
+      stop = response.stop_reason;
+      const toolUses = response.content.filter(b => b.type === 'tool_use');
+      if (stop !== 'tool_use' || !toolUses.length) {
+        reply = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim() || 'No response.';
+        break;
+      }
+      // Run every tool the model asked for in this round, in parallel, each audited.
+      const results = await Promise.all(toolUses.map(async (tu) => {
+        const r = await pulseTools.runTool(tu.name, tu.input, toolCtx);
+        trace.push({ tool: tu.name, args: tu.input, ok: r.ok, ms: r.ms });
+        try {
+          _pulseAudit.run(req.auth?.userId || 'anonymous', req.auth?.orgId || null, req.auth?.orgRole || null,
+            'pulse_tool_' + tu.name, '/pulse/chat', 'TOOL', req.ip || '', 'pulse', JSON.stringify({ client: toolCtx.client, args: tu.input }).slice(0, 2000), r.ok ? 200 : 500, r.ok ? null : String(r.result && r.result.error || 'failed'));
+        } catch (_) {}
+        return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(r.result), is_error: !r.ok };
+      }));
+      const assistantBlocks = response.content.map(b => b.type === 'tool_use' ? { type: 'tool_use', id: b.id, name: b.name, input: b.input } : { type: 'text', text: b.text });
+      convo.push({ role: 'assistant', content: assistantBlocks });
+      convo.push({ role: 'user', content: results });
+      turnBlocks.push({ role: 'assistant', content: assistantBlocks }, { role: 'user', content: results });
+    }
+    if (reply === null) reply = 'I looked that up several ways and could not settle on an answer — try a narrower question.';
+
+    if (turnBlocks.length) {
+      sess.turns.push({ at: Date.now(), blocks: turnBlocks });
+      if (sess.turns.length > 6) sess.turns = sess.turns.slice(-6);
+      _pulseSessions.set(sessKey, sess);
+    }
+    res.json({ reply, spoken: _style === 'spoken' ? pulseTools.speakable(reply) : undefined, tools: trace, style: _style });
 
   } catch(e) {
     console.error('[/pulse/chat]', e);
@@ -12049,6 +12106,24 @@ const stockStatusReport = require('./stock_status_report');
 // Terminal49 writes the two milestones a carrier can actually observe — departure and
 // arrival — and revises the planned arrival. It never touches the quoted transit, or a stage
 // a person has already confirmed.
+// ── Pulse tools (agent loop support) ──
+// Tools run through Pinpoint's own routes on this process, as the caller. See pulse_tools.js.
+const pulseTools = require('./pulse_tools')({ port: PORT, log: console });
+const _pulseSessions = new Map();           // user|client|day → recent tool exchanges
+setInterval(() => {                         // forget yesterday's sessions
+  const today = todayChicagoISO();
+  for (const k of _pulseSessions.keys()) if (!k.endsWith('|' + today)) _pulseSessions.delete(k);
+}, 60 * 60 * 1000).unref();
+// Tool calls are written to the same audit log as route calls, through the audit module
+// (it keeps its own database file), so one query shows what a person did and what Pulse did
+// on their behalf.
+const { logAudit: _auditWrite } = require('./middleware/auditLog');
+const _pulseAudit = { run(userId, orgId, orgRole, action, resource, method, ip, ua, body, status, error) {
+  try {
+    _auditWrite({ auth: { userId, orgId, orgRole }, path: resource, method, ip, headers: { 'user-agent': ua }, body: body ? { pulse: body } : null }, { statusCode: status }, action, error);
+  } catch (_) {}
+} };
+
 const consignmentRoutes = require('./consignment_routes')({
   express, db, authenticateRequest, requireRole, auditLog, curClient,
   // Transit Movements: client notifications go out through the same Resend sender as the
