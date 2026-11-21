@@ -12123,6 +12123,9 @@ const _pulseAudit = { run(userId, orgId, orgRole, action, resource, method, ip, 
     _auditWrite({ auth: { userId, orgId, orgRole }, path: resource, method, ip, headers: { 'user-agent': ua }, body: body ? { pulse: body } : null }, { statusCode: status }, action, error);
   } catch (_) {}
 } };
+// ── Pulse voice (Phase 2): /pulse/transcribe, /pulse/speak, /pulse/voice/status ──
+// Vendor keys stay on the server; the browser only ever sees text and audio. See pulse_voice.js.
+require('./pulse_voice')({ app, db, authenticateRequest, aiLimiter, aiAllowed, audit: _pulseAudit, log: console });
 
 const consignmentRoutes = require('./consignment_routes')({
   express, db, authenticateRequest, requireRole, auditLog, curClient,
