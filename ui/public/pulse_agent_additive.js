@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Pulse agent UI v2 ──
+/* ── VelOzity Pinpoint — Pulse agent UI v3 ──
    Pulse now looks things up through tools before it answers. This module shows that work
    in the panel, adds a Spoken toggle, and renders the proposed-action card the write tools
    will send in Phase 3. It wraps the existing pulseSend() in index.html rather than
@@ -48,6 +48,7 @@
     get_receiving: 'receiving', get_vas_progress: 'VAS progress', get_last_mile: 'last mile', get_uid_labels: 'UID labels', get_alerts: 'alerts',
     get_air_quotes: 'air quotes', get_non_compliance: 'non-compliance', get_ops_summary: 'ops summary', list_weeks: 'weeks', get_invoices: 'invoices', get_pl: 'P&L',
     add_note: 'note added', confirm_milestone: 'milestone confirmed', amend_milestone: 'milestone date', mark_last_mile: 'last mile', acknowledge_alert: 'alert acknowledged',
+    create_movement: 'new movement', amend_movement: 'movement changed', issue_extra_labels: 'extra labels', set_department_format: 'department format', move_po: 'PO moved',
   };
   const isoOf = (ymd) => { const d = new Date(String(ymd || '').slice(0, 10) + 'T00:00:00Z'); if (isNaN(d)) return ''; const day = (d.getUTCDay() + 6) % 7; d.setUTCDate(d.getUTCDate() - day + 3); const ft = new Date(Date.UTC(d.getUTCFullYear(), 0, 4)); return 'W' + (1 + Math.round(((d - ft) / 86400000 - 3 + ((ft.getUTCDay() + 6) % 7)) / 7)); };
   const argHint = (t) => {
