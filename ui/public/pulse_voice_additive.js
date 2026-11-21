@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Pulse voice v2 (Phase 2) ──
+/* ── VelOzity Pinpoint — Pulse voice v3 (Phase 2 + spoken confirmations) ──
    Hands-free Pulse. The Spoken switch on the Pulse bar (from pulse_agent_additive.js) now does
    what its name says: on, Pulse listens through the microphone and answers out loud; off, it is
    the typed assistant it always was. There are no buttons to hold.
@@ -27,6 +27,13 @@
    seconds, and tapping it opens the panel at the full text. Typing still opens the panel, as it
    always has, and the #meet room laptop keeps it open on purpose.
 
+   SAYING YES (Phase 3)
+   When Pulse proposes an action it asks aloud ("Shall I record arrival for M S K U… as the
+   sixteenth?") and then listens for an answer for 15 seconds (25 in Meeting mode, where the
+   name is not needed for the reply). "Yes", "do it", "go ahead", "confirm" runs it and the
+   receipt is read back; "no", "cancel", silence or anything unclear cancels. The on-screen
+   card still works as a tap at any point.
+
    FALLBACKS
    If the server has no transcription key it says so once (503) and the browser's own speech
    recognition takes over; if it has no voice key, the browser's own voice reads the answer.
@@ -40,6 +47,9 @@
   const BRAND = '#990033', MID = '#6E6E73', LIGHT = '#AEAEB2', DARK = '#1C1C1E', OK = '#1F7A4D', BAD = '#B42318';
   const WAKE = /^\s*(?:hey|hi|ok|okay|hello)?[\s,]*(?:pulse|paulse|pals|pulls|pause)\b[\s,.:!?-]*/i;   // what transcribers make of "Pulse"
   const AGAIN = /^(?:pulse[\s,]*)?(?:say that again|repeat that|say again|what was that|pardon|come again)\W*$/i;
+  const YES = /^(?:pulse[\s,]*)?(?:yes|yes please|yep|yeah|yup|sure|do it|go ahead|go for it|confirm|confirmed|correct|that's right|ok|okay|please do|make it so)\b[\s!.]*$/i;
+  const NO = /^(?:pulse[\s,]*)?(?:no|nope|cancel|don't|do not|stop|never mind|nevermind|leave it|not now)\b/i;
+  const CONFIRM_SOLO_MS = 15000, CONFIRM_MEETING_MS = 25000;
   const MIN_CLIP_MS = 450, MAX_CLIP_MS = 20000, AFTER_SPEAK_MS = 350, SNIPPET_MS = 15000;
 
   const css = `
@@ -63,6 +73,7 @@
     on: false, mode: 'solo', state: 'off', detail: '', caps: null,
     stream: null, ctx: null, analyser: null, src: null, timer: null, rec: null, chunks: [], clipStart: 0,
     busy: false, audio: null, lastSpoken: '', useWebSpeech: false, recog: null, pausedUntil: 0, lastError: '', snippet: '', snippetTimer: null,
+    awaiting: null,     // { token, summary, until, timer } while a proposed action waits for a spoken yes
     log: [],
   };
   try { V.mode = localStorage.getItem('pulse_voice_mode') === 'meeting' ? 'meeting' : 'solo'; } catch (_) {}
@@ -110,7 +121,7 @@
     V.state = s; V.detail = detail || '';
     const label = {
       off: '', starting: 'Starting microphone…',
-      listening: V.mode === 'meeting' ? 'Listening for "Pulse…"' : 'Listening',
+      listening: (V.awaiting && Date.now() < V.awaiting.until) ? 'Yes or no?' : (V.mode === 'meeting' ? 'Listening for "Pulse…"' : 'Listening'),
       hearing: 'Hearing you…', transcribing: 'Working out what you said…', thinking: 'Thinking…', speaking: 'Speaking — tap to stop',
       error: detail || 'Voice unavailable', paused: detail || 'Paused',
     }[s] || s;
@@ -195,7 +206,7 @@
   function stop() {
     V.on = false;
     clearInterval(V.timer); V.timer = null;
-    discardClip(); releaseStream(); stopSpeaking();
+    discardClip(); releaseStream(); stopSpeaking(); clearAwaiting();
     if (V.recog) { try { V.recog.onend = null; V.recog.stop(); } catch (_) {} V.recog = null; }
     document.removeEventListener('visibilitychange', onVis);
     setState('off');
@@ -257,6 +268,7 @@
     if (!text) { if (V.on) setState('listening'); return ''; }
     V.log.push({ at: Date.now(), heard: text, mode: V.mode });
     if (V.log.length > 50) V.log.shift();
+    if (V.awaiting && Date.now() < V.awaiting.until) return answerProposal(text);
     if (V.mode === 'meeting') {
       if (!WAKE.test(text)) { if (V.on) setState('listening'); return ''; }   // not for Pulse
       text = text.replace(WAKE, '').trim();
@@ -283,6 +295,34 @@
     // If a spoken reply arrived, speak() now owns busy/state; otherwise (error, empty) go back to listening.
     if (V.state === 'thinking') { V.busy = false; setState(V.on ? 'listening' : 'off'); }
     return text;
+  }
+
+  // ── spoken yes / no to a proposed action ──
+  // The agent module renders the card and owns the token; this drives it from what was heard.
+  window.addEventListener('pulse:actions', (e) => {
+    const acts = (e.detail && e.detail.actions) || [];
+    const prop = acts.find(a => a.kind === 'proposed');
+    if (!prop || !V.on) return;
+    clearAwaiting();
+    const ms = V.mode === 'meeting' ? CONFIRM_MEETING_MS : CONFIRM_SOLO_MS;
+    V.awaiting = { token: prop.token, summary: prop.summary, until: Date.now() + ms + 8000 /* clock starts after Pulse finishes asking */, timer: null };
+    V.awaiting.timer = setTimeout(() => { if (V.awaiting && V.awaiting.token === prop.token) { const t = prop.token; clearAwaiting(); try { window._pulseCards.cancel(t); } catch (_) {} if (V.on) setState('listening', 'No answer — cancelled'); } }, ms + 8000);
+  });
+  // If someone taps the card instead, stop waiting for a voice answer.
+  window.addEventListener('pulse:action-settled', (e) => { if (V.awaiting && e.detail && e.detail.token === V.awaiting.token) clearAwaiting(); });
+  function clearAwaiting() { if (V.awaiting) { clearTimeout(V.awaiting.timer); V.awaiting = null; } }
+  async function answerProposal(text) {
+    const a = V.awaiting; const t = String(text || '').trim();
+    if (YES.test(t)) {
+      clearAwaiting(); V.busy = true; setState('thinking', 'Doing it…');
+      try { const r = await window._pulseCards.confirm(a.token); V.busy = false; speak(r && r.receipt ? r.receipt + '.' : 'Done.'); }
+      catch (e) { V.busy = false; speak('That did not work: ' + String(e && e.message || 'the action failed') + '.'); }
+      return 'yes';
+    }
+    if (NO.test(t)) { clearAwaiting(); try { window._pulseCards.cancel(a.token); } catch (_) {} speak('Cancelled.'); return 'no'; }
+    // Unclear: ask once more, keep waiting; a second unclear answer cancels.
+    if (!a.retried) { a.retried = true; speak('Sorry — yes or no?'); return 'unclear'; }
+    clearAwaiting(); try { window._pulseCards.cancel(a.token); } catch (_) {} speak('Leaving it, then.'); return 'no';
   }
 
   // ── speaking ──
@@ -319,7 +359,7 @@
   function openPanel() { if (typeof window.togglePulse === 'function') window.togglePulse(true); const c = document.getElementById('pulse-chat'); if (c) c.scrollTop = c.scrollHeight; clearSnippet(); }
   function clearSnippet() { clearTimeout(V.snippetTimer); V.snippetTimer = null; V.snippet = ''; if (V.on && V.state === 'listening') setState('listening'); }
   function showSnippet(text) {
-    if (panelOpen() || !text) { setState('listening'); return; }
+    if (panelOpen() || !text || V.awaiting) { setState('listening'); return; }
     const first = String(text).split(/(?<=[.!?])\s+/)[0] || text;
     V.snippet = first.length > 72 ? first.slice(0, 70).replace(/\s\S*$/, '') + '…' : first;
     setState('listening', V.snippet);
@@ -350,7 +390,7 @@
     if (spk && !spk.classList.contains('on')) spk.click();    // the agent module flips style; our observer starts the mic
   }
 
-  Object.assign(V, { start, stop, setMode, handleUtterance, speak, stopSpeaking, mount, openPanel, panelOpen });
+  Object.assign(V, { start, stop, setMode, handleUtterance, speak, stopSpeaking, mount, openPanel, panelOpen, clearAwaiting });
 
   // Mount once the agent module has put the Spoken switch on the bar (it retries for ~10 s).
   let tries = 0; const t = setInterval(() => { if (mount()) { clearInterval(t); setTimeout(meetRoute, 300); } else if (++tries > 60) clearInterval(t); }, 250);

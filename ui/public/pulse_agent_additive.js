@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Pulse agent UI v1 ──
+/* ── VelOzity Pinpoint — Pulse agent UI v2 ──
    Pulse now looks things up through tools before it answers. This module shows that work
    in the panel, adds a Spoken toggle, and renders the proposed-action card the write tools
    will send in Phase 3. It wraps the existing pulseSend() in index.html rather than
@@ -10,9 +10,12 @@
      when Pulse answered from memory instead (no line at all).
    - A Spoken switch on the bar. On, Pulse answers in two or three sentences written for the
      ear and the panel shows that text; Phase 2 plays it through a voice. Off is the default.
-   - An action card (Phase 3): "Pulse wants to: confirm departure for MSKU… as 16 Oct"
-     with Confirm / Cancel. Nothing is sent in Phase 1; the renderer is here so the server
-     can start sending cards without a UI release.                                        */
+   - Action cards (Phase 3). Two kinds come back in `actions`:
+       done     — an Auto-tier write already happened: "Confirmed departure for MSKU… — undo"
+                  (undo is live for 10 minutes, then the link goes)
+       proposed — a Confirm-tier write is waiting: "Pulse wants to: record arrival… as 16 Oct"
+                  with Confirm / Cancel. Confirm runs it; Cancel voids the token.
+     The voice module drives the same cards from a spoken yes/no via window._pulseCards.     */
 ;(function () {
   'use strict';
 
@@ -30,10 +33,11 @@
     .pa-card{margin-top:8px;border:1px solid rgba(153,0,51,.35);border-left:3px solid ${BRAND};border-radius:10px;padding:10px 12px;background:#FFF7F9;}
     .pa-card .pa-k{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:${BRAND};font-weight:600;}
     .pa-card .pa-what{font-size:13px;color:${DARK};margin:4px 0 8px;}
+    .pa-card.done{background:#F6FBF8;border-color:rgba(31,122,77,.35);border-left-color:#1F7A4D;padding:8px 12px;}
     .pa-card .pa-btns{display:flex;gap:8px;}
     .pa-card button{height:28px;padding:0 12px;border-radius:7px;border:.5px solid rgba(0,0,0,.15);background:#fff;font:500 12px inherit;font-family:inherit;cursor:pointer;color:${DARK};}
     .pa-card button.p{background:${BRAND};border-color:${BRAND};color:#fff;}
-    .pa-receipt{margin-top:6px;font-size:11px;color:${MID};display:flex;gap:8px;align-items:center;}
+    .pa-receipt{font-size:11.5px;color:${DARK};display:flex;gap:6px;align-items:center;flex-wrap:wrap;} .pa-card.proposed .pa-receipt{margin-top:6px;color:${MID};}
     .pa-receipt a{color:${BRAND};cursor:pointer;text-decoration:underline;}
     .pulse-msg.ai .pa-spoken{font-size:13.5px;line-height:1.5;}
   `;
@@ -43,6 +47,7 @@
     get_week_status: 'week status', find_movement: 'movement search', get_movement: 'movement detail', get_transit_board: 'transit board',
     get_receiving: 'receiving', get_vas_progress: 'VAS progress', get_last_mile: 'last mile', get_uid_labels: 'UID labels', get_alerts: 'alerts',
     get_air_quotes: 'air quotes', get_non_compliance: 'non-compliance', get_ops_summary: 'ops summary', list_weeks: 'weeks', get_invoices: 'invoices', get_pl: 'P&L',
+    add_note: 'note added', confirm_milestone: 'milestone confirmed', amend_milestone: 'milestone date', mark_last_mile: 'last mile', acknowledge_alert: 'alert acknowledged',
   };
   const isoOf = (ymd) => { const d = new Date(String(ymd || '').slice(0, 10) + 'T00:00:00Z'); if (isNaN(d)) return ''; const day = (d.getUTCDay() + 6) % 7; d.setUTCDate(d.getUTCDate() - day + 3); const ft = new Date(Date.UTC(d.getUTCFullYear(), 0, 4)); return 'W' + (1 + Math.round(((d - ft) / 86400000 - 3 + ((ft.getUTCDay() + 6) % 7)) / 7)); };
   const argHint = (t) => {
@@ -71,25 +76,65 @@
   function traceHtml(tools) {
     if (!Array.isArray(tools) || !tools.length) return '';
     const ms = tools.reduce((s, t) => s + (Number(t.ms) || 0), 0);
-    return `<div class="pa-trace"><b>Looked up</b>${tools.map(t => `<span class="pa-t ${t.ok ? '' : 'bad'}" title="${esc(JSON.stringify(t.args || {}))}">${esc(TOOL_LABEL[t.tool] || t.tool)}${argHint(t) ? ' · ' + esc(argHint(t)) : ''}</span>`).join('')}<span>${(ms / 1000).toFixed(1)} s</span></div>`;
+    const reads = tools.filter(t => !t.write && !t.proposed), writes = tools.filter(t => t.write || t.proposed);
+    const pill = (t) => `<span class="pa-t ${t.ok ? '' : 'bad'}" title="${esc(JSON.stringify(t.args || {}))}">${esc(TOOL_LABEL[t.tool] || t.tool)}${t.proposed ? ' · awaiting yes' : (argHint(t) ? ' · ' + esc(argHint(t)) : '')}</span>`;
+    return `<div class="pa-trace">${reads.length ? `<b>Looked up</b>${reads.map(pill).join('')}` : ''}${writes.length ? `<b>${reads.length ? '· ' : ''}Did</b>${writes.map(pill).join('')}` : ''}<span>${(ms / 1000).toFixed(1)} s</span></div>`;
   }
 
-  // ── Proposed-action card (Phase 3 renders these; inert until the server sends one) ──
+  // ── Action cards ──
+  const cards = new Map();                       // token → { confirm(), cancel() } for the voice module
+  window._pulseCards = {
+    confirm: (token) => { const c = cards.get(token); return c ? c.confirm() : Promise.reject(new Error('no such card')); },
+    cancel: (token) => { const c = cards.get(token); return c ? c.cancel() : Promise.resolve(); },
+    pending: () => [...cards.keys()],
+  };
+  function receiptHtml(text, undoToken, undoUntil) {
+    return `<div class="pa-receipt"><span>✓</span><span>${esc(text || 'Done.')}</span>${undoToken ? ` <a data-undo>undo</a>` : ''}</div>`;
+  }
+  function wireUndo(wrap, undoToken, undoUntil) {
+    const u = wrap.querySelector('[data-undo]'); if (!u) return;
+    const ttl = undoUntil ? Math.max(0, undoUntil - Date.now()) : 10 * 60 * 1000;
+    const timer = setTimeout(() => { u.remove(); }, ttl);
+    u.onclick = async () => {
+      clearTimeout(timer); u.textContent = 'undoing…'; u.onclick = null;
+      try { const x = await window._pulseApi('/pulse/undo', { token: undoToken }); wrap.innerHTML = `<div class="pa-receipt"><span>↺</span><span>${esc(x.receipt || 'Undone.')}</span></div>`; }
+      catch (e) { wrap.innerHTML = `<div class="pa-receipt" style="color:#B42318">${esc(e.message || 'Could not undo')}</div>`; }
+      window.dispatchEvent(new CustomEvent('pulse:undone', { detail: { token: undoToken } }));
+    };
+  }
   function actionCard(action) {
     const wrap = document.createElement('div');
-    wrap.className = 'pa-card';
+    wrap.className = 'pa-card ' + (action.kind === 'done' ? 'done' : 'proposed');
+    wrap.dataset.token = action.token || action.undo_token || '';
+    if (action.kind === 'done') {
+      wrap.innerHTML = receiptHtml(action.summary, action.undo_token, action.undo_until);
+      wireUndo(wrap, action.undo_token, action.undo_until);
+      return wrap;
+    }
     wrap.innerHTML = `<div class="pa-k">Pulse wants to</div><div class="pa-what">${esc(action.summary || action.tool)}</div>
       <div class="pa-btns"><button class="p" data-ok>Confirm</button><button data-no>Cancel</button></div>`;
-    wrap.querySelector('[data-no]').onclick = () => { wrap.innerHTML = `<div class="pa-receipt">Cancelled.</div>`; };
-    wrap.querySelector('[data-ok]').onclick = async () => {
+    let settled = false;
+    const finish = () => { settled = true; cards.delete(action.token); window.dispatchEvent(new CustomEvent('pulse:action-settled', { detail: { token: action.token } })); };
+    const cancel = async () => {
+      if (settled) return; finish();
+      wrap.innerHTML = `<div class="pa-receipt">Cancelled.</div>`;
+      try { await window._pulseApi('/pulse/cancel', { token: action.token }); } catch (_) {}
+    };
+    const confirm = async () => {
+      if (settled) return null; finish();
       wrap.querySelector('.pa-btns').innerHTML = '<span class="pa-receipt">Doing it…</span>';
       try {
         const r = await window._pulseApi('/pulse/confirm', { token: action.token });
-        wrap.innerHTML = `<div class="pa-receipt">${esc(r.receipt || 'Done.')}${r.undo_token ? ` <a data-undo>undo</a>` : ''}</div>`;
-        const u = wrap.querySelector('[data-undo]');
-        if (u) u.onclick = async () => { u.textContent = 'undoing…'; const x = await window._pulseApi('/pulse/undo', { token: r.undo_token }); wrap.innerHTML = `<div class="pa-receipt">${esc(x.receipt || 'Undone.')}</div>`; };
-      } catch (e) { wrap.innerHTML = `<div class="pa-receipt" style="color:#B42318">${esc(e.message || 'Failed')}</div>`; }
+        wrap.innerHTML = receiptHtml(r.receipt, r.undo_token, r.undo_until);
+        wireUndo(wrap, r.undo_token, r.undo_until);
+        return r;
+      } catch (e) { wrap.innerHTML = `<div class="pa-receipt" style="color:#B42318">${esc(e.message || 'Failed')}</div>`; throw e; }
     };
+    wrap.querySelector('[data-no]').onclick = cancel;
+    wrap.querySelector('[data-ok]').onclick = confirm;
+    cards.set(action.token, { confirm, cancel });
+    // A proposal is good for two minutes on the server; the card follows.
+    setTimeout(() => { if (!settled) { finish(); wrap.innerHTML = `<div class="pa-receipt">Expired — ask Pulse again.</div>`; } }, Math.max(5000, ((action.expires_in || 120) * 1000) - 2000));
     return wrap;
   }
 
@@ -155,8 +200,10 @@
           if (data.style === 'spoken') last.classList.add('pa-spoken');
           const tr = traceHtml(data.tools);
           if (tr) last.insertAdjacentHTML('beforeend', tr);
-          for (const a of (Array.isArray(data.actions) ? data.actions : [])) last.appendChild(actionCard(a));
-          if (data.spoken) window.dispatchEvent(new CustomEvent('pulse:spoken', { detail: { text: data.spoken } }));
+          const acts = Array.isArray(data.actions) ? data.actions : [];
+          for (const a of acts) last.appendChild(actionCard(a));
+          if (data.spoken) window.dispatchEvent(new CustomEvent('pulse:spoken', { detail: { text: data.spoken, actions: acts } }));
+          if (acts.length) window.dispatchEvent(new CustomEvent('pulse:actions', { detail: { actions: acts } }));
           chat.scrollTop = chat.scrollHeight;
         }
       } catch (e) {

@@ -29,6 +29,9 @@
     '/pulse/transcribe',                      // Pulse voice (Phase 2): speech in, speech out
     '/pulse/speak',
     '/pulse/voice/status',
+    '/pulse/confirm',                         // Pulse actions (Phase 3)
+    '/pulse/cancel',
+    '/pulse/undo',
     '/ai/pulse',
     '/finance/insights',
     '/report/cost-utilisation/insights',
