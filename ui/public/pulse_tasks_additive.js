@@ -1,8 +1,11 @@
-/* ── VelOzity Pinpoint — Pulse tasks v1 (Phase 3c) ──
+/* ── VelOzity Pinpoint — Pulse tasks v2 (Phase 3c/3d) ──
    A quiet strip at the top of the Pulse panel: "Tasks · 3 open". Open it and you see what has
    been handed to Pulse or to people — title, who, due, status — with the emails Pulse sent for
    each and any reply that came back. Close a task or cancel it from here; everything else
    (adding, emailing) happens by asking Pulse.
+
+   Emails Pulse composed on its own (replies to the mailbox, Phase 3d) show here during their
+   60-second hold with a "stop" link, so ops can pull one back before it goes.
 
    Only VelOzity admins see it: the API answers 403 for everyone else and the strip never mounts.
    It refreshes when the panel opens and after Pulse does something.                           */
@@ -76,7 +79,7 @@
     list.innerHTML = T.tasks.map(t => {
       const overdue = t.due_at && String(t.due_at).slice(0, 10) < today();
       const chips = [`<span class="pt-chip ${t.status}">${esc(t.status === 'waiting' ? 'awaiting reply' : t.status)}</span>`, overdue ? `<span class="pt-chip overdue">overdue</span>` : ''].join('');
-      const mails = (t.emails || []).map(e => `<span>✉ ${esc(e.to.join(', '))} · ${esc(e.status === 'held' ? 'sending shortly' : e.status)}</span>`).join('');
+      const mails = (t.emails || []).map(e => `<span>✉ ${esc(e.to.join(', '))} · ${esc(e.status === 'held' ? 'sending shortly' : e.status)}${e.status === 'held' ? ` <a data-recall="${e.id}" style="color:${BRAND};cursor:pointer;text-decoration:underline">stop</a>` : ''}</span>`).join('');
       const replies = (t.replies || []).map(r => `<div class="pt-reply"><small>${esc(r.from_addr)} · ${esc(String(r.received_at).slice(0, 16).replace('T', ' '))}</small>${esc(r.text)}</div>`).join('');
       return `<div class="pt-row" data-id="${t.id}"><div class="pt-t">#${t.id} ${esc(t.title)}</div>
         <div class="pt-acts">${t.status !== 'done' ? `<a data-done>done</a>` : ''}<a data-cancel>cancel</a></div>
@@ -84,6 +87,7 @@
     }).join('');
     list.querySelectorAll('[data-done]').forEach(a => { a.onclick = () => act(a.closest('.pt-row').dataset.id, 'done'); });
     list.querySelectorAll('[data-cancel]').forEach(a => { a.onclick = () => act(a.closest('.pt-row').dataset.id, 'cancelled'); });
+    list.querySelectorAll('[data-recall]').forEach(a => { a.onclick = async () => { a.textContent = 'stopping…'; try { await call(`/pulse/email/${a.dataset.recall}/recall`, { method: 'POST', body: '{}' }); } catch (e) { console.warn('[Pulse tasks]', e.message); } refresh(); }; });
   }
   async function act(id, status) {
     try { await call(`/pulse/tasks/${id}`, { method: 'PATCH', body: JSON.stringify({ status, outcome: status === 'done' ? 'Closed from the panel' : 'Cancelled from the panel' }) }); } catch (e) { console.warn('[Pulse tasks]', e.message); }
