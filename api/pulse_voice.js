@@ -130,6 +130,34 @@ module.exports = function pulseVoice(deps) {
   });
 
   // ── speak ──
+  // Shared with the meeting bot (Phase 4): text → mp3 Buffer with the chosen voice, falling
+  // back to the stock voice if the chosen one is not on the account.
+  async function synthesize(text, opts) {
+    text = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!text) throw new Error('nothing to say');
+    if (!ttsOn()) throw Object.assign(new Error('tts_unavailable'), { code: 'tts_unavailable' });
+    if (text.length > MAX_SPEAK_CHARS) text = text.slice(0, MAX_SPEAK_CHARS).replace(/\s\S*$/, '') + '.';
+    const format = (opts && opts.format) || 'mp3_22050_32';
+    const call = async (voice) => {
+      const ctrl = new AbortController(); const tm = setTimeout(() => ctrl.abort(), 20000);
+      try {
+        return await _fetch(`${TTS_BASE()}/text-to-speech/${encodeURIComponent(voice)}/stream?output_format=${encodeURIComponent(format)}`, {
+          method: 'POST', signal: ctrl.signal,
+          headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY, 'content-type': 'application/json', accept: 'audio/mpeg' },
+          body: JSON.stringify({ text, model_id: TTS_MODEL, voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.2, use_speaker_boost: true } }),
+        });
+      } finally { clearTimeout(tm); }
+    };
+    let voice = VOICE_ID();
+    let r = await call(voice);
+    if (!r.ok && (r.status === 404 || r.status === 422 || r.status === 400) && voice !== FALLBACK_VOICE) {
+      log.warn('[pulse voice] tts voice ' + voice + ' → ' + r.status + ', retrying with fallback voice');
+      voice = FALLBACK_VOICE; r = await call(voice);
+    }
+    if (!r.ok) { const body = await r.text().catch(() => ''); throw Object.assign(new Error('tts_' + r.status), { code: 'tts_failed', status: r.status, detail: body.slice(0, 200) }); }
+    return { stream: r.body, voice, text, async buffer() { return Buffer.from(await new Response(r.body).arrayBuffer()); } };
+  }
+
   app.post('/pulse/speak', authenticateRequest, aiLimiter, async (req, res) => {
     if (!aiAllowed(req, res)) return;
     if (!ttsOn()) return res.status(503).json({ error: 'tts_unavailable', message: 'Speech is not configured on the server.' });
@@ -137,45 +165,22 @@ module.exports = function pulseVoice(deps) {
     if (!text) return res.status(400).json({ error: 'text required' });
     if (text.length > MAX_SPEAK_CHARS) text = text.slice(0, MAX_SPEAK_CHARS).replace(/\s\S*$/, '') + '.';
     if (overCap(req, res, text.length / CHARS_PER_SECOND)) return;
-
-    const call = async (voice) => {
-      const ctrl = new AbortController(); const tm = setTimeout(() => ctrl.abort(), 20000);
-      try {
-        return await _fetch(`${TTS_BASE()}/text-to-speech/${encodeURIComponent(voice)}/stream?output_format=mp3_22050_32`, {
-          method: 'POST', signal: ctrl.signal,
-          headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY, 'content-type': 'application/json', accept: 'audio/mpeg' },
-          body: JSON.stringify({ text, model_id: TTS_MODEL, voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.2, use_speaker_boost: true } }),
-        });
-      } finally { clearTimeout(tm); }
-    };
     try {
-      let voice = VOICE_ID();
-      let r = await call(voice);
-      if (!r.ok && (r.status === 404 || r.status === 422 || r.status === 400) && voice !== FALLBACK_VOICE) {
-        // The chosen voice may not be added to this account's library yet; the stock voice is.
-        log.warn('[pulse voice] tts voice ' + voice + ' → ' + r.status + ', retrying with fallback voice');
-        voice = FALLBACK_VOICE; r = await call(voice);
-      }
-      if (!r.ok) {
-        const body = await r.text().catch(() => '');
-        log.warn('[pulse voice] tts ' + r.status + ' ' + body.slice(0, 200));
-        note(req, 'pulse_speak', { chars: text.length }, 502, 'tts_' + r.status);
-        return res.status(502).json({ error: 'tts_failed', message: 'Speech failed.', status: r.status });
-      }
+      const out = await synthesize(text);
       qAdd.run(who(req).userId, today(), 0, text.length);
-      note(req, 'pulse_speak', { chars: text.length, voice }, 200, null);
+      note(req, 'pulse_speak', { chars: text.length, voice: out.voice }, 200, null);
       res.setHeader('content-type', 'audio/mpeg');
       res.setHeader('cache-control', 'no-store');
-      res.setHeader('x-pulse-voice', voice === FALLBACK_VOICE ? 'fallback' : 'primary');
+      res.setHeader('x-pulse-voice', out.voice === FALLBACK_VOICE ? 'fallback' : 'primary');
       // Stream the vendor's body straight through so the first words play before the last are made.
       const { Readable } = require('stream');
-      Readable.fromWeb(r.body).on('error', () => { try { res.end(); } catch (_) {} }).pipe(res);
+      Readable.fromWeb(out.stream).on('error', () => { try { res.end(); } catch (_) {} }).pipe(res);
     } catch (e) {
-      log.warn('[pulse voice] tts error ' + (e && e.message));
+      log.warn('[pulse voice] tts error ' + (e && e.message) + (e.detail ? ' ' + e.detail : ''));
       note(req, 'pulse_speak', { chars: text.length }, 502, String(e && e.message || e));
-      if (!res.headersSent) res.status(502).json({ error: 'tts_failed', message: e.name === 'AbortError' ? 'Speech timed out.' : 'Speech failed.' });
+      if (!res.headersSent) res.status(502).json({ error: 'tts_failed', message: e.name === 'AbortError' ? 'Speech timed out.' : 'Speech failed.', status: e.status });
     }
   });
 
-  return { usedSeconds, capSeconds, VOICE_ID, FALLBACK_VOICE, STT_MODEL };
+  return { usedSeconds, capSeconds, VOICE_ID, FALLBACK_VOICE, STT_MODEL, synthesize, ttsOn };
 };

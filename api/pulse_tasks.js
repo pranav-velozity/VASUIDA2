@@ -89,6 +89,7 @@ module.exports = function pulseTasks(deps) {
   `);
 
   const iso = () => new Date(now()).toISOString();
+  let _meetings = null; const setMeetings = (m) => { _meetings = m; };
   const FROM = () => process.env.PULSE_EMAIL_FROM || 'Pulse (VelOzity) <pulseAI@velozity.au>';
   const HOLD_MS = () => Math.max(5, Number(process.env.PULSE_EMAIL_HOLD_SECONDS) || 60) * 1000;
   const DOMAINS = () => String(process.env.PULSE_EMAIL_DOMAINS || 'velozity.au,velozity.com.au,theiconic.com.au,ehplabs.com,kerrylogistics.com,kln.com').split(/[\s,]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
@@ -181,6 +182,25 @@ module.exports = function pulseTasks(deps) {
       res.json({ ok: true, email_id: Number(r.lastInsertRowid), task_id: taskId, hold_until: holdUntil, hold_seconds: HOLD_MS() / 1000, to, cc, subject });
     } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
   });
+  // Programmatic hold-then-send, used by the meeting bot for its summaries. Same table, same
+  // tick, same 60-second recall from the tasks strip.
+  function holdEmail(o) {
+    const to = [].concat(o.to || []).map(addrOf).filter(validAddr), cc = [].concat(o.cc || []).map(addrOf).filter(validAddr).filter(a => !to.includes(a));
+    if (!to.length) throw new Error('no valid recipient');
+    const client = o.client || 'ICONIC';
+    let taskId = Number(o.task_id) || null;
+    if (!taskId) {
+      const r = db.prepare(`INSERT INTO pulse_task (client_id, title, detail, owner, status, due_at, about, source, created_by, created_by_name, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(client, String(o.title || `Email ${to.join(', ')}: ${o.subject}`).slice(0, 300), String(o.body || '').slice(0, 2000), 'pulse', o.task_status || 'done', null, o.about || null, o.source || 'meeting', o.created_by || 'pulse', o.created_by_name || null, iso());
+      taskId = Number(r.lastInsertRowid);
+      if ((o.task_status || 'done') === 'done') db.prepare(`UPDATE pulse_task SET done_at = ?, outcome = ? WHERE id = ?`).run(iso(), o.outcome || 'Sent by Pulse', taskId);
+    }
+    const holdUntil = new Date(now() + HOLD_MS()).toISOString();
+    const r = db.prepare(`INSERT INTO pulse_email (client_id, task_id, to_json, cc_json, subject, body, status, hold_until, created_by, created_by_name, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(client, taskId, JSON.stringify(to), JSON.stringify(cc), String(o.subject || '').slice(0, 300), String(o.body || ''), 'held', holdUntil, o.created_by || 'pulse', o.created_by_name || null, iso());
+    return { email_id: Number(r.lastInsertRowid), task_id: taskId, hold_until: holdUntil };
+  }
+
   app.post('/pulse/email/:id/recall', ...gate, (req, res) => {
     try {
       const e = db.prepare('SELECT * FROM pulse_email WHERE id = ? AND client_id = ?').get(Number(req.params.id), curClient());
@@ -263,6 +283,10 @@ module.exports = function pulseTasks(deps) {
     if (taskId) db.prepare(`UPDATE pulse_task SET status = CASE WHEN status IN ('done','cancelled') THEN status ELSE 'replied' END, updated_at = ? WHERE id = ?`).run(iso(), taskId);
     try { audit && audit.run('pulse', null, null, 'pulse_email_received', '/pulse/inbound', 'POST', '', 'resend', JSON.stringify({ from, subject, task_id: taskId, kind }), 200, null); } catch (_) {}
     log.log(`[pulse mail] inbound from ${from} "${subject}" → ${kind}${taskId ? ' task #' + taskId : ''}`);
+    // A meeting invitation forwarded to the mailbox schedules Pulse to join (Phase 4).
+    let meeting = null;
+    if (_meetings && kind !== 'reply') { try { meeting = await _meetings.fromInvite({ from, subject, text: full.text || text, html: full.html || '' }); } catch (e) { log.warn('[pulse mail] invite parse error: ' + (e && e.message)); } }
+    if (meeting && !meeting.duplicate) { db.prepare(`UPDATE pulse_inbound SET kind = 'invite' WHERE resend_id = ?`).run(d.email_id); return { ok: true, kind: 'invite', meeting_id: meeting.id }; }
     let reply = null;
     try { reply = await autoReply({ resend_id: d.email_id, from, subject, text, taskId, kind }); } catch (e) { log.warn('[pulse mail] auto-reply error: ' + (e && e.message)); }
     return { ok: true, task_id: taskId, kind, reply };
@@ -349,5 +373,5 @@ module.exports = function pulseTasks(deps) {
     recordInbound(ev).catch(e => log.warn('[pulse mail] inbound error: ' + e.message));
   });
 
-  return { tick, sendHeld, recordInbound, verifySvix, knownRecipient, DOMAINS, FROM, autoReply, senderIdentity };
+  return { tick, sendHeld, recordInbound, verifySvix, knownRecipient, DOMAINS, FROM, autoReply, senderIdentity, holdEmail, CC, setMeetings };
 };

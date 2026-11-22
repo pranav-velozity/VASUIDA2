@@ -1730,7 +1730,9 @@ app.post('/pulse/chat',
     // Email persona (Phase 3d): the mailbox answers as a READ-ONLY client or staff member. Only
     // this server's own loopback call may ask for it; a browser sending `persona` is ignored.
     const _persona = (req.auth && req.auth.internal && req.body && req.body.persona && typeof req.body.persona === 'object') ? req.body.persona : null;
-    const _emailMode = !!_persona;
+    const _meetingMode = !!(_persona && _persona.as === 'meeting');
+    const _summaryMode = !!(_persona && _persona.as === 'summary');
+    const _emailMode = !!_persona && !_meetingMode && !_summaryMode;
 
     const userRole = req.auth?.orgRole || '';
     const roleLabel = {
@@ -1742,7 +1744,7 @@ app.post('/pulse/chat',
 
     // Write tools exist only for VelOzity admins (Phase 3, agreed 19 Nov). Everyone else is
     // told plainly that Pulse cannot change things for them, so it never pretends to.
-    const _canWrite = !_persona && roleLabel === 'Admin' && (() => { try { const t = tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole); return !t || !t.org_type || t.org_type === 'internal'; } catch (_) { return true; } })();
+    const _canWrite = (!_persona || _meetingMode) && roleLabel === 'Admin' && (() => { try { const t = tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole); return !t || !t.org_type || t.org_type === 'internal'; } catch (_) { return true; } })();
     const _writeGuide = _canWrite
       ? 'You can also ACT with the write tools: notes, milestone confirmations, last-mile scheduled/delivered, alert acknowledgements, recording a stated milestone date, creating or changing a container/flight and its lanes, extra UID labels, department label formats, moving a PO between weeks, tasks (create_task / update_task / list_tasks) and email from Pulse\'s own mailbox (send_email — the command is the approval; it holds 60 seconds; say who it went to and the gist). Look the movement up first if you are not sure which one is meant; never guess between two. Some tools run at once and return a receipt — repeat the receipt in one sentence. Others return {proposed:true}: nothing has happened yet; reply with ONE short sentence asking for approval ("Shall I record departure for MSKU… as 16 Oct?") and nothing else. If a tool refuses with needs_confirmation, ask the person for the date rather than inventing one. Never claim something was done unless a tool returned a receipt.'
       : 'You cannot change anything for this user — for changes, guide them to the screen (e.g. "Confirm that in Transit Movements").';
@@ -1918,8 +1920,9 @@ app.post('/pulse/chat',
     const toolCtx = {
       authorization: req.headers['authorization'] || '',
       client: curClient(),
-      role: _persona ? (_persona.as === 'client' ? 'Client' : 'Facility') : roleLabel,
+      role: _persona ? (_persona.as === 'client' ? 'Client' : _meetingMode ? 'Admin' : 'Facility') : roleLabel,
       isInternal: _persona ? _persona.as !== 'client' : (!_tenant || !_tenant.org_type || _tenant.org_type === 'internal'),
+      noInternalOnly: _meetingMode || _summaryMode,
       isPartner: !!(_tenant && _tenant.org_type === 'partner'),
       today: todayChicagoISO(),
       userId: req.auth?.userId || null,
@@ -1937,6 +1940,7 @@ app.post('/pulse/chat',
       ...(dynamicBlock ? [{ type: 'text', text: dynamicBlock }] : []),
       ...(_style === 'spoken' ? [{ type: 'text', text: pulseTools.SPOKEN_GUIDE }] : []),
       ...(_emailMode ? [{ type: 'text', text: pulseTools.EMAIL_GUIDE(_persona) }] : []),
+      ...(_meetingMode ? [{ type: 'text', text: pulseTools.MEETING_GUIDE(_persona) }] : []),
     ];
 
     // Session memory: the browser sends the visible thread; the server keeps the tool
@@ -1979,19 +1983,20 @@ app.post('/pulse/chat',
         const meta = pulseTools.findTool(tu.name, toolCtx);
         // dry_run (the evaluation script): every write becomes a proposal with no token, so
         // the model's choice and arguments can be scored without anything changing.
-        if (meta && meta.write && (meta.tier === 'confirm' || _dryRun)) {
+        if (meta && meta.write && (meta.tier === 'confirm' || _dryRun || _meetingMode)) {
           const pre = typeof meta.prepare === 'function' ? await meta.prepare(tu.input, toolCtx).catch(e => ({ error: String(e.message || e) })) : null;
           if (pre && pre.error) {
             trace.push({ tool: tu.name, args: tu.input, ok: false, ms: 0 });
             return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(pre), is_error: true };
           }
           const summary = meta.summary ? meta.summary(tu.input, pre) : tu.name;
-          const token = _dryRun ? null : _pulseProposals.add({ tool: tu.name, args: tu.input, summary, userId: toolCtx.userId, client: toolCtx.client });
+          // In a meeting the proposal is kept by the meeting module (no token: it is confirmed later in Pinpoint).
+          const token = (_dryRun || _meetingMode) ? null : _pulseProposals.add({ tool: tu.name, args: tu.input, summary, userId: toolCtx.userId, client: toolCtx.client });
           trace.push({ tool: tu.name, args: tu.input, ok: true, ms: 0, proposed: true, dry_run: _dryRun || undefined });
-          if (!_dryRun) actions.push({ kind: 'proposed', token, tool: tu.name, summary, expires_in: PROPOSAL_TTL_MS / 1000 });
+          if (!_dryRun) actions.push({ kind: 'proposed', token, tool: tu.name, args: _meetingMode ? tu.input : undefined, summary, expires_in: token ? PROPOSAL_TTL_MS / 1000 : null });
           _pulseAudit.run(req.auth?.userId || 'anonymous', req.auth?.orgId || null, req.auth?.orgRole || null,
             'pulse_propose_' + tu.name, '/pulse/chat', 'TOOL', req.ip || '', 'pulse', JSON.stringify({ client: toolCtx.client, args: tu.input, summary }).slice(0, 2000), 202, null);
-          return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify({ proposed: true, summary, note: 'Nothing has happened yet. The user must approve. Reply with one short sentence asking for approval and nothing else.' }) };
+          return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify({ proposed: true, summary, note: _meetingMode ? 'Noted for after the meeting; nothing has changed. Reply with one short sentence saying it is queued for confirmation in Pinpoint after the meeting.' : 'Nothing has happened yet. The user must approve. Reply with one short sentence asking for approval and nothing else.' }) };
         }
         const r = await pulseTools.runTool(tu.name, tu.input, toolCtx);
         trace.push({ tool: tu.name, args: tu.input, ok: r.ok, ms: r.ms, write: !!(meta && meta.write) });
@@ -12254,7 +12259,15 @@ const _pulseTasks = require('./pulse_tasks')({ app, db, authenticateRequest, req
 
 // ── Pulse voice (Phase 2): /pulse/transcribe, /pulse/speak, /pulse/voice/status ──
 // Vendor keys stay on the server; the browser only ever sees text and audio. See pulse_voice.js.
-require('./pulse_voice')({ app, db, authenticateRequest, aiLimiter, aiAllowed, audit: _pulseAudit, log: console });
+const _pulseVoice = require('./pulse_voice')({ app, db, authenticateRequest, aiLimiter, aiAllowed, audit: _pulseAudit, log: console });
+
+// ── Pulse in meetings (Phase 4): Recall.ai bot, live answers, post-meeting summary ──
+const _pulseMeetings = require('./pulse_meetings')({ app, db, authenticateRequest, requireRole, requireInternalOrg, curClient, internal: internalAuth, synthesize: _pulseVoice.synthesize,
+  mondayOf: pulseTools.mondayOf, audit: _pulseAudit, holdEmail: _pulseTasks.holdEmail, log: console, fallbackTo: (_pulseTasks.CC() || [])[0] || 'operations@velozity.au',
+  runToolAs: (req, tool, args) => pulseTools.runTool(tool, args, _pulseToolCtx(req)),
+  isKnownSender: async (from) => !!(await _pulseTasks.senderIdentity(from, null)),
+  clientForSender: async (from) => { const w = await _pulseTasks.senderIdentity(from, null); return w && w.client; } });
+_pulseTasks.setMeetings(_pulseMeetings);
 
 const consignmentRoutes = require('./consignment_routes')({
   express, db, authenticateRequest, requireRole, auditLog, curClient,

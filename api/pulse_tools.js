@@ -835,7 +835,8 @@ module.exports = function makePulseTools(deps) {
   const writesOff = () => /^(off|0|false|no)$/i.test(String(process.env.PULSE_WRITES || ''));
   function toolsFor(ctx) {
     const rk = roleKey(ctx);
-    return TOOLS.filter(t => (!t.internalOnly || ctx.isInternal) && t.roles.includes(rk) && !(t.write && writesOff()));
+    // noInternalOnly: a meeting room may have a client in it, so finance never reaches the model there.
+    return TOOLS.filter(t => (!t.internalOnly || (ctx.isInternal && !ctx.noInternalOnly)) && t.roles.includes(rk) && !(t.write && writesOff()));
   }
   function anthropicTools(ctx) {
     return toolsFor(ctx).map(t => ({ name: t.name, description: t.description, input_schema: t.input_schema }));
@@ -895,6 +896,14 @@ module.exports = function makePulseTools(deps) {
     'You can only READ. If the email asks for a change (rebooking, confirming, amending, labels, invoices) or for something you cannot answer from the tools, say in one sentence that you have passed it to the VelOzity team, and end your reply with the exact token [[HANDOVER]] on its own line. Never promise an action, never invent a figure, never mention tools or Pinpoint internals.',
     'If the email is just an acknowledgement or thanks with no question, reply with exactly [[NOREPLY]].',
   ].join('\n');
+  // In a meeting (Phase 4): spoken, brief, and nothing is changed live.
+  const MEETING_GUIDE = (p) => [
+    `MEETING MODE. You are a participant in a ${p.title ? `meeting "${p.title}"` : 'meeting'} for ${p.client || 'the client'}${Array.isArray(p.attendees) && p.attendees.length ? ` with ${p.attendees.slice(0, 8).join(', ')}` : ''}. ${p.speaker ? `${p.speaker} just addressed you.` : ''}`,
+    'Answer in ONE or TWO short sentences for the ear; offer "I can put the detail in the notes" rather than listing. Figures rounded, dates as day and month, references spoken plainly.',
+    'Nothing changes during the meeting. If asked to do something, the tool will return {proposed:true}: reply with one short sentence that it is noted and will be confirmed in Pinpoint after the meeting. Never say it is done.',
+    'Finance, margins and costs are never discussed in a meeting.',
+    p.context ? `What was said in the last ${20} minutes (oldest first):\n${p.context}` : 'Nothing has been said yet.',
+  ].join('\n');
   const findTool = (name, ctx) => toolsFor(ctx).find(x => x.name === name) || null;
   // Undo a previous run, through the tool that made it.
   async function undoTool(name, record, ctx) {
@@ -904,5 +913,5 @@ module.exports = function makePulseTools(deps) {
     try { const out = await t.undo(record, ctx); return { ok: !out || !out.error, result: out, ms: Date.now() - started }; }
     catch (e) { return { ok: false, result: { error: String(e.message || e) }, ms: Date.now() - started }; }
   }
-  return { TOOLS, toolsFor, anthropicTools, runTool, undoTool, findTool, resolveWeek, isoWeek, mondayOf, SPOKEN_GUIDE, EMAIL_GUIDE, speakable, callRoute };
+  return { TOOLS, toolsFor, anthropicTools, runTool, undoTool, findTool, resolveWeek, isoWeek, mondayOf, SPOKEN_GUIDE, EMAIL_GUIDE, MEETING_GUIDE, speakable, callRoute };
 };
