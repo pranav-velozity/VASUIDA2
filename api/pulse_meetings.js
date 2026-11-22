@@ -95,7 +95,13 @@ module.exports = function pulseMeetings(deps) {
   const DEFAULT_CLIENT = () => process.env.PULSE_MEETING_DEFAULT_CLIENT || 'ICONIC';
   const enabled = () => !!KEY();
   const platformOf = (url) => /teams\.microsoft\.com|teams\.live\.com/i.test(url) ? 'teams' : /meet\.google\.com/i.test(url) ? 'meet' : /zoom\.us/i.test(url) ? 'zoom' : 'other';
-  const MEETING_LINK = /https?:\/\/(?:teams\.microsoft\.com\/l\/meetup-join\/[^\s"'<>)]+|teams\.live\.com\/meet\/[^\s"'<>)]+|meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}[^\s"'<>)]*|[a-z0-9.]*zoom\.us\/j\/[^\s"'<>)]+)/i;
+  // Every link shape the three platforms issue today:
+  //   Teams   https://teams.microsoft.com/l/meetup-join/19%3a…   (classic)
+  //           https://teams.microsoft.com/meet/4123456789?p=…    (new short link)
+  //           https://teams.live.com/meet/…                       (personal)
+  //   Meet    https://meet.google.com/abc-defg-hij
+  //   Zoom    https://company.zoom.us/j/123…  or /my/room
+  const MEETING_LINK = /https?:\/\/(?:(?:[a-z0-9-]+\.)?teams\.microsoft\.com\/(?:l\/meetup-join|meet)\/[^\s"'<>)\]]+|teams\.live\.com\/meet\/[^\s"'<>)\]]+|meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:[?#][^\s"'<>)\]]*)?|[a-z0-9.-]*zoom\.us\/(?:j|my|s|w)\/[^\s"'<>)\]]+)/i;
   const who = (req) => ({ userId: req.auth?.userId || 'anon', orgId: req.auth?.orgId || '', orgRole: req.auth?.orgRole || '' });
   const note = (req, action, body, status, error) => { try { const w = req ? who(req) : { userId: 'pulse', orgId: null, orgRole: null }; audit && audit.run(w.userId, w.orgId, w.orgRole, action, req ? req.path : '/pulse/meeting', req ? req.method : 'BOT', req ? req.ip : '', req ? req.headers['user-agent'] : 'recall', body, status, error); } catch (_) {} };
   const gate = [authenticateRequest, requireRole(['admin']), requireInternalOrg];
