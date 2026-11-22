@@ -1740,7 +1740,7 @@ app.post('/pulse/chat',
     // told plainly that Pulse cannot change things for them, so it never pretends to.
     const _canWrite = roleLabel === 'Admin' && (() => { try { const t = tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole); return !t || !t.org_type || t.org_type === 'internal'; } catch (_) { return true; } })();
     const _writeGuide = _canWrite
-      ? 'You can also ACT with the write tools: notes, milestone confirmations, last-mile scheduled/delivered, alert acknowledgements, recording a stated milestone date, creating or changing a container/flight and its lanes, extra UID labels, department label formats, and moving a PO between weeks. Look the movement up first if you are not sure which one is meant; never guess between two. Some tools run at once and return a receipt — repeat the receipt in one sentence. Others return {proposed:true}: nothing has happened yet; reply with ONE short sentence asking for approval ("Shall I record departure for MSKU… as 16 Oct?") and nothing else. If a tool refuses with needs_confirmation, ask the person for the date rather than inventing one. Never claim something was done unless a tool returned a receipt.'
+      ? 'You can also ACT with the write tools: notes, milestone confirmations, last-mile scheduled/delivered, alert acknowledgements, recording a stated milestone date, creating or changing a container/flight and its lanes, extra UID labels, department label formats, moving a PO between weeks, tasks (create_task / update_task / list_tasks) and email from Pulse\'s own mailbox (send_email — the command is the approval; it holds 60 seconds; say who it went to and the gist). Look the movement up first if you are not sure which one is meant; never guess between two. Some tools run at once and return a receipt — repeat the receipt in one sentence. Others return {proposed:true}: nothing has happened yet; reply with ONE short sentence asking for approval ("Shall I record departure for MSKU… as 16 Oct?") and nothing else. If a tool refuses with needs_confirmation, ask the person for the date rather than inventing one. Never claim something was done unless a tool returned a receipt.'
       : 'You cannot change anything for this user — for changes, guide them to the screen (e.g. "Confirm that in Transit Movements").';
     const facility = pulseContext?.facility || currentWeek?.facility || '';
     const weeks    = Array.isArray(pulseContext?.weeks) ? pulseContext.weeks : [];
@@ -1919,6 +1919,10 @@ app.post('/pulse/chat',
       isPartner: !!(_tenant && _tenant.org_type === 'partner'),
       today: todayChicagoISO(),
       userId: req.auth?.userId || null,
+      // The browser knows the person's name (Clerk); the token does not carry it. Used only
+      // to sign what Pulse does on their behalf.
+      userName: String(req.body?.user_name || '').replace(/[<>\r\n]/g, '').trim().slice(0, 80) || null,
+      style: _style,
       timeoutMs: 12000,
     };
     const toolDefs = pulseTools.anthropicTools(toolCtx);
@@ -1992,8 +1996,11 @@ app.post('/pulse/chat',
         if (meta && meta.write && r.ok && r.result && r.result.receipt) {
           // The receipt goes to the user as a card with an undo link; the undo record itself
           // stays on the server so the model never sees or forges it.
-          const undo_token = r.result.undo ? _pulseUndo.add({ tool: tu.name, record: r.result.undo, userId: toolCtx.userId, client: toolCtx.client, receipt: r.result.receipt }) : null;
-          actions.push({ kind: 'done', tool: tu.name, summary: r.result.receipt, undo_token, undo_until: undo_token ? Date.now() + UNDO_TTL_MS : null });
+          const held = !!(meta.hold && r.result.hold_until);
+          // A held email's stop token lives exactly as long as the hold; everything else gets the 10-minute undo.
+          const undo_token = r.result.undo ? _pulseUndo.add({ tool: tu.name, record: r.result.undo, userId: toolCtx.userId, client: toolCtx.client, receipt: r.result.receipt }, held ? Math.max(1000, new Date(r.result.hold_until).getTime() - Date.now()) : undefined) : null;
+          actions.push({ kind: held ? 'held' : 'done', tool: tu.name, summary: r.result.receipt, undo_token,
+            undo_until: undo_token ? (held ? new Date(r.result.hold_until).getTime() : Date.now() + UNDO_TTL_MS) : null, hold_until: held ? r.result.hold_until : undefined });
           content = { done: true, receipt: r.result.receipt };
         }
         return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(content), is_error: !r.ok };
@@ -12167,7 +12174,7 @@ function _tokenStore(ttl) {
   const sweep = () => { const now = Date.now(); for (const [k, v] of m) if (v.expires < now) m.delete(k); };
   setInterval(sweep, 60 * 1000).unref();
   return {
-    add(v) { sweep(); const token = require('crypto').randomBytes(18).toString('base64url'); m.set(token, { ...v, expires: Date.now() + ttl }); return token; },
+    add(v, ttlOverride) { sweep(); const token = require('crypto').randomBytes(18).toString('base64url'); m.set(token, { ...v, expires: Date.now() + (ttlOverride || ttl) }); return token; },
     take(token) { sweep(); const v = m.get(token); if (v) m.delete(token); return v || null; },      // single use
     peek(token) { sweep(); return m.get(token) || null; },
   };
@@ -12218,6 +12225,9 @@ app.post('/pulse/undo', authenticateRequest, aiLimiter, async (req, res) => {
   if (!r.ok) return res.status(422).json({ error: 'failed', message: String(r.result && r.result.error || 'Could not undo.') });
   res.json({ ok: true, receipt: (r.result && r.result.receipt) || 'Undone.' });
 });
+
+// ── Pulse tasks and mailbox (Phase 3c): /pulse/tasks, /pulse/email (60-second hold), /pulse/inbound ──
+const _pulseTasks = require('./pulse_tasks')({ app, db, authenticateRequest, requireRole, requireInternalOrg, aiLimiter, curClient, sendViaResend, audit: _pulseAudit, log: console });
 
 // ── Pulse voice (Phase 2): /pulse/transcribe, /pulse/speak, /pulse/voice/status ──
 // Vendor keys stay on the server; the browser only ever sees text and audio. See pulse_voice.js.

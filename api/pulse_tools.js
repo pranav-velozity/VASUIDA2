@@ -657,6 +657,66 @@ module.exports = function makePulseTools(deps) {
         return { ok: true, receipt: `PO ${rec.po} is back in ${isoWeek(rec.from)}` };
       },
     },
+    // ── Phase 3c: Pulse as an actor — tasks and its own mailbox ──
+    {
+      name: 'list_tasks',
+      description: 'Pulse\'s task list for this client: things handed to Pulse or to people in chat and meetings, with owner, due date, status (open, waiting for a reply, replied, done) and any email replies received. Use for "what is outstanding", "did Kerry reply", "what did you send".',
+      input_schema: { type: 'object', properties: { status: { type: 'string', description: 'open (default) | done | cancelled | all' } } },
+      tier: 'read', roles: ['admin'], internalOnly: true,
+      async run(a, ctx) {
+        const r = await callRoute(ctx, 'GET', `/pulse/tasks?status=${encodeURIComponent(a.status || 'open')}`); if (!r.ok) return { error: r.error };
+        return { count: (r.data.tasks || []).length, open: r.data.open, today: ctx.today,
+          tasks: take((r.data.tasks || []).map(t => ({ id: t.id, title: t.title, owner: t.owner, status: t.status, due: t.due_at, about: t.about, created: String(t.created_at).slice(0, 10), outcome: t.outcome || null,
+            overdue: !!(t.due_at && String(t.due_at).slice(0, 10) < ctx.today && ['open', 'waiting', 'replied'].includes(t.status)),
+            emails: (t.emails || []).map(e => ({ to: e.to, subject: e.subject, status: e.status, sent: e.sent_at ? String(e.sent_at).slice(0, 16) : null })),
+            replies: (t.replies || []).map(x => ({ from: x.from_addr, at: String(x.received_at).slice(0, 16), text: String(x.text || '').slice(0, 400) })) })), 40) };
+      },
+    },
+    {
+      name: 'create_task',
+      description: 'Record a task: something for Pulse or a person to do, with an optional due date and what it is about. Use for "remind me to…", "add a task…", "Yash to chase…", or an action agreed in a meeting that cannot be done right now. If the task is an email Pulse should send, use send_email instead.',
+      input_schema: { type: 'object', properties: { title: { type: 'string' }, detail: { type: 'string' }, owner: { type: 'string', description: '"pulse", "me", or a person\'s name (default pulse)' }, due: { type: 'string', description: 'YYYY-MM-DD or YYYY-MM-DDTHH:MM' }, about: { type: 'string', description: 'movement reference, PO or week it concerns' } }, required: ['title'] },
+      tier: 'auto', roles: ['admin'], internalOnly: true, write: true,
+      summary: (a) => `Add task “${a.title}”${a.owner && a.owner !== 'pulse' ? ` for ${a.owner}` : ''}${a.due ? ` due ${fmtWhen(a.due)}` : ''}`,
+      async run(a, ctx) {
+        const title = String(a.title || '').trim(); if (!title) return { error: 'title required' };
+        const owner = !a.owner || /^pulse$/i.test(a.owner) ? 'pulse' : (/^me$/i.test(a.owner) ? (ctx.userName || 'me') : String(a.owner).trim());
+        const r = await callRoute(ctx, 'POST', '/pulse/tasks', { title, detail: a.detail || null, owner, due_at: a.due || null, about: a.about || null, source: ctx.style === 'spoken' ? 'voice' : 'chat', created_by_name: ctx.userName || null });
+        if (!r.ok) return { error: r.error };
+        const t = r.data.task;
+        return { ok: true, receipt: `Task #${t.id}: ${t.title}${owner !== 'pulse' ? ` — ${owner}` : ''}${t.due_at ? `, due ${fmtWhen(t.due_at)}` : ''}`, task_id: t.id, undo: { kind: 'task_cancel', id: t.id } };
+      },
+      async undo(rec, ctx) { const r = await callRoute(ctx, 'PATCH', `/pulse/tasks/${rec.id}`, { status: 'cancelled', outcome: 'Undone' }); return r.ok ? { ok: true, receipt: `Task #${rec.id} removed` } : { error: r.error }; },
+    },
+    {
+      name: 'update_task',
+      description: 'Close, reopen, reassign or re-date a task from list_tasks: status done | cancelled | open, with an outcome line; or a new owner or due date.',
+      input_schema: { type: 'object', properties: { id: { type: 'integer' }, status: { type: 'string', enum: ['done', 'cancelled', 'open'] }, outcome: { type: 'string' }, owner: { type: 'string' }, due: { type: 'string' } }, required: ['id'] },
+      tier: 'auto', roles: ['admin'], internalOnly: true, write: true,
+      summary: (a) => `${a.status === 'done' ? 'Close' : a.status === 'cancelled' ? 'Cancel' : 'Update'} task #${a.id}${a.outcome ? `: ${a.outcome}` : ''}`,
+      async run(a, ctx) {
+        const body = {}; if (a.status) body.status = a.status; if (a.outcome !== undefined) body.outcome = a.outcome; if (a.owner) body.owner = a.owner; if (a.due) body.due_at = a.due;
+        const r = await callRoute(ctx, 'PATCH', `/pulse/tasks/${Number(a.id)}`, body); if (!r.ok) return { error: r.error };
+        const t = r.data.task;
+        return { ok: true, receipt: `Task #${t.id} ${t.status === 'done' ? 'closed' : t.status === 'cancelled' ? 'cancelled' : 'updated'}: ${t.title}`, undo: { kind: 'task_restore', id: t.id, previous: r.data.previous } };
+      },
+      async undo(rec, ctx) { const p = rec.previous || {}; const r = await callRoute(ctx, 'PATCH', `/pulse/tasks/${rec.id}`, { status: p.status || 'open', outcome: p.outcome || '', due_at: p.due_at || null, owner: p.owner || 'pulse' }); return r.ok ? { ok: true, receipt: `Task #${rec.id} is back to ${p.status || 'open'}` } : { error: r.error }; },
+    },
+    {
+      name: 'send_email',
+      description: 'Send an email from Pulse\'s own mailbox (pulseAI@velozity.au) on behalf of the person asking — to a client, partner or colleague at a known address. Write a short, plain, professional body; do not add a greeting signature, Pulse signs it. Pulse holds the message for 60 seconds before it goes, so the person can say "Pulse, stop". Only addresses at known client, partner or VelOzity domains are accepted. Always state recipient and gist in your reply.',
+      input_schema: { type: 'object', properties: { to: { type: 'array', items: { type: 'string' } }, cc: { type: 'array', items: { type: 'string' } }, subject: { type: 'string' }, body: { type: 'string' }, about: { type: 'string', description: 'movement reference, PO or week this concerns' }, task_id: { type: 'integer', description: 'existing task this email belongs to, if any' } }, required: ['to', 'subject', 'body'] },
+      tier: 'auto', roles: ['admin'], internalOnly: true, write: true, hold: true,
+      summary: (a) => `Email ${(a.to || []).join(', ')}: “${a.subject}”`,
+      async run(a, ctx) {
+        const r = await callRoute(ctx, 'POST', '/pulse/email', { to: a.to, cc: a.cc || [], subject: a.subject, body: a.body, about: a.about || null, task_id: a.task_id || null, source: ctx.style === 'spoken' ? 'voice' : 'chat', created_by_name: ctx.userName || null });
+        if (!r.ok) return { error: r.error };
+        const d = r.data;
+        return { ok: true, receipt: `Emailing ${d.to.join(', ')}${d.cc && d.cc.length ? ` (cc ${d.cc.join(', ')})` : ''}: “${d.subject}” — sends in ${d.hold_seconds} seconds unless you say stop. Task #${d.task_id}.`,
+          hold_until: d.hold_until, task_id: d.task_id, undo: { kind: 'email_recall', id: d.email_id, task_id: d.task_id } };
+      },
+      async undo(rec, ctx) { const r = await callRoute(ctx, 'POST', `/pulse/email/${rec.id}/recall`, {}); return r.ok ? { ok: true, receipt: 'Stopped — the email was not sent' } : { error: r.error }; },
+    },
   ];
 
   // ── Write-tool helpers ──
