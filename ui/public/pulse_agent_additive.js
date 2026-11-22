@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Pulse agent UI v3 ──
+/* ── VelOzity Pinpoint — Pulse agent UI v4 ──
    Pulse now looks things up through tools before it answers. This module shows that work
    in the panel, adds a Spoken toggle, and renders the proposed-action card the write tools
    will send in Phase 3. It wraps the existing pulseSend() in index.html rather than
@@ -15,6 +15,8 @@
                   (undo is live for 10 minutes, then the link goes)
        proposed — a Confirm-tier write is waiting: "Pulse wants to: record arrival… as 16 Oct"
                   with Confirm / Cancel. Confirm runs it; Cancel voids the token.
+       held     — an email Pulse is about to send: "Emailing kerry@…: 'HBL for MSKU…' — sends in
+                  58 s" with a Stop button. The command was the approval; Stop recalls it.
      The voice module drives the same cards from a spoken yes/no via window._pulseCards.     */
 ;(function () {
   'use strict';
@@ -34,6 +36,7 @@
     .pa-card .pa-k{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:${BRAND};font-weight:600;}
     .pa-card .pa-what{font-size:13px;color:${DARK};margin:4px 0 8px;}
     .pa-card.done{background:#F6FBF8;border-color:rgba(31,122,77,.35);border-left-color:#1F7A4D;padding:8px 12px;}
+    .pa-card.held{background:#FFFBF2;border-color:rgba(176,112,0,.35);border-left-color:#B07000;} .pa-card.held .pa-k{color:#B07000;} .pa-card.held .pa-btns{align-items:center;}
     .pa-card .pa-btns{display:flex;gap:8px;}
     .pa-card button{height:28px;padding:0 12px;border-radius:7px;border:.5px solid rgba(0,0,0,.15);background:#fff;font:500 12px inherit;font-family:inherit;cursor:pointer;color:${DARK};}
     .pa-card button.p{background:${BRAND};border-color:${BRAND};color:#fff;}
@@ -49,6 +52,7 @@
     get_air_quotes: 'air quotes', get_non_compliance: 'non-compliance', get_ops_summary: 'ops summary', list_weeks: 'weeks', get_invoices: 'invoices', get_pl: 'P&L',
     add_note: 'note added', confirm_milestone: 'milestone confirmed', amend_milestone: 'milestone date', mark_last_mile: 'last mile', acknowledge_alert: 'alert acknowledged',
     create_movement: 'new movement', amend_movement: 'movement changed', issue_extra_labels: 'extra labels', set_department_format: 'department format', move_po: 'PO moved',
+    list_tasks: 'tasks', create_task: 'task added', update_task: 'task updated', send_email: 'email',
   };
   const isoOf = (ymd) => { const d = new Date(String(ymd || '').slice(0, 10) + 'T00:00:00Z'); if (isNaN(d)) return ''; const day = (d.getUTCDay() + 6) % 7; d.setUTCDate(d.getUTCDate() - day + 3); const ft = new Date(Date.UTC(d.getUTCFullYear(), 0, 4)); return 'W' + (1 + Math.round(((d - ft) / 86400000 - 3 + ((ft.getUTCDay() + 6) % 7)) / 7)); };
   const argHint = (t) => {
@@ -87,7 +91,9 @@
   window._pulseCards = {
     confirm: (token) => { const c = cards.get(token); return c ? c.confirm() : Promise.reject(new Error('no such card')); },
     cancel: (token) => { const c = cards.get(token); return c ? c.cancel() : Promise.resolve(); },
-    pending: () => [...cards.keys()],
+    pending: () => [...cards.keys()].filter(k => cards.get(k).kind === 'proposed'),
+    held: () => [...cards.keys()].filter(k => cards.get(k).kind === 'held'),
+    stop: (token) => { const c = cards.get(token); return c && c.stop ? c.stop() : Promise.resolve(); },
   };
   function receiptHtml(text, undoToken, undoUntil) {
     return `<div class="pa-receipt"><span>✓</span><span>${esc(text || 'Done.')}</span>${undoToken ? ` <a data-undo>undo</a>` : ''}</div>`;
@@ -112,6 +118,27 @@
       wireUndo(wrap, action.undo_token, action.undo_until);
       return wrap;
     }
+    if (action.kind === 'held') {
+      // Countdown to the send; Stop recalls through the same undo route.
+      wrap.className = 'pa-card held';
+      const until = action.hold_until ? new Date(action.hold_until).getTime() : (action.undo_until || Date.now() + 60000);
+      const text = String(action.summary || '').replace(/\s*—\s*sends in .*$/i, '');
+      wrap.innerHTML = `<div class="pa-k">Pulse is sending</div><div class="pa-what">${esc(text)}</div><div class="pa-btns"><span class="pa-receipt" data-cd></span><button data-stop>Stop</button></div>`;
+      let stopped = false;
+      const cd = wrap.querySelector('[data-cd]');
+      const paint = () => { const left = Math.max(0, Math.ceil((until - Date.now()) / 1000)); cd.textContent = left > 0 ? `Sends in ${left} s` : 'Sent.'; if (left <= 0) { clearInterval(iv); if (!stopped) { wrap.classList.replace('held', 'done'); wrap.innerHTML = receiptHtml('Sent — ' + text); cards.delete(action.undo_token); window.dispatchEvent(new CustomEvent('pulse:action-settled', { detail: { token: action.undo_token } })); } } };
+      const iv = setInterval(paint, 500); paint();
+      const stop = async () => {
+        if (stopped) return; stopped = true; clearInterval(iv); cards.delete(action.undo_token);
+        wrap.querySelector('.pa-btns').innerHTML = '<span class="pa-receipt">Stopping…</span>';
+        try { const x = await window._pulseApi('/pulse/undo', { token: action.undo_token }); wrap.innerHTML = `<div class="pa-receipt"><span>■</span><span>${esc(x.receipt || 'Stopped — not sent.')}</span></div>`; }
+        catch (e) { wrap.innerHTML = `<div class="pa-receipt" style="color:#B42318">${esc(e.message || 'Could not stop it')}</div>`; }
+        window.dispatchEvent(new CustomEvent('pulse:action-settled', { detail: { token: action.undo_token } }));
+      };
+      wrap.querySelector('[data-stop]').onclick = stop;
+      cards.set(action.undo_token, { kind: 'held', stop, confirm: () => Promise.resolve(), cancel: stop });
+      return wrap;
+    }
     wrap.innerHTML = `<div class="pa-k">Pulse wants to</div><div class="pa-what">${esc(action.summary || action.tool)}</div>
       <div class="pa-btns"><button class="p" data-ok>Confirm</button><button data-no>Cancel</button></div>`;
     let settled = false;
@@ -133,12 +160,14 @@
     };
     wrap.querySelector('[data-no]').onclick = cancel;
     wrap.querySelector('[data-ok]').onclick = confirm;
-    cards.set(action.token, { confirm, cancel });
+    cards.set(action.token, { kind: 'proposed', confirm, cancel });
     // A proposal is good for two minutes on the server; the card follows.
     setTimeout(() => { if (!settled) { finish(); wrap.innerHTML = `<div class="pa-receipt">Expired — ask Pulse again.</div>`; } }, Math.max(5000, ((action.expires_in || 120) * 1000) - 2000));
     return wrap;
   }
 
+  // Who Pulse acts for, as the browser knows them (the token carries only an id).
+  function userName() { try { const u = window.Clerk && window.Clerk.user; return (u && (u.fullName || (u.primaryEmailAddress && u.primaryEmailAddress.emailAddress))) || null; } catch (_) { return null; } }
   // Small authenticated POST used by the card.
   window._pulseApi = async function (path, body) {
     const apiBase = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/, '');
@@ -180,7 +209,7 @@
         const resp = await fetch(apiBase + '/pulse/chat', {
           method: 'POST',
           headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
-          body: JSON.stringify({ messages: window._pulseHistory, pulseContext: window._pulseSessionContext || null, currentWeek, style: window._pulseStyle || 'text' }),
+          body: JSON.stringify({ messages: window._pulseHistory, pulseContext: window._pulseSessionContext || null, currentWeek, style: window._pulseStyle || 'text', user_name: userName() }),
         });
         if (loading) loading.remove();
         if (!resp.ok) {

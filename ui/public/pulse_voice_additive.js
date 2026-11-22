@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Pulse voice v3 (Phase 2 + spoken confirmations) ──
+/* ── VelOzity Pinpoint — Pulse voice v4 (Phase 2 + spoken confirmations + stop) ──
    Hands-free Pulse. The Spoken switch on the Pulse bar (from pulse_agent_additive.js) now does
    what its name says: on, Pulse listens through the microphone and answers out loud; off, it is
    the typed assistant it always was. There are no buttons to hold.
@@ -50,6 +50,7 @@
   const YES = /^(?:pulse[\s,]*)?(?:yes|yes please|yep|yeah|yup|sure|do it|go ahead|go for it|confirm|confirmed|correct|that's right|ok|okay|please do|make it so)\b[\s!.]*$/i;
   const NO = /^(?:pulse[\s,]*)?(?:no|nope|cancel|don't|do not|stop|never mind|nevermind|leave it|not now)\b/i;
   const CONFIRM_SOLO_MS = 15000, CONFIRM_MEETING_MS = 25000;
+  const STOP = /^(?:pulse[\s,]*)?(?:stop|don't send|do not send|don't send that|recall|cancel that|hold it|wait)\b/i;
   const MIN_CLIP_MS = 450, MAX_CLIP_MS = 20000, AFTER_SPEAK_MS = 350, SNIPPET_MS = 15000;
 
   const css = `
@@ -269,6 +270,11 @@
     V.log.push({ at: Date.now(), heard: text, mode: V.mode });
     if (V.log.length > 50) V.log.shift();
     if (V.awaiting && Date.now() < V.awaiting.until) return answerProposal(text);
+    // "Pulse, stop" while an email is on its 60-second hold recalls it — no wake word needed.
+    if (STOP.test(text) && window._pulseCards && window._pulseCards.held().length) {
+      const held = window._pulseCards.held(); for (const tk of held) { try { await window._pulseCards.stop(tk); } catch (_) {} }
+      speak(held.length > 1 ? 'Stopped — nothing was sent.' : 'Stopped — the email was not sent.'); return 'stop';
+    }
     if (V.mode === 'meeting') {
       if (!WAKE.test(text)) { if (V.on) setState('listening'); return ''; }   // not for Pulse
       text = text.replace(WAKE, '').trim();
