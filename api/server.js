@@ -1727,6 +1727,10 @@ app.post('/pulse/chat',
     // style: 'spoken' writes for the ear (voice modes); default writes for the screen.
     const _style = String(req.body?.style || '').toLowerCase() === 'spoken' ? 'spoken' : 'text';
     const _dryRun = req.body?.dry_run === true;   // evaluation runs: writes are described, never done
+    // Email persona (Phase 3d): the mailbox answers as a READ-ONLY client or staff member. Only
+    // this server's own loopback call may ask for it; a browser sending `persona` is ignored.
+    const _persona = (req.auth && req.auth.internal && req.body && req.body.persona && typeof req.body.persona === 'object') ? req.body.persona : null;
+    const _emailMode = !!_persona;
 
     const userRole = req.auth?.orgRole || '';
     const roleLabel = {
@@ -1738,7 +1742,7 @@ app.post('/pulse/chat',
 
     // Write tools exist only for VelOzity admins (Phase 3, agreed 19 Nov). Everyone else is
     // told plainly that Pulse cannot change things for them, so it never pretends to.
-    const _canWrite = roleLabel === 'Admin' && (() => { try { const t = tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole); return !t || !t.org_type || t.org_type === 'internal'; } catch (_) { return true; } })();
+    const _canWrite = !_persona && roleLabel === 'Admin' && (() => { try { const t = tenancyResolve(req.auth && req.auth.orgId, req.auth && req.auth.orgRole); return !t || !t.org_type || t.org_type === 'internal'; } catch (_) { return true; } })();
     const _writeGuide = _canWrite
       ? 'You can also ACT with the write tools: notes, milestone confirmations, last-mile scheduled/delivered, alert acknowledgements, recording a stated milestone date, creating or changing a container/flight and its lanes, extra UID labels, department label formats, moving a PO between weeks, tasks (create_task / update_task / list_tasks) and email from Pulse\'s own mailbox (send_email — the command is the approval; it holds 60 seconds; say who it went to and the gist). Look the movement up first if you are not sure which one is meant; never guess between two. Some tools run at once and return a receipt — repeat the receipt in one sentence. Others return {proposed:true}: nothing has happened yet; reply with ONE short sentence asking for approval ("Shall I record departure for MSKU… as 16 Oct?") and nothing else. If a tool refuses with needs_confirmation, ask the person for the date rather than inventing one. Never claim something was done unless a tool returned a receipt.'
       : 'You cannot change anything for this user — for changes, guide them to the screen (e.g. "Confirm that in Transit Movements").';
@@ -1914,11 +1918,13 @@ app.post('/pulse/chat',
     const toolCtx = {
       authorization: req.headers['authorization'] || '',
       client: curClient(),
-      role: roleLabel,
-      isInternal: !_tenant || !_tenant.org_type || _tenant.org_type === 'internal',
+      role: _persona ? (_persona.as === 'client' ? 'Client' : 'Facility') : roleLabel,
+      isInternal: _persona ? _persona.as !== 'client' : (!_tenant || !_tenant.org_type || _tenant.org_type === 'internal'),
       isPartner: !!(_tenant && _tenant.org_type === 'partner'),
       today: todayChicagoISO(),
       userId: req.auth?.userId || null,
+      // The loopback caller has no bearer token; its own header carries through to the tools.
+      internalToken: (req.auth && req.auth.internal) ? (req.headers[internalAuth.headerName] || '') : '',
       // The browser knows the person's name (Clerk); the token does not carry it. Used only
       // to sign what Pulse does on their behalf.
       userName: String(req.body?.user_name || '').replace(/[<>\r\n]/g, '').trim().slice(0, 80) || null,
@@ -1930,6 +1936,7 @@ app.post('/pulse/chat',
       ...(staticBlock ? [{ type: 'text', text: staticBlock, cache_control: { type: 'ephemeral' } }] : []),
       ...(dynamicBlock ? [{ type: 'text', text: dynamicBlock }] : []),
       ...(_style === 'spoken' ? [{ type: 'text', text: pulseTools.SPOKEN_GUIDE }] : []),
+      ...(_emailMode ? [{ type: 'text', text: pulseTools.EMAIL_GUIDE(_persona) }] : []),
     ];
 
     // Session memory: the browser sends the visible thread; the server keeps the tool
@@ -12227,7 +12234,23 @@ app.post('/pulse/undo', authenticateRequest, aiLimiter, async (req, res) => {
 });
 
 // ── Pulse tasks and mailbox (Phase 3c): /pulse/tasks, /pulse/email (60-second hold), /pulse/inbound ──
-const _pulseTasks = require('./pulse_tasks')({ app, db, authenticateRequest, requireRole, requireInternalOrg, aiLimiter, curClient, sendViaResend, audit: _pulseAudit, log: console });
+// Who an email sender is, via Clerk: a client-org member answers as that client; nobody else.
+async function _pulseLookupSender(addr) {
+  const { clerkClient } = require('@clerk/clerk-sdk-node');
+  const users = await clerkClient.users.getUserList({ emailAddress: [addr], limit: 2 });
+  const list = Array.isArray(users) ? users : (users && users.data) || [];
+  if (!list.length) return null;
+  const ms = await clerkClient.users.getOrganizationMembershipList({ userId: list[0].id });
+  const arr = Array.isArray(ms) ? ms : (ms && ms.data) || [];
+  for (const m of arr) {
+    const org = m.organization || {}; let t = null;
+    try { t = tenancyResolve(org.id, m.role); } catch (_) {}
+    if (t && t.org_type === 'client' && t.client_ids && t.client_ids[0]) return { client: t.client_ids[0], persona: 'client' };
+  }
+  return null;
+}
+const _pulseTasks = require('./pulse_tasks')({ app, db, authenticateRequest, requireRole, requireInternalOrg, aiLimiter, curClient, sendViaResend, audit: _pulseAudit, log: console,
+  internal: internalAuth, lookupSender: _pulseLookupSender, mondayOf: pulseTools.mondayOf });
 
 // ── Pulse voice (Phase 2): /pulse/transcribe, /pulse/speak, /pulse/voice/status ──
 // Vendor keys stay on the server; the browser only ever sees text and audio. See pulse_voice.js.

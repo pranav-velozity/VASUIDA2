@@ -61,6 +61,7 @@ module.exports = function makePulseTools(deps) {
   async function callRoute(ctx, method, path, body) {
     const headers = { 'content-type': 'application/json', 'x-pulse-enabled': '1', 'x-pulse-tool': '1' };
     if (ctx.authorization) headers['authorization'] = ctx.authorization;
+    if (ctx.internalToken) headers['x-internal-token'] = ctx.internalToken;   // the mailbox answering as Pulse
     if (ctx.client) headers['x-pinpoint-client'] = ctx.client;
     const ac = new AbortController();
     const t = setTimeout(() => ac.abort(), ctx.timeoutMs || 12000);
@@ -885,6 +886,15 @@ module.exports = function makePulseTools(deps) {
       .replace(/[*_#`>]/g, '');
   }
 
+  // How Pulse writes when it is answering an EMAIL rather than a chat (Phase 3d).
+  const EMAIL_GUIDE = (persona) => [
+    'EMAIL MODE. You are replying to an email sent to Pulse\'s mailbox. ' + (persona && persona.as === 'client'
+      ? `The sender is a client user at ${persona.client || 'the client'}; answer only from that client\'s data. `
+      : 'The sender is a VelOzity colleague or partner replying on a thread Pulse started. ') +
+    'Write 2–6 short plain sentences, no markdown, no bullet symbols, no tables, no greeting and no sign-off (Pulse adds those). State facts with their dates. Spell references normally (MSKU1234567), not letter by letter.',
+    'You can only READ. If the email asks for a change (rebooking, confirming, amending, labels, invoices) or for something you cannot answer from the tools, say in one sentence that you have passed it to the VelOzity team, and end your reply with the exact token [[HANDOVER]] on its own line. Never promise an action, never invent a figure, never mention tools or Pinpoint internals.',
+    'If the email is just an acknowledgement or thanks with no question, reply with exactly [[NOREPLY]].',
+  ].join('\n');
   const findTool = (name, ctx) => toolsFor(ctx).find(x => x.name === name) || null;
   // Undo a previous run, through the tool that made it.
   async function undoTool(name, record, ctx) {
@@ -894,5 +904,5 @@ module.exports = function makePulseTools(deps) {
     try { const out = await t.undo(record, ctx); return { ok: !out || !out.error, result: out, ms: Date.now() - started }; }
     catch (e) { return { ok: false, result: { error: String(e.message || e) }, ms: Date.now() - started }; }
   }
-  return { TOOLS, toolsFor, anthropicTools, runTool, undoTool, findTool, resolveWeek, isoWeek, mondayOf, SPOKEN_GUIDE, speakable, callRoute };
+  return { TOOLS, toolsFor, anthropicTools, runTool, undoTool, findTool, resolveWeek, isoWeek, mondayOf, SPOKEN_GUIDE, EMAIL_GUIDE, speakable, callRoute };
 };

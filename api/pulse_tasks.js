@@ -16,6 +16,17 @@
 // EHP and Kerry domains) plus addresses Pinpoint has already notified. A stranger's address is
 // refused rather than guessed at.
 //
+// REPLIES (Phase 3d). Pulse can answer email itself, read-only:
+//   · a reply on a thread Pulse started (the [PP-n] tag) — answered as a VelOzity colleague would
+//     read it, with the client's data, cc operations@;
+//   · a fresh question from a KNOWN client user (a Pinpoint login, or an address on that client's
+//     notification list) — answered as that client, from that client's data only, cc operations@.
+//   Unknown senders get nothing. Anything needing a change becomes a task for the team. Each
+//   reply goes through the same 60-second hold as every other Pulse email. Three automated
+//   replies per thread per day, then it stops and leaves it to a person.
+//   PULSE_EMAIL_REPLIES=off|threads|on (default off): threads = only replies on Pulse's own
+//   threads; on = also client questions, for the clients in PULSE_EMAIL_REPLY_CLIENTS (comma list).
+//
 // Env:  PULSE_EMAIL_FROM        default "Pulse (VelOzity) <pulseAI@velozity.au>"
 //       PULSE_EMAIL_DOMAINS     comma list of domains Pulse may write to
 //       PULSE_EMAIL_HOLD_SECONDS  default 60
@@ -26,7 +37,7 @@
 const crypto = require('crypto');
 
 module.exports = function pulseTasks(deps) {
-  const { app, db, authenticateRequest, requireRole, requireInternalOrg, aiLimiter, curClient, sendViaResend, audit, log = console, now = () => Date.now() } = deps;
+  const { app, db, authenticateRequest, requireRole, requireInternalOrg, aiLimiter, curClient, sendViaResend, audit, log = console, now = () => Date.now(), internal, lookupSender, mondayOf } = deps;
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS pulse_task (
@@ -252,8 +263,83 @@ module.exports = function pulseTasks(deps) {
     if (taskId) db.prepare(`UPDATE pulse_task SET status = CASE WHEN status IN ('done','cancelled') THEN status ELSE 'replied' END, updated_at = ? WHERE id = ?`).run(iso(), taskId);
     try { audit && audit.run('pulse', null, null, 'pulse_email_received', '/pulse/inbound', 'POST', '', 'resend', JSON.stringify({ from, subject, task_id: taskId, kind }), 200, null); } catch (_) {}
     log.log(`[pulse mail] inbound from ${from} "${subject}" → ${kind}${taskId ? ' task #' + taskId : ''}`);
-    return { ok: true, task_id: taskId, kind };
+    let reply = null;
+    try { reply = await autoReply({ resend_id: d.email_id, from, subject, text, taskId, kind }); } catch (e) { log.warn('[pulse mail] auto-reply error: ' + (e && e.message)); }
+    return { ok: true, task_id: taskId, kind, reply };
   }
+  // ── Auto-reply (Phase 3d) ──
+  const REPLY_MODE = () => String(process.env.PULSE_EMAIL_REPLIES || 'off').toLowerCase();
+  const REPLY_CLIENTS = () => String(process.env.PULSE_EMAIL_REPLY_CLIENTS || '').split(/[\s,]+/).map(x => x.trim().toUpperCase()).filter(Boolean);
+  const CC = () => String(process.env.PULSE_EMAIL_CC || 'operations@velozity.au').split(/[\s,]+/).map(addrOf).filter(validAddr);
+  const MAX_PER_THREAD_PER_DAY = 3;
+  const isOps = (a) => DOMAINS().slice(0, 2).includes((a.split('@')[1] || '').toLowerCase()) && !/^pulseai@/i.test(a);   // velozity.au / velozity.com.au
+
+  // Who is this sender to Pinpoint? → { client, persona: 'client'|'internal' } or null.
+  async function senderIdentity(from, taskRow) {
+    if (!from || /^(no-?reply|noreply|mailer-daemon|postmaster|notifications?)@/i.test(from) || /^pulseai@/i.test(from)) return null;
+    // A client user is a client user wherever they write from — including on a thread Pulse
+    // started with them — so they only ever get the client's view.
+    const n = db.prepare('SELECT client_id FROM notify_recipient WHERE lower(email) = ? ORDER BY last_used_at DESC LIMIT 1').get(from);
+    if (n) return { client: n.client_id, persona: 'client' };
+    if (taskRow) {
+      // On Pulse's own thread: the people Pulse wrote to may answer; the client is the task's.
+      const wrote = db.prepare(`SELECT 1 FROM pulse_email WHERE task_id = ? AND status = 'sent' AND (lower(to_json) LIKE ? OR lower(cc_json) LIKE ?)`).get(taskRow.id, `%"${from}"%`, `%"${from}"%`);
+      if (wrote) return { client: taskRow.client_id, persona: isOps(from) ? 'internal' : 'thread' };
+    }
+    if (typeof lookupSender === 'function') { try { const r = await lookupSender(from); if (r && r.client) return { client: r.client, persona: r.persona || 'client' }; } catch (e) { log.warn('[pulse mail] sender lookup failed: ' + e.message); } }
+    return null;
+  }
+  async function autoReply(inb) {
+    const mode = REPLY_MODE();
+    if (mode === 'off' || !internal) return { skipped: 'off' };
+    const taskRow = inb.taskId ? db.prepare('SELECT * FROM pulse_task WHERE id = ?').get(inb.taskId) : null;
+    const who = await senderIdentity(inb.from, taskRow);
+    if (!who) { log.log(`[pulse mail] no reply: ${inb.from} is not known`); return { skipped: 'unknown_sender' }; }
+    const onThread = !!taskRow && who.persona !== 'client';
+    if (!onThread) {
+      if (mode !== 'on') return { skipped: 'client_replies_off' };
+      if (!REPLY_CLIENTS().includes(String(who.client).toUpperCase())) return { skipped: 'client_not_enabled' };
+    }
+    const text = String(inb.text || '').trim();
+    if (text.length < 3) return { skipped: 'empty' };
+    // Thread budget: automated replies today on this task.
+    let taskId = inb.taskId;
+    if (taskId) {
+      const n = db.prepare(`SELECT COUNT(*) n FROM pulse_email WHERE task_id = ? AND created_by = 'pulse' AND created_at >= ?`).get(taskId, new Date(now() - 86400000).toISOString()).n;
+      if (n >= MAX_PER_THREAD_PER_DAY) { log.log(`[pulse mail] thread #${taskId} reached ${MAX_PER_THREAD_PER_DAY} automated replies; leaving it to a person`); return { skipped: 'thread_budget' }; }
+    }
+    // Ask Pulse, as the right persona, with the client pinned.
+    const persona = who.persona === 'client' ? { as: 'client', client: who.client } : { as: 'internal', client: who.client };
+    const ws = typeof mondayOf === 'function' ? mondayOf(new Date(now()).toISOString().slice(0, 10)) : undefined;
+    const prompt = `Email from ${inb.from}${inb.subject ? ` with subject "${inb.subject.replace(/\s*\[PP-\d+\]\s*/g, ' ').trim()}"` : ''}:\n\n${text.slice(0, 4000)}`;
+    const out = await internal.json('/pulse/chat', { method: 'POST', headers: { 'content-type': 'application/json', 'x-pulse-enabled': '1', 'x-pinpoint-client': who.client },
+      body: JSON.stringify({ messages: [{ role: 'user', content: prompt }], currentWeek: ws ? { week_start: ws } : undefined, persona, style: 'text' }) });
+    let answer = String(out.reply || '').trim();
+    if (!answer || /\[\[NOREPLY\]\]/.test(answer)) { log.log('[pulse mail] nothing to answer'); return { skipped: 'noreply' }; }
+    const handover = /\[\[HANDOVER\]\]/.test(answer);
+    answer = answer.replace(/\[\[HANDOVER\]\]/g, '').replace(/\n{3,}/g, '\n\n').trim();
+    const greet = `Hi,\n\n`;
+    // Task: an existing thread keeps its task; a client question gets its own, owned by the team when handed over.
+    if (!taskId) {
+      const r = db.prepare(`INSERT INTO pulse_task (client_id, title, detail, owner, status, due_at, about, source, created_by, created_by_name, created_at)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(who.client, `${handover ? 'Follow up' : 'Answered'}: ${inb.subject || 'email from ' + inb.from}`.slice(0, 300), text.slice(0, 2000), handover ? 'VelOzity team' : 'pulse', handover ? 'open' : 'done', null, null, 'email', 'pulse', null, iso());
+      taskId = Number(r.lastInsertRowid);
+      if (!handover) db.prepare(`UPDATE pulse_task SET done_at = ?, outcome = 'Pulse answered by email' WHERE id = ?`).run(iso(), taskId);
+      db.prepare('UPDATE pulse_inbound SET task_id = ?, kind = ? WHERE resend_id = ?').run(taskId, 'question', inb.resend_id);
+    } else if (handover) {
+      db.prepare(`UPDATE pulse_task SET owner = CASE WHEN owner = 'pulse' THEN 'VelOzity team' ELSE owner END, status = 'open', outcome = ?, updated_at = ? WHERE id = ?`).run('Needs a person: ' + text.slice(0, 160), iso(), taskId);
+    }
+    const subject = 'Re: ' + String(inb.subject || 'your email').replace(/^\s*(re|fwd?)\s*:\s*/i, '').replace(/\s*\[PP-\d+\]\s*/g, ' ').trim();
+    const holdUntil = new Date(now() + HOLD_MS()).toISOString();
+    const e = db.prepare(`INSERT INTO pulse_email (client_id, task_id, to_json, cc_json, subject, body, status, hold_until, created_by, created_by_name, created_at)
+                          VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(who.client, taskId, JSON.stringify([inb.from]), JSON.stringify(CC().filter(c => c !== inb.from)), subject, greet + answer, 'held', holdUntil, 'pulse', null, iso());
+    try { audit && audit.run('pulse', null, null, 'pulse_email_autoreply', '/pulse/inbound', 'POST', '', 'pulse', JSON.stringify({ id: e.lastInsertRowid, to: inb.from, persona: persona.as, client: who.client, handover, tools: (out.tools || []).map(t => t.tool) }), 200, null); } catch (_) {}
+    log.log(`[pulse mail] auto-reply #${e.lastInsertRowid} to ${inb.from} as ${persona.as}/${who.client}${handover ? ' (handed over)' : ''}, sends at ${holdUntil}`);
+    return { email_id: Number(e.lastInsertRowid), task_id: taskId, handover, persona: persona.as };
+  }
+
   app.post('/pulse/inbound', async (req, res) => {
     const v = verifySvix(req);
     if (!v.ok) { log.warn('[pulse mail] inbound refused: ' + v.error); return res.status(v.error.includes('not set') ? 503 : 401).json({ ok: false, error: v.error }); }
@@ -263,5 +349,5 @@ module.exports = function pulseTasks(deps) {
     recordInbound(ev).catch(e => log.warn('[pulse mail] inbound error: ' + e.message));
   });
 
-  return { tick, sendHeld, recordInbound, verifySvix, knownRecipient, DOMAINS, FROM };
+  return { tick, sendHeld, recordInbound, verifySvix, knownRecipient, DOMAINS, FROM, autoReply, senderIdentity };
 };
