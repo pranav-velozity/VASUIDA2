@@ -12280,6 +12280,7 @@ const _pulseTasks = require('./pulse_tasks')({ app, db, authenticateRequest, req
 // ── Pulse voice (Phase 2): /pulse/transcribe, /pulse/speak, /pulse/voice/status ──
 // Vendor keys stay on the server; the browser only ever sees text and audio. See pulse_voice.js.
 _pulseUsage = require('./pulse_usage')({ app, db, authenticateRequest, requireRole, requireInternalOrg, log: console });
+require('./air_quote_intel')({ app, db, authenticateRequest, requireRole, requireInternalOrg, curClient, aqMarkupDefault });
 if (_anthropic) _pulseUsage.wrap(_anthropic);
 const _pulseVoice = require('./pulse_voice')({ app, db, authenticateRequest, aiLimiter, aiAllowed, audit: _pulseAudit, log: console });
 
@@ -16787,6 +16788,9 @@ app.post('/air-quotes/:id/pricing', authenticateRequest, requireRole(['admin']),
 
     const roll = aqRollup(q.id);
     db.prepare(`UPDATE air_quote SET review_saved_at=datetime('now'), updated_at=datetime('now') WHERE id=?`).run(q.id);
+    // A price chosen from the intelligence panel records why, so the audit trail reads
+    // "hold the average /kg, 4.21 vs 4.35" rather than a bare override.
+    if (b.reason) db.prepare(`UPDATE air_quote_cost SET markup_source='override', markup_reason=?, updated_at=datetime('now') WHERE quote_id=?`).run(String(b.reason).slice(0, 200), q.id);
 
     // A released quote re-issues rather than saving a draft: the header moves to the new
     // figure, the client is emailed, and the previous decision link is expired so the old

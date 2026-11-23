@@ -143,6 +143,20 @@ module.exports = function makePulseTools(deps) {
       },
     },
     {
+      name: 'get_quote_intel',
+      description: 'Pricing intelligence for one air quote (internal only): partner cost against the vendor\'s history, the client\'s usual sell per kg and per unit, the win curve by price position, the ceiling (lowest price the client has declined), and priced options — rate card, hold the average, best expected margin — each with sell, markup, gross margin, /kg and win likelihood. Use it for "what should we charge", "is this a margin opportunity", "what if we go 20%". Never do the arithmetic yourself; quote these figures. Sell and margin figures are never for the client or the partner.',
+      input_schema: { type: 'object', properties: { ref: { type: 'string', description: 'quote reference like AQ-2611-003, or the quote id' } }, required: ['ref'] },
+      tier: 'read', roles: ['admin'], internalOnly: true,
+      async run(a, ctx) {
+        const ref = String(a.ref || '').trim(); if (!ref) return { error: 'ref required' };
+        const r = await callRoute(ctx, 'GET', `/air-quotes/intel?ref=${encodeURIComponent(ref)}`);
+        if (!r.ok) return { error: r.error };
+        const i = r.data.intel || r.data;
+        // Trim what the model does not need to reason with.
+        return { quote: i.quote, headline: i.headline, kind: i.kind, anchor: i.anchor, benchmarks: i.benchmarks, partner: { cost_kg: i.partner.cost_kg, median_kg: i.partner.median_kg, min_kg: i.partner.min_kg, max_kg: i.partner.max_kg, vs_median_pct: i.partner.vs_median_pct, vs_size_median_pct: i.partner.vs_size_median_pct, rank_low: i.partner.rank_low, n: i.partner.n, volatility_pct: i.partner.volatility_pct, by_size: i.partner.by_size, by_mode: i.partner.by_mode }, ceiling: i.ceiling, win_curve: i.win_curve, options: i.options, recommended: i.recommended };
+      },
+    },
+    {
       name: 'get_transit_board',
       description: 'The live Transit Movements board across the last 12 weeks: counts by health, movements needing attention (late, held, unconfirmed), and recent progress. Use for cross-week questions like "what is late right now" or "what moved in the last 7 days".',
       input_schema: { type: 'object', properties: { week: { type: 'string', description: 'optional Monday or "W46" to narrow to one week' } } },
