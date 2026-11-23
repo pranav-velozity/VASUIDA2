@@ -233,9 +233,14 @@ module.exports = function pulseMeetings(deps) {
     else out.recent = db.prepare('SELECT speaker, text, is_question, answer FROM pulse_meeting_line WHERE meeting_id = ? ORDER BY id DESC LIMIT 4').all(m.id).reverse();
     return out;
   };
-  app.get('/pulse/meetings', ...gate, (req, res) => {
+  app.get('/pulse/meetings', ...gate, async (req, res) => {
+    try { await reconcile(false); } catch (_) {}
     const rows = db.prepare(`SELECT * FROM pulse_meeting WHERE client_id = ? ORDER BY CASE status WHEN 'live' THEN 0 WHEN 'joining' THEN 0 WHEN 'waiting' THEN 0 WHEN 'scheduled' THEN 1 ELSE 2 END, COALESCE(scheduled_at, created_at) DESC LIMIT 30`).all(curClient());
     res.json({ ok: true, enabled: enabled(), meetings: rows.map(m => shape(m, false)) });
+  });
+  // "Check with Recall now" — forces a reconcile (the automatic one runs every two minutes).
+  app.post('/pulse/meetings/reconcile', ...gate, async (req, res) => {
+    try { const n = await reconcile(true); res.json({ ok: true, changed: n }); } catch (e) { res.status(502).json({ ok: false, error: String(e.message || e) }); }
   });
   app.get('/pulse/meetings/:id', ...gate, (req, res) => {
     const m = getM(req.params.id); if (!m || m.client_id !== curClient()) return res.status(404).json({ ok: false, error: 'no such meeting' });
@@ -294,6 +299,9 @@ module.exports = function pulseMeetings(deps) {
     const m = getM(req.params.id); if (!m || m.client_id !== curClient()) return res.status(404).json({ ok: false, error: 'no such meeting' });
     try { if (m.bot_id) await recall('POST', `/api/v1/bot/${m.bot_id}/leave_call/`); } catch (e) { log.warn('[pulse meeting] leave failed: ' + e.message); }
     if (m.status === 'scheduled') { try { if (m.bot_id) await recall('DELETE', `/api/v1/bot/${m.bot_id}/`); } catch (_) {} setM(m.id, { status: 'cancelled' }); }
+    // Leaving a meeting that is (or looks) live ends it here and now: notes, tasks and the queued
+    // actions must not wait for a status webhook that may never come.
+    else if (['joining', 'waiting', 'live'].includes(m.status)) { setM(m.id, { status: 'ended', ended_at: iso() }); try { await finish(getM(m.id)); } catch (e) { log.warn('[pulse meeting] finish after leave failed #' + m.id + ': ' + e.message); } }
     note(req, 'pulse_meeting_leave', { id: m.id }, 200, null);
     res.json({ ok: true, meeting: shape(getM(m.id)) });
   });
@@ -477,6 +485,35 @@ module.exports = function pulseMeetings(deps) {
     const old = m.ended_at && (now() - new Date(m.ended_at).getTime()) > RETENTION_DAYS * 86400000;
     if (!open || old) { db.prepare('DELETE FROM pulse_meeting_line WHERE meeting_id = ?').run(id); setM(id, { transcript_deleted_at: iso() }); if (old && open) db.prepare(`UPDATE pulse_meeting_action SET status = 'dismissed', settled_by = 'retention', settled_at = ? WHERE meeting_id = ? AND status = 'proposed'`).run(iso(), id); }
   }
+  // ── Reconcile with Recall ──
+  // The status webhook is the normal way a meeting ends. If it is not configured, mis-signed or
+  // simply lost, a meeting would stay "live" forever and the notes would never go out — so every
+  // couple of minutes, and whenever the panel lists meetings, we ask Recall what the bot is doing
+  // and trust that over our own record.
+  const RECONCILE_MS = 2 * 60 * 1000; let lastReconcile = 0; let reconciling = false;
+  const ENDED_CODES = new Set(['call_ended', 'done', 'fatal', 'recording_permission_denied', 'analysis_done', 'media_expired']);
+  async function reconcile(force) {
+    if (!enabled() || reconciling) return 0; if (!force && now() - lastReconcile < RECONCILE_MS) return 0;
+    lastReconcile = now(); reconciling = true; let changed = 0;
+    try {
+      const rows = db.prepare(`SELECT * FROM pulse_meeting WHERE status IN ('joining','waiting','live') AND bot_id IS NOT NULL`).all();
+      for (const m of rows) {
+        let bot; try { bot = await recall('GET', `/api/v1/bot/${m.bot_id}/`); } catch (e) { if (e.status === 404) { setM(m.id, { status: 'ended', ended_at: iso(), last_error: 'bot not found at Recall' }); changed++; try { await finish(getM(m.id)); } catch (_) {} } continue; }
+        const sc = Array.isArray(bot.status_changes) ? bot.status_changes : []; const last = sc.length ? sc[sc.length - 1] : null; const code = last && String(last.code || '');
+        if (!code) continue;
+        if (ENDED_CODES.has(code)) {
+          setM(m.id, { status: 'ended', ended_at: last.created_at || iso(), last_error: code === 'fatal' ? 'fatal' + (last.sub_code ? ' (' + last.sub_code + ')' : '') : null }); changed++;
+          log.log(`[pulse meeting] #${m.id} reconciled from Recall: ${code} → ended (status webhook missing?)`);
+          note(null, 'pulse_meeting_reconciled', { meeting: m.id, code }, 200, null);
+          try { await finish(getM(m.id)); } catch (e) { log.warn('[pulse meeting] finish failed #' + m.id + ': ' + e.message); }
+        } else if (code === 'in_call_recording' || code === 'in_call_not_recording') { if (m.status !== 'live') { setM(m.id, { status: 'live', started_at: m.started_at || iso() }); changed++; } }
+        else if (code === 'in_waiting_room' && m.status !== 'waiting') { setM(m.id, { status: 'waiting' }); changed++; }
+      }
+    } finally { reconciling = false; }
+    return changed;
+  }
+  setInterval(() => reconcile(false).catch(() => {}), RECONCILE_MS).unref();
+
   function sweep() {
     try { for (const m of db.prepare(`SELECT id FROM pulse_meeting WHERE status = 'ended' AND transcript_deleted_at IS NULL`).all()) maybeForget(m.id); } catch (_) {}
     // A scheduled meeting whose time passed with no bot (Recall unconfigured when it was created) is marked.
@@ -484,5 +521,5 @@ module.exports = function pulseMeetings(deps) {
   }
   setInterval(sweep, 60 * 60 * 1000).unref();
 
-  return { createMeeting, startMeeting, fromInvite, parseInviteTime, onUtterance, finish, maybeForget, sweep, verifySvix, enabled, MEETING_LINK, transcriptProvider, keyterms };
+  return { createMeeting, startMeeting, fromInvite, parseInviteTime, onUtterance, finish, maybeForget, sweep, reconcile, verifySvix, enabled, MEETING_LINK, transcriptProvider, keyterms };
 };
