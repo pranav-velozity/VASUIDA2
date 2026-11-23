@@ -102,11 +102,19 @@
       return `<div class="pm-row" data-id="${m.id}">
         <div class="pm-t"><span class="pm-chip ${m.status}">${esc(LABEL[m.status] || m.status)}</span><span class="pm-title">${esc(m.title || m.meeting_url)}</span>${m.proposed ? `<span class="pm-chip" style="color:${BRAND}">${m.proposed} to confirm</span>` : ''}</div>
         <div class="pm-meta">${m.scheduled_at ? `<span>${esc(when(m.scheduled_at))}</span>` : ''}<span>${esc(m.platform || '')}</span>${m.lines ? `<span>${m.lines} exchanges</span>` : ''}${m.last_error ? `<span style="color:${BAD}">${esc(m.last_error)}</span>` : ''}
-          ${(m.status === 'scheduled' && !m.bot_id) || m.status === 'failed' ? `<a data-join>${m.status === 'failed' ? 'retry' : 'join now'}</a>` : ''}${['scheduled', 'joining', 'waiting', 'live'].includes(m.status) ? `<a data-leave>${m.status === 'scheduled' ? 'cancel' : 'leave'}</a>` : ''}${m.summary ? `<a data-toggle>${open ? 'hide notes' : 'notes'}</a>` : ''}</div>
+          ${(m.status === 'scheduled' && !m.bot_id) || m.status === 'failed' ? `<a data-join>${m.status === 'failed' ? 'retry' : 'join now'}</a>` : ''}${['joining', 'waiting', 'live'].includes(m.status) ? `<a data-answer title="Pulse answers what was just said, no wake word needed">answer that</a>` : ''}${['scheduled', 'joining', 'waiting', 'live'].includes(m.status) ? `<a data-leave>${m.status === 'scheduled' ? 'cancel' : 'leave'}</a>` : ''}${m.summary ? `<a data-toggle>${open ? 'hide notes' : 'notes'}</a>` : ''}</div>
         ${['live', 'joining', 'waiting'].includes(m.status) && lines ? `<div class="pm-lines">${lines}</div>` : ''}
         ${open && m.summary ? `<div class="pm-sum">${esc(m.summary)}</div>` : ''}
         ${acts}</div>`;
     }).join('');
+    // "Answer that": when someone is not being picked up (accent, cross-talk), Pulse takes the last
+    // 20 s as the question — or, if nothing was heard, answers the next thing anyone says.
+    list.querySelectorAll('[data-answer]').forEach(a => { a.onclick = async () => {
+      const id = a.closest('.pm-row').dataset.id; a.textContent = '…';
+      try { const r = await call(`/pulse/meetings/${id}/answer`, { method: 'POST', body: '{}' }); a.textContent = r.mode === 'next' ? 'listening…' : 'answering…'; }
+      catch (e) { a.textContent = 'answer that'; console.warn('[Pulse meetings]', e.message); return; }
+      setTimeout(refresh, 4000);
+    }; });
     list.querySelectorAll('[data-leave]').forEach(a => { a.onclick = async () => { const id = a.closest('.pm-row').dataset.id; try { await call(`/pulse/meetings/${id}/leave`, { method: 'POST', body: '{}' }); } catch (e) { console.warn('[Pulse meetings]', e.message); } refresh(); }; });
     list.querySelectorAll('[data-join]').forEach(a => { a.onclick = async () => { const id = a.closest('.pm-row').dataset.id; a.textContent = 'joining…'; try { await call(`/pulse/meetings/${id}/join`, { method: 'POST', body: '{}' }); } catch (e) { alert(e.message || 'Could not join'); } refresh(); }; });
     list.querySelectorAll('[data-toggle]').forEach(a => { a.onclick = () => { const id = a.closest('.pm-row').dataset.id; M.open[id] = !M.open[id]; paint(); }; });

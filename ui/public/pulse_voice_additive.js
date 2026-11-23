@@ -40,17 +40,26 @@
    Either way the panel still shows every word as text, so nothing is lost when audio is not
    possible — a muted laptop in a meeting still gets its answers on screen.
 
-   Test hook: window._pulseVoice (state, start, stop, setMode, handleUtterance, speak, vad). */
+   Test hook: window._pulseVoice (state, start, stop, setMode, handleUtterance, speak, vad, setWake). */
 ;(function () {
   'use strict';
 
   const BRAND = '#990033', MID = '#6E6E73', LIGHT = '#AEAEB2', DARK = '#1C1C1E', OK = '#1F7A4D', BAD = '#B42318';
-  const WAKE = /^\s*(?:hey|hi|ok|okay|hello)?[\s,]*(?:pulse|paulse|pals|pulls|pause)\b[\s,.:!?-]*/i;   // what transcribers make of "Pulse"
+  // Wake words: the server's list (GET /pulse/voice/status → wake_words) carries the name and the
+  // ways transcribers mishear it across accents (bulbs, pause, pulls…); this default is the fallback.
+  const WAKE_DEFAULT = ['pulse', 'pulse ai', 'pulsar', 'paulse', 'pals', 'pause', 'pulls', 'pull', 'bulbs', 'bulb', 'bulls', 'pols', 'polls', 'pinpoint'];
+  const escW = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+').replace(/'/g, "['’]?");
+  let WAKE, MIDWAKE;
+  function setWake(words) {
+    const a = (Array.isArray(words) && words.length ? words : WAKE_DEFAULT).slice().sort((x, y) => y.length - x.length).map(escW).join('|');
+    WAKE = new RegExp('^\\s*(?:hey|hi|ok|okay|hello|so|um|uh|right|now)?[\\s,]*(?:' + a + ')\\b[\\s,.:!?-]*', 'i');
+    MIDWAKE = new RegExp('^.{3,}?[,.;:!?—-]?\\s+(?:hey|ok|okay)?\\s*(?:' + a + ')\\b[\\s,.:!?-]*(.{3,})$', 'i');
+  }
+  setWake(WAKE_DEFAULT);
   const AGAIN = /^(?:pulse[\s,]*)?(?:say that again|repeat that|say again|what was that|pardon|come again)\W*$/i;
   const YES = /^(?:pulse[\s,]*)?(?:yes|yes please|yep|yeah|yup|sure|do it|go ahead|go for it|confirm|confirmed|correct|that's right|ok|okay|please do|make it so)\b[\s!.]*$/i;
   const NO = /^(?:pulse[\s,]*)?(?:no|nope|cancel|don't|do not|stop|never mind|nevermind|leave it|not now)\b/i;
   const CONFIRM_SOLO_MS = 15000, CONFIRM_MEETING_MS = 25000, FOLLOW_MS = 8000;
-  const MIDWAKE = /^.{3,}?[,.;:!?—-]?\s+(?:hey|ok|okay)?\s*(?:pulse|paulse|pulls|pause)\b[\s,.:!?-]*(.{3,})$/i;
   const STOP = /^(?:pulse[\s,]*)?(?:stop|don't send|do not send|don't send that|recall|cancel that|hold it|wait)\b/i;
   const MIN_CLIP_MS = 450, MAX_CLIP_MS = 20000, AFTER_SPEAK_MS = 350, SNIPPET_MS = 15000;
 
@@ -78,6 +87,7 @@
     awaiting: null,     // { token, summary, until, timer } while a proposed action waits for a spoken yes
     queue: [], pumping: false,   // clips waiting for the transcriber (Meeting mode keeps recording)
     followUntil: 0,     // after a bare "Pulse", the next sentence counts without the name
+    setWake,            // swap the wake-word list (the server's list is applied when /pulse/voice/status loads)
     log: [],
   };
   try { V.mode = localStorage.getItem('pulse_voice_mode') === 'meeting' ? 'meeting' : 'solo'; } catch (_) {}
@@ -167,6 +177,7 @@
     if (!V.caps) {
       try { const r = await get('/pulse/voice/status'); V.caps = r.ok ? await r.json() : { stt: false, tts: false, error: r.status }; }
       catch (_) { V.caps = { stt: false, tts: false }; }
+      if (V.caps && V.caps.wake_words) setWake(V.caps.wake_words);
       if (V.caps.error === 409) { setState('error', 'Turn Pulse on first'); V.on = false; return; }
     }
     V.useWebSpeech = !V.caps.stt && !!(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -294,7 +305,7 @@
       V.followUntil = 0;
       if (!text) { V.followUntil = Date.now() + FOLLOW_MS; setState('listening', 'Yes?'); speak('Yes?'); return ''; }   // name alone: listen for the next sentence
     } else {
-      text = text.replace(WAKE, (m) => (/^\s*(?:hey|hi|ok|okay|hello)?[\s,]*pulse/i.test(m) ? '' : m)).trim();   // "Pulse, …" is fine in Solo too
+      text = text.replace(WAKE, '').trim();                                           // "Pulse, …" is fine in Solo too
     }
     if (AGAIN.test(text)) { if (V.lastSpoken) { speak(V.lastSpoken); } else if (V.on) setState('listening'); return 'again'; }
     if (text.length < 3) { if (V.on) setState('listening'); return ''; }
@@ -356,7 +367,7 @@
     stopSpeaking(true);
     V.busy = true; setState('speaking');
     const done = () => { V.audio = null; V.busy = false; V.pausedUntil = Date.now() + AFTER_SPEAK_MS; if (V.on) showSnippet(text); else setState('off'); };
-    if (!V.caps) { try { const r = await get('/pulse/voice/status'); V.caps = r.ok ? await r.json() : { stt: false, tts: false }; } catch (_) { V.caps = { stt: false, tts: false }; } }
+    if (!V.caps) { try { const r = await get('/pulse/voice/status'); V.caps = r.ok ? await r.json() : { stt: false, tts: false }; } catch (_) { V.caps = { stt: false, tts: false }; } } if (V.caps && V.caps.wake_words) setWake(V.caps.wake_words);
     if (V.caps.tts) {
       try {
         const r = await post('/pulse/speak', { text }, 'audio/mpeg');
