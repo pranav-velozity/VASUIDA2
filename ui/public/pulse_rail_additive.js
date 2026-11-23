@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Pulse rail v1 ──
+/* ── VelOzity Pinpoint — Pulse rail v2 ──
    Pulse moves from the bottom bar to a right-hand rail and speaks first: a briefing surface at
    the top (built from the Week Hub insights already fetched — no extra model call), four verb
    tiles for the page you are on, then the conversation, then the composer.
@@ -23,7 +23,10 @@
 
   const css = `
     :root{--pr-w:${W}px;--pr-top:52px}
-    body.pr-on main.vo-wrap{width:auto!important;max-width:none!important;margin:0!important;padding-right:calc(24px + var(--pr-w))!important;box-sizing:border-box;}
+    /* Pages that nest their own .vo-wrap (Receiving, others) size it to 96vw; inside the narrowed main they must follow the main instead. */
+    body.pr-on .vo-wrap{width:auto!important;max-width:none!important;margin:0!important;}
+    body.pr-on main.vo-wrap{padding-right:calc(24px + var(--pr-w))!important;box-sizing:border-box;}
+    body.pr-on main.vo-wrap .vo-wrap{padding-left:0!important;padding-right:0!important;}
     body.pr-on.pr-overlay main.vo-wrap{padding-right:calc(24px + ${WC}px)!important;}
     #pr-rail{position:fixed;top:var(--pr-top);right:0;bottom:0;width:var(--pr-w);box-sizing:border-box;z-index:45;background:#fff;border-left:.5px solid rgba(0,0,0,.1);display:flex;flex-direction:column;font-family:Inter,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:${DARK};transition:width .2s ease;}
     body.pr-overlay #pr-rail:not(.collapsed){box-shadow:-16px 0 40px rgba(0,0,0,.12);}
@@ -77,7 +80,7 @@
     body.pr-on #pulse-panel{position:static!important;max-height:none!important;flex:1 1 auto!important;min-height:120px;border:0!important;border-radius:0!important;box-shadow:none!important;overflow:visible!important;display:flex!important;flex-direction:column;background:transparent!important;margin:0 -12px;padding:0 12px;}
     body.pr-on #pulse-panel .pulse-chat{padding:4px 0 10px!important;flex:1 1 auto;overflow:visible!important}
     body.pr-on #pulse-panel .pulse-msg{max-width:92%!important}
-    body.pr-on #pulse-panel .pulse-suggestions{padding:0 0 8px!important}
+    body.pr-on #pulse-panel .pulse-suggestions{display:none!important}   /* the verb tiles replace the stock questions */
     body.pr-on #pulse-panel #pt-strip,body.pr-on #pulse-panel #pm-strip{margin:0 0 8px!important}
     body.pr-on #pulse-minimize{display:none!important}
     body.pr-on #pulse-bar{position:static!important;left:auto!important;right:auto!important;bottom:auto!important;width:auto!important;margin:0!important;border:0!important;border-top:.5px solid rgba(0,0,0,.08)!important;border-radius:0!important;box-shadow:none!important;padding:8px 12px 12px!important;display:none;flex-wrap:wrap;gap:8px!important;justify-content:flex-start!important;background:#fff!important;flex:none}
@@ -368,9 +371,11 @@
     build(); if (!adopt()) return;
     R.state.on = true; R.state.page = pageKey();
     R.el.classList.toggle('collapsed', R.state.collapsed);
+    // Tasks and meetings start folded in the rail; the minis above open them.
+    ['pt-strip', 'pm-strip'].forEach(id => { const el = document.getElementById(id); if (el && el.classList.contains('open')) { const h = el.querySelector('.pt-head, .pm-head'); if (h) h.click(); else el.classList.remove('open'); } });
     const bar = document.getElementById('pulse-bar'); R.el.classList.toggle('hidden', !(bar && bar.classList.contains('visible')));
     layout(); paint(); compactHeader();
-    console.log('[pulse-rail] v1 on');
+    console.log('[pulse-rail] v2 on');
   }
   function disable() { if (!R.state.on) return; release(); R.state.on = false; document.body.classList.remove('pr-on', 'pr-overlay', 'pr-hdr'); if (R.el) R.el.classList.add('hidden'); }
 
