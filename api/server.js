@@ -1790,6 +1790,16 @@ app.post('/pulse/chat',
     lines.push('- Role: ' + roleLabel);
     lines.push('- Facility: ' + (facility || 'not set'));
     lines.push('- Currently viewing week: ' + (currWk || 'not set'));
+    // Pulse rail: what the user has pinned on screen (selected POs, an open movement). Plain text
+    // from the browser, capped and quoted — it steers the answer, it is not data.
+    const _pin = req.body && req.body.pin && typeof req.body.pin === 'object' ? req.body.pin : null;
+    if (_pin) {
+      const ids = Array.isArray(_pin.ids) ? _pin.ids.map(x => String(x).slice(0, 40)).slice(0, 60) : [];
+      const label = String(_pin.label || '').slice(0, 160);
+      const page = String(_pin.page || '').slice(0, 40);
+      lines.push('- Looking at' + (page ? ' (' + page + ')' : '') + ': ' + (label || 'a selection') + (ids.length ? ' — ' + ids.join(', ') : '')
+        + '. Unless the question names something else, "these", "it", "this one" refer to this selection.');
+    }
     lines.push('');
 
     if (_isFulfilmentCtx) {

@@ -77,6 +77,12 @@ module.exports = function pulseVoice(deps) {
     return true;
   };
 
+  // ── UI switches the browser reads once after sign-in ──
+  //   PULSE_RAIL=off     fall back to the bottom bar (the rail module stays loaded but stands down)
+  //   PULSE_HEADER=off   keep the full header (no compact user menu / "powered by" text hidden)
+  app.get('/pulse/ui', authenticateRequest, (req, res) => {
+    res.json({ rail: process.env.PULSE_RAIL !== 'off', header: process.env.PULSE_HEADER !== 'off' });
+  });
   // ── status ──
   app.get('/pulse/voice/status', authenticateRequest, (req, res) => {
     if (!aiAllowed(req, res)) return;
