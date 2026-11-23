@@ -40,6 +40,23 @@ module.exports = function mountAPO(deps) {
     );
   `);
 
+  // Nov 2026: the sea lead moved 30 → 33 with the transit lane rules (Friday departure, 20-day
+  // transit, 2 days to clear). A saved setting still on the old default follows; one somebody
+  // set to anything else is their decision. Runs once, marked by a sentinel row.
+  try {
+    if (!db.prepare(`SELECT 1 x FROM apo_settings WHERE client_id = '__sea33__'`).get()) {
+      let n = 0;
+      for (const row of db.prepare('SELECT client_id, data FROM apo_settings').all()) {
+        let d; try { d = JSON.parse(row.data); } catch (_) { continue; }
+        if (!d || typeof d !== 'object' || d.sea_lead_days == null || Number(d.sea_lead_days) !== 30) continue;
+        d.sea_lead_days = 33;
+        db.prepare('UPDATE apo_settings SET data = ?, updated_at = ?, updated_by = ? WHERE client_id = ?').run(JSON.stringify(d), new Date().toISOString(), 'migration:sea33', row.client_id); n++;
+      }
+      db.prepare('INSERT INTO apo_settings (client_id, data, updated_at, updated_by) VALUES (?, ?, ?, ?)').run('__sea33__', '{}', new Date().toISOString(), 'migration:sea33');
+      console.log(`[apo] sea_lead_days 30 → 33 on ${n} saved setting(s)`);
+    }
+  } catch (e) { console.warn('[apo] sea lead migration skipped:', e.message); }
+
   const internalOnly = (req, res) => {
     const role = (req.auth && req.auth.orgRole) || '';
     if (role !== 'org:admin_auth') {

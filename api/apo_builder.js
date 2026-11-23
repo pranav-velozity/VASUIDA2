@@ -51,7 +51,7 @@
     shipping_cost: 1.1,
     logistic_eta: '11:00',     // a time of day, constant across the file
     air_lead_days: 12,
-    sea_lead_days: 30,
+    sea_lead_days: 33,         // Friday + 33 = Monday + 37, in step with the transit lane rules (Nov 2026; was 30)
   };
 
   const norm = (v) => String(v == null ? '' : v).trim();
