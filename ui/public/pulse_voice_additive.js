@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Pulse voice v4 (Phase 2 + spoken confirmations + stop) ──
+/* ── VelOzity Pinpoint — Pulse voice v5 (continuous listening in Meeting mode) ──
    Hands-free Pulse. The Spoken switch on the Pulse bar (from pulse_agent_additive.js) now does
    what its name says: on, Pulse listens through the microphone and answers out loud; off, it is
    the typed assistant it always was. There are no buttons to hold.
@@ -49,7 +49,8 @@
   const AGAIN = /^(?:pulse[\s,]*)?(?:say that again|repeat that|say again|what was that|pardon|come again)\W*$/i;
   const YES = /^(?:pulse[\s,]*)?(?:yes|yes please|yep|yeah|yup|sure|do it|go ahead|go for it|confirm|confirmed|correct|that's right|ok|okay|please do|make it so)\b[\s!.]*$/i;
   const NO = /^(?:pulse[\s,]*)?(?:no|nope|cancel|don't|do not|stop|never mind|nevermind|leave it|not now)\b/i;
-  const CONFIRM_SOLO_MS = 15000, CONFIRM_MEETING_MS = 25000;
+  const CONFIRM_SOLO_MS = 15000, CONFIRM_MEETING_MS = 25000, FOLLOW_MS = 8000;
+  const MIDWAKE = /^.{3,}?[,.;:!?—-]?\s+(?:hey|ok|okay)?\s*(?:pulse|paulse|pulls|pause)\b[\s,.:!?-]*(.{3,})$/i;
   const STOP = /^(?:pulse[\s,]*)?(?:stop|don't send|do not send|don't send that|recall|cancel that|hold it|wait)\b/i;
   const MIN_CLIP_MS = 450, MAX_CLIP_MS = 20000, AFTER_SPEAK_MS = 350, SNIPPET_MS = 15000;
 
@@ -75,6 +76,8 @@
     stream: null, ctx: null, analyser: null, src: null, timer: null, rec: null, chunks: [], clipStart: 0,
     busy: false, audio: null, lastSpoken: '', useWebSpeech: false, recog: null, pausedUntil: 0, lastError: '', snippet: '', snippetTimer: null,
     awaiting: null,     // { token, summary, until, timer } while a proposed action waits for a spoken yes
+    queue: [], pumping: false,   // clips waiting for the transcriber (Meeting mode keeps recording)
+    followUntil: 0,     // after a bare "Pulse", the next sentence counts without the name
     log: [],
   };
   try { V.mode = localStorage.getItem('pulse_voice_mode') === 'meeting' ? 'meeting' : 'solo'; } catch (_) {}
@@ -122,7 +125,7 @@
     V.state = s; V.detail = detail || '';
     const label = {
       off: '', starting: 'Starting microphone…',
-      listening: (V.awaiting && Date.now() < V.awaiting.until) ? 'Yes or no?' : (V.mode === 'meeting' ? 'Listening for "Pulse…"' : 'Listening'),
+      listening: (V.awaiting && Date.now() < V.awaiting.until) ? 'Yes or no?' : (Date.now() < V.followUntil ? 'Yes?' : (V.mode === 'meeting' ? 'Listening for "Pulse…"' : 'Listening')),
       hearing: 'Hearing you…', transcribing: 'Working out what you said…', thinking: 'Thinking…', speaking: 'Speaking — tap to stop',
       error: detail || 'Voice unavailable', paused: detail || 'Paused',
     }[s] || s;
@@ -190,8 +193,10 @@
     V.timer = setInterval(() => {
       if (!V.on || V.detectorOff) return;   // detectorOff: test knob, the fake microphone hums
       if (V.mode !== lastMode) { lastMode = V.mode; vad = V.vad({ hangMs: V.mode === 'meeting' ? 1000 : 700 }); }
-      // Do not hear while Pulse is talking/thinking, or just after (speaker bleed).
-      if (V.busy || V.state === 'speaking' || Date.now() < V.pausedUntil) { if (vad.st.speaking) { vad.st.speaking = false; discardClip(); } return; }
+      // Do not hear while Pulse is talking, or just after (speaker bleed). Transcribing and
+      // thinking do NOT pause the microphone: in a room people keep talking, and a sentence
+      // said while the previous clip is in flight must still be caught — clips queue up.
+      if (V.state === 'speaking' || V.audio || Date.now() < V.pausedUntil) { if (vad.st.speaking) { vad.st.speaking = false; discardClip(); } return; }
       V.analyser.getFloatTimeDomainData(buf);
       let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
       const rms = Math.sqrt(s / buf.length);
@@ -207,7 +212,7 @@
   function stop() {
     V.on = false;
     clearInterval(V.timer); V.timer = null;
-    discardClip(); releaseStream(); stopSpeaking(); clearAwaiting();
+    discardClip(); releaseStream(); stopSpeaking(); clearAwaiting(); V.queue = []; V.followUntil = 0;
     if (V.recog) { try { V.recog.onend = null; V.recog.stop(); } catch (_) {} V.recog = null; }
     document.removeEventListener('visibilitychange', onVis);
     setState('off');
@@ -227,17 +232,23 @@
   function endClip() {
     const rec = V.rec; if (!rec) return;
     const dur = Date.now() - V.clipStart, mime = rec.mimeType || 'audio/webm';
-    rec.onstop = async () => {
+    rec.onstop = () => {
       const blob = new Blob(V.chunks, { type: mime }); V.rec = null; V.chunks = [];
-      if (dur < MIN_CLIP_MS || blob.size < 2000) { if (V.on) setState('listening'); return; }    // a cough, a door
-      await transcribeAndHandle(blob, dur);
+      if (dur < MIN_CLIP_MS || blob.size < 2000) { if (V.on && V.state === 'transcribing') setState('listening'); return; }    // a cough, a door
+      V.queue.push({ blob, dur }); pump();
     };
     try { rec.stop(); } catch (_) { V.rec = null; if (V.on) setState('listening'); }
   }
 
+  // One clip at a time through the transcriber, in order, while the microphone keeps recording.
+  async function pump() {
+    if (V.pumping) return; V.pumping = true;
+    try { while (V.on && V.queue.length) { const { blob, dur } = V.queue.shift(); await transcribeAndHandle(blob, dur); } }
+    finally { V.pumping = false; }
+  }
   async function transcribeAndHandle(blob, durMs) {
     if (!V.on) return;
-    V.busy = true; setState('transcribing');
+    V.busy = true; if (V.state !== 'speaking') setState('transcribing');
     try {
       const b64 = await new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(',')[1] || ''); r.onerror = no; r.readAsDataURL(blob); });
       const r = await post('/pulse/transcribe', { audio: b64, mime: blob.type, duration_ms: durMs, mode: V.mode });
@@ -276,9 +287,12 @@
       speak(held.length > 1 ? 'Stopped — nothing was sent.' : 'Stopped — the email was not sent.'); return 'stop';
     }
     if (V.mode === 'meeting') {
-      if (!WAKE.test(text)) { if (V.on) setState('listening'); return ''; }   // not for Pulse
-      text = text.replace(WAKE, '').trim();
-      if (!text) { if (V.on) setState('listening', 'Yes?'); return ''; }
+      const follow = Date.now() < V.followUntil;
+      if (WAKE.test(text)) text = text.replace(WAKE, '').trim();
+      else if (MIDWAKE.test(text)) text = text.replace(MIDWAKE, '$1').trim();      // "…so, Pulse, what's the ETA?"
+      else if (!follow) { if (V.on) setState('listening'); return ''; }           // not for Pulse
+      V.followUntil = 0;
+      if (!text) { V.followUntil = Date.now() + FOLLOW_MS; setState('listening', 'Yes?'); speak('Yes?'); return ''; }   // name alone: listen for the next sentence
     } else {
       text = text.replace(WAKE, (m) => (/^\s*(?:hey|hi|ok|okay|hello)?[\s,]*pulse/i.test(m) ? '' : m)).trim();   // "Pulse, …" is fine in Solo too
     }
