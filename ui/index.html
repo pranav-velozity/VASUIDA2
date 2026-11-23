@@ -6517,10 +6517,11 @@ window.__openPrebookModal = function(){
   <script src="/public/ehp_geo_additive.js?v=10" defer></script>
   <script src="/public/air_quotes_additive.js?v=20" defer></script>
   <script src="/public/pulse_toggle_additive.js?v=5" defer></script>
-  <script src="/public/pulse_agent_additive.js?v=4" defer></script>
+  <script src="/public/pulse_agent_additive.js?v=5" defer></script>
   <script src="/public/pulse_voice_additive.js?v=7" defer></script>
   <script src="/public/pulse_tasks_additive.js?v=2" defer></script>
   <script src="/public/pulse_meetings_additive.js?v=3" defer></script>
+  <script src="/public/pulse_rail_additive.js?v=1" defer></script>
   <script src="/public/air_quotes_internal_additive.js?v=21" defer></script>
   <script src="/public/supplier_invoices_additive.js?v=4" defer></script>
   <script src="/public/dept_owners_additive.js?v=1" defer></script>
@@ -6590,6 +6591,11 @@ window.__openPrebookModal = function(){
       _flipperIdx = (_flipperIdx + 1) % _flipperInsights.length;
       _showInsight(_flipperIdx);
     }, 4000);
+  }
+
+  // The Pulse rail reads the same insights for its briefing (no second model call).
+  function _publishInsights(ws) {
+    try { window._whInsights = _flipperInsights; window.dispatchEvent(new CustomEvent('pulse:insights', { detail: { week: ws, insights: _flipperInsights } })); } catch (_) {}
   }
 
   // ── Fire question into PULSE chat ──
@@ -6768,6 +6774,7 @@ window.__openPrebookModal = function(){
 
       _flipperInsights = parsed;
       _flipperIdx = 0;
+      _publishInsights(ws);
 
       // Reset text color
       var textEl = document.getElementById('wh-flipper-text');
@@ -6782,6 +6789,7 @@ window.__openPrebookModal = function(){
       if (/^EHP/i.test(String(window.pinpointClient || ''))) { try { await _loadEhpSummary(); } catch (_) {} }
       _flipperInsights = _computeFallback(ws);
       _flipperIdx = 0;
+      _publishInsights(ws);
       var textEl = document.getElementById('wh-flipper-text');
       if (textEl) textEl.style.color = '';
       _showInsight(0);
