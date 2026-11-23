@@ -283,10 +283,20 @@ module.exports = function pulseTasks(deps) {
     if (taskId) db.prepare(`UPDATE pulse_task SET status = CASE WHEN status IN ('done','cancelled') THEN status ELSE 'replied' END, updated_at = ? WHERE id = ?`).run(iso(), taskId);
     try { audit && audit.run('pulse', null, null, 'pulse_email_received', '/pulse/inbound', 'POST', '', 'resend', JSON.stringify({ from, subject, task_id: taskId, kind }), 200, null); } catch (_) {}
     log.log(`[pulse mail] inbound from ${from} "${subject}" → ${kind}${taskId ? ' task #' + taskId : ''}`);
-    // A meeting invitation forwarded to the mailbox schedules Pulse to join (Phase 4).
+    // A meeting invitation forwarded to the mailbox schedules Pulse to join (Phase 4). Checked
+    // on EVERY inbound email that carries a meeting link — including one from a person Pulse
+    // has written to before, which would otherwise be filed as a reply to that thread.
     let meeting = null;
-    if (_meetings && kind !== 'reply') { try { meeting = await _meetings.fromInvite({ from, subject, text: full.text || text, html: full.html || '' }); } catch (e) { log.warn('[pulse mail] invite parse error: ' + (e && e.message)); } }
-    if (meeting && !meeting.duplicate) { db.prepare(`UPDATE pulse_inbound SET kind = 'invite' WHERE resend_id = ?`).run(d.email_id); return { ok: true, kind: 'invite', meeting_id: meeting.id }; }
+    const rawAll = String(full.text || text || '') + ' ' + String(full.html || '');
+    if (_meetings && _meetings.MEETING_LINK && _meetings.MEETING_LINK.test(rawAll) && !/^pulseai@/i.test(from)) {
+      try { meeting = await _meetings.fromInvite({ from, subject, text: full.text || text, html: full.html || '' }); } catch (e) { log.warn('[pulse mail] invite parse error: ' + (e && e.message)); }
+    }
+    if (meeting && !meeting.duplicate && meeting.id) {
+      db.prepare(`UPDATE pulse_inbound SET kind = 'invite', task_id = NULL WHERE resend_id = ?`).run(d.email_id);
+      if (taskId) db.prepare(`UPDATE pulse_task SET status = CASE WHEN status = 'replied' THEN 'waiting' ELSE status END WHERE id = ?`).run(taskId);
+      return { ok: true, kind: 'invite', meeting_id: meeting.id };
+    }
+    if (meeting && meeting.duplicate) { db.prepare(`UPDATE pulse_inbound SET kind = 'invite' WHERE resend_id = ?`).run(d.email_id); return { ok: true, kind: 'invite', duplicate: true }; }
     let reply = null;
     try { reply = await autoReply({ resend_id: d.email_id, from, subject, text, taskId, kind }); } catch (e) { log.warn('[pulse mail] auto-reply error: ' + (e && e.message)); }
     return { ok: true, task_id: taskId, kind, reply };
@@ -364,6 +374,11 @@ module.exports = function pulseTasks(deps) {
     return { email_id: Number(e.lastInsertRowid), task_id: taskId, handover, persona: persona.as };
   }
 
+  // What the mailbox has received lately — for checking why something did or did not happen.
+  app.get('/pulse/inbound/recent', ...gate, (req, res) => {
+    const rows = db.prepare('SELECT id, resend_id, from_addr, subject, kind, task_id, received_at, length(text) AS text_len, substr(text,1,160) AS preview FROM pulse_inbound ORDER BY id DESC LIMIT 25').all();
+    res.json({ ok: true, inbound: rows, replies: REPLY_MODE(), reply_clients: REPLY_CLIENTS() });
+  });
   app.post('/pulse/inbound', async (req, res) => {
     const v = verifySvix(req);
     if (!v.ok) { log.warn('[pulse mail] inbound refused: ' + v.error); return res.status(v.error.includes('not set') ? 503 : 401).json({ ok: false, error: v.error }); }

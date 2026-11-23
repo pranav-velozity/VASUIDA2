@@ -184,13 +184,23 @@ module.exports = function pulseMeetings(deps) {
     if (!/@(velozity\.au|velozity\.com\.au)$/.test(from) && !(deps.isKnownSender && await deps.isKnownSender(from))) { log.log('[pulse meeting] invite from unknown sender ignored: ' + from); return null; }
     const url = link[0];
     if (db.prepare(`SELECT id FROM pulse_meeting WHERE meeting_url = ? AND status IN ('scheduled','joining','waiting','live')`).get(url)) return { duplicate: true };
-    const when = parseInviteTime(inb.text || '');
+    const plain = String(inb.text || '') || String(inb.html || '').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ');
+    const when = parseInviteTime(plain);
+    const subj = String(inb.subject || '');
+    if (/^\s*(accepted|declined|tentative|canceled|cancelled)\b/i.test(subj)) { log.log('[pulse meeting] calendar response ignored: ' + subj); return null; }
     const client = (deps.clientForSender && await deps.clientForSender(from)) || DEFAULT_CLIENT();
-    const title = String(inb.subject || '').replace(/^\s*(fw|fwd|re|invitation|updated invitation|accepted)\s*:\s*/ig, '').replace(/@.*$/, '').trim().slice(0, 200) || 'Meeting';
+    const title = subj.replace(/^\s*(fw|fwd|re|invitation|updated invitation|meeting invitation)\s*:\s*/ig, '').replace(/\s*@.*$/, '').trim().slice(0, 200) || 'Meeting';
+    // Past by more than 90 minutes: an old invite or a forwarded thread — don't crash a finished meeting.
+    if (when && when.getTime() < now() - 90 * 60 * 1000) { log.log(`[pulse meeting] invite for a past time ignored (${when.toISOString()}): ${title}`); return null; }
     const m = createMeeting({ meeting_url: url, title, client, scheduled_at: when, organiser: from, source: 'invite', created_by: 'pulse' });
-    if (when && when.getTime() > now() + 3 * 60 * 1000) { try { await createBot(m); } catch (e) { setM(m.id, { last_error: String(e.message || e).slice(0, 300) }); } }
-    note(null, 'pulse_meeting_invite', { id: m.id, from, when: when && when.toISOString(), title }, 200, null);
-    log.log(`[pulse meeting] invite → #${m.id} ${title} ${when ? when.toISOString() : '(time not found — join from the panel)'}`);
+    // Join now when the meeting is already on or about to start, or when the time could not be
+    // read but the email is plainly an invitation; otherwise schedule the bot for the start.
+    const looksLikeInvite = /invit|meeting|teams|meet\.google|zoom/i.test(subj + ' ' + plain.slice(0, 400));
+    const joinNow = when ? when.getTime() <= now() + 3 * 60 * 1000 : looksLikeInvite;
+    try { if (when || joinNow) await createBot(joinNow ? { ...m, scheduled_at: null } : m); }
+    catch (e) { setM(m.id, { last_error: String(e.message || e).slice(0, 300) }); }
+    note(null, 'pulse_meeting_invite', { id: m.id, from, when: when && when.toISOString(), title, join_now: joinNow }, 200, null);
+    log.log(`[pulse meeting] invite → #${m.id} ${title} ${when ? when.toISOString() : '(no time)'}${joinNow ? ' — joining now' : ''}`);
     return getM(m.id);
   }
 
