@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Pulse agent UI v4 ──
+/* ── VelOzity Pinpoint — Pulse agent UI v5 ──
    Pulse now looks things up through tools before it answers. This module shows that work
    in the panel, adds a Spoken toggle, and renders the proposed-action card the write tools
    will send in Phase 3. It wraps the existing pulseSend() in index.html rather than
@@ -209,7 +209,7 @@
         const resp = await fetch(apiBase + '/pulse/chat', {
           method: 'POST',
           headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
-          body: JSON.stringify({ messages: window._pulseHistory, pulseContext: window._pulseSessionContext || null, currentWeek, style: window._pulseStyle || 'text', user_name: userName() }),
+          body: JSON.stringify({ messages: window._pulseHistory, pulseContext: window._pulseSessionContext || null, currentWeek, style: window._pulseStyle || 'text', user_name: userName(), pin: window._pulsePin || null }),
         });
         if (loading) loading.remove();
         if (!resp.ok) {
