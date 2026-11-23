@@ -21,7 +21,13 @@
 // Env:  RECALL_API_KEY, RECALL_REGION (https://ap-northeast-1.recall.ai), RECALL_WEBHOOK_SECRET
 //       PULSE_PUBLIC_BASE   default https://vasuida1.onrender.com (where Recall calls us back)
 //       PULSE_MEETING_DEFAULT_CLIENT  default ICONIC (for invites with no client signal)
-//       RECALL_TRANSCRIPT_PROVIDER    JSON override of the transcript provider block
+//       RECALL_STT                    recall (default) | deepgram | assembly — which engine Recall streams with.
+//                                     deepgram/assembly need that vendor's key added in the Recall dashboard
+//                                     (Transcription credentials) first; both take a key-term list so "Pulse",
+//                                     "Pinpoint" and the ops vocabulary are boosted, and both handle accents
+//                                     far better than Recall's low-latency engine.
+//       PULSE_KEYTERMS                comma-separated extra key terms (facility codes, client names…)
+//       RECALL_TRANSCRIPT_PROVIDER    JSON override of the whole transcript provider block (wins over RECALL_STT)
 'use strict';
 const crypto = require('crypto');
 
@@ -29,7 +35,7 @@ const crypto = require('crypto');
 // before the output_audio endpoint can be used; this is the inaudible default it plays.
 const SILENT_MP3_B64 = 'SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjYwLjE2LjEwMAAAAAAAAAAAAAAA//NwwAAAAAAAAAAAAEluZm8AAAAPAAAADgAABm0ALCwsLCwsLDw8PDw8PDxNTU1NTU1NXV1dXV1dXW1tbW1tbW19fX19fX19jo6Ojo6Ojp6enp6enp6erq6urq6urr6+vr6+vr7Pz8/Pz8/P39/f39/f3+/v7+/v7+//////////AAAAAExhdmM2MC4zMQAAAAAAAAAAAAAAACQDaQAAAAAAAAZtL+ircQAAAAAAAAAAAAAAAAD/80DEAAAAA0gAAAAATEFNRTMuMTAwVVVVVVVVVVVVVUxBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVf/zQsRbAAADSAAAAABVVVVVVVVVVVVVVVVVVVVVVVVVVUxBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVf/zQMSkAAADSAAAAABVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//NCxKMAAANIAAAAAFVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//NAxKQAAANIAAAAAFVVVVVVVVVVVVVVVVVVVVVVVVVMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/80LEowAAA0gAAAAAVVVVVVVVVVVVVVVVVVVVVVVVVVVMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/80DEpAAAA0gAAAAAVVVVVVVVVVVVVVVVVVVVVVVVVUxBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVf/zQsSjAAADSAAAAABVVVVVVVVVVVVVVVVVVVVVVVVVVUxBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVf/zQMSkAAADSAAAAABVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//NCxKMAAANIAAAAAFVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//NAxKQAAANIAAAAAFVVVVVVVVVVVVVVVVVVVVVVVVVMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/80LEowAAA0gAAAAAVVVVVVVVVVVVVVVVVVVVVVVVVVVMQU1FMy4xMDBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/80DEpAAAA0gAAAAAVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVf/zQsSjAAADSAAAAABVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQ==';
 
-const WAKE = /^\s*(?:hey|hi|ok|okay|hello|so|um|uh)?[\s,]*(?:pulse|paulse|pulls|pause)\b[\s,.:!?-]*/i;
+const wake = require('./pulse_wake');                       // shared wake-word list (also served to the browser)
 const CONTEXT_MINUTES = 20, RETENTION_DAYS = 7;
 
 module.exports = function pulseMeetings(deps) {
@@ -119,8 +125,16 @@ module.exports = function pulseMeetings(deps) {
       return json;
     } finally { clearTimeout(tm); }
   }
+  const BASE_KEYTERMS = ['Pulse', 'Pulse AI', 'Pinpoint', 'VelOzity', 'THE ICONIC', 'EHP Labs', 'packing list', 'FC receipt', 'Mobiledock', 'ETA', 'PO', 'container', 'customs', 'VAS', 'last mile', 'lane', 'vessel', 'departed', 'arrived', 'discharged', 'milestone'];
+  function keyterms() {
+    const extra = String(process.env.PULSE_KEYTERMS || '').split(',').map(s => s.trim()).filter(Boolean);
+    return [...new Set([...BASE_KEYTERMS, ...extra])].slice(0, 100);
+  }
   function transcriptProvider() {
     try { if (process.env.RECALL_TRANSCRIPT_PROVIDER) return JSON.parse(process.env.RECALL_TRANSCRIPT_PROVIDER); } catch (_) {}
+    const stt = String(process.env.RECALL_STT || 'recall').toLowerCase();
+    if (stt === 'deepgram') return { deepgram_streaming: { model: 'nova-3', language: 'en', smart_format: true, keyterm: keyterms() } };
+    if (stt === 'assembly' || stt === 'assemblyai') return { assembly_ai_v3_streaming: { keyterms_prompt: keyterms() } };
     return { recallai_streaming: { mode: 'prioritize_low_latency', language_code: 'en' } };
   }
   async function createBot(m) {
@@ -240,6 +254,28 @@ module.exports = function pulseMeetings(deps) {
     try { setM(m.id, { scheduled_at: null, status: 'scheduled' }); await startMeeting(getM(m.id)); note(req, 'pulse_meeting_join', { id: m.id }, 200, null); res.json({ ok: true, meeting: shape(getM(m.id)) }); }
     catch (e) { res.status(502).json({ ok: false, error: String(e.message || e) }); }
   });
+  // "Answer that": the host could not get Pulse's attention (accent, cross-talk). Take what was said
+  // in the last 20 s as the question; if nothing was heard, answer the next thing anyone says.
+  app.post('/pulse/meetings/:id/answer', ...gate, async (req, res) => {
+    const m = getM(req.params.id); if (!m || m.client_id !== curClient()) return res.status(404).json({ ok: false, error: 'no such meeting' });
+    if (!['live', 'joining', 'waiting'].includes(m.status)) return res.status(409).json({ ok: false, error: 'Pulse is not in that meeting right now.' });
+    const since = new Date(now() - ANSWER_LAST_S * 1000).toISOString();
+    const rows = db.prepare('SELECT id, speaker, text FROM pulse_meeting_line WHERE meeting_id = ? AND is_question = 0 AND created_at >= ? ORDER BY id DESC LIMIT 3').all(m.id, since).reverse();
+    note(req, 'pulse_meeting_answer_last', { id: m.id, lines: rows.length }, 200, null);
+    if (!rows.length || busy.get(m.id)) {
+      listenNext.set(m.id, now() + LISTEN_NEXT_MS);
+      if (!busy.get(m.id)) say(m, 'Yes — go ahead.');
+      return res.json({ ok: true, mode: 'next', message: 'Pulse will answer the next thing said.' });
+    }
+    listenNext.delete(m.id);
+    const question = rows.map(r => r.text).join(' ');
+    db.prepare(`UPDATE pulse_meeting_line SET is_question = 1 WHERE id IN (${rows.map(() => '?').join(',')})`).run(...rows.map(r => r.id));
+    res.json({ ok: true, mode: 'last', question });
+    busy.set(m.id, true);
+    try { await answer(m, rows[rows.length - 1].id, rows[rows.length - 1].speaker, question); }
+    catch (e) { log.warn('[pulse meeting] answer-last failed #' + m.id + ': ' + (e && e.message)); }
+    finally { busy.delete(m.id); }
+  });
   app.post('/pulse/meetings/:id/leave', ...gate, async (req, res) => {
     const m = getM(req.params.id); if (!m || m.client_id !== curClient()) return res.status(404).json({ ok: false, error: 'no such meeting' });
     try { if (m.bot_id) await recall('POST', `/api/v1/bot/${m.bot_id}/leave_call/`); } catch (e) { log.warn('[pulse meeting] leave failed: ' + e.message); }
@@ -282,6 +318,8 @@ module.exports = function pulseMeetings(deps) {
     if (m.status !== 'live' && ev.event.endsWith('.join')) setM(m.id, { status: 'live', started_at: m.started_at || iso() });
   }
   const busy = new Map();                                      // meeting id → answering right now
+  const listenNext = new Map();                                // meeting id → until (ms): answer the next thing said, no wake word
+  const LISTEN_NEXT_MS = 20000, ANSWER_LAST_S = 20;
   async function onUtterance(m, d) {
     const inner = d.data || {};
     const words = Array.isArray(inner.words) ? inner.words : [];
@@ -291,10 +329,11 @@ module.exports = function pulseMeetings(deps) {
     if (/^pulse\b/i.test(speaker)) return;                     // the bot's own audio, if ever transcribed
     const atRel = words.length ? Number(words[0].start_timestamp && words[0].start_timestamp.relative) || null : null;
     if (m.status !== 'live') { setM(m.id, { status: 'live', started_at: m.started_at || iso() }); m = getM(m.id); }
-    const isQ = WAKE.test(text);
+    let { hit: isQ, question } = wake.strip(text);
+    if (!isQ && (listenNext.get(m.id) || 0) > now()) { isQ = true; question = text; }   // host pressed "Answer that": no name needed
     const line = db.prepare('INSERT INTO pulse_meeting_line (meeting_id, at_rel, speaker, text, is_question, created_at) VALUES (?,?,?,?,?,?)').run(m.id, atRel, speaker, text, isQ ? 1 : 0, iso());
     if (!isQ) return;
-    const question = text.replace(WAKE, '').trim();
+    listenNext.delete(m.id);
     if (busy.get(m.id)) { log.log('[pulse meeting] still answering; skipped: ' + question); return; }
     busy.set(m.id, true);
     try { await answer(m, Number(line.lastInsertRowid), speaker, question); }
@@ -317,7 +356,7 @@ module.exports = function pulseMeetings(deps) {
     } catch (e) { log.warn('[pulse meeting] say failed #' + m.id + ': ' + (e && e.message)); return false; }
   }
   async function answer(m, lineId, speaker, question) {
-    if (!question) { await say(m, 'Yes?'); return; }
+    if (!question) { listenNext.set(m.id, now() + LISTEN_NEXT_MS); await say(m, 'Yes?'); return; }   // name alone: the next sentence is the question
     const ws = typeof mondayOf === 'function' ? mondayOf(new Date(now()).toISOString().slice(0, 10)) : undefined;
     let out;
     try {
@@ -417,5 +456,5 @@ module.exports = function pulseMeetings(deps) {
   }
   setInterval(sweep, 60 * 60 * 1000).unref();
 
-  return { createMeeting, startMeeting, fromInvite, parseInviteTime, onUtterance, finish, maybeForget, sweep, verifySvix, enabled, MEETING_LINK };
+  return { createMeeting, startMeeting, fromInvite, parseInviteTime, onUtterance, finish, maybeForget, sweep, verifySvix, enabled, MEETING_LINK, transcriptProvider, keyterms };
 };
