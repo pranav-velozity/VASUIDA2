@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Pulse rail v4 ──
+/* ── VelOzity Pinpoint — Pulse rail v5 ──
    Pulse moves from the bottom bar to a right-hand rail and speaks first: a briefing surface at
    the top (built from the Week Hub insights already fetched — no extra model call), four verb
    tiles for the page you are on, then the conversation, then the composer.
@@ -137,6 +137,8 @@
     .pr-strip .dot{width:8px;height:8px;border-radius:50%;background:#D1D1D6} .pr-strip .dot.on{background:${OK};box-shadow:0 0 0 4px rgba(31,122,77,.15)}
     .pr-strip .badge{min-width:20px;height:20px;border-radius:10px;background:${BRAND};color:#fff;font-size:11px;font-weight:600;display:inline-flex;align-items:center;justify-content:center;padding:0 6px}
     .pr-strip .exp{width:30px;height:30px;border-radius:8px;border:.5px solid rgba(0,0,0,.1);background:#fff;display:inline-flex;align-items:center;justify-content:center;padding:0;cursor:pointer}
+    /* full-screen overlays that should leave the rail visible (Quote Review) */
+    body.pr-on .aqi-ov{right:var(--pr-w)!important;width:auto!important;}
     /* compact header */
     body.pr-hdr .pn-brand > span[style*="border-left"]{display:none!important}
     body.pr-hdr .pn-user-meta,body.pr-hdr .pn-signout{display:none!important}
@@ -465,7 +467,7 @@
     layout(); paint(); compactHeader();
     spend(); setInterval(spend, 5 * 60 * 1000);
     const chat = document.getElementById('pulse-chat'); if (chat) new MutationObserver(scheduleSpend).observe(chat, { childList: true });
-    console.log('[pulse-rail] v4 on');
+    console.log('[pulse-rail] v5 on');
   }
   function disable() { if (!R.state.on) return; release(); R.state.on = false; document.body.classList.remove('pr-on', 'pr-overlay', 'pr-hdr', 'pr-focus'); if (R.el) R.el.classList.add('hidden'); }
 

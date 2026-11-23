@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Air Quote Review (internal) v1 ──
+/* ── VelOzity Pinpoint — Air Quote Review (internal) v2 ──
    The one surface in Pinpoint where partner cost and margin are visible.
 
    Admin only, and it fails closed: /air-quotes/internal returns 403 for anyone else, at
@@ -366,19 +366,7 @@
     body.innerHTML = `
     ${tilesHtml()}
     <div id="aqi-weeks">${weeksHtml()}</div>
-    ${(ins.length || bands.length) ? `<div class="aqi-card" style="margin-bottom:16px;">
-      <div class="aqi-sec">Pricing intelligence</div>
-      ${ins.map(t => `<div style="font-size:12px;color:${DARK};line-height:1.55;margin-bottom:6px;">
-        <span style="color:${BRAND};font-weight:700;">&bull;</span> ${esc(t)}</div>`).join('')}
-      ${bands.length ? `<div style="display:grid;grid-template-columns:repeat(${bands.length},minmax(0,1fr));gap:10px;margin-top:10px;">
-        ${bands.map(b => `<div style="border:.5px solid rgba(0,0,0,.09);border-radius:9px;padding:8px 10px;">
-          <div style="font-size:8px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};">${esc(b.band)} /kg</div>
-          <div style="font-size:16px;font-weight:700;color:${b.win_pct >= 70 ? GREEN : b.win_pct >= 40 ? AMBER : RED};margin-top:2px;">${b.win_pct}%</div>
-          <div style="font-size:9px;color:${LIGHT};">won &middot; ${b.n} decided</div>
-        </div>`).join('')}
-      </div>
-      <div class="aqi-s" style="margin-top:7px;">Bands are terciles of decided quotes. Internal only &mdash; never shown to the client or the partner.</div>` : ''}
-    </div>` : ''}
+    <div id="aqi-intel">${intelFallbackHtml(ins, bands)}</div>
     <div class="aqi-grid">
       <div class="aqi-card">
         <div class="aqi-sec">Queue &middot; ${_q ? `${list.length} of ${all.length}` : list.length} quote(s)</div>
@@ -413,6 +401,7 @@
       <div id="aqi-detail">${detailHtml(q)}</div>
     </div>`;
 
+    paintIntel(q); loadIntel(q);
     body.querySelectorAll('[data-exp]').forEach(t => t.addEventListener('click', (ev) => {
       ev.stopPropagation();
       const id = t.getAttribute('data-exp');
@@ -439,6 +428,140 @@
       _sel = r.getAttribute('data-q'); render();
     }));
     wireDetail();
+  }
+
+  // ── Pricing intelligence ──
+  // The numbers come from /air-quotes/:id/intel (arithmetic over decided quotes, no model);
+  // Pulse explains them on request. The old bullet list stays as the fallback when the
+  // selected quote has no partner cost yet.
+  const _intel = {};          // quote id → { key, data }
+  function intelFallbackHtml(ins, bands) {
+    if (!ins.length && !bands.length) return '';
+    return `<div class="aqi-card" style="margin-bottom:16px;">
+      <div class="aqi-sec">Pricing intelligence</div>
+      ${ins.map(t => `<div style="font-size:12px;color:${DARK};line-height:1.55;margin-bottom:6px;"><span style="color:${BRAND};font-weight:700;">&bull;</span> ${esc(t)}</div>`).join('')}
+      ${bands.length ? `<div style="display:grid;grid-template-columns:repeat(${bands.length},minmax(0,1fr));gap:10px;margin-top:10px;">
+        ${bands.map(b => `<div style="border:.5px solid rgba(0,0,0,.09);border-radius:9px;padding:8px 10px;">
+          <div style="font-size:8px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};">${esc(b.band)} /kg</div>
+          <div style="font-size:16px;font-weight:700;color:${b.win_pct >= 70 ? GREEN : b.win_pct >= 40 ? AMBER : RED};margin-top:2px;">${b.win_pct}%</div>
+          <div style="font-size:9px;color:${LIGHT};">won &middot; ${b.n} decided</div></div>`).join('')}</div>
+      <div class="aqi-s" style="margin-top:7px;">Bands are terciles of decided quotes. Internal only &mdash; never shown to the client or the partner.</div>` : ''}
+    </div>`;
+  }
+  async function loadIntel(q) {
+    if (!q || q.cost == null) return;
+    const key = q.id + '|' + q.cost + '|' + (q.updated_at || '') + '|' + q.state;
+    if (_intel[q.id] && _intel[q.id].key === key) return;
+    try { const r = await req('/air-quotes/' + encodeURIComponent(q.id) + '/intel'); _intel[q.id] = { key, data: r.intel }; }
+    catch (e) { _intel[q.id] = { key, data: null, error: e.message || String(e) }; }
+    if (_sel === q.id) paintIntel(q);
+  }
+  const pct = (n, sign) => n == null ? '—' : ((sign && n > 0 ? '+' : '') + n + '%');
+  function intelHtml(q) {
+    const rec = _intel[q.id]; if (!rec) return `<div class="aqi-card" style="margin-bottom:16px;"><div class="aqi-sec">Pricing intelligence &middot; ${esc(q.ref || '')}</div><div class="aqi-s">Working it out…</div></div>`;
+    if (!rec.data) return `<div class="aqi-card" style="margin-bottom:16px;"><div class="aqi-sec">Pricing intelligence</div><div style="font-size:12px;color:${RED};">${esc(rec.error || 'unavailable')}</div></div>`;
+    const i = rec.data, p = i.partner, b = i.benchmarks, wc = i.win_curve;
+    const kindCol = i.kind === 'opportunity' ? GREEN : i.kind === 'squeeze' ? AMBER : LIGHT;
+    const conf = wc.confidence === 'ok' ? `<span style="color:${GREEN};">win curve on ${wc.decided} decisions</span>` : wc.confidence === 'thin' ? `<span style="color:${AMBER};">thin — ${wc.decided} decisions, treat win % as a hint</span>` : `<span style="color:${LIGHT};">${wc.decided} decisions — benchmarks only, no win estimate yet</span>`;
+    const canApply = ['pending_review', 'costed', 'repricing', 'submitted', 'rfq_sent'].includes(q.state) && q.cost != null;
+    // partner range bar: min … median … max with today's cost marked
+    let bar = '';
+    if (p.n >= 2 && p.min_kg != null && p.max_kg > p.min_kg) {
+      const pos = (v) => Math.max(0, Math.min(100, (v - p.min_kg) / (p.max_kg - p.min_kg) * 100));
+      bar = `<div style="position:relative;height:26px;margin:8px 0 2px;">
+        <div style="position:absolute;left:0;right:0;top:11px;height:4px;border-radius:2px;background:rgba(0,0,0,.08);"></div>
+        <div style="position:absolute;left:${pos(p.median_kg)}%;top:6px;width:1px;height:14px;background:${MID};" title="median ${p.median_kg}/kg"></div>
+        ${p.cost_kg != null ? `<div style="position:absolute;left:calc(${pos(p.cost_kg)}% - 6px);top:7px;width:12px;height:12px;border-radius:50%;background:${i.kind === 'opportunity' ? GREEN : i.kind === 'squeeze' ? AMBER : BRAND};box-shadow:0 0 0 3px rgba(255,255,255,.9);" title="this quote ${p.cost_kg}/kg"></div>` : ''}
+        <div style="position:absolute;left:0;top:18px;font-size:9px;color:${LIGHT};">${p.min_kg}</div>
+        <div style="position:absolute;left:${pos(p.median_kg)}%;top:18px;transform:translateX(-50%);font-size:9px;color:${MID};">med ${p.median_kg}</div>
+        <div style="position:absolute;right:0;top:18px;font-size:9px;color:${LIGHT};">${p.max_kg}</div>
+      </div>`;
+    }
+    const chip = (label, v, sub) => `<div style="border:.5px solid rgba(0,0,0,.09);border-radius:9px;padding:7px 10px;min-width:0;">
+      <div style="font-size:8px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${LIGHT};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${label}</div>
+      <div style="font-size:14px;font-weight:700;color:${DARK};margin-top:1px;">${v == null ? '—' : v}</div>${sub ? `<div style="font-size:9px;color:${LIGHT};">${sub}</div>` : ''}</div>`;
+    const opt = (o) => {
+      const isRec = o.key === i.recommended;
+      return `<div style="border:${isRec ? '1.5px solid ' + BRAND : '.5px solid rgba(0,0,0,.1)'};border-radius:11px;padding:10px 12px;position:relative;background:${isRec ? '#FFF7F9' : '#fff'};">
+        ${isRec ? `<div style="position:absolute;top:-7px;left:10px;background:${BRAND};color:#fff;font-size:8px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:2px 7px;border-radius:7px;">Recommended</div>` : ''}
+        <div style="font-size:11px;font-weight:700;color:${DARK};">${esc(o.label)}</div>
+        <div style="font-size:10px;color:${MID};margin-bottom:6px;min-height:13px;">${esc(o.why || '')}</div>
+        <div style="font-size:16px;font-weight:700;color:${DARK};">${money(o.sell, 'USD')}</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;font-size:10.5px;color:${MID};margin-top:4px;">
+          <span><b style="color:${DARK}">${o.markup_pct}%</b> markup</span>
+          <span><b style="color:${o.gross_margin_pct >= 25 ? GREEN : o.gross_margin_pct >= 12 ? DARK : RED}">${o.gross_margin_pct}%</b> GM &middot; ${money(o.margin, 'USD')}</span>
+          <span><b style="color:${DARK}">${o.sell_kg ?? '—'}</b>/kg${o.vs_anchor_pct != null ? ` <span style="color:${o.vs_anchor_pct > 10 ? AMBER : LIGHT}">(${pct(o.vs_anchor_pct, true)} vs usual)</span>` : ''}</span>
+          ${o.sell_unit != null ? `<span><b style="color:${DARK}">${o.sell_unit}</b>/unit</span>` : ''}
+          ${o.win_pct != null ? `<span><b style="color:${o.win_pct >= 70 ? GREEN : o.win_pct >= 40 ? AMBER : RED}">${o.win_pct}%</b> likely &middot; EV ${money(o.expected_margin, 'USD')}</span>` : ''}
+        </div>
+        ${o.over_ceiling ? `<div style="font-size:10px;color:${RED};margin-top:5px;">&#9888; above ${i.ceiling.vendor_kg ?? i.ceiling.lane_kg ?? i.ceiling.client_kg}/kg — a price the client has declined before</div>` : ''}
+        ${canApply ? `<button class="aqi-btn ${isRec ? '' : 'g'}" data-apply="${esc(o.key)}" style="margin-top:8px;padding:5px 11px;font-size:11px;">Apply ${money(o.sell, 'USD')}</button>` : ''}
+      </div>`;
+    };
+    const curve = wc.buckets && wc.buckets.length && wc.confidence !== 'none' ? `<div style="display:flex;gap:6px;align-items:flex-end;height:46px;margin-top:6px;">
+      ${wc.buckets.map(c => `<div style="flex:1;text-align:center;" title="${c.n} decided">
+        <div style="height:${c.win_pct == null ? 2 : Math.max(2, c.win_pct * 0.3)}px;background:${c.win_pct == null ? 'rgba(0,0,0,.08)' : c.win_pct >= 70 ? GREEN : c.win_pct >= 40 ? AMBER : RED};border-radius:3px 3px 0 0;margin:0 auto;"></div>
+        <div style="font-size:8px;color:${LIGHT};margin-top:2px;white-space:nowrap;">${esc(c.band)}</div><div style="font-size:9px;color:${MID};">${c.win_pct == null ? '—' : c.win_pct + '%'} <span style="color:${LIGHT}">(${c.n})</span></div></div>`).join('')}
+    </div>` : '';
+    return `<div class="aqi-card" style="margin-bottom:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;">
+        <div class="aqi-sec" style="margin:0;">Pricing intelligence &middot; ${esc(q.ref || '')} &middot; ${esc(q.vendor_raw)}${i.quote.lane ? ' &middot; ' + esc(i.quote.lane) : ''}</div>
+        <div style="font-size:10px;">${conf}</div>
+      </div>
+      ${i.headline ? `<div style="margin:10px 0 12px;padding:9px 12px;border-left:3px solid ${kindCol};background:#FAFAFA;border-radius:0 8px 8px 0;font-size:12.5px;color:${DARK};line-height:1.5;">${esc(i.headline)}</div>` : ''}
+      <div style="display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:16px;align-items:start;">
+        <div>
+          <div class="aqi-sec" style="margin-bottom:4px;">Partner cost &middot; ${esc(q.vendor_raw)} &middot; ${p.n} costed in ${i.window_days} days</div>
+          <div style="font-size:12px;color:${DARK};">${p.cost_kg != null ? `<b>${p.cost_kg}/kg</b> today` : 'no cost yet'}${p.vs_median_pct != null ? ` &middot; <span style="color:${p.vs_median_pct <= -5 ? GREEN : p.vs_median_pct >= 5 ? AMBER : MID}">${pct(p.vs_median_pct, true)} vs median</span>` : ''}${p.rank_low ? ` &middot; ${p.rank_low === 1 ? 'lowest' : p.rank_low + (p.rank_low === 2 ? 'nd' : p.rank_low === 3 ? 'rd' : 'th') + ' lowest'} of ${p.n + 1}` : ''}${p.volatility_pct != null ? ` &middot; volatility ${p.volatility_pct}%` : ''}</div>
+          ${bar}
+          ${p.by_size.length > 1 || p.by_mode.length > 1 ? `<div style="font-size:10px;color:${MID};margin-top:6px;line-height:1.6;">
+            ${p.by_size.length > 1 ? `By size: ${p.by_size.map(x => `${esc(x.band)} <b>${x.median_kg}</b> (${x.n})`).join(' &middot; ')}${p.vs_size_median_pct != null ? ` — this one ${pct(p.vs_size_median_pct, true)} vs its size band` : ''}<br>` : ''}
+            ${p.by_mode.length > 1 ? `By mode: ${p.by_mode.map(x => `${esc(x.mode)} <b>${x.median_kg}</b> (${x.n})`).join(' &middot; ')}` : ''}
+          </div>` : ''}
+        </div>
+        <div>
+          <div class="aqi-sec" style="margin-bottom:4px;">What the client pays &middot; approved, ${i.window_days} days</div>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;">
+            ${chip('Client /kg', b.client.sell_kg, b.client.n + ' approved')}
+            ${chip('Vendor /kg', b.vendor.sell_kg, b.vendor.n + ' approved')}
+            ${chip(b.lane.label ? 'Lane /kg' : 'Lane', b.lane.label ? b.lane.sell_kg : null, b.lane.label ? b.lane.n + ' approved' : 'no lane on quote')}
+            ${i.quote.units ? chip('Client /unit', b.client.sell_unit, b.client.n_units + ' with units') : ''}
+            ${chip('Ceiling /kg', i.ceiling.vendor_kg ?? i.ceiling.lane_kg ?? i.ceiling.client_kg, i.ceiling.n_declined ? 'lowest declined' : 'nothing declined')}
+            ${chip('Win rate', wc.overall_win_pct != null ? wc.overall_win_pct + '%' : null, wc.decided + ' decided')}
+          </div>
+          ${curve}
+        </div>
+      </div>
+      ${i.options.length ? `<div style="display:grid;grid-template-columns:repeat(${Math.min(4, i.options.length)},minmax(0,1fr));gap:10px;margin-top:14px;">${i.options.map(opt).join('')}</div>` : ''}
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap;">
+        <div class="aqi-s">Win likelihood is the share of decided quotes approved at a similar price position against the usual /kg. Internal only &mdash; never shown to the client or the partner.</div>
+        <button class="aqi-btn g" id="aqi-explain" style="padding:5px 11px;font-size:11px;white-space:nowrap;">Explain with Pulse</button>
+      </div>
+    </div>`;
+  }
+  function paintIntel(q) {
+    const host = el('aqi-intel'); if (!host) return;
+    if (!q || q.cost == null) { host.innerHTML = intelFallbackHtml((_data && _data.insights) || [], (_data && _data.win_bands) || []); window._pulsePin = q ? { page: 'Quote review', label: 'quote ' + (q.ref || ''), ids: [q.ref || q.id] } : null; return; }
+    host.innerHTML = intelHtml(q);
+    window._pulsePin = { page: 'Quote review', label: 'air quote ' + (q.ref || '') + ' (' + (q.vendor_raw || '') + ')', ids: [q.ref || q.id] };
+    host.querySelectorAll('[data-apply]').forEach(bt => bt.addEventListener('click', async () => {
+      if (_busy) return; const rec = _intel[q.id]; const o = rec && rec.data && rec.data.options.find(x => x.key === bt.getAttribute('data-apply')); if (!o) return;
+      _busy = true; bt.disabled = true;
+      try {
+        const reason = `intelligence: ${o.label.toLowerCase()} — ${o.sell_kg}/kg${o.vs_anchor_pct != null ? ' (' + pct(o.vs_anchor_pct, true) + ' vs usual)' : ''}${o.win_pct != null ? ', ' + o.win_pct + '% likely' : ''}`;
+        const r = await req('/air-quotes/' + encodeURIComponent(q.id) + '/pricing', { method: 'POST', body: JSON.stringify({ total_sell: o.sell, reason }) });
+        await load();
+        ok(`Priced at ${esc(money(r.sell, 'USD'))} (${esc(o.label)}) — saved as draft, nothing sent to the client.`);
+      } catch (e) { err(e.message || String(e)); bt.disabled = false; }
+      _busy = false;
+    }));
+    const ex = el('aqi-explain');
+    if (ex) ex.addEventListener('click', () => {
+      const qn = `Explain the pricing recommendation for air quote ${q.ref}: which option and why, where the partner's cost sits, and the risk. Three lines.`;
+      if (window._pulseRail && window._pulseRail.fire) window._pulseRail.fire(qn);
+      else if (typeof window._fireIntoPulse === 'function') window._fireIntoPulse(qn);
+      else { const inp = el('pulse-input-display'); if (inp) { inp.value = qn; if (typeof window.pulseSend === 'function') window.pulseSend(); } }
+    });
   }
 
   function detailHtml(q) {
@@ -586,10 +709,10 @@
     </div>`;
   }
 
+  const msg = t => { const m = el('aqi-msg'); if (m) m.innerHTML = t; };
+  const err = t => msg(`<div class="aqi-msg" style="background:rgba(179,63,64,.10);color:${RED};">${esc(t)}</div>`);
+  const ok = t => msg(`<div class="aqi-msg" style="background:rgba(27,127,59,.10);color:${GREEN};">${t}</div>`);
   function wireDetail() {
-    const msg = t => { const m = el('aqi-msg'); if (m) m.innerHTML = t; };
-    const err = t => msg(`<div class="aqi-msg" style="background:rgba(179,63,64,.10);color:${RED};">${esc(t)}</div>`);
-    const ok = t => msg(`<div class="aqi-msg" style="background:rgba(27,127,59,.10);color:${GREEN};">${t}</div>`);
 
     const rfq = el('aqi-rfq');
     if (rfq) rfq.addEventListener('click', async () => {
@@ -787,6 +910,7 @@
   }
 
   function close() {
+    window._pulsePin = null;
     const o = document.querySelector('.aqi-ov'); if (o) o.remove();
     document.body.classList.remove('aqi-open');
   }
