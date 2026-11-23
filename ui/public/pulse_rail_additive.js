@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Pulse rail v2 ──
+/* ── VelOzity Pinpoint — Pulse rail v3 ──
    Pulse moves from the bottom bar to a right-hand rail and speaks first: a briefing surface at
    the top (built from the Week Hub insights already fetched — no extra model call), four verb
    tiles for the page you are on, then the conversation, then the composer.
@@ -12,14 +12,21 @@
    the movement you open is. The pin is sent with every question as `pin`, so "these" and "it"
    mean what is on screen, and the verb tiles change to match.
 
+   Sizes: the handle on the rail's left edge drags it; on release it snaps to Rail (380), Wide (560)
+   or Focus (960, page dimmed behind — the full-conversation mode). Double-click the handle or
+   Ctrl/Cmd+Shift+P for Focus; Esc, ✕ or the dim brings the rail back. Wide is remembered,
+   Focus is not.
+
    Collapsed: a 48 px strip with the orb, the listening dot and the task count; your choice is
    remembered. Under 1300 px the open rail floats over the page instead of narrowing it.
 
-   Test hook: window._pulseRail { state, setCollapsed, setPin, refresh, page } */
+   Test hook: window._pulseRail { state, setCollapsed, setSize, setPin, refresh, page } */
 ;(function () {
   'use strict';
   const BRAND = '#990033', MID = '#6E6E73', LIGHT = '#AEAEB2', DARK = '#1C1C1E', OK = '#1F7A4D', AMBER = '#B07000';
-  const W = 380, WC = 48, OVERLAY_BELOW = 1300;
+  const W = 380, WW = 560, WF = 960, WC = 48, OVERLAY_BELOW = 1300;
+  const SIZES = { rail: W, wide: WW, focus: WF };
+  const focusW = () => Math.min(WF, Math.max(WW, window.innerWidth - 80));
 
   const css = `
     :root{--pr-w:${W}px;--pr-top:52px}
@@ -89,6 +96,36 @@
     body.pr-on #pulse-bar #ptg-wrap{order:1;margin-right:auto} body.pr-on #pulse-bar #pa-spoken{order:2} body.pr-on #pulse-bar #pv-pill{order:3} body.pr-on #pulse-bar #pv-mode{order:4;margin-right:0}
     body.pr-on #pulse-bar #pulse-input-display{order:10;flex:1 1 200px!important;min-width:0!important;height:40px;border-radius:12px!important;padding:0 14px!important}
     body.pr-on #pulse-bar #pulse-open-btn{order:11;width:40px!important;height:40px!important;border-radius:12px!important}
+    /* sizes: rail 380 · wide 560 · focus 960 (page dims behind) — the handle on the left edge drags between them */
+    #pr-rail.dragging{transition:none!important} body.pr-dragging{user-select:none;cursor:ew-resize}
+    .pr-handle{position:absolute;left:-14px;top:50%;transform:translateY(-50%);width:28px;height:64px;border-radius:14px;background:#fff;border:.5px solid rgba(0,0,0,.12);box-shadow:0 6px 18px rgba(0,0,0,.14);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;cursor:ew-resize;z-index:2;touch-action:none}
+    .pr-handle i{display:block;width:3px;height:3px;border-radius:50%;background:${BRAND}}
+    .pr-handle:hover{border-color:rgba(153,0,51,.4)} #pr-rail.collapsed .pr-handle{display:none}
+    #pr-dim{position:fixed;left:0;right:0;bottom:0;top:var(--pr-top);background:rgba(20,8,12,.42);backdrop-filter:blur(1.5px);z-index:44;display:none}
+    body.pr-focus #pr-dim{display:block} body.pr-focus.pr-on main.vo-wrap{padding-right:calc(24px + ${W}px)!important}
+    body.pr-focus #pr-rail{box-shadow:-24px 0 60px rgba(0,0,0,.22)}
+    .pr-snap{display:none;border:.5px solid rgba(255,255,255,.22);border-radius:8px;overflow:hidden;font-size:10.5px;flex:none}
+    .pr-snap span{padding:4px 10px;color:rgba(255,255,255,.7);cursor:pointer} .pr-snap span.on{background:#fff;color:#5B0020;font-weight:600}
+    .pr-close{display:none;width:26px;height:26px;border-radius:8px;border:.5px solid rgba(255,255,255,.22);background:rgba(255,255,255,.08);color:#fff;cursor:pointer;font-size:13px;flex:none;align-items:center;justify-content:center;padding:0}
+    body.pr-focus .pr-snap{display:inline-flex} body.pr-focus .pr-close{display:inline-flex} body.pr-focus .pr-fold{display:none}
+    body.pr-focus .pr-surface{border-radius:0;padding:10px 20px;margin:-12px -12px 0;flex-direction:row;align-items:center;gap:14px;display:flex}
+    body.pr-focus .pr-surface::after{top:-160px}
+    body.pr-focus .pr-surface .pr-row{display:contents}
+    body.pr-focus .pr-surface .pr-orb{width:34px;height:34px;order:0} body.pr-focus .pr-surface .pr-orb .c{inset:8px}
+    body.pr-focus .pr-eyebrow{flex:none;max-width:200px;order:1}
+    body.pr-focus .pr-head{font-size:19px;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;order:2;position:relative}
+    body.pr-focus .pr-snap{order:3} body.pr-focus .pr-spk{order:4} body.pr-focus .pr-close{order:5}
+    body.pr-focus .pr-sub,body.pr-focus [data-sigs]{display:none}
+    body.pr-focus .pr-verbs{display:flex;flex-wrap:wrap;gap:8px;padding:0 8px}
+    body.pr-focus .pr-verb{flex-direction:row;align-items:center;gap:8px;padding:6px 12px 6px 6px;border-radius:12px}
+    body.pr-focus .pr-verb .pr-g{width:24px;height:24px;border-radius:7px} body.pr-focus .pr-verb small,body.pr-focus .pr-verb .n{display:none} body.pr-focus .pr-verb b{font-weight:500;font-size:12px}
+    body.pr-focus .pr-minis{display:flex;gap:8px;padding:0 8px} body.pr-focus .pr-mini{padding:6px 12px 6px 6px;border-radius:12px} body.pr-focus .pr-mini b{margin-left:4px}
+    body.pr-focus .pr-pin{margin:0 8px}
+    body.pr-focus #pulse-panel{max-width:760px;width:100%;margin:0 auto!important;padding:0 20px!important;box-sizing:border-box}
+    body.pr-focus #pulse-panel .pulse-msg{font-size:14px!important;line-height:1.6!important;max-width:80%!important}
+    body.pr-focus #pulse-bar{max-width:760px;width:100%!important;margin:0 auto!important;box-sizing:border-box;padding:12px 20px 18px!important}
+    body.pr-focus #pulse-bar #pulse-input-display{height:48px;font-size:14px!important;border-radius:14px!important}
+    body.pr-focus #pulse-bar #pulse-open-btn{width:48px!important;height:48px!important;border-radius:14px!important}
     /* collapsed strip */
     #pr-rail.collapsed{width:${WC}px} #pr-rail.collapsed .pr-scroll,#pr-rail.collapsed #pulse-bar,#pr-rail.collapsed #pulse-panel{display:none!important}
     .pr-strip{display:none;flex-direction:column;align-items:center;padding:10px 0;gap:14px;height:100%}
@@ -121,8 +158,8 @@
   // The serif headline gets one italic flourish: the first number, or the last word.
   const flourish = (t) => { const s = esc(t); const m = s.match(/\d[\d,.%]*\s?[A-Za-z%]*/); if (m) return s.slice(0, m.index) + '<em>' + m[0] + '</em>' + s.slice(m.index + m[0].length); return s.replace(/(\S+)([.!?]?)$/, '<em>$1</em>$2'); };
 
-  const R = window._pulseRail = { state: { on: false, collapsed: false, page: 'weekhub', pin: null, insights: [], ui: null, overlay: false }, el: null };
-  try { R.state.collapsed = localStorage.getItem('pulse_rail_collapsed') === '1'; } catch (_) {}
+  const R = window._pulseRail = { state: { on: false, collapsed: false, size: 'rail', page: 'weekhub', pin: null, insights: [], ui: null, overlay: false }, el: null };
+  try { R.state.collapsed = localStorage.getItem('pulse_rail_collapsed') === '1'; const sz = localStorage.getItem('pulse_rail_size'); if (sz === 'wide') R.state.size = 'wide'; } catch (_) {}   // focus is never restored: it is a moment, not a setting
 
   // ── where are we ──
   function pageKey() {
@@ -208,6 +245,7 @@
     if (R.el) return R.el;
     const rail = document.createElement('aside'); rail.id = 'pr-rail'; rail.className = 'hidden'; rail.setAttribute('aria-label', 'Pulse');
     rail.innerHTML = `
+      <div class="pr-handle" role="separator" aria-orientation="vertical" aria-label="Resize Pulse — drag, or double-click for Focus" title="Drag to resize · double-click for Focus"><i></i><i></i><i></i></div>
       <div class="pr-strip">
         <div class="pr-orb" role="button" aria-label="Open Pulse" title="Open Pulse"><span class="r"></span><span class="r two"></span><span class="c"></span></div>
         <span class="dot" data-voice></span><span class="vt" data-voice-txt>Pulse</span>
@@ -220,7 +258,9 @@
           <div class="pr-row">
             <div class="pr-orb" title="Pulse"><span class="r"></span><span class="r two"></span><span class="c"></span></div>
             <div class="pr-eyebrow" data-eyebrow>Pulse</div>
+            <div class="pr-snap" data-snap><span data-size="rail">Rail</span><span data-size="wide">Wide</span><span data-size="focus">Focus</span></div>
             <label class="pr-spk" data-spk title="Spoken answers"><span class="sw"></span>Spoken</label>
+            <button class="pr-close" data-close aria-label="Back to the rail" title="Back to the rail (Esc)">✕</button>
             <button class="pr-fold" aria-label="Collapse Pulse" title="Collapse"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
           </div>
           <div class="pr-head" data-head></div>
@@ -237,6 +277,20 @@
     document.body.appendChild(rail);
     R.el = rail;
     rail.querySelector('.pr-fold').onclick = () => setCollapsed(true);
+    rail.querySelector('[data-close]').onclick = () => setSize('rail');
+    rail.querySelectorAll('[data-snap] span').forEach(sp => { sp.onclick = () => setSize(sp.dataset.size); });
+    const dim = document.createElement('div'); dim.id = 'pr-dim'; dim.onclick = () => setSize('rail'); document.body.appendChild(dim);
+    // The handle: drag to any width, snap on release to the nearest of rail / wide / focus (or fold if dragged shut).
+    const h = rail.querySelector('.pr-handle'); let drag = null;
+    h.addEventListener('pointerdown', (e) => { if (e.button !== 0) return; drag = { x0: e.clientX, w0: rail.getBoundingClientRect().width, moved: false }; h.setPointerCapture(e.pointerId); rail.classList.add('dragging'); document.body.classList.add('pr-dragging'); e.preventDefault(); });
+    h.addEventListener('pointermove', (e) => { if (!drag) return; const w = Math.max(WC, Math.min(focusW(), drag.w0 + (drag.x0 - e.clientX))); if (Math.abs(e.clientX - drag.x0) > 3) drag.moved = true; if (drag.moved) document.documentElement.style.setProperty('--pr-w', w + 'px'); });
+    const endDrag = (e) => { if (!drag) return; const d = drag; drag = null; rail.classList.remove('dragging'); document.body.classList.remove('pr-dragging'); try { h.releasePointerCapture(e.pointerId); } catch (_) {} if (!d.moved) return; const w = rail.getBoundingClientRect().width; if (w < 220) { setCollapsed(true); return; } const cands = [['rail', W], ['wide', WW], ['focus', focusW()]]; cands.sort((a, b) => Math.abs(a[1] - w) - Math.abs(b[1] - w)); if (R.state.collapsed) { R.state.collapsed = false; rail.classList.remove('collapsed'); try { localStorage.setItem('pulse_rail_collapsed', '0'); } catch (_) {} } setSize(cands[0][0]); };
+    h.addEventListener('pointerup', endDrag); h.addEventListener('pointercancel', endDrag);
+    h.addEventListener('dblclick', () => setSize(R.state.size === 'focus' ? 'rail' : 'focus'));
+    document.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'P' || e.key === 'p')) { e.preventDefault(); if (R.state.collapsed) setCollapsed(false); setSize(R.state.size === 'focus' ? 'rail' : 'focus'); }
+      else if (e.key === 'Escape' && R.state.size === 'focus') setSize('rail');
+    });
     rail.querySelector('.pr-strip .exp').onclick = () => setCollapsed(false);
     rail.querySelector('.pr-strip .pr-orb').onclick = () => setCollapsed(false);
     rail.querySelector('[data-spk]').onclick = (e) => { e.preventDefault(); const s = document.getElementById('pa-spoken'); if (s) s.click(); };
@@ -288,7 +342,17 @@
   function setCollapsed(c) {
     R.state.collapsed = !!c; try { localStorage.setItem('pulse_rail_collapsed', c ? '1' : '0'); } catch (_) {}
     if (R.el) R.el.classList.toggle('collapsed', !!c);
+    if (c && R.state.size === 'focus') R.state.size = 'rail';
     layout();
+  }
+  function setSize(sz) {
+    if (!SIZES[sz]) sz = 'rail';
+    R.state.size = sz; try { localStorage.setItem('pulse_rail_size', sz === 'focus' ? 'rail' : sz); } catch (_) {}
+    if (R.el) { R.el.querySelectorAll('[data-snap] span').forEach(sp => sp.classList.toggle('on', sp.dataset.size === sz)); R.el.classList.toggle('collapsed', false); }
+    if (sz !== 'rail' && R.state.collapsed) { R.state.collapsed = false; try { localStorage.setItem('pulse_rail_collapsed', '0'); } catch (_) {} }
+    layout();
+    if (sz === 'focus') { const i = document.getElementById('pulse-input-display'); if (i && !i.disabled) setTimeout(() => i.focus(), 50); }
+    window.dispatchEvent(new CustomEvent('pulse:rail-size', { detail: { size: sz } }));
   }
   function layout() {
     const on = R.state.on; document.body.classList.toggle('pr-on', on);
@@ -299,7 +363,9 @@
     // On a narrow screen the open rail floats over the page, so start it folded unless the person has chosen otherwise.
     let chosen = null; try { chosen = localStorage.getItem('pulse_rail_collapsed'); } catch (_) {}
     if (overlay && chosen == null && !R.state.collapsed) { R.state.collapsed = true; R.el && R.el.classList.add('collapsed'); }
-    document.documentElement.style.setProperty('--pr-w', (R.state.collapsed ? WC : W) + 'px');
+    const focus = !R.state.collapsed && R.state.size === 'focus'; document.body.classList.toggle('pr-focus', focus);
+    const w = R.state.collapsed ? WC : (focus ? focusW() : SIZES[R.state.size] || W);
+    document.documentElement.style.setProperty('--pr-w', w + 'px');
   }
 
   // ── pins ──
@@ -375,9 +441,9 @@
     ['pt-strip', 'pm-strip'].forEach(id => { const el = document.getElementById(id); if (el && el.classList.contains('open')) { const h = el.querySelector('.pt-head, .pm-head'); if (h) h.click(); else el.classList.remove('open'); } });
     const bar = document.getElementById('pulse-bar'); R.el.classList.toggle('hidden', !(bar && bar.classList.contains('visible')));
     layout(); paint(); compactHeader();
-    console.log('[pulse-rail] v2 on');
+    console.log('[pulse-rail] v3 on');
   }
-  function disable() { if (!R.state.on) return; release(); R.state.on = false; document.body.classList.remove('pr-on', 'pr-overlay', 'pr-hdr'); if (R.el) R.el.classList.add('hidden'); }
+  function disable() { if (!R.state.on) return; release(); R.state.on = false; document.body.classList.remove('pr-on', 'pr-overlay', 'pr-hdr', 'pr-focus'); if (R.el) R.el.classList.add('hidden'); }
 
   let tries = 0;
   async function init() {
@@ -393,6 +459,6 @@
     if (R.state.ui.rail === false || localOff) { console.log('[pulse-rail] off (' + (localOff ? 'local' : 'PULSE_RAIL') + ')'); return; }
     enable();
   }
-  Object.assign(R, { setCollapsed, setPin, refresh: paint, page: pageKey, enable, disable, fire });
+  Object.assign(R, { setCollapsed, setSize, setPin, refresh: paint, page: pageKey, enable, disable, fire });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
