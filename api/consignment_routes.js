@@ -237,18 +237,20 @@ module.exports = function mountConsignments(deps) {
     // Destination cleared → FC receipt is four days: the FC dock is booked after clearance,
     // and neither one day nor three was what happened.
     //
-    // Transit 18 (was 28) and arrival → cleared 1 (was 2), set from what the lanes actually
-    // run. Monday to FC is now 32 days against the 34 the Advanced PO publishes to the
-    // client; it was 42, which had our own tracker disagreeing with our own PO by over a week.
-    Sea: { packing: 4, cleared: 7, departed: 9, arrDest: 1, destFc: 4, transit: 18 },
+    // Nov 2026: departs Friday (+11, was Wednesday +9), transit 20 (was 18), arrival → cleared
+    // 2 (was 1), set from what the lanes actually run. Tracking still wins wherever it exists:
+    // a carrier ETD replaces the Friday, a carrier ETA replaces departure + 20. Monday to FC on
+    // these defaults is 37 days; the Advanced PO publishes 34 to the client.
+    Sea: { packing: 4, cleared: 7, departed: 11, arrDest: 2, destFc: 4, transit: 20 },
     // Air: offsets BACKWARD from the flight. Cleared the day before, packing list the day
     // before that. Departure is entered rather than derived, because it moves.
     Air: { beforeDeparture: { cleared: 1, packing: 2 }, arrDest: 1, destFc: 1, transit: 2 },
   };
 
-  // The sea figures these replaced, kept only so the migration below can recognise a stored
+  // The sea figures these replaced, kept only so the migrations below can recognise a stored
   // rule nobody has deliberately changed. Never used for planning.
-  const SUPERSEDED_SEA = { arrDest: 2, destFc: 3, transit: 28 };
+  const SUPERSEDED_SEA = { arrDest: 2, destFc: 3, transit: 28 };          // Oct 2026 → 1 / 4 / 18
+  const SUPERSEDED_SEA_2 = { departed: 9, arrDest: 1, transit: 18 };      // Nov 2026 → 11 / 2 / 20
 
   // ── Sea rule migration ──
   // Rules live in a table, so changing the constant above does nothing for a client who has
@@ -286,6 +288,36 @@ module.exports = function mountConsignments(deps) {
     }
   } catch (e) {
     console.warn('[consignments] sea rule migration skipped:', e.message);
+  }
+  // Nov 2026: Friday departure, transit 20, arrival → cleared 2. Same shape: only rows still
+  // carrying the previous defaults exactly are rewritten; edited rows are left alone; open sea
+  // consignments are re-planned either way (the defaults moved for clients with no saved row).
+  try {
+    if (!db.prepare(`SELECT 1 x FROM consignment_rules
+                      WHERE facility = '__migration__' AND mode = 'Sea' AND client_id = '__sea2011__'`).get()) {
+      const r = db.prepare(`UPDATE consignment_rules
+                               SET departed_offset_days         = ?,
+                                   arrived_to_dest_cleared_days = ?,
+                                   default_transit_days         = ?,
+                                   updated_at                   = ?
+                             WHERE mode = 'Sea'
+                               AND facility <> '__migration__'
+                               AND departed_offset_days = ?
+                               AND arrived_to_dest_cleared_days = ?
+                               AND default_transit_days = ?`)
+        .run(DEFAULT_RULES.Sea.departed, DEFAULT_RULES.Sea.arrDest, DEFAULT_RULES.Sea.transit,
+             new Date().toISOString(),
+             SUPERSEDED_SEA_2.departed, SUPERSEDED_SEA_2.arrDest, SUPERSEDED_SEA_2.transit);
+      db.prepare(`INSERT INTO consignment_rules (client_id, facility, mode, packing_list_offset_days,
+                    origin_cleared_offset_days, departed_offset_days, arrived_to_dest_cleared_days,
+                    dest_cleared_to_fc_days, default_transit_days, updated_at)
+                  VALUES ('__sea2011__', '__migration__', 'Sea', 0, 0, 0, 0, 0, NULL, ?)`)
+        .run(new Date().toISOString());
+      console.log(`[consignments] sea rules moved to depart Fri (+11) / transit 20 / arr→cleared 2 on ${r.changes} saved row(s)`);
+      global.__cgReplanOpen = true;
+    }
+  } catch (e) {
+    console.warn('[consignments] sea rule migration (Nov 2026) skipped:', e.message);
   }
 
   // CA1306/25SEP, SQ7823/23SEP — the flight date is in the reference. Read rather than asked
@@ -535,6 +567,17 @@ module.exports = function mountConsignments(deps) {
         .run(DEFAULT_RULES.Sea.transit, SUPERSEDED_SEA.transit);
       for (const p of pending) refreshPlanned(p.consignment_uid);
       console.log(`[consignments] ${pending.length} unquoted sea consignment(s) moved 28 → 18 days`);
+    }
+    // Nov 2026: the unquoted 18s move to 20 the same way. Quotes (transit_confirmed = 1) stay.
+    const pending2 = db.prepare(`SELECT consignment_uid FROM consignment
+                                  WHERE mode = 'Sea' AND transit_confirmed = 0 AND status != 'closed'
+                                    AND transit_days = ?`).all(SUPERSEDED_SEA_2.transit);
+    if (pending2.length) {
+      db.prepare(`UPDATE consignment SET transit_days = ?
+                   WHERE mode = 'Sea' AND transit_confirmed = 0 AND status != 'closed' AND transit_days = ?`)
+        .run(DEFAULT_RULES.Sea.transit, SUPERSEDED_SEA_2.transit);
+      for (const p of pending2) refreshPlanned(p.consignment_uid);
+      console.log(`[consignments] ${pending2.length} unquoted open sea consignment(s) moved 18 → 20 days`);
     }
   } catch (e) {
     console.warn('[consignments] transit migration skipped:', e.message);
