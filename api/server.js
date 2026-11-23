@@ -23,14 +23,20 @@ function aiAllowed(req, res, opts) {
   return false;
 }
 
+var _pulseUsage = null;   // set once the Pulse modules are wired (below); meters every model call
 function getAnthropic() {
   if (!_anthropic) {
     const key = process.env.ANTHROPIC_API_KEY;
     if (!key) throw new Error('ANTHROPIC_API_KEY env var not set');
     _anthropic = new Anthropic({ apiKey: key });
   }
+  if (_pulseUsage && !_anthropic.messages.__metered) _pulseUsage.wrap(_anthropic);
   return _anthropic;
 }
+// Models: Sonnet for anything a person reads or hears; the light model for ticker lines,
+// summaries and classification. Both overridable without a deploy.
+const PULSE_MODEL = () => process.env.PULSE_MODEL || 'claude-sonnet-4-6';
+const PULSE_MODEL_LIGHT = () => process.env.PULSE_MODEL_LIGHT || 'claude-haiku-4-5';
 const cors = require('cors');
 const ExcelJS = require('exceljs');
 const Database = require('better-sqlite3');
@@ -1785,11 +1791,12 @@ app.post('/pulse/chat',
 
     // Finance is deliberately NOT in the AI context: it is VelOzity-internal, spans all
     // clients, and has no place in a client-scoped assistant.
-    lines.push('## User context');
-    lines.push('- Client: ' + curClient() + ' (answer ONLY about this client; you have no data for any other)');
-    lines.push('- Role: ' + roleLabel);
-    lines.push('- Facility: ' + (facility || 'not set'));
-    lines.push('- Currently viewing week: ' + (currWk || 'not set'));
+    const userLines = [];                 // tiny and per-request: goes last, outside the cache
+    userLines.push('## User context');
+    userLines.push('- Client: ' + curClient() + ' (answer ONLY about this client; you have no data for any other)');
+    userLines.push('- Role: ' + roleLabel);
+    userLines.push('- Facility: ' + (facility || 'not set'));
+    userLines.push('- Currently viewing week: ' + (currWk || 'not set'));
     // Pulse rail: what the user has pinned on screen (selected POs, an open movement). Plain text
     // from the browser, capped and quoted — it steers the answer, it is not data.
     const _pin = req.body && req.body.pin && typeof req.body.pin === 'object' ? req.body.pin : null;
@@ -1797,11 +1804,10 @@ app.post('/pulse/chat',
       const ids = Array.isArray(_pin.ids) ? _pin.ids.map(x => String(x).slice(0, 40)).slice(0, 60) : [];
       const label = String(_pin.label || '').slice(0, 160);
       const page = String(_pin.page || '').slice(0, 40);
-      lines.push('- Looking at' + (page ? ' (' + page + ')' : '') + ': ' + (label || 'a selection') + (ids.length ? ' — ' + ids.join(', ') : '')
+      userLines.push('- Looking at' + (page ? ' (' + page + ')' : '') + ': ' + (label || 'a selection') + (ids.length ? ' — ' + ids.join(', ') : '')
         + '. Unless the question names something else, "these", "it", "this one" refer to this selection.');
     }
-    lines.push('');
-
+    userLines.push('');
     if (_isFulfilmentCtx) {
       // Fulfilment-shaped data block. Aggregates only — no order or recipient detail.
       if (weeks.length > 0) {
@@ -1855,8 +1861,9 @@ app.post('/pulse/chat',
         lines.push('Planned: ' + (w.planned_total||0).toLocaleString() + ' units | Applied: ' + (w.applied_total||0).toLocaleString() + ' (' + (w.completion_pct||0) + '%) | Received POs: ' + (w.received_pos||0) + ' | Late POs: ' + (w.late_pos||0) + ' | Mobile bins (cartons out): ' + (w.total_mobile_bins||0) + ' | Bin units: ' + (w.total_bin_units||0).toLocaleString() + (w.total_bin_weight_kg ? ' | Bin weight: ' + w.total_bin_weight_kg + ' kg' : ''));
         lines.push('');
 
-        // PO detail
-        if (Array.isArray(w.pos) && w.pos.length > 0) {
+        // PO detail: off by default — it was the largest block in every prompt and Pulse has
+        // get_week_status / find_po for exactly this. PULSE_CONTEXT=full restores it.
+        if (process.env.PULSE_CONTEXT === 'full' && Array.isArray(w.pos) && w.pos.length > 0) {
           lines.push('POs this week:');
           for (const p of w.pos) {
             const recvStr = p.received ? ('received ' + (p.received_date ? p.received_date.slice(0,10) : 'yes') + (p.cartons_received ? ' (' + p.cartons_received + ' cartons in)' : '')) : 'NOT received';
@@ -1907,20 +1914,18 @@ app.post('/pulse/chat',
     lines.push('- For a transit question, answer in this order. 1) One headline line across everything asked: how many movements, how many on time / behind / delayed / held, and name the ones that are late. 2) What matters, worst first: each delayed, behind or held movement with how late it is against the first promise, the new FC date, what it carries (lanes, POs, units) and the stated cause. 3) Data gaps, grouped into one line rather than repeated per movement: e.g. "5 movements have no confirmed milestones and FC dates that passed weeks ago — they may have been delivered without being recorded; confirm them in Week Hub → Transit & Clearing." Never say a movement was delivered unless FC receipt is confirmed. 4) One suggested next action.');
     lines.push('- Do not repeat "no carrier quote" for air: air transit is a rule default and that is normal. Mention a missing quote only for sea.');
 
-    // Split prompt: static ops data (cacheable) + dynamic context (not cached)
-    // Cache only kicks in when content is identical across requests.
-    // The ops data block is static for the whole session — perfect for caching.
-    // The role/facility/week line is tiny and dynamic — sent uncached each time.
-
-    // Find where the ops data starts (after the user context lines)
-    // The cache split keys off the data heading. Fulfilment clients emit a different one,
-    // and either slice may be empty — the API rejects an empty text block, so guard both.
-    const opsDataStartIdx = lines.findIndex(l => l.startsWith('## Operations data') || l.startsWith('## Fulfilment data') || l.startsWith('## No operations data') || l.startsWith('## Transit movements'));
-    const staticLines  = opsDataStartIdx >= 0 ? lines.slice(opsDataStartIdx) : lines;
-    const dynamicLines = opsDataStartIdx >= 0 ? lines.slice(0, opsDataStartIdx) : [];
-
-    const staticBlock  = staticLines.join('\n').trim();
-    const dynamicBlock = dynamicLines.join('\n').trim();
+    // Prompt order, for the cache: [role + guidelines + mode guides] is identical from one
+    // request to the next and sits first with the cache breakpoint; the data picture (weeks,
+    // transit) and the per-request user context follow it uncached. Tool definitions precede
+    // the system prompt in the cache prefix automatically.
+    const dataStartIdx = lines.findIndex(l => l.startsWith('## Operations data') || l.startsWith('## Fulfilment data') || l.startsWith('## No operations data') || l.startsWith('## Transit movements'));
+    const guideStartIdx = lines.findIndex(l => l === '## Guidelines');
+    const roleLines = dataStartIdx >= 0 ? lines.slice(0, dataStartIdx) : (guideStartIdx >= 0 ? lines.slice(0, guideStartIdx) : lines.slice());
+    const dataLines = dataStartIdx >= 0 ? lines.slice(dataStartIdx, guideStartIdx >= 0 ? guideStartIdx : undefined) : [];
+    const guideLines = guideStartIdx >= 0 ? lines.slice(guideStartIdx) : [];
+    const staticBlock = [...roleLines, ...guideLines].join('\n').trim();
+    const dataBlock = dataLines.join('\n').trim();
+    const dynamicBlock = userLines.join('\n').trim();
 
     // ── Tool context: who is asking, as what, for which client ──
     // Pulse's tools call Pinpoint's own routes with this user's token, so the route guards
@@ -1945,13 +1950,15 @@ app.post('/pulse/chat',
       timeoutMs: 12000,
     };
     const toolDefs = pulseTools.anthropicTools(toolCtx);
+    const guideText = [staticBlock, _style === 'spoken' ? pulseTools.SPOKEN_GUIDE : '', _emailMode ? pulseTools.EMAIL_GUIDE(_persona) : '', _meetingMode ? pulseTools.MEETING_GUIDE(_persona) : ''].filter(Boolean).join('\n\n');
     const sysBlocks = [
-      ...(staticBlock ? [{ type: 'text', text: staticBlock, cache_control: { type: 'ephemeral' } }] : []),
+      ...(guideText ? [{ type: 'text', text: guideText, cache_control: { type: 'ephemeral' } }] : []),
+      ...(dataBlock ? [{ type: 'text', text: dataBlock }] : []),
       ...(dynamicBlock ? [{ type: 'text', text: dynamicBlock }] : []),
-      ...(_style === 'spoken' ? [{ type: 'text', text: pulseTools.SPOKEN_GUIDE }] : []),
-      ...(_emailMode ? [{ type: 'text', text: pulseTools.EMAIL_GUIDE(_persona) }] : []),
-      ...(_meetingMode ? [{ type: 'text', text: pulseTools.MEETING_GUIDE(_persona) }] : []),
     ];
+    // Which job this is: picks the model and labels the usage record.
+    const _feature = String(req.body?.task || '') === 'insights' ? 'insights' : _summaryMode ? 'meeting_summary' : _meetingMode ? 'meeting' : _emailMode ? 'email' : _dryRun ? 'eval' : 'chat';
+    const _model = (_feature === 'insights' || _feature === 'meeting_summary') ? PULSE_MODEL_LIGHT() : PULSE_MODEL();
 
     // Session memory: the browser sends the visible thread; the server keeps the tool
     // results of recent turns so "and the other one?" has something to refer to. Keyed by
@@ -1962,7 +1969,10 @@ app.post('/pulse/chat',
     // Replay the last few tool exchanges ahead of the newest user message, so the model can
     // see what it looked up previously without the browser having to carry it.
     if (sess.turns.length && convo.length > 1) {
-      const priorTools = sess.turns.slice(-3).flatMap(t => t.blocks);
+      // Tool results from earlier turns are replayed trimmed: the model needs the gist of what
+      // it saw, not a second copy of a whole week.
+      const trimBlock = (b) => (b && b.role === 'user' && Array.isArray(b.content)) ? { ...b, content: b.content.map(c => c.type === 'tool_result' && typeof c.content === 'string' && c.content.length > 1500 ? { ...c, content: c.content.slice(0, 1500) + '…[trimmed]' } : c) } : b;
+      const priorTools = sess.turns.slice(-3).flatMap(t => t.blocks).map(trimBlock);
       convo.splice(convo.length - 1, 0, ...priorTools);
     }
 
@@ -1974,12 +1984,12 @@ app.post('/pulse/chat',
     let reply = null, stop = null;
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
+        model: _model,
         max_tokens: _style === 'spoken' ? 400 : 1200,
         system: sysBlocks,
         tools: toolDefs,
         messages: convo,
-      }, { headers: { 'anthropic-beta': 'prompt-caching-2024-07-31' } });
+      }, { headers: { 'anthropic-beta': 'prompt-caching-2024-07-31' }, _pulseFeature: _feature, _pulseMeta: { client: toolCtx.client, userId: toolCtx.userId } });
       stop = response.stop_reason;
       const toolUses = response.content.filter(b => b.type === 'tool_use');
       if (stop !== 'tool_use' || !toolUses.length) {
@@ -12269,6 +12279,8 @@ const _pulseTasks = require('./pulse_tasks')({ app, db, authenticateRequest, req
 
 // ── Pulse voice (Phase 2): /pulse/transcribe, /pulse/speak, /pulse/voice/status ──
 // Vendor keys stay on the server; the browser only ever sees text and audio. See pulse_voice.js.
+_pulseUsage = require('./pulse_usage')({ app, db, authenticateRequest, requireRole, requireInternalOrg, log: console });
+if (_anthropic) _pulseUsage.wrap(_anthropic);
 const _pulseVoice = require('./pulse_voice')({ app, db, authenticateRequest, aiLimiter, aiAllowed, audit: _pulseAudit, log: console });
 
 // ── Pulse in meetings (Phase 4): Recall.ai bot, live answers, post-meeting summary ──
