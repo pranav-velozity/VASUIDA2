@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Pulse rail v3 ──
+/* ── VelOzity Pinpoint — Pulse rail v4 ──
    Pulse moves from the bottom bar to a right-hand rail and speaks first: a briefing surface at
    the top (built from the Week Hub insights already fetched — no extra model call), four verb
    tiles for the page you are on, then the conversation, then the composer.
@@ -81,6 +81,8 @@
     .pr-pin{display:flex;align-items:center;gap:10px;padding:8px 10px;border:.5px solid rgba(153,0,51,.3);background:#FFF7F9;border-radius:12px;font-size:12px;flex:none}
     .pr-pin b{font-weight:600} .pr-pin a{margin-left:auto;font-size:11px;color:${BRAND};cursor:pointer}
     .pr-minis{display:grid;grid-template-columns:1fr 1fr;gap:8px;flex:none}
+    .pr-spend{display:none;font-size:10.5px;color:${LIGHT};padding:0 2px;flex:none;cursor:default} .pr-spend b{color:${MID};font-weight:600} .pr-spend.show{display:block}
+    body.pr-focus .pr-spend{padding:0 10px}
     .pr-mini{display:flex;align-items:center;gap:8px;padding:8px 10px;border:.5px solid rgba(0,0,0,.08);border-radius:12px;font-size:11px;color:${MID};cursor:pointer;background:#fff}
     .pr-mini:hover{border-color:rgba(153,0,51,.4)} .pr-mini b{color:${DARK};font-weight:600;margin-left:auto} .pr-mini .pr-g{width:22px;height:22px;border-radius:7px}
     /* the moved panel + bar */
@@ -273,6 +275,7 @@
           <div class="pr-mini" data-mini="tasks"><span class="pr-g rose">${ico('check', 12)}</span><span>Tasks</span><b data-tasks>0</b></div>
           <div class="pr-mini" data-mini="meetings"><span class="pr-g ink">${ico('clock', 12)}</span><span>Meetings</span><b data-meetings>—</b></div>
         </div>
+        <div class="pr-spend" data-spend></div>
       </div>`;
     document.body.appendChild(rail);
     R.el = rail;
@@ -411,6 +414,25 @@
     window.addEventListener('tenancy:ready', () => setTimeout(paint, 0));
     document.addEventListener('visibilitychange', () => { if (!document.hidden) paint(); });
   }
+  // Spend line (VelOzity admins only — the route is 403 for everyone else, and the line stays hidden).
+  let spendTimer = null, spendAllowed = true;
+  async function spend() {
+    if (!R.el || !spendAllowed) return;
+    try {
+      const base = (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/, '');
+      let token = null; if (window.Clerk?.session) { try { token = await window.Clerk.session.getToken(); } catch (_) {} }
+      if (!token) return;
+      const r = await fetch(base + '/pulse/usage?days=7', { headers: { Authorization: 'Bearer ' + token } });
+      if (r.status === 403 || r.status === 401) { spendAllowed = false; return; }
+      if (!r.ok) return;
+      const u = await r.json(); const el = R.el.querySelector('[data-spend]');
+      const usd = (v) => '$' + (Number(v) || 0).toFixed(2);
+      el.innerHTML = `Pulse today <b>${usd(u.today.usd)}</b> · ${u.today.calls || 0} call${u.today.calls === 1 ? '' : 's'} · 7-day avg <b>${usd(u.avg_per_day_usd)}</b>${u.today.cache_hit ? ` · cache ${u.today.cache_hit}%` : ''}`;
+      el.title = (u.by_feature || []).map(f => `${f.feature}: ${usd(f.usd)} (${f.calls})`).join('\n') || 'No usage yet';
+      el.classList.add('show');
+    } catch (_) {}
+  }
+  function scheduleSpend() { clearTimeout(spendTimer); spendTimer = setTimeout(spend, 4000); }
   function compactHeader() {
     if (!R.state.ui || R.state.ui.header === false) return;
     document.body.classList.add('pr-hdr');
@@ -441,7 +463,9 @@
     ['pt-strip', 'pm-strip'].forEach(id => { const el = document.getElementById(id); if (el && el.classList.contains('open')) { const h = el.querySelector('.pt-head, .pm-head'); if (h) h.click(); else el.classList.remove('open'); } });
     const bar = document.getElementById('pulse-bar'); R.el.classList.toggle('hidden', !(bar && bar.classList.contains('visible')));
     layout(); paint(); compactHeader();
-    console.log('[pulse-rail] v3 on');
+    spend(); setInterval(spend, 5 * 60 * 1000);
+    const chat = document.getElementById('pulse-chat'); if (chat) new MutationObserver(scheduleSpend).observe(chat, { childList: true });
+    console.log('[pulse-rail] v4 on');
   }
   function disable() { if (!R.state.on) return; release(); R.state.on = false; document.body.classList.remove('pr-on', 'pr-overlay', 'pr-hdr', 'pr-focus'); if (R.el) R.el.classList.add('hidden'); }
 
