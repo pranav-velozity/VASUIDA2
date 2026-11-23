@@ -9,7 +9,7 @@
 //   POST /pulse/speak        { text }                                        → audio/mpeg stream
 //                            ElevenLabs Flash v2.5 with the chosen voice; if that voice is not
 //                            on the account it retries once with the stock fallback voice.
-//   GET  /pulse/voice/status                                                 → { stt, tts, used_seconds, cap_seconds, wake_words }
+//   GET  /pulse/voice/status                                                 → { stt, tts, used_seconds, cap_seconds, wake_words, ops_terms, convo_seconds }
 //
 // Nothing is stored: the audio is forwarded and dropped, the transcript goes back to the
 // browser (where it becomes an ordinary chat turn), and the usage table holds only seconds
@@ -81,7 +81,7 @@ module.exports = function pulseVoice(deps) {
   app.get('/pulse/voice/status', authenticateRequest, (req, res) => {
     if (!aiAllowed(req, res)) return;
     const used = usedSeconds(who(req).userId);
-    res.json({ stt: sttOn(), tts: ttsOn(), used_seconds: Math.round(used), cap_seconds: capSeconds(), voice_id: ttsOn() ? VOICE_ID() : null, stt_model: sttOn() ? STT_MODEL() : null, wake_words: require('./pulse_wake').list() });
+    res.json({ stt: sttOn(), tts: ttsOn(), used_seconds: Math.round(used), cap_seconds: capSeconds(), voice_id: ttsOn() ? VOICE_ID() : null, stt_model: sttOn() ? STT_MODEL() : null, wake_words: require('./pulse_wake').list(), ops_terms: require('./pulse_wake').opsTerms(), convo_seconds: Math.max(0, Number(process.env.PULSE_CONVO_SECONDS ?? 45)) });
   });
 
   // ── transcribe ──

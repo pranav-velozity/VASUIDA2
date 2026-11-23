@@ -27,6 +27,9 @@
 //                                     "Pinpoint" and the ops vocabulary are boosted, and both handle accents
 //                                     far better than Recall's low-latency engine.
 //       PULSE_KEYTERMS                comma-separated extra key terms (facility codes, client names…)
+//       PULSE_CONVO_SECONDS           after Pulse answers, operations questions without the name are
+//                                     answered for this long (default 45; 0 = always say the name)
+//       PULSE_OPS_TERMS               extra words that mark a sentence as "about our work" (see pulse_wake.js)
 //       RECALL_TRANSCRIPT_PROVIDER    JSON override of the whole transcript provider block (wins over RECALL_STT)
 'use strict';
 const crypto = require('crypto');
@@ -65,6 +68,7 @@ module.exports = function pulseMeetings(deps) {
       summary_email_id INTEGER,
       transcript_deleted_at TEXT,
       last_error    TEXT,
+      open_mode     INTEGER NOT NULL DEFAULT 0,          -- 1: answer any operations question, no name needed
       created_at    TEXT NOT NULL,
       updated_at    TEXT
     );
@@ -108,6 +112,7 @@ module.exports = function pulseMeetings(deps) {
   //   Meet    https://meet.google.com/abc-defg-hij
   //   Zoom    https://company.zoom.us/j/123…  or /my/room
   const MEETING_LINK = /https?:\/\/(?:(?:[a-z0-9-]+\.)?teams\.microsoft\.com\/(?:l\/meetup-join|meet)\/[^\s"'<>)\]]+|teams\.live\.com\/meet\/[^\s"'<>)\]]+|meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}(?:[?#][^\s"'<>)\]]*)?|[a-z0-9.-]*zoom\.us\/(?:j|my|s|w)\/[^\s"'<>)\]]+)/i;
+  try { db.exec('ALTER TABLE pulse_meeting ADD COLUMN open_mode INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
   const who = (req) => ({ userId: req.auth?.userId || 'anon', orgId: req.auth?.orgId || '', orgRole: req.auth?.orgRole || '' });
   const note = (req, action, body, status, error) => { try { const w = req ? who(req) : { userId: 'pulse', orgId: null, orgRole: null }; audit && audit.run(w.userId, w.orgId, w.orgRole, action, req ? req.path : '/pulse/meeting', req ? req.method : 'BOT', req ? req.ip : '', req ? req.headers['user-agent'] : 'recall', body, status, error); } catch (_) {} };
   const gate = [authenticateRequest, requireRole(['admin']), requireInternalOrg];
@@ -240,7 +245,8 @@ module.exports = function pulseMeetings(deps) {
     try {
       const b = req.body || {};
       const m = createMeeting({ meeting_url: b.meeting_url, title: b.title, client: curClient(), scheduled_at: b.scheduled_at || null, organiser: b.organiser || null, source: 'panel', created_by: req.auth?.userId || null, created_by_name: b.created_by_name || null });
-      note(req, 'pulse_meeting_create', { id: m.id, url: m.meeting_url, when: m.scheduled_at }, 200, null);
+      if (b.open_mode) setM(m.id, { open_mode: 1 });
+      note(req, 'pulse_meeting_create', { id: m.id, url: m.meeting_url, when: m.scheduled_at, open: !!b.open_mode }, 200, null);
       if (!enabled()) { setM(m.id, { status: 'failed', last_error: 'Recall is not configured (RECALL_API_KEY)' }); return res.status(503).json({ ok: false, error: 'Meetings are not configured on the server yet.', meeting: shape(getM(m.id)) }); }
       await startMeeting(m);
       res.json({ ok: true, meeting: shape(getM(m.id)) });
@@ -275,6 +281,14 @@ module.exports = function pulseMeetings(deps) {
     try { await answer(m, rows[rows.length - 1].id, rows[rows.length - 1].speaker, question); }
     catch (e) { log.warn('[pulse meeting] answer-last failed #' + m.id + ': ' + (e && e.message)); }
     finally { busy.delete(m.id); }
+  });
+  // Open mode on/off from the panel (also by voice: "Pulse, open mode" / "Pulse, name only").
+  app.post('/pulse/meetings/:id/mode', ...gate, async (req, res) => {
+    const m = getM(req.params.id); if (!m || m.client_id !== curClient()) return res.status(404).json({ ok: false, error: 'no such meeting' });
+    const on = !!(req.body || {}).open;
+    if (['live', 'joining', 'waiting'].includes(m.status) && m.bot_id) await setOpenMode(m, on, req.auth?.userId || 'panel');
+    else { setM(m.id, { open_mode: on ? 1 : 0 }); note(req, 'pulse_meeting_mode', { meeting: m.id, open: on }, 200, null); }
+    res.json({ ok: true, meeting: shape(getM(m.id)) });
   });
   app.post('/pulse/meetings/:id/leave', ...gate, async (req, res) => {
     const m = getM(req.params.id); if (!m || m.client_id !== curClient()) return res.status(404).json({ ok: false, error: 'no such meeting' });
@@ -320,6 +334,9 @@ module.exports = function pulseMeetings(deps) {
   const busy = new Map();                                      // meeting id → answering right now
   const listenNext = new Map();                                // meeting id → until (ms): answer the next thing said, no wake word
   const LISTEN_NEXT_MS = 20000, ANSWER_LAST_S = 20;
+  const convo = new Map();                                     // meeting id → until (ms): Pulse is in the conversation
+  const CONVO_MS = () => Math.max(0, Number(process.env.PULSE_CONVO_SECONDS ?? 45)) * 1000;
+  const opsRx = wake.opsRegex();
   async function onUtterance(m, d) {
     const inner = d.data || {};
     const words = Array.isArray(inner.words) ? inner.words : [];
@@ -330,14 +347,24 @@ module.exports = function pulseMeetings(deps) {
     const atRel = words.length ? Number(words[0].start_timestamp && words[0].start_timestamp.relative) || null : null;
     if (m.status !== 'live') { setM(m.id, { status: 'live', started_at: m.started_at || iso() }); m = getM(m.id); }
     let { hit: isQ, question } = wake.strip(text);
+    let named = isQ;
     if (!isQ && (listenNext.get(m.id) || 0) > now()) { isQ = true; question = text; }   // host pressed "Answer that": no name needed
+    // Already in the conversation, or open mode: an operations question counts without the name.
+    if (!isQ && (m.open_mode || (convo.get(m.id) || 0) > now()) && wake.looksLikeQuestion(text, opsRx)) { isQ = true; question = text; }
     const line = db.prepare('INSERT INTO pulse_meeting_line (meeting_id, at_rel, speaker, text, is_question, created_at) VALUES (?,?,?,?,?,?)').run(m.id, atRel, speaker, text, isQ ? 1 : 0, iso());
     if (!isQ) return;
     listenNext.delete(m.id);
+    const cmd = named ? wake.modeCommand(question) : null;
+    if (cmd) { await setOpenMode(m, cmd === 'open', speaker); return; }
     if (busy.get(m.id)) { log.log('[pulse meeting] still answering; skipped: ' + question); return; }
     busy.set(m.id, true);
     try { await answer(m, Number(line.lastInsertRowid), speaker, question); }
     finally { busy.delete(m.id); }
+  }
+  async function setOpenMode(m, on, by) {
+    setM(m.id, { open_mode: on ? 1 : 0 });
+    note(null, 'pulse_meeting_mode', { meeting: m.id, open: on, by }, 200, null);
+    await say(m, on ? 'Open mode — I will answer any operations question; no need to say my name.' : 'Back to name only — say Pulse when you need me.');
   }
   function contextFor(m, beforeLineId) {
     const since = new Date(now() - CONTEXT_MINUTES * 60000).toISOString();
@@ -374,6 +401,7 @@ module.exports = function pulseMeetings(deps) {
       db.prepare('INSERT INTO pulse_meeting_action (meeting_id, line_id, tool, args_json, summary, created_at) VALUES (?,?,?,?,?,?)').run(m.id, lineId, a.tool, JSON.stringify(a.args || {}), a.summary || a.tool, iso());
     }
     db.prepare('UPDATE pulse_meeting_line SET answer = ? WHERE id = ?').run(reply, lineId);
+    if (CONVO_MS()) convo.set(m.id, now() + CONVO_MS());        // follow-ups need no name for a while
     note(null, 'pulse_meeting_answer', { meeting: m.id, speaker, question: question.slice(0, 200), tools: (out.tools || []).map(t => t.tool), proposed: (out.actions || []).filter(a => a.kind === 'proposed').length }, 200, null);
     if (reply) await say(m, reply);
   }
