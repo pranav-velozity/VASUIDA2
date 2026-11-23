@@ -56,6 +56,17 @@
     MIDWAKE = new RegExp('^.{3,}?[,.;:!?—-]?\\s+(?:hey|ok|okay)?\\s*(?:' + a + ')\\b[\\s,.:!?-]*(.{3,})$', 'i');
   }
   setWake(WAKE_DEFAULT);
+  // "In the conversation": after Pulse answers, operations questions need no name for a while; in Open
+  // mode they never do. Same detector as the server's (pulse_wake.js): asks something + about our work.
+  const ASKS = /^(?:and |so |ok |okay |also |then |but |um |uh )*(?:what|what's|whats|which|when|when's|where|where's|who|who's|how|how's|why|is|are|was|were|has|have|had|do|does|did|can|could|will|would|should|any|anything|tell me|give me|show me|show us|check|look up|pull up|remind|list|find|get me|do we|did we|have we)\b/i;
+  const OPS_DEFAULT = ['week', 'po', 'pos', 'order', 'orders', 'container', 'containers', 'eta', 'vessel', 'lane', 'lanes', 'shipment', 'movement', 'customs', 'cleared', 'depart', 'departed', 'arrive', 'arrived', 'land', 'delivered', 'receipt', 'received', 'dispatch', 'dispatched', 'packing list', 'warehouse', 'facility', 'dock', 'truck', 'carton', 'cartons', 'units', 'sku', 'skus', 'label', 'labels', 'vas', 'invoice', 'alert', 'alerts', 'late', 'delayed', 'on hold', 'at risk', 'status', 'plan', 'progress', 'complete', 'behind', 'on track', 'pending', 'outstanding', 'task', 'tasks', 'note', 'email', 'summary', 'iconic', 'ehp', 'supplier', 'ticket', 'transit', 'freight'];
+  let OPS; let CONVO_MS = 45000;
+  function setOps(terms) { const a = (Array.isArray(terms) && terms.length ? terms : OPS_DEFAULT).slice().sort((x, y) => y.length - x.length).map(escW).join('|'); OPS = new RegExp('\\b(?:(?:' + a + ')(?:s|es|ed|ing)?|[a-z]{4}\\d{6,7}|w\\d{1,2}|\\d{4,})\\b', 'i'); }
+  setOps(OPS_DEFAULT);
+  const looksLikeQuestion = (t) => t.trim().split(/\s+/).length >= 3 && (ASKS.test(t) || /\?\s*$/.test(t)) && OPS.test(t);
+  const OPEN_ON = /^(?:go |switch to |turn on |enable |start )?(?:open mode|open|free mode|conversation mode|answer everything|answer everyone|listen to everything)\b/i;
+  const OPEN_OFF = /^(?:go |switch to |turn off |disable |stop |back to )?(?:name only|name mode|closed mode|close mode|wake word only|only when called|stop open mode|open mode off|quiet mode)\b/i;
+  function applyCaps(c) { if (!c) return; if (c.wake_words) setWake(c.wake_words); if (c.ops_terms) setOps(c.ops_terms); if (c.convo_seconds != null) CONVO_MS = Math.max(0, Number(c.convo_seconds)) * 1000; }
   const AGAIN = /^(?:pulse[\s,]*)?(?:say that again|repeat that|say again|what was that|pardon|come again)\W*$/i;
   const YES = /^(?:pulse[\s,]*)?(?:yes|yes please|yep|yeah|yup|sure|do it|go ahead|go for it|confirm|confirmed|correct|that's right|ok|okay|please do|make it so)\b[\s!.]*$/i;
   const NO = /^(?:pulse[\s,]*)?(?:no|nope|cancel|don't|do not|stop|never mind|nevermind|leave it|not now)\b/i;
@@ -87,10 +98,12 @@
     awaiting: null,     // { token, summary, until, timer } while a proposed action waits for a spoken yes
     queue: [], pumping: false,   // clips waiting for the transcriber (Meeting mode keeps recording)
     followUntil: 0,     // after a bare "Pulse", the next sentence counts without the name
-    setWake,            // swap the wake-word list (the server's list is applied when /pulse/voice/status loads)
+    convoUntil: 0,      // after an answer, operations questions count without the name (Meeting mode)
+    openMode: false,    // Meeting mode: answer any operations question, never needs the name
+    setWake, looksLikeQuestion,   // swap the wake-word list (the server's list is applied when /pulse/voice/status loads)
     log: [],
   };
-  try { V.mode = localStorage.getItem('pulse_voice_mode') === 'meeting' ? 'meeting' : 'solo'; } catch (_) {}
+  try { const sm = localStorage.getItem('pulse_voice_mode'); V.mode = (sm === 'meeting' || sm === 'open') ? 'meeting' : 'solo'; V.openMode = sm === 'open'; } catch (_) {}
 
   const apiBase = () => (document.querySelector('meta[name="api-base"]')?.content || '').replace(/\/+$/, '');
   async function token() { if (window.Clerk?.session) { try { return await window.Clerk.session.getToken(); } catch (_) {} } return null; }
@@ -112,7 +125,7 @@
     const bar = document.getElementById('pulse-bar'), spk = document.getElementById('pa-spoken');
     if (!bar || !spk || document.getElementById('pv-pill')) return false;
     modeEl = document.createElement('div'); modeEl.id = 'pv-mode'; modeEl.className = 'pv-mode';
-    modeEl.innerHTML = '<span data-m="solo" title="One person: every sentence is a question">Solo</span><span data-m="meeting" title="A room: Pulse answers only when it hears its name">Meeting</span>';
+    modeEl.innerHTML = '<span data-m="solo" title="One person: every sentence is a question">Solo</span><span data-m="meeting" title="A room: Pulse answers when it hears its name, and follow-ups for a little while after">Meeting</span><span data-m="open" title="A room: Pulse answers any operations question, no name needed">Open</span>';
     modeEl.querySelectorAll('span').forEach(s => { s.onclick = () => setMode(s.dataset.m); });
     pill = document.createElement('div'); pill.id = 'pv-pill'; pill.className = 'pv-pill';
     pill.innerHTML = '<span class="pv-dot"></span><span class="pv-txt"></span>';
@@ -123,10 +136,11 @@
     new MutationObserver(() => { const on = spk.classList.contains('on'); if (on !== V.on) (on ? start() : stop()); }).observe(spk, { attributes: true, attributeFilter: ['class'] });
     return true;
   }
-  function paintMode() { if (modeEl) modeEl.querySelectorAll('span').forEach(s => s.classList.toggle('on', s.dataset.m === V.mode)); }
+  const modeKey = () => V.mode === 'meeting' ? (V.openMode ? 'open' : 'meeting') : 'solo';
+  function paintMode() { if (modeEl) modeEl.querySelectorAll('span').forEach(s => s.classList.toggle('on', s.dataset.m === modeKey())); }
   function setMode(m) {
-    V.mode = m === 'meeting' ? 'meeting' : 'solo'; paintMode();
-    try { localStorage.setItem('pulse_voice_mode', V.mode); } catch (_) {}
+    V.mode = (m === 'meeting' || m === 'open') ? 'meeting' : 'solo'; V.openMode = m === 'open'; V.convoUntil = 0; paintMode();
+    try { localStorage.setItem('pulse_voice_mode', modeKey()); } catch (_) {}
     if (V.on && V.state === 'listening') setState('listening');
   }
   function setState(s, detail) {
@@ -135,7 +149,7 @@
     V.state = s; V.detail = detail || '';
     const label = {
       off: '', starting: 'Starting microphone…',
-      listening: (V.awaiting && Date.now() < V.awaiting.until) ? 'Yes or no?' : (Date.now() < V.followUntil ? 'Yes?' : (V.mode === 'meeting' ? 'Listening for "Pulse…"' : 'Listening')),
+      listening: (V.awaiting && Date.now() < V.awaiting.until) ? 'Yes or no?' : (Date.now() < V.followUntil ? 'Yes?' : (V.mode === 'meeting' ? (V.openMode ? 'Listening (open mode)' : (Date.now() < V.convoUntil ? 'Listening (in conversation)' : 'Listening for "Pulse…"')) : 'Listening')),
       hearing: 'Hearing you…', transcribing: 'Working out what you said…', thinking: 'Thinking…', speaking: 'Speaking — tap to stop',
       error: detail || 'Voice unavailable', paused: detail || 'Paused',
     }[s] || s;
@@ -177,7 +191,7 @@
     if (!V.caps) {
       try { const r = await get('/pulse/voice/status'); V.caps = r.ok ? await r.json() : { stt: false, tts: false, error: r.status }; }
       catch (_) { V.caps = { stt: false, tts: false }; }
-      if (V.caps && V.caps.wake_words) setWake(V.caps.wake_words);
+      applyCaps(V.caps);
       if (V.caps.error === 409) { setState('error', 'Turn Pulse on first'); V.on = false; return; }
     }
     V.useWebSpeech = !V.caps.stt && !!(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -223,7 +237,7 @@
   function stop() {
     V.on = false;
     clearInterval(V.timer); V.timer = null;
-    discardClip(); releaseStream(); stopSpeaking(); clearAwaiting(); V.queue = []; V.followUntil = 0;
+    discardClip(); releaseStream(); stopSpeaking(); clearAwaiting(); V.queue = []; V.followUntil = 0; V.convoUntil = 0;
     if (V.recog) { try { V.recog.onend = null; V.recog.stop(); } catch (_) {} V.recog = null; }
     document.removeEventListener('visibilitychange', onVis);
     setState('off');
@@ -298,11 +312,16 @@
       speak(held.length > 1 ? 'Stopped — nothing was sent.' : 'Stopped — the email was not sent.'); return 'stop';
     }
     if (V.mode === 'meeting') {
-      const follow = Date.now() < V.followUntil;
+      const follow = Date.now() < V.followUntil, inConvo = Date.now() < V.convoUntil;
+      let named = true;
       if (WAKE.test(text)) text = text.replace(WAKE, '').trim();
       else if (MIDWAKE.test(text)) text = text.replace(MIDWAKE, '$1').trim();      // "…so, Pulse, what's the ETA?"
-      else if (!follow) { if (V.on) setState('listening'); return ''; }           // not for Pulse
+      else if (follow) named = false;
+      else if ((V.openMode || inConvo) && looksLikeQuestion(text)) named = false;  // in the conversation / open mode: ops question, no name
+      else { if (V.on) setState('listening'); return ''; }                        // not for Pulse
       V.followUntil = 0;
+      if (named && OPEN_ON.test(text)) { V.openMode = true; paintMode(); speak('Open mode — I will answer any operations question.'); return 'mode'; }
+      if (named && OPEN_OFF.test(text)) { V.openMode = false; V.convoUntil = 0; paintMode(); speak('Back to name only.'); return 'mode'; }
       if (!text) { V.followUntil = Date.now() + FOLLOW_MS; setState('listening', 'Yes?'); speak('Yes?'); return ''; }   // name alone: listen for the next sentence
     } else {
       text = text.replace(WAKE, '').trim();                                           // "Pulse, …" is fine in Solo too
@@ -323,6 +342,7 @@
     // Mark the user bubble as heard rather than typed.
     setTimeout(() => { const chat = document.getElementById('pulse-chat'); const u = chat && chat.querySelectorAll('.pulse-msg.user'); if (u && u.length) u[u.length - 1].classList.add('pv-heard'); }, 0);
     try { await p; } catch (_) {}
+    if (V.mode === 'meeting' && CONVO_MS) V.convoUntil = Date.now() + CONVO_MS;   // follow-ups need no name for a while
     // If a spoken reply arrived, speak() now owns busy/state; otherwise (error, empty) go back to listening.
     if (V.state === 'thinking') { V.busy = false; setState(V.on ? 'listening' : 'off'); }
     return text;
@@ -367,7 +387,7 @@
     stopSpeaking(true);
     V.busy = true; setState('speaking');
     const done = () => { V.audio = null; V.busy = false; V.pausedUntil = Date.now() + AFTER_SPEAK_MS; if (V.on) showSnippet(text); else setState('off'); };
-    if (!V.caps) { try { const r = await get('/pulse/voice/status'); V.caps = r.ok ? await r.json() : { stt: false, tts: false }; } catch (_) { V.caps = { stt: false, tts: false }; } } if (V.caps && V.caps.wake_words) setWake(V.caps.wake_words);
+    if (!V.caps) { try { const r = await get('/pulse/voice/status'); V.caps = r.ok ? await r.json() : { stt: false, tts: false }; } catch (_) { V.caps = { stt: false, tts: false }; } } applyCaps(V.caps);
     if (V.caps.tts) {
       try {
         const r = await post('/pulse/speak', { text }, 'audio/mpeg');
