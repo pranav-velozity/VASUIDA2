@@ -1,4 +1,5 @@
-/* ── VelOzity Pinpoint — Finance Module v16 ── */
+/* ── VelOzity Pinpoint — Finance Module v17 ── */
+/* v17: Quotes tab — carrier partners per client (air / sea toggles), client notification address, origin ports. */
 ;(function(){
 'use strict';
 
@@ -264,6 +265,9 @@ function injectSkeleton(host){
         <button class="fin-nav-item" id="fin-nav-rates" onclick="window._finTab('rates')">
           <span class="nav-icon">${icons.rates || icons.expenses}</span>Rates
         </button>
+        <button class="fin-nav-item" id="fin-nav-quotes" onclick="window._finTab('quotes')">
+          <span class="nav-icon">${icons.rates || icons.expenses}</span>Quotes
+        </button>
       </div>
 
       <div style="margin:8px 16px;height:1px;background:rgba(255,255,255,0.07);"></div>
@@ -302,6 +306,7 @@ function injectSkeleton(host){
       <div id="fin-tab-pl" style="display:none;"></div>
       <div id="fin-tab-expenses" style="display:none;"></div>
       <div id="fin-tab-rates" style="display:none;"></div>
+      <div id="fin-tab-quotes" style="display:none;"></div>
     </div>
   </div>
   <div class="fin-panel" id="fin-panel"></div>
@@ -526,7 +531,7 @@ function paintStatement(){
 
 window._finTab=function(tab){
   _finState.tab=tab;
-  ['invoices','statement','pl','expenses','rates'].forEach(t=>{
+  ['invoices','statement','pl','expenses','rates','quotes'].forEach(t=>{
     const btn=el('fin-nav-'+t),content=el('fin-tab-'+t);
     if(btn)btn.classList.toggle('active',t===tab);
     if(content)content.style.display=t===tab?'':'none';
@@ -539,6 +544,7 @@ window._finTab=function(tab){
   if(tab==='pl')renderPLTab();
   if(tab==='expenses')renderExpensesTab();
   if(tab==='rates')renderRatesTab();
+  if(tab==='quotes')renderQuotesTab();
 };
 
 // ── Rates: the client's invoice line template — rate, quantity source and multiplier ──
@@ -631,6 +637,47 @@ async function renderBillingCard(){
       }
     });
   });
+}
+
+// ── Quotes: who prices door-to-door and air requests for this client, and who hears back ──
+const qapi=(p,o={})=>api(p,{...o,headers:{...(o.headers||{}),'x-pinpoint-client':window.pinpointClient||'ICONIC'}});
+async function renderQuotesTab(){
+  const host=el('fin-tab-quotes'); if(!host) return;
+  host.innerHTML='<div style="padding:24px;color:'+MID+';font-size:12px;">Loading…</div>';
+  try{
+    const d=await qapi('/rq/partners');
+    const tog=(on)=>'<span style="display:inline-block;width:30px;height:17px;border-radius:999px;background:'+(on?BRAND:'#D2D2D7')+';position:relative;vertical-align:middle;cursor:pointer;"><span style="position:absolute;top:2px;left:'+(on?'15px':'2px')+';width:13px;height:13px;border-radius:50%;background:#fff;"></span></span>';
+    const th=(t,r)=>'<th style="text-align:'+(r?'right':'left')+';padding:6px 8px;border-bottom:0.5px solid rgba(0,0,0,0.08);font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:'+LIGHT+';">'+t+'</th>';
+    const td='padding:8px;border-bottom:0.5px solid rgba(0,0,0,0.05);font-size:12px;vertical-align:middle;';
+    const rows=(d.partners||[]).map(p=>'<tr data-pid="'+esc(p.id)+'" style="'+(p.active?'':'opacity:.5')+'">'
+      +'<td style="'+td+'"><input data-pf="name" value="'+esc(p.name)+'" style="width:100%;border:0.5px solid rgba(0,0,0,.14);border-radius:7px;padding:5px 7px;font:inherit;font-size:12px;"></td>'
+      +'<td style="'+td+'"><input data-pf="email" value="'+esc(p.email)+'" style="width:100%;border:0.5px solid rgba(0,0,0,.14);border-radius:7px;padding:5px 7px;font:inherit;font-size:12px;"></td>'
+      +'<td style="'+td+'text-align:center;" data-pf="air" data-on="'+(p.air?1:0)+'">'+tog(!!p.air)+'</td>'
+      +'<td style="'+td+'text-align:center;" data-pf="sea" data-on="'+(p.sea?1:0)+'">'+tog(!!p.sea)+'</td>'
+      +'<td style="'+td+'text-align:center;" data-pf="active" data-on="'+(p.active?1:0)+'">'+tog(!!p.active)+'</td>'
+      +'<td style="'+td+'text-align:right;white-space:nowrap;"><button data-pact="save" style="border:0;border-radius:7px;padding:5px 10px;background:'+DARK+';color:#fff;font:600 11px inherit;cursor:pointer;">Save</button></td></tr>').join('');
+    const orows=(d.origins||[]).map(o=>'<tr data-oid="'+esc(o.id)+'" style="'+(o.active?'':'opacity:.5')+'"><td style="'+td+'"><input data-of="name" value="'+esc(o.name)+'" style="width:100%;border:0.5px solid rgba(0,0,0,.14);border-radius:7px;padding:5px 7px;font:inherit;font-size:12px;"></td><td style="'+td+'"><input data-of="country" value="'+esc(o.country||'')+'" placeholder="country" style="width:100%;border:0.5px solid rgba(0,0,0,.14);border-radius:7px;padding:5px 7px;font:inherit;font-size:12px;"></td><td style="'+td+'text-align:center;" data-of="active" data-on="'+(o.active?1:0)+'">'+tog(!!o.active)+'</td><td style="'+td+'text-align:right;"><button data-oact="save" style="border:0;border-radius:7px;padding:5px 10px;background:'+DARK+';color:#fff;font:600 11px inherit;cursor:pointer;">Save</button></td></tr>').join('');
+    const maps=(d.supplier_origins||[]).map(m=>esc(m.supplier_name||m.supplier_key)+' → '+esc(m.origin_name||'?')).join(' · ');
+    host.innerHTML='<div style="font-size:11px;font-weight:700;color:'+DARK+';text-transform:uppercase;letter-spacing:.06em;">Carrier partners · '+esc(d.client_id)+'</div>'
+      +'<div style="font-size:10px;color:'+LIGHT+';margin-bottom:8px;">Who gets the magic link when this client asks for options. Air feeds the air RFQ as before; Sea is new. A partner can do one or both.</div>'
+      +'<table style="width:100%;border-collapse:collapse;"><thead><tr>'+th('Partner')+th('Email')+th('Air')+th('Sea')+th('Active')+th('',1)+'</tr></thead><tbody>'+rows
+      +'<tr><td style="'+td+'"><input id="fq-new-name" placeholder="New partner" style="width:100%;border:0.5px solid rgba(0,0,0,.14);border-radius:7px;padding:5px 7px;font:inherit;font-size:12px;"></td><td style="'+td+'"><input id="fq-new-email" placeholder="email" style="width:100%;border:0.5px solid rgba(0,0,0,.14);border-radius:7px;padding:5px 7px;font:inherit;font-size:12px;"></td><td style="'+td+'text-align:center;color:'+LIGHT+';" colspan="3">air + sea</td><td style="'+td+'text-align:right;"><button id="fq-new" style="border:0;border-radius:7px;padding:5px 10px;background:'+BRAND+';color:#fff;font:600 11px inherit;cursor:pointer;">Add</button></td></tr></tbody></table>'
+      +'<div style="margin-top:22px;font-size:11px;font-weight:700;color:'+DARK+';text-transform:uppercase;letter-spacing:.06em;">Notifications &amp; destination</div>'
+      +'<div style="font-size:10px;color:'+LIGHT+';margin-bottom:8px;">Where the client hears that options are ready, prices are firm, or a pick expired. Comma-separated. Empty falls back to the Render setting.</div>'
+      +'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><input id="fq-notify" value="'+esc(d.settings.client_notify_to||'')+'" placeholder="client emails" style="flex:1;min-width:260px;border:0.5px solid rgba(0,0,0,.14);border-radius:7px;padding:6px 8px;font:inherit;font-size:12px;"><input id="fq-dest" value="'+esc(d.settings.destination||'')+'" placeholder="Sydney · VOZ_KY" style="width:200px;border:0.5px solid rgba(0,0,0,.14);border-radius:7px;padding:6px 8px;font:inherit;font-size:12px;"><button id="fq-save-settings" style="border:0;border-radius:7px;padding:6px 12px;background:'+DARK+';color:#fff;font:600 11px inherit;cursor:pointer;">Save</button></div>'
+      +'<div style="font-size:10px;color:'+LIGHT+';margin-top:8px;">Markup defaults come from Rates: air_quote_markup '+esc(d.settings.markup.Air)+'% · sea_quote_markup '+esc(d.settings.markup.Sea)+'%.</div>'
+      +'<div style="margin-top:22px;font-size:11px;font-weight:700;color:'+DARK+';text-transform:uppercase;letter-spacing:.06em;">Origin ports</div>'
+      +'<div style="font-size:10px;color:'+LIGHT+';margin-bottom:8px;">The client picks from these on a request. Suppliers map to an origin the first time they appear; the client can set that mapping on the form.</div>'
+      +'<table style="width:100%;border-collapse:collapse;"><thead><tr>'+th('Origin')+th('Country')+th('Active')+th('',1)+'</tr></thead><tbody>'+orows
+      +'<tr><td style="'+td+'"><input id="fq-new-origin" placeholder="New origin, e.g. Shanghai" style="width:100%;border:0.5px solid rgba(0,0,0,.14);border-radius:7px;padding:5px 7px;font:inherit;font-size:12px;"></td><td style="'+td+'"><input id="fq-new-country" placeholder="country" style="width:100%;border:0.5px solid rgba(0,0,0,.14);border-radius:7px;padding:5px 7px;font:inherit;font-size:12px;"></td><td></td><td style="'+td+'text-align:right;"><button id="fq-new-o" style="border:0;border-radius:7px;padding:5px 10px;background:'+BRAND+';color:#fff;font:600 11px inherit;cursor:pointer;">Add</button></td></tr></tbody></table>'
+      +(maps?'<div style="font-size:10px;color:'+MID+';margin-top:8px;">Supplier → origin: '+maps+'</div>':'');
+    host.querySelectorAll('[data-on]').forEach(c=>c.onclick=()=>{c.dataset.on=c.dataset.on==='1'?'0':'1';c.innerHTML=tog(c.dataset.on==='1');});
+    host.querySelectorAll('[data-pact=save]').forEach(b=>b.onclick=async()=>{const tr=b.closest('tr');const g=f=>tr.querySelector('[data-pf='+f+']');try{await qapi('/rq/partners',{method:'POST',body:JSON.stringify({id:tr.dataset.pid,name:g('name').value,email:g('email').value,air:g('air').dataset.on==='1',sea:g('sea').dataset.on==='1',active:g('active').dataset.on==='1'})});renderQuotesTab();}catch(e){alert(e.message);}});
+    const nb=el('fq-new');if(nb)nb.onclick=async()=>{try{await qapi('/rq/partners',{method:'POST',body:JSON.stringify({name:el('fq-new-name').value,email:el('fq-new-email').value,air:true,sea:true,active:true})});renderQuotesTab();}catch(e){alert(e.message);}};
+    const ss=el('fq-save-settings');if(ss)ss.onclick=async()=>{try{await qapi('/rq/settings',{method:'PUT',body:JSON.stringify({client_notify_to:el('fq-notify').value,destination:el('fq-dest').value})});renderQuotesTab();}catch(e){alert(e.message);}};
+    host.querySelectorAll('[data-oact=save]').forEach(b=>b.onclick=async()=>{const tr=b.closest('tr');const g=f=>tr.querySelector('[data-of='+f+']');try{await qapi('/rq/origins',{method:'POST',body:JSON.stringify({id:tr.dataset.oid,name:g('name').value,country:g('country').value,active:g('active').dataset.on==='1'})});renderQuotesTab();}catch(e){alert(e.message);}});
+    const no=el('fq-new-o');if(no)no.onclick=async()=>{try{await qapi('/rq/origins',{method:'POST',body:JSON.stringify({name:el('fq-new-origin').value,country:el('fq-new-country').value})});renderQuotesTab();}catch(e){alert(e.message);}};
+  }catch(e){host.innerHTML='<div style="padding:24px;color:'+BRAND+';font-size:12px;">'+esc(e.message)+'</div>';}
 }
 
 async function renderRatesTab(){
