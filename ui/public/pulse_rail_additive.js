@@ -1,4 +1,4 @@
-/* ── VelOzity Pinpoint — Pulse rail v6 ──
+/* ── VelOzity Pinpoint — Pulse rail v7 ──
    v6: Performance page — its own eyebrow, verbs that go through get_signals, and a supplier pin.
    Pulse moves from the bottom bar to a right-hand rail and speaks first: a briefing surface at
    the top (built from the Week Hub insights already fetched — no extra model call), four verb
@@ -196,7 +196,7 @@
     } else if (pin && pin.page === 'performance') {
       head = pin.label + '.'; sub = 'Measured history — ask how reliable, how late, or what to expect.'; eyebrow = 'Pulse · Performance';
     } else if (page === 'performance') {
-      head = 'Measured, not estimated.'; sub = 'Suppliers, lanes, volume and price over the last 26 weeks. Click a supplier to pin it.';
+      head = 'Measured, not estimated.'; sub = 'Suppliers and lanes over the last 26 weeks. Click a supplier to pin it.';
     } else if (page === 'receiving') {
       const plan = Array.isArray(window.state && window.state.plan) ? window.state.plan : [], rec = Array.isArray(window.state && window.state.receiving) ? window.state.receiving : [];
       const pos = new Set(plan.map(p => String(p.po_number || '').trim()).filter(Boolean)), got = new Set(rec.map(r => String(r.po_number || '').trim()).filter(Boolean));
@@ -485,7 +485,7 @@
     layout(); paint(); compactHeader();
     spend(); setInterval(spend, 5 * 60 * 1000);
     const chat = document.getElementById('pulse-chat'); if (chat) new MutationObserver(scheduleSpend).observe(chat, { childList: true });
-    console.log('[pulse-rail] v6 on');
+    console.log('[pulse-rail] v7 on');
   }
   function disable() { if (!R.state.on) return; release(); R.state.on = false; document.body.classList.remove('pr-on', 'pr-overlay', 'pr-hdr', 'pr-focus'); if (R.el) R.el.classList.add('hidden'); }
 

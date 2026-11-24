@@ -1,4 +1,5 @@
-/* ── VelOzity Pinpoint — Performance v2 ──
+/* ── VelOzity Pinpoint — Performance v3 ──
+   v3: no volume & price block — this page is for clients too, and nothing here touches cost or margin.
    v2: Pinpoint's own light look (only the simulator is dark); delivery accuracy (over / under
    against plan, tolerance per client) and compliance from the Exception log on every card.
    The signals layer, made visible. Everything on this page is read from GET /signals/overview,
@@ -8,14 +9,13 @@
 
    Additive: injects a nav item after Transit Movements, owns #performance, and wraps
    window.show the same way the Shipments hub does. The server strips cost and margin for
-   client orgs, so the price block simply has no cost to show there — the page never decides
-   who is internal.
+   client orgs, and this page shows neither — nothing on it is cost- or margin-derived.
 
    Pulse: the rail gets a 'performance' page and a supplier pin; the chips at the top fire the
    same question a person would type, so answers come through get_signals, never arithmetic. */
 (function () {
   if (window.__perfLoaded) return; window.__perfLoaded = true;
-  const BUILD = 'perf-2';
+  const BUILD = 'perf-3';
   const el = id => document.getElementById(id);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const nf = n => n == null ? '—' : Number(n).toLocaleString();
@@ -111,14 +111,6 @@
       .perf-stage{background:${C.card};border:0.5px solid ${C.line};border-radius:10px;padding:8px 11px;font-size:11px;color:${C.mute};min-width:120px;}
       .perf-stage b{display:block;color:${C.text};font-size:14px;font-weight:700;margin-top:2px;font-variant-numeric:tabular-nums;}
       .perf-stage.slow{border-color:rgba(153,0,51,.5);}
-      .perf-two{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
-      @media (max-width:1100px){.perf-two{grid-template-columns:1fr;} .perf-kpis{grid-template-columns:repeat(2,minmax(0,1fr));}}
-      .perf-chart{background:${C.card};border:0.5px solid ${C.line};border-radius:14px;padding:14px 15px;}
-      .perf-chart h3{margin:0;font-size:12.5px;font-weight:700;display:flex;gap:10px;align-items:baseline;}
-      .perf-chart h3 span{font-size:11px;color:${C.mute};font-weight:400;}
-      .perf-chart svg{display:block;width:100%;height:150px;margin-top:8px;overflow:visible;}
-      .perf-legend{display:flex;gap:14px;font-size:10.5px;color:${C.mute};margin-top:6px;flex-wrap:wrap;}
-      .perf-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;vertical-align:-1px;margin-right:5px;}
       .perf-foot{font-size:10.5px;color:${C.dim};margin-top:22px;line-height:1.6;}
       .perf-empty{background:${C.card};border:0.5px solid ${C.line};border-radius:14px;padding:28px;text-align:center;color:${C.mute};font-size:13px;}
       .perf-btn{background:${C.wine};color:#fff;border:0;border-radius:999px;padding:8px 16px;font-size:12px;cursor:pointer;font-family:inherit;margin-top:12px;}
@@ -190,28 +182,6 @@
     const a = x(l.transit_p50), b = x(l.transit_p90 == null ? l.transit_p50 : l.transit_p90), late = l.quoted_p50 != null && l.transit_p50 > l.quoted_p50;
     return `<div class="perf-band" title="P50 ${d1(l.transit_p50)} d · P90 ${d1(l.transit_p90)} d${l.quoted_p50 != null ? ' · quoted ' + d1(l.quoted_p50) : ''}"><div class="ax"></div><div class="bd${late ? ' late' : ''}" style="left:${a}%;width:${Math.max(1.5, b - a)}%"></div><div class="p" style="left:calc(${a}% - 1px)"></div>${l.quoted_p50 != null ? `<div class="q" style="left:calc(${x(l.quoted_p50)}% - 1px)"></div>` : ''}</div>`;
   }
-  function stackChart(weeks, series) {
-    // weeks: [week_start]; series: [{name, color, byWeek:{ws:units}}]
-    const W = 520, H = 150, padL = 34, padB = 18, iw = W - padL - 4, ih = H - padB - 6, n = weeks.length || 1, gap = 3, bw = Math.max(3, (iw - gap * (n - 1)) / n);
-    const tot = weeks.map(w => series.reduce((s, q) => s + (q.byWeek[w] || 0), 0)); const max = Math.max(1, ...tot);
-    const ticks = [0, 0.5, 1].map(f => Math.round(max * f));
-    let out = `<svg viewBox="0 0 ${W} ${H}">`;
-    ticks.forEach(t => { const y = 6 + ih - (t / max) * ih; out += `<line x1="${padL}" x2="${W - 4}" y1="${y}" y2="${y}" stroke="rgba(0,0,0,.06)"/><text x="${padL - 6}" y="${y + 3}" font-size="9" fill="${C.dim}" text-anchor="end">${t >= 1000 ? Math.round(t / 1000) + 'k' : t}</text>`; });
-    weeks.forEach((w, i) => { let y = 6 + ih; const x = padL + i * (bw + gap); series.forEach(q => { const v = q.byWeek[w] || 0; if (!v) return; const bh = (v / max) * ih; y -= bh; out += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="1.5" fill="${q.color}"><title>${esc(wk(w) + ' · ' + q.name + ' · ' + nf(v) + ' units')}</title></rect>`; }); if (i % Math.ceil(n / 8) === 0 || i === n - 1) out += `<text x="${(x + bw / 2).toFixed(1)}" y="${H - 4}" font-size="9" fill="${C.dim}" text-anchor="middle">${wk(w)}</text>`; });
-    return out + '</svg>';
-  }
-  function lineChart(weeks, series, fmt) {
-    // series: [{name, color, byWeek:{ws:value}}], one y scale.
-    const W = 520, H = 150, padL = 40, padB = 18, iw = W - padL - 6, ih = H - padB - 8, n = weeks.length;
-    const vals = series.flatMap(q => weeks.map(w => q.byWeek[w]).filter(v => v != null)); if (!vals.length) return `<div style="font-size:12px;color:${C.faint};padding:30px 0;text-align:center">No approved prices in this window yet.</div>`;
-    const lo = Math.min(...vals) * 0.9, hi = Math.max(...vals) * 1.05 || 1; const x = i => padL + (n > 1 ? (i / (n - 1)) * iw : iw / 2), y = v => 8 + ih - ((v - lo) / (hi - lo || 1)) * ih;
-    let out = `<svg viewBox="0 0 ${W} ${H}">`;
-    [lo, (lo + hi) / 2, hi].forEach(t => { out += `<line x1="${padL}" x2="${W - 6}" y1="${y(t)}" y2="${y(t)}" stroke="rgba(0,0,0,.06)"/><text x="${padL - 6}" y="${y(t) + 3}" font-size="9" fill="${C.dim}" text-anchor="end">${fmt(t)}</text>`; });
-    series.forEach(q => { const pts = weeks.map((w, i) => q.byWeek[w] == null ? null : [x(i), y(q.byWeek[w])]).filter(Boolean); if (!pts.length) return; out += `<polyline fill="none" stroke="${q.color}" stroke-width="1.8" stroke-linejoin="round" points="${pts.map(p => p.map(v => v.toFixed(1)).join(',')).join(' ')}"/>`; pts.forEach(p => { out += `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.4" fill="#fff" stroke="${q.color}" stroke-width="1.5"/>`; }); });
-    weeks.forEach((w, i) => { if (i % Math.ceil(n / 8) === 0 || i === n - 1) out += `<text x="${x(i).toFixed(1)}" y="${H - 4}" font-size="9" fill="${C.dim}" text-anchor="middle">${wk(w)}</text>`; });
-    return out + '</svg>';
-  }
-
   // ── Pulse ──
   function ask(q) { if (window._pulseRail && typeof window._pulseRail.fire === 'function') return window._pulseRail.fire(q); const i = el('pulse-input-display'); if (i) { i.value = q; if (typeof window.pulseSend === 'function') window.pulseSend(); } }
   function pinSupplier(name) { if (window._pulseRail && typeof window._pulseRail.setPin === 'function') window._pulseRail.setPin(name ? { page: 'performance', label: name, ids: [], supplier: name } : null); }
@@ -221,7 +191,7 @@
     const s = section(); styles();
     if (_loading && !_data) { s.innerHTML = `<div class="perf"><div class="perf-eyebrow">Performance</div><div class="perf-sub" style="margin-top:14px">Reading the signals…</div></div>`; return; }
     if (_err || !_data) { s.innerHTML = `<div class="perf"><div class="perf-eyebrow">Performance</div><div class="perf-empty" style="margin-top:14px">${esc(_err ? (_err.status === 403 ? 'Performance is not available for this account.' : _err.message) : 'No signals yet.')}</div></div>`; return; }
-    const d = _data, sup = d.suppliers || [], lanes = d.lanes || [], internal = (d.price || []).some(p => p.cost != null);
+    const d = _data, sup = d.suppliers || [], lanes = d.lanes || [];
     const isAdmin = (window._pnRoleKey || '') === 'org:admin_auth';
     if (!d.computed_at && !sup.length) {
       s.innerHTML = `<div class="perf"><div class="perf-eyebrow">Performance</div><h1 class="perf-h1">Nothing measured yet</h1><div class="perf-empty" style="margin-top:16px">The signals job runs nightly over the last ${d.window_weeks} weeks of plans, receiving and transit. ${isAdmin ? 'You can run it now for this client.' : 'Check back after the next run.'}${isAdmin ? '<br><button class="perf-btn" id="perf-run">Compute now</button>' : ''}</div></div>`;
@@ -245,7 +215,7 @@
     let html = `<div class="perf" data-build="${BUILD}">
       <div class="perf-head"><div><div class="perf-eyebrow">Performance · last ${d.window_weeks} weeks</div>
         <h1 class="perf-h1">Performance</h1>
-        <div class="perf-sub">Suppliers, lanes, volume and price from Pinpoint's own records — computed ${d.computed_at ? dmy(d.computed_at) : '—'}, never estimated. Every figure carries its sample; thin samples say so.</div></div>
+        <div class="perf-sub">Suppliers and lanes from Pinpoint's own records — computed ${d.computed_at ? dmy(d.computed_at) : '—'}, never estimated. Every figure carries its sample; thin samples say so.</div></div>
         <div class="perf-chips">${chips.map(c => `<button class="perf-chip" data-q="${esc(c[1])}"><i></i>${esc(c[0])}</button>`).join('')}</div></div>
       <div class="perf-kpis">
         <div class="perf-kpi"><small>Suppliers on time</small><b>${onTime} <span style="font-size:14px;color:${C.dim};font-weight:500">of ${rated.length}</span></b><i>≥ 90% of POs received by plan date</i></div>
@@ -299,20 +269,7 @@
       }
     }
 
-    // Volume & price
-    const vol = d.volume || [], weeks = [...new Set(vol.map(v => v.week_start))].sort();
-    const vser = [...new Set(vol.map(v => v.mode))].sort().map(m => ({ name: m, color: m === 'Air' ? C.sky : m === 'Sea' ? C.mint : C.amber, byWeek: vol.filter(v => v.mode === m).reduce((o, v) => { o[v.week_start] = (o[v.week_start] || 0) + (v.units || 0); return o; }, {}) }));
-    const base = (d.volume_baseline || []).map(b => `${esc(b.mode)} avg ${nf(b.avg_units_26w)}/wk · last 8 ${nf(b.avg_units_8w)} · blended ${nf(b.blended)}`).join(' &nbsp;·&nbsp; ');
-    const price = d.price || [], pweeks = [...new Set(price.map(p => p.week_start))].sort();
-    const pser = [...new Set(price.map(p => p.mode))].sort().map(m => ({ name: m, color: m === 'Air' ? C.sky : C.mint, byWeek: price.filter(p => p.mode === m).reduce((o, p) => { o[p.week_start] = p.price_per_unit; return o; }, {}) }));
-    const lastP = m => price.filter(p => p.mode === m).slice(-1)[0];
-    const pLines = ['Sea', 'Air'].map(m => { const p = lastP(m); if (!p) return ''; return `<span><i style="background:${m === 'Air' ? C.sky : C.mint}"></i>${m} ${wk(p.week_start)}: ${money(p.price)} · $${d1(p.price_per_unit)}/unit${m === 'Air' && p.price_per_kg != null ? ' · $' + d1(p.price_per_kg) + '/kg' : ''}${m === 'Sea' && p.price_per_container != null ? ' · ' + money(p.price_per_container) + '/container' : ''}${internal && p.margin_pct != null ? ` · <span style="color:${C.rose}">margin ${d1(p.margin_pct)}%</span>` : ''}</span>`; }).join('');
-    html += `<div class="perf-sec"><h2>Volume &amp; price</h2><span>units applied per week by mode · price per unit from approved quotes and sea invoices${internal ? ' · margin is internal only' : ''}</span></div>
-      <div class="perf-two">
-        <div class="perf-chart"><h3>Units per week <span>${weeks.length} weeks</span></h3>${weeks.length ? stackChart(weeks, vser) : `<div style="font-size:12px;color:${C.faint};padding:30px 0;text-align:center">No receiving in the window.</div>`}<div class="perf-legend">${vser.map(q => `<span><i style="background:${q.color}"></i>${esc(q.name)}</span>`).join('')}<span style="margin-left:auto">${base}</span></div></div>
-        <div class="perf-chart"><h3>Price per unit <span>${pweeks.length} weeks priced</span></h3>${lineChart(pweeks, pser, v => '$' + d1(v))}<div class="perf-legend">${pLines}</div></div>
-      </div>
-      <div class="perf-foot">Definitions · <b>Fill rate</b> units applied in Pinpoint against units planned, counted once a week is four weeks old (mature). <b>On time</b> PO received by its planned due date; <b>late</b> is days past it. <b>Packing list on time</b> the supplier's packing list date against the plan. <b>Transit</b> departed → arrived on the movement's milestones; <b>quoted</b> is the transit on the quote or the lane rule. <b>Door to door</b> packing list → FC receipt. <b>Accuracy</b> received POs in mature weeks whose applied units land within the tolerance of plan; <b>over</b> / <b>under</b> are the units above or below plan as a share of those POs' plan. <b>Compliance</b> incidents from the Exception log joined to this client's plan by week and PO: share of received POs with an incident, units reworked per 1,000 applied, carton failures per 100 cartons received. <b>Confidence</b> ok from ${d.minimums ? d.minimums.supplier_weeks : 8} weeks or ${d.minimums ? d.minimums.lane_movements : 5} movements; thin below that; none when there is too little to say. Definitions v${esc(d.definitions_version || '')}.</div>
+    html += `<div class="perf-foot">Definitions · <b>Fill rate</b> units applied in Pinpoint against units planned, counted once a week is four weeks old (mature). <b>On time</b> PO received by its planned due date; <b>late</b> is days past it. <b>Packing list on time</b> the supplier's packing list date against the plan. <b>Transit</b> departed → arrived on the movement's milestones; <b>quoted</b> is the transit on the quote or the lane rule. <b>Door to door</b> packing list → FC receipt. <b>Accuracy</b> received POs in mature weeks whose applied units land within the tolerance of plan; <b>over</b> / <b>under</b> are the units above or below plan as a share of those POs' plan. <b>Compliance</b> incidents from the Exception log joined to this client's plan by week and PO: share of received POs with an incident, units reworked per 1,000 applied, carton failures per 100 cartons received. <b>Confidence</b> ok from ${d.minimums ? d.minimums.supplier_weeks : 8} weeks or ${d.minimums ? d.minimums.lane_movements : 5} movements; thin below that; none when there is too little to say. Definitions v${esc(d.definitions_version || '')}.</div>
     </div>`;
     s.innerHTML = html;
 
