@@ -246,8 +246,10 @@ module.exports = function pulseTasks(deps) {
   function verifySvix(req) {
     const secret = process.env.RESEND_WEBHOOK_SECRET || '';
     if (!secret) return { ok: false, error: 'RESEND_WEBHOOK_SECRET not set' };
-    const id = req.headers['svix-id'], ts = req.headers['svix-timestamp'], sig = req.headers['svix-signature'];
-    if (!id || !ts || !sig) return { ok: false, error: 'missing svix headers' };
+    // Svix sends svix-*; Recall sends the Standard Webhooks spelling (webhook-*). Same scheme.
+    const h = (a, b) => req.headers[a] || req.headers[b];
+    const id = h('svix-id', 'webhook-id'), ts = h('svix-timestamp', 'webhook-timestamp'), sig = h('svix-signature', 'webhook-signature');
+    if (!id || !ts || !sig) return { ok: false, error: 'missing signature headers (svix-* or webhook-*)' };
     if (Math.abs(now() / 1000 - Number(ts)) > 300) return { ok: false, error: 'timestamp outside tolerance' };
     const raw = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body || {});
     const key = Buffer.from(String(secret).replace(/^whsec_/, ''), 'base64');

@@ -418,8 +418,10 @@ module.exports = function pulseMeetings(deps) {
   function verifySvix(req) {
     const secret = process.env.RECALL_WEBHOOK_SECRET || '';
     if (!secret) return { ok: false, error: 'RECALL_WEBHOOK_SECRET not set' };
-    const id = req.headers['svix-id'], ts = req.headers['svix-timestamp'], sig = req.headers['svix-signature'];
-    if (!id || !ts || !sig) return { ok: false, error: 'missing svix headers' };
+    // Svix sends svix-*; Recall sends the Standard Webhooks spelling (webhook-*). Same scheme.
+    const h = (a, b) => req.headers[a] || req.headers[b];
+    const id = h('svix-id', 'webhook-id'), ts = h('svix-timestamp', 'webhook-timestamp'), sig = h('svix-signature', 'webhook-signature');
+    if (!id || !ts || !sig) return { ok: false, error: 'missing signature headers (svix-* or webhook-*)' };
     if (Math.abs(now() / 1000 - Number(ts)) > 300) return { ok: false, error: 'timestamp outside tolerance' };
     const raw = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body || {});
     const expected = crypto.createHmac('sha256', Buffer.from(String(secret).replace(/^whsec_/, ''), 'base64')).update(`${id}.${ts}.${raw}`).digest('base64');
@@ -435,7 +437,7 @@ module.exports = function pulseMeetings(deps) {
   });
   app.post('/pulse/meeting/events', async (req, res) => {
     const v = verifySvix(req);
-    if (!v.ok) { log.warn('[pulse meeting] webhook refused: ' + v.error + ' (svix-id ' + (req.get('svix-id') || '-') + ', event ' + ((req.body || {}).event || '?') + ')'); return res.status(v.error.includes('not set') ? 503 : 401).json({ ok: false, error: v.error, hint: v.error.includes('not set') ? 'set RECALL_WEBHOOK_SECRET on Render to the endpoint\'s signing secret (whsec_…)' : 'RECALL_WEBHOOK_SECRET does not match this endpoint\'s signing secret — each endpoint and each Recall region has its own' }); }
+    if (!v.ok) { log.warn('[pulse meeting] webhook refused: ' + v.error + ' (id ' + (req.get('svix-id') || req.get('webhook-id') || '-') + ', event ' + ((req.body || {}).event || '?') + ')'); return res.status(v.error.includes('not set') ? 503 : 401).json({ ok: false, error: v.error, hint: v.error.includes('not set') ? 'set RECALL_WEBHOOK_SECRET on Render to the endpoint\'s signing secret (whsec_…)' : 'RECALL_WEBHOOK_SECRET does not match this endpoint\'s signing secret — each endpoint and each Recall region has its own' }); }
     res.json({ ok: true });
     const ev = req.body || {}; const botId = ev.data && ev.data.bot && ev.data.bot.id; if (!botId) return;
     const m = db.prepare('SELECT * FROM pulse_meeting WHERE bot_id = ?').get(botId); if (!m) return;
