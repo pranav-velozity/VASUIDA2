@@ -21812,6 +21812,9 @@ app.get('/shopify/status', authenticateRequest, (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
+// Door-to-door requests (Phase 5b): options from carrier partners, priced and released, picked, firmed, approved.
+const _d2dRequests = require('./d2d_request_routes')({ app, db, authenticateRequest, requireRole, requireInternalOrg, requireClientOrInternal, curClient, tenancyResolve, writeOpLimiter, auditLog, sendViaResend, parseEmailList, escHtml, rateFor, aqNewId, aqChargeableKg, log: console });
+
 app.listen(PORT, () => {
   console.log(`UID Ops backend listening on http://localhost:${PORT}`);
   console.log(`DB file: ${DB_FILE}`);

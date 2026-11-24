@@ -28,6 +28,8 @@ module.exports = function makePulseTools(deps) {
 
   // ── Plumbing ──
   const ymdOk = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
+  // pick_option: resolve the request and label the chosen options for the proposal card.
+  async function preparePick(a, ctx) { const r = await callRoute(ctx, 'GET', '/rq/requests'); if (!r.ok) return { error: r.error }; const x = (r.data.requests || []).find(q => String(q.ref).toLowerCase() === String(a.ref || '').toLowerCase()); if (!x) return { error: `no request ${a.ref}` }; const ids = a.option_ids || []; const labels = (x.options || []).filter(o => ids.includes(o.id)).map(o => `${o.mode} ${[o.carrier, o.service].filter(Boolean).join(' ')}${o.price != null ? ' ' + o.currency + ' ' + o.price : ''}`); if (labels.length !== ids.length) return { error: 'one or more option ids are not on this request' }; return { id: x.id, labels }; }
   const mondayOf = (ymd) => {
     const d = new Date(String(ymd).slice(0, 10) + 'T00:00:00Z');
     if (isNaN(d)) return null;
@@ -140,6 +142,49 @@ module.exports = function makePulseTools(deps) {
         out.events = take((c.events || []).map(e => ({ at: String(e.at || '').slice(0, 16), kind: e.kind, text: e.text })), 12);
         out.notes = take((c.notes || []).map(n => ({ at: String(n.created_at || n.at || '').slice(0, 16), by: n.author || n.by || null, text: String(n.text || n.body || '').slice(0, 300) })), 8);
         return out;
+      },
+    },
+    {
+      name: 'get_requests',
+      description: 'Door-to-door requests for this client: each request (period, origins → destination, need-by date, volume, state) with its options — mode, carrier/service, container size, departs, transit days, valid-to, Price (client price, never cost), state (approximate/picked/confirmed/firm/approved/expired). Use for "what options do we have for W49", "has VelOzity come back", "which option did we pick". States: requested (waiting on carrier options), with_velozity (VelOzity is pricing or confirming), options_ready (client can simulate and pick), picked, firm (approve now), approved, declined, expired.',
+      input_schema: { type: 'object', properties: { ref: { type: 'string', description: 'optional: one request by reference (RQ-…) or period label (W49)' } } },
+      tier: 'read', roles: ['admin', 'ops', 'client', 'partner'],
+      async run(a, ctx) {
+        const r = await callRoute(ctx, 'GET', '/rq/requests'); if (!r.ok) return { error: r.error };
+        let list = r.data.requests || [];
+        if (a.ref) { const q = String(a.ref).toLowerCase(); list = list.filter(x => String(x.ref).toLowerCase() === q || String(x.period_label).toLowerCase() === q); }
+        return { requests: list.slice(0, 8).map(x => ({ ref: x.ref, period: x.period_label, origins: x.origins, destination: x.destination, need_by: x.need_by, units: x.volume && x.volume.units, expected_units: x.volume && x.volume.expected_units, supplier_notes: x.volume && x.volume.supplier_notes, state: x.client_state, source: x.source,
+          options: (x.options || []).filter(o => o.state !== 'withdrawn').slice(0, 12).map(o => ({ id: o.id, mode: o.mode, carrier: o.carrier, service: o.service, container_size: o.container_size, departs: o.departs, transit_days: o.transit_days, valid_until: o.valid_until, price: o.price, currency: o.currency, price_basis: o.price_basis, state: o.state, from_history: o.kind === 'history' })) })) };
+      },
+    },
+    {
+      name: 'request_options',
+      description: 'Ask VelOzity for door-to-door options for a period (sea and air), or build them from history. Needs the period (a Monday date for a week, or YYYY-MM for a month) and ideally the date the goods must be in the Sydney FC. Volume and origins are pre-filled from the plan. Creates the request; carrier partners are asked and the client is told when options are ready.',
+      input_schema: { type: 'object', properties: { period_start: { type: 'string', description: 'YYYY-MM-DD (any day of the week) or YYYY-MM for a month' }, period_type: { type: 'string', enum: ['week', 'month'] }, need_by: { type: 'string', description: 'YYYY-MM-DD the goods must be in the Sydney FC' }, source: { type: 'string', enum: ['ask', 'history'], description: 'ask = fresh options from carriers (default); history = instant options from what was shipped or quoted before' }, note: { type: 'string' } }, required: ['period_start'] },
+      tier: 'confirm', roles: ['admin', 'ops', 'client'], write: true,
+      summary: (a) => `${a.source === 'history' ? 'Build options from history' : 'Ask VelOzity for options'} for ${a.period_type === 'month' ? a.period_start.slice(0, 7) : 'the week of ' + a.period_start}${a.need_by ? `, in FC by ${fmtShort(a.need_by)}` : ''}`,
+      async run(a, ctx) {
+        const type = a.period_type === 'month' || /^\d{4}-\d{2}$/.test(String(a.period_start || '')) ? 'month' : 'week';
+        const start = type === 'month' ? String(a.period_start).slice(0, 7) + '-01' : String(a.period_start);
+        if (!ymdOk(start)) return { error: 'period_start must be YYYY-MM-DD or YYYY-MM' };
+        if (a.need_by && !ymdOk(a.need_by)) return { error: 'need_by must be YYYY-MM-DD' };
+        const r = await callRoute(ctx, 'POST', '/rq/requests', { period_type: type, period_start: start, need_by: a.need_by || null, source: a.source === 'history' ? 'history' : 'ask', note: a.note ? `Pulse: ${a.note}` : null });
+        if (!r.ok) return { error: r.error };
+        const x = r.data; return { ok: true, receipt: `${x.ref} created for ${x.period_label} · ${x.volume && x.volume.units} units${x.no_history ? ' · no history on these lanes yet — ask VelOzity instead' : (x.source === 'history' ? ` · ${x.options_count} option(s) ready` : ` · carrier partners asked (${x.partner_links_sent})`)}`, ref: x.ref, state: x.client_state, options: x.options_count };
+      },
+    },
+    {
+      name: 'pick_option',
+      description: 'Pick one or more released options on a door-to-door request (a split is two picks). Picking asks VelOzity to confirm the price; the client approves once it is firm. Option ids come from get_requests.',
+      input_schema: { type: 'object', properties: { ref: { type: 'string', description: 'request reference, e.g. RQ-2611-07' }, option_ids: { type: 'array', items: { type: 'string' } } }, required: ['ref', 'option_ids'] },
+      tier: 'confirm', roles: ['admin', 'ops', 'client'], write: true,
+      summary: (a, pre) => `Pick ${pre && pre.labels ? pre.labels.join(' + ') : (a.option_ids || []).length + ' option(s)'} on ${a.ref} and ask VelOzity to confirm the price`,
+      prepare: preparePick,
+      async run(a, ctx) {
+        const pre = await preparePick(a, ctx); if (pre.error) return pre;
+        const r = await callRoute(ctx, 'POST', `/rq/requests/${encodeURIComponent(pre.id)}/pick`, { option_ids: a.option_ids });
+        if (!r.ok) return { error: r.error };
+        return { ok: true, receipt: `Picked ${pre.labels.join(' + ')} on ${a.ref} — VelOzity is confirming the price${r.data.confirm_links_sent ? '' : ' (no carrier link sent; VelOzity will confirm by hand)'}`, state: r.data.client_state };
       },
     },
     {
