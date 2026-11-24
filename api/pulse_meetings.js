@@ -54,7 +54,7 @@ module.exports = function pulseMeetings(deps) {
       platform      TEXT,
       scheduled_at  TEXT,
       bot_id        TEXT,
-      status        TEXT NOT NULL DEFAULT 'scheduled',   -- scheduled | joining | waiting | live | ended | failed | cancelled
+      status        TEXT NOT NULL DEFAULT 'scheduled',   -- scheduled | needs_time | joining | waiting | live | ended | failed | cancelled
       started_at    TEXT,
       ended_at      TEXT,
       organiser     TEXT,
@@ -179,6 +179,49 @@ module.exports = function pulseMeetings(deps) {
   // Outlook: "When: Monday, 24 November 2026 10:00 AM-10:30 AM (UTC+10:00) ..."
   // Google:  "When  Monday 24 Nov 2026 ⋅ 10:00 – 10:30am (Australian Eastern Daylight Time)"
   const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+  // ── Calendar invitations ──
+  // Outlook and Google put the meeting time in the text/calendar part (the .ics), not in the
+  // body text, so the .ics is the first place to look. DTSTART comes as UTC (…Z), floating, or
+  // with a TZID that is either an IANA zone (Google) or a Windows display name (Outlook).
+  const WIN_TZ = { 'central standard time': 'America/Chicago', 'eastern standard time': 'America/New_York', 'mountain standard time': 'America/Denver', 'pacific standard time': 'America/Los_Angeles', 'us mountain standard time': 'America/Phoenix', 'alaskan standard time': 'America/Anchorage', 'hawaiian standard time': 'Pacific/Honolulu',
+    'aus eastern standard time': 'Australia/Sydney', 'e. australia standard time': 'Australia/Brisbane', 'aus central standard time': 'Australia/Darwin', 'cen. australia standard time': 'Australia/Adelaide', 'w. australia standard time': 'Australia/Perth', 'tasmania standard time': 'Australia/Hobart', 'new zealand standard time': 'Pacific/Auckland',
+    'gmt standard time': 'Europe/London', 'greenwich standard time': 'Atlantic/Reykjavik', 'w. europe standard time': 'Europe/Berlin', 'romance standard time': 'Europe/Paris', 'central europe standard time': 'Europe/Budapest', 'central european standard time': 'Europe/Warsaw', 'e. europe standard time': 'Europe/Chisinau', 'fle standard time': 'Europe/Helsinki',
+    'china standard time': 'Asia/Shanghai', 'singapore standard time': 'Asia/Singapore', 'india standard time': 'Asia/Kolkata', 'tokyo standard time': 'Asia/Tokyo', 'korea standard time': 'Asia/Seoul', 'se asia standard time': 'Asia/Bangkok', 'taipei standard time': 'Asia/Taipei', 'arabian standard time': 'Asia/Dubai', 'west asia standard time': 'Asia/Tashkent', 'utc': 'UTC', 'coordinated universal time': 'UTC' };
+  // Minutes east of UTC for an IANA zone at a given instant.
+  function zoneOffsetMin(zone, at) {
+    try { const parts = new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'shortOffset' }).formatToParts(at); const v = (parts.find(p => p.type === 'timeZoneName') || {}).value || 'GMT'; const m = v.match(/GMT([+-]\d+)(?::(\d+))?/); return m ? Number(m[1]) * 60 + (Number(m[1]) < 0 ? -Number(m[2] || 0) : Number(m[2] || 0)) : 0; } catch (_) { return null; }
+  }
+  function wallToUtc(y, mo, d, hh, mm, zone) {
+    // Two passes: the offset depends on the instant, which depends on the offset.
+    let guess = Date.UTC(y, mo, d, hh, mm); let off = zoneOffsetMin(zone, new Date(guess)); if (off == null) return null;
+    let t = guess - off * 60000; const off2 = zoneOffsetMin(zone, new Date(t)); if (off2 !== off) t = guess - off2 * 60000;
+    return new Date(t);
+  }
+  function parseIcs(ics) {
+    const text = String(ics || '').replace(/\r?\n[ \t]/g, '');            // unfold continuation lines
+    if (!/BEGIN:VEVENT/i.test(text)) return null;
+    const method = (text.match(/^METHOD:(\w+)/im) || [])[1] || null;
+    const ev = (text.match(/BEGIN:VEVENT([\s\S]*?)END:VEVENT/i) || [])[1] || text;
+    const ds = ev.match(/^DTSTART(?:;([^:]*))?:(\d{8}T\d{6})(Z?)/im) || ev.match(/^DTSTART(?:;([^:]*))?:(\d{8})$/im);
+    if (!ds) return { method, start: null };
+    const params = ds[1] || '', val = ds[2], zulu = ds[3] === 'Z';
+    const y = +val.slice(0, 4), mo = +val.slice(4, 6) - 1, d = +val.slice(6, 8), hh = val.length > 8 ? +val.slice(9, 11) : 9, mm = val.length > 8 ? +val.slice(11, 13) : 0;
+    let start = null, zone = null;
+    if (zulu) start = new Date(Date.UTC(y, mo, d, hh, mm));
+    else {
+      const tzid = ((params.match(/TZID=\"?([^;\"]+)/i) || [])[1] || '').trim();
+      zone = WIN_TZ[tzid.toLowerCase()] || (tzid && zoneOffsetMin(tzid, new Date()) != null ? tzid : null);
+      if (!zone) {
+        // Unknown name: take the offset the VTIMEZONE block declares (standard time; DST approximated by the DAYLIGHT block when the date falls in it is beyond this — Sydney is assumed for floating times).
+        const std = text.match(/BEGIN:STANDARD[\s\S]*?TZOFFSETTO:([+-]\d{4})/i);
+        if (std) { const o = std[1]; const offMin = (Number(o.slice(0, 3)) * 60) + (Number(o.slice(0, 1) + '1') * Number(o.slice(3, 5))); start = new Date(Date.UTC(y, mo, d, hh, mm) - offMin * 60000); }
+        else start = wallToUtc(y, mo, d, hh, mm, 'Australia/Sydney');
+      } else start = wallToUtc(y, mo, d, hh, mm, zone);
+    }
+    const summary = ((ev.match(/^SUMMARY(?:;[^:]*)?:(.*)$/im) || [])[1] || '').trim() || null;
+    const uid = ((ev.match(/^UID:(.*)$/im) || [])[1] || '').trim() || null;
+    return { method, start, zone, summary, uid };
+  }
   function parseInviteTime(text) {
     const t = String(text || '').replace(/ /g, ' ');
     const m = t.match(/\b(\d{1,2})\s+([A-Za-z]{3})[a-z]*\s+(\d{4})\b[^\n]{0,40}?(\d{1,2})[:.](\d{2})\s*(am|pm)?/i) || t.match(/\b([A-Za-z]{3})[a-z]*\s+(\d{1,2}),?\s+(\d{4})\b[^\n]{0,40}?(\d{1,2})[:.](\d{2})\s*(am|pm)?/i);
@@ -202,21 +245,38 @@ module.exports = function pulseMeetings(deps) {
     const from = String(inb.from || '').toLowerCase();
     if (!/@(velozity\.au|velozity\.com\.au)$/.test(from) && !(deps.isKnownSender && await deps.isKnownSender(from))) { log.log('[pulse meeting] invite from unknown sender ignored: ' + from); return null; }
     const url = link[0];
-    if (db.prepare(`SELECT id FROM pulse_meeting WHERE meeting_url = ? AND status IN ('scheduled','joining','waiting','live')`).get(url)) return { duplicate: true };
     const plain = String(inb.text || '') || String(inb.html || '').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ');
-    const when = parseInviteTime(plain);
+    const ics = inb.ics ? parseIcs(inb.ics) : null;
+    const when = (ics && ics.start && !isNaN(ics.start)) ? ics.start : parseInviteTime(plain);
     const subj = String(inb.subject || '');
-    if (/^\s*(accepted|declined|tentative|canceled|cancelled)\b/i.test(subj)) { log.log('[pulse meeting] calendar response ignored: ' + subj); return null; }
+    // A cancellation (subject or METHOD:CANCEL) withdraws Pulse from the scheduled meeting with that link.
+    if (/^\s*(canceled|cancelled)\b/i.test(subj) || (ics && /^cancel$/i.test(ics.method || ''))) {
+      const sched = db.prepare(`SELECT * FROM pulse_meeting WHERE meeting_url = ? AND status IN ('scheduled','needs_time')`).get(url);
+      if (sched) { try { if (sched.bot_id) await recall('DELETE', `/api/v1/bot/${sched.bot_id}/`); } catch (_) {} setM(sched.id, { status: 'cancelled', last_error: 'cancelled by organiser' }); log.log(`[pulse meeting] #${sched.id} cancelled by invite`); return { cancelled: true, id: sched.id }; }
+      log.log('[pulse meeting] cancellation with no scheduled meeting ignored: ' + subj); return null;
+    }
+    if (/^\s*(accepted|declined|tentative)\b/i.test(subj)) { log.log('[pulse meeting] calendar response ignored: ' + subj); return { response: true }; }
+    if (db.prepare(`SELECT id FROM pulse_meeting WHERE meeting_url = ? AND status IN ('scheduled','joining','waiting','live')`).get(url)) return { duplicate: true };
+    if (db.prepare(`SELECT id FROM pulse_meeting WHERE meeting_url = ? AND status = 'needs_time'`).get(url) && !when) return { duplicate: true };
     const client = (deps.clientForSender && await deps.clientForSender(from)) || DEFAULT_CLIENT();
     const title = subj.replace(/^\s*(fw|fwd|re|invitation|updated invitation|meeting invitation)\s*:\s*/ig, '').replace(/\s*@.*$/, '').trim().slice(0, 200) || 'Meeting';
     // Past by more than 90 minutes: an old invite or a forwarded thread — don't crash a finished meeting.
     if (when && when.getTime() < now() - 90 * 60 * 1000) { log.log(`[pulse meeting] invite for a past time ignored (${when.toISOString()}): ${title}`); return null; }
-    const m = createMeeting({ meeting_url: url, title, client, scheduled_at: when, organiser: from, source: 'invite', created_by: 'pulse' });
-    // Join now when the meeting is already on or about to start, or when the time could not be
-    // read but the email is plainly an invitation; otherwise schedule the bot for the start.
-    const looksLikeInvite = /invit|meeting|teams|meet\.google|zoom/i.test(subj + ' ' + plain.slice(0, 400));
-    const joinNow = when ? when.getTime() <= now() + 3 * 60 * 1000 : looksLikeInvite;
-    try { if (when || joinNow) await createBot(joinNow ? { ...m, scheduled_at: null } : m); }
+    const m = createMeeting({ meeting_url: url, title: (ics && ics.summary) || title, client, scheduled_at: when, organiser: from, source: 'invite', created_by: 'pulse' });
+    // With a time: join at the start (or now, if it has already begun). A calendar invitation whose
+    // time could not be read is NOT joined blind — the bot would sit in an empty room, time out,
+    // and the meeting would show as ended before it ever happened. It waits for a time instead,
+    // and the organiser is told. A bare link in an ordinary email ("Pulse, join us") still joins now.
+    const isCalendar = !!inb.ics || /microsoft teams meeting|invitation|meeting id:|passcode/i.test(plain.slice(0, 1500));
+    const joinNow = when ? when.getTime() <= now() + 3 * 60 * 1000 : !isCalendar;
+    if (!when && isCalendar) {
+      setM(m.id, { status: 'needs_time', last_error: 'time not found in the invitation' });
+      try { if (typeof holdEmail === 'function') holdEmail({ client, to: [from], subject: `Pulse: when is "${m.title || 'the meeting'}"?`, body: `I received the invitation for "${m.title || 'the meeting'}" but could not read its start time.\n\nSet the time on the Pulse meetings panel in Pinpoint (the row says "needs time"), or re-send the invitation. I will join when it starts.\n\n— Pulse`, title: `Ask ${from} for the time of "${m.title || 'the meeting'}"`, about: 'meeting #' + m.id, source: 'meeting' }); } catch (e) { log.warn('[pulse meeting] needs-time email failed: ' + e.message); }
+      note(null, 'pulse_meeting_invite', { id: m.id, from, title: m.title, needs_time: true }, 200, null);
+      log.log(`[pulse meeting] invite → #${m.id} ${m.title} — no time found, waiting`);
+      return getM(m.id);
+    }
+    try { await createBot(joinNow ? { ...m, scheduled_at: null } : m); }
     catch (e) { setM(m.id, { last_error: String(e.message || e).slice(0, 300) }); }
     note(null, 'pulse_meeting_invite', { id: m.id, from, when: when && when.toISOString(), title, join_now: joinNow }, 200, null);
     log.log(`[pulse meeting] invite → #${m.id} ${title} ${when ? when.toISOString() : '(no time)'}${joinNow ? ' — joining now' : ''}`);
@@ -258,6 +318,18 @@ module.exports = function pulseMeetings(deps) {
     } catch (e) { res.status(400).json({ ok: false, error: String(e.message || e) }); }
   });
   // Join now: a meeting from an invite whose time could not be read, or a retry after a failure.
+  // Set or change the start time (also how a "needs time" invite is completed).
+  app.post('/pulse/meetings/:id/schedule', ...gate, async (req, res) => {
+    const m = getM(req.params.id); if (!m || m.client_id !== curClient()) return res.status(404).json({ ok: false, error: 'no such meeting' });
+    if (!['scheduled', 'needs_time', 'failed'].includes(m.status)) return res.status(409).json({ ok: false, error: 'This meeting has already started or ended.' });
+    const at = new Date(String((req.body || {}).at || '')); if (isNaN(at)) return res.status(400).json({ ok: false, error: 'at (ISO date-time) required' });
+    if (at.getTime() < now() - 5 * 60 * 1000) return res.status(400).json({ ok: false, error: 'That time has passed.' });
+    try { if (m.bot_id) await recall('DELETE', `/api/v1/bot/${m.bot_id}/`); } catch (_) {}
+    setM(m.id, { scheduled_at: at.toISOString(), status: 'scheduled', bot_id: null, last_error: null });
+    try { await createBot(getM(m.id)); } catch (e) { setM(m.id, { last_error: String(e.message || e).slice(0, 300) }); }
+    note(req, 'pulse_meeting_schedule', { id: m.id, at: at.toISOString() }, 200, null);
+    res.json({ ok: true, meeting: shape(getM(m.id)) });
+  });
   app.post('/pulse/meetings/:id/join', ...gate, async (req, res) => {
     const m = getM(req.params.id); if (!m || m.client_id !== curClient()) return res.status(404).json({ ok: false, error: 'no such meeting' });
     if (['live', 'joining', 'waiting'].includes(m.status) && m.bot_id) return res.json({ ok: true, meeting: shape(m) });
@@ -298,7 +370,7 @@ module.exports = function pulseMeetings(deps) {
   app.post('/pulse/meetings/:id/leave', ...gate, async (req, res) => {
     const m = getM(req.params.id); if (!m || m.client_id !== curClient()) return res.status(404).json({ ok: false, error: 'no such meeting' });
     try { if (m.bot_id) await recall('POST', `/api/v1/bot/${m.bot_id}/leave_call/`); } catch (e) { log.warn('[pulse meeting] leave failed: ' + e.message); }
-    if (m.status === 'scheduled') { try { if (m.bot_id) await recall('DELETE', `/api/v1/bot/${m.bot_id}/`); } catch (_) {} setM(m.id, { status: 'cancelled' }); }
+    if (m.status === 'scheduled' || m.status === 'needs_time') { try { if (m.bot_id) await recall('DELETE', `/api/v1/bot/${m.bot_id}/`); } catch (_) {} setM(m.id, { status: 'cancelled' }); }
     // Leaving a meeting that is (or looks) live ends it here and now: notes, tasks and the queued
     // actions must not wait for a status webhook that may never come.
     else if (['joining', 'waiting', 'live'].includes(m.status)) { setM(m.id, { status: 'ended', ended_at: iso() }); try { await finish(getM(m.id)); } catch (e) { log.warn('[pulse meeting] finish after leave failed #' + m.id + ': ' + e.message); } }
@@ -529,5 +601,5 @@ module.exports = function pulseMeetings(deps) {
   }
   setInterval(sweep, 60 * 60 * 1000).unref();
 
-  return { createMeeting, startMeeting, fromInvite, parseInviteTime, onUtterance, finish, maybeForget, sweep, reconcile, verifySvix, enabled, MEETING_LINK, transcriptProvider, keyterms };
+  return { createMeeting, startMeeting, fromInvite, parseInviteTime, parseIcs, onUtterance, finish, maybeForget, sweep, reconcile, verifySvix, enabled, MEETING_LINK, transcriptProvider, keyterms };
 };

@@ -263,6 +263,20 @@ module.exports = function pulseTasks(deps) {
     if (!r.ok) throw new Error('resend ' + r.status);
     return r.json();
   }
+  // The .ics of a calendar invitation: the webhook carries only attachment metadata, so list the
+  // email's attachments and download the text/calendar one (links expire after an hour).
+  async function fetchIcs(id) {
+    const base = (process.env.PULSE_RESEND_BASE || 'https://api.resend.com').replace(/\/+$/, '');
+    const H = { Authorization: 'Bearer ' + (process.env.RESEND_API_KEY || '') };
+    const r = await fetch(`${base}/emails/receiving/${encodeURIComponent(id)}/attachments`, { headers: H });
+    if (!r.ok) return null;
+    const j = await r.json(); const items = Array.isArray(j) ? j : (j.data || j.attachments || []);
+    const cal = items.find(a => /calendar/i.test(a.content_type || a.contentType || '') || /\.ics$/i.test(a.filename || a.name || ''));
+    if (!cal) return null;
+    const url = cal.download_url || cal.downloadUrl || cal.url; if (!url) return null;
+    const f = await fetch(url, { headers: /resend\.com/.test(url) ? H : {} }); if (!f.ok) return null;
+    const t = await f.text(); return /BEGIN:VCALENDAR/i.test(t) ? t.slice(0, 200000) : null;
+  }
   const stripQuoted = (t) => String(t || '').split(/\r?\n/).filter(l => !/^>/.test(l)).join('\n').split(/\r?\n(?:On .{5,120} wrote:|-----Original Message-----|From: )/)[0].trim();
   async function recordInbound(ev) {
     const d = (ev && ev.data) || {};
@@ -291,14 +305,16 @@ module.exports = function pulseTasks(deps) {
     let meeting = null;
     const rawAll = String(full.text || text || '') + ' ' + String(full.html || '');
     if (_meetings && _meetings.MEETING_LINK && _meetings.MEETING_LINK.test(rawAll) && !/^pulseai@/i.test(from)) {
-      try { meeting = await _meetings.fromInvite({ from, subject, text: full.text || text, html: full.html || '' }); } catch (e) { log.warn('[pulse mail] invite parse error: ' + (e && e.message)); }
+      let ics = null; try { ics = await fetchIcs(d.email_id); } catch (e) { log.warn('[pulse mail] ics fetch failed: ' + (e && e.message)); }
+      try { meeting = await _meetings.fromInvite({ from, subject, text: full.text || text, html: full.html || '', ics }); } catch (e) { log.warn('[pulse mail] invite parse error: ' + (e && e.message)); }
     }
+    if (meeting && meeting.cancelled) { db.prepare(`UPDATE pulse_inbound SET kind = 'invite', task_id = NULL WHERE resend_id = ?`).run(d.email_id); return { ok: true, kind: 'invite', cancelled: meeting.id }; }
     if (meeting && !meeting.duplicate && meeting.id) {
       db.prepare(`UPDATE pulse_inbound SET kind = 'invite', task_id = NULL WHERE resend_id = ?`).run(d.email_id);
       if (taskId) db.prepare(`UPDATE pulse_task SET status = CASE WHEN status = 'replied' THEN 'waiting' ELSE status END WHERE id = ?`).run(taskId);
       return { ok: true, kind: 'invite', meeting_id: meeting.id };
     }
-    if (meeting && meeting.duplicate) { db.prepare(`UPDATE pulse_inbound SET kind = 'invite' WHERE resend_id = ?`).run(d.email_id); return { ok: true, kind: 'invite', duplicate: true }; }
+    if (meeting && (meeting.duplicate || meeting.response)) { db.prepare(`UPDATE pulse_inbound SET kind = 'invite' WHERE resend_id = ?`).run(d.email_id); return { ok: true, kind: 'invite', duplicate: true }; }
     let reply = null;
     try { reply = await autoReply({ resend_id: d.email_id, from, subject, text, taskId, kind }); } catch (e) { log.warn('[pulse mail] auto-reply error: ' + (e && e.message)); }
     return { ok: true, task_id: taskId, kind, reply };
