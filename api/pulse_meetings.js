@@ -27,6 +27,7 @@
 //                                     "Pinpoint" and the ops vocabulary are boosted, and both handle accents
 //                                     far better than Recall's low-latency engine.
 //       PULSE_KEYTERMS                comma-separated extra key terms (facility codes, client names…)
+//       PULSE_MEETING_DEFAULT_MODE    open (default) | name — whether a new meeting answers any ops question or waits for its name
 //       PULSE_CONVO_SECONDS           after Pulse answers, operations questions without the name are
 //                                     answered for this long (default 45; 0 = always say the name)
 //       PULSE_OPS_TERMS               extra words that mark a sentence as "about our work" (see pulse_wake.js)
@@ -168,6 +169,10 @@ module.exports = function pulseMeetings(deps) {
                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(o.client || DEFAULT_CLIENT(), (o.title || '').slice(0, 200) || null, meeting_url, platformOf(meeting_url), when && !isNaN(when) ? when.toISOString() : null, 'scheduled',
            o.organiser || null, o.attendees ? JSON.stringify(o.attendees) : null, o.source || 'panel', o.created_by || null, o.created_by_name || null, crypto.randomBytes(16).toString('hex'), iso());
+    // A meeting is a room: people will not keep saying the name, so Open mode is the default
+    // (PULSE_MEETING_DEFAULT_MODE=name reverts to wake-word only). An explicit choice wins.
+    const openDefault = String(process.env.PULSE_MEETING_DEFAULT_MODE || 'open').toLowerCase() !== 'name';
+    if (o.open_mode != null ? !!o.open_mode : openDefault) db.prepare('UPDATE pulse_meeting SET open_mode = 1 WHERE id = ?').run(r.lastInsertRowid);
     return getM(r.lastInsertRowid);
   }
   async function startMeeting(m) {
@@ -310,7 +315,7 @@ module.exports = function pulseMeetings(deps) {
     try {
       const b = req.body || {};
       const m = createMeeting({ meeting_url: b.meeting_url, title: b.title, client: curClient(), scheduled_at: b.scheduled_at || null, organiser: b.organiser || null, source: 'panel', created_by: req.auth?.userId || null, created_by_name: b.created_by_name || null });
-      if (b.open_mode) setM(m.id, { open_mode: 1 });
+      if (b.open_mode != null) setM(m.id, { open_mode: b.open_mode ? 1 : 0 });
       note(req, 'pulse_meeting_create', { id: m.id, url: m.meeting_url, when: m.scheduled_at, open: !!b.open_mode }, 200, null);
       if (!enabled()) { setM(m.id, { status: 'failed', last_error: 'Recall is not configured (RECALL_API_KEY)' }); return res.status(503).json({ ok: false, error: 'Meetings are not configured on the server yet.', meeting: shape(getM(m.id)) }); }
       await startMeeting(m);
