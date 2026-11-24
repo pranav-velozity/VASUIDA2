@@ -36,6 +36,12 @@
      app.use('/uid-labels', require('./uid_label_routes')({ express, db, authenticateRequest,
        requireRole, requireInternalOrg, auditLog, curClient, sendViaResend, writeOpLimiter, logger }));
      and after a plan is saved: uidLabels.onPlanSaved(clientId, monday, rows, who)
+
+   Email: one digest a day, not one email per run. Every run (plan delta, "check plan now",
+   extra labels) lands in the queue at once; the warehouse gets a single email at
+   UID_LABEL_DIGEST_HOUR Sydney (default 16) listing everything issued since the last digest,
+   and nothing on a day with nothing. UID_LABEL_DIGEST=off restores an email per run.
+   A run can still be emailed on its own from the page (Send now).
 */
 'use strict';
 
@@ -129,6 +135,10 @@ module.exports = function mountUidLabels(deps) {
       at          TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+  // emailed_via: 'run' (its own email) | 'digest' (part of the daily email).
+  try { if (!db.prepare('PRAGMA table_info(uid_label_run)').all().some(c => c.name === 'emailed_via')) db.exec('ALTER TABLE uid_label_run ADD COLUMN emailed_via TEXT'); } catch (e) { log.warn('[uid-labels] migration:', e.message); }
+  const DIGEST_ON = !/^(off|0|false|no)$/i.test(String(process.env.UID_LABEL_DIGEST || 'on'));
+  const DIGEST_HOUR = Math.min(23, Math.max(0, Number(process.env.UID_LABEL_DIGEST_HOUR ?? 16)));
 
   // Seed the format table once per client from the department owners the team already keeps:
   // a name that says "Footwear" is footwear. Everything else starts as standard. The team can
@@ -741,7 +751,7 @@ module.exports = function mountUidLabels(deps) {
     const subject = `UID labels ${isoWeek(run.week_start)} — ${run.labels} ready${run.kind === 'extra' ? ' (extra)' : ''}`;
     try {
       const out = await sendViaResend({ from: r.from, to: r.to, cc: r.cc, subject, html: emailHtml(run, summary, run.week_start) });
-      db.prepare(`UPDATE uid_label_run SET emailed_at = datetime('now'), email_error = NULL WHERE id = ?`).run(runId);
+      db.prepare(`UPDATE uid_label_run SET emailed_at = datetime('now'), email_error = NULL, emailed_via = 'run' WHERE id = ?`).run(runId);
       return { sent: true, id: out && out.id };
     } catch (e) {
       db.prepare('UPDATE uid_label_run SET email_error = ? WHERE id = ?').run(String(e.message || e), runId);
@@ -750,13 +760,102 @@ module.exports = function mountUidLabels(deps) {
     }
   }
 
+  // A new run: emailed on its own only when the digest is off. Otherwise it waits, visible on
+  // the page as "in today's digest", and goes out with everything else at DIGEST_HOUR.
+  function queueEmail(runId) {
+    if (!DIGEST_ON) return emailRun(runId).catch(() => {});
+    return Promise.resolve({ sent: false, reason: 'digest' });
+  }
+
+  // ── Daily digest ──
+  const SYD = 'Australia/Sydney';
+  const sydDay = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: SYD, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d || new Date());
+  const sydHour = () => Number(new Intl.DateTimeFormat('en-AU', { timeZone: SYD, hour: 'numeric', hour12: false }).format(new Date())) % 24;
+  // Runs waiting for a digest: never emailed, created in the last 3 days (older unsent runs
+  // predate the digest and would only confuse the first one).
+  const pendingStmt = () => db.prepare(`SELECT * FROM uid_label_run WHERE emailed_at IS NULL AND created_at > datetime('now', '-3 days') AND (labels > 0 OR summary LIKE '%"moved":[{%') ORDER BY client_id, week_start, id`);
+  function digestHtml(runs) {
+    const byWeek = new Map();
+    for (const r of runs) {
+      const w = byWeek.get(r.week_start) || { week: r.week_start, labels: 0, plan: 0, extra: 0, pos: new Map(), moved: 0, over: 0, new_codes: new Set() };
+      const sm = JSON.parse(r.summary || '{}');
+      w.labels += r.labels; if (r.kind === 'extra') w.extra++; else w.plan++;
+      for (const p of (sm.pos || [])) { const c = w.pos.get(p.po) || { po: p.po, format: p.format, labels: 0 }; c.labels += p.labels; w.pos.set(p.po, c); }
+      w.moved += (sm.moved || []).length; w.over += (sm.over || []).length; for (const c of (sm.new_codes || [])) w.new_codes.add(c.code);
+      byWeek.set(r.week_start, w);
+    }
+    const total = runs.reduce((a, r) => a + r.labels, 0);
+    const list = (arr) => arr.map(p => `<tr><td style="padding:3px 10px 3px 0;font-family:ui-monospace,Menlo,monospace">${esc(p.po)}</td><td style="padding:3px 10px;text-align:right">${p.labels}</td><td style="padding:3px 0 3px 10px;color:#6E6E73">${p.format === 'footwear' ? 'footwear 36×76' : 'standard 76×36'}</td></tr>`).join('');
+    const weeks = [...byWeek.values()].sort((a, b) => a.week.localeCompare(b.week)).map(w => {
+      const notes = [];
+      if (w.moved) notes.push(`${w.moved} PO line${w.moved === 1 ? '' : 's'} moved from an earlier week — nothing printed; choose on the page.`);
+      if (w.new_codes.size) notes.push(`New department code${w.new_codes.size === 1 ? '' : 's'} ${[...w.new_codes].join(', ')} printed as standard — review on the page.`);
+      if (w.over) notes.push(`${w.over} PO line${w.over === 1 ? '' : 's'} plan fewer units than issued — shown as over-issued.`);
+      const runsTxt = [w.plan ? `${w.plan} plan run${w.plan === 1 ? '' : 's'}` : null, w.extra ? `${w.extra} extra${w.extra === 1 ? '' : 's'}` : null].filter(Boolean).join(' · ');
+      return `<h3 style="margin:18px 0 6px;font-size:14px">${isoWeek(w.week)} · ${w.labels} label${w.labels === 1 ? '' : 's'} <span style="font-weight:400;color:#6E6E73">· ${runsTxt}</span></h3>
+        ${w.pos.size ? `<table style="border-collapse:collapse;font-size:13px">${list([...w.pos.values()].sort((a, b) => a.po.localeCompare(b.po)))}</table>` : ''}
+        ${notes.length ? `<ul style="margin:8px 0 0;padding-left:18px;font-size:12.5px;color:#3A3A3C">${notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}`;
+    }).join('');
+    return `<div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#1C1C1E;max-width:640px">
+      <p style="margin:0 0 4px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#6E6E73">Pinpoint · UID labels · daily digest</p>
+      <h2 style="margin:0 0 10px;font-size:20px">${total} label${total === 1 ? '' : 's'} ready to print</h2>
+      <p style="margin:0 0 6px;font-size:14px;color:#6E6E73">Everything issued since the last digest, across ${runs.length} run${runs.length === 1 ? '' : 's'}.</p>
+      ${weeks}
+      <p style="margin:22px 0 0"><a href="${PAGE_URL}" style="display:inline-block;padding:11px 18px;border-radius:9px;background:#1C1C1E;color:#fff;text-decoration:none;font-weight:600;font-size:14px">Open the print queue</a></p>
+      <p style="margin:14px 0 0;font-size:12px;color:#6E6E73">One PDF per PO. Print at 100% scale, no fit-to-page.</p>
+    </div>`;
+  }
+  // One email per client that has runs waiting. `onlyClient` limits it (the page's "Send digest now").
+  async function sendDigest(onlyClient) {
+    const all = pendingStmt().all().filter(r => !onlyClient || r.client_id === onlyClient);
+    const byClient = new Map(); for (const r of all) (byClient.get(r.client_id) || byClient.set(r.client_id, []).get(r.client_id)).push(r);
+    const out = [];
+    for (const [client, runs] of byClient) {
+      const r = recipients();
+      if (!r.to.length || !r.from) { const e = 'UID_LABEL_TO / from address not set'; db.prepare(`UPDATE uid_label_run SET email_error = ? WHERE id IN (${runs.map(() => '?').join(',')})`).run(e, ...runs.map(x => x.id)); out.push({ client, runs: runs.length, sent: false, reason: e }); continue; }
+      const labels = runs.reduce((a, x) => a + x.labels, 0);
+      const weeks = [...new Set(runs.map(x => isoWeek(x.week_start)))].join(', ');
+      const subject = `UID labels digest — ${labels} ready (${weeks})`;
+      try {
+        const res = await sendViaResend({ from: r.from, to: r.to, cc: r.cc, subject, html: digestHtml(runs) });
+        db.prepare(`UPDATE uid_label_run SET emailed_at = datetime('now'), email_error = NULL, emailed_via = 'digest' WHERE id IN (${runs.map(() => '?').join(',')})`).run(...runs.map(x => x.id));
+        out.push({ client, runs: runs.length, labels, sent: true, id: res && res.id });
+      } catch (e) {
+        db.prepare(`UPDATE uid_label_run SET email_error = ? WHERE id IN (${runs.map(() => '?').join(',')})`).run(String(e.message || e), ...runs.map(x => x.id));
+        log.warn('[uid-labels] digest failed:', e.message); out.push({ client, runs: runs.length, sent: false, reason: String(e.message || e) });
+      }
+    }
+    return { ok: true, sent: out };
+  }
+  // Last digest day (Sydney) from the ledger, so a restart never sends twice.
+  function lastDigestDay() {
+    const r = db.prepare(`SELECT MAX(emailed_at) t FROM uid_label_run WHERE emailed_via = 'digest'`).get();
+    return r && r.t ? sydDay(new Date(r.t.replace(' ', 'T') + 'Z')) : null;
+  }
+  let digestDayDone = null;
+  function digestTick() {
+    try {
+      if (!DIGEST_ON) return;
+      const today = sydDay();
+      if (digestDayDone === today || sydHour() < DIGEST_HOUR) return;
+      if (lastDigestDay() === today) { digestDayDone = today; return; }
+      digestDayDone = today;                       // a day with nothing pending is also done
+      if (pendingStmt().all().length) sendDigest().then(o => log.info('[uid-labels] digest:', JSON.stringify(o.sent))).catch(e => log.warn('[uid-labels] digest:', e.message));
+    } catch (e) { log.warn('[uid-labels] digest tick:', e.message); }
+  }
+  if (DIGEST_ON && process.env.NODE_ENV !== 'test') { setInterval(digestTick, 10 * 60 * 1000).unref(); setTimeout(digestTick, 30 * 1000).unref(); }
+  function digestStatus(client) {
+    const pending = pendingStmt().all().filter(r => r.client_id === client);
+    return { on: DIGEST_ON, hour: DIGEST_HOUR, pending_runs: pending.length, pending_labels: pending.reduce((a, r) => a + r.labels, 0), last_sent: (db.prepare(`SELECT MAX(emailed_at) t FROM uid_label_run WHERE emailed_via = 'digest' AND client_id = ?`).get(client) || {}).t || null };
+  }
+
   // ── Hook called by the plan upload ──
   // Non-fatal by contract: the plan is already saved; anything that goes wrong here is logged
   // and shown on the page, never surfaced as an upload failure.
   function onPlanSaved(client, monday, rows, by) {
     try {
       const out = reconcile(client, monday, rows, by || 'plan upload');
-      if (out.run_id) emailRun(out.run_id).catch(() => {});
+      if (out.run_id) queueEmail(out.run_id);
       return out;
     } catch (e) {
       log.error('[uid-labels] reconcile failed (non-fatal):', e);
@@ -817,7 +916,7 @@ module.exports = function mountUidLabels(deps) {
         const files = db.prepare(`SELECT po_number po, format, COUNT(*) labels, MIN(seq) seq FROM uid_label WHERE run_id = ? GROUP BY po_number ORDER BY po_number`).all(r.id);
         const reprints = db.prepare(`SELECT po_number po, COUNT(*) n, MAX(at) last_at, MAX(by_user) by_user FROM uid_label_reprint WHERE run_id = ? GROUP BY po_number`).all(r.id);
         const rp = new Map(reprints.map(x => [x.po, x]));
-        return { id: r.id, kind: r.kind, by: r.trigger_by, at: r.created_at, labels: r.labels, emailed_at: r.emailed_at, email_error: r.email_error,
+        return { id: r.id, kind: r.kind, by: r.trigger_by, at: r.created_at, labels: r.labels, emailed_at: r.emailed_at, email_error: r.email_error, emailed_via: r.emailed_via, digest_pending: DIGEST_ON && !r.emailed_at && !r.email_error,
                  summary: JSON.parse(r.summary || '{}'),
                  files: files.map(f => ({ ...f, reprints: rp.get(f.po) ? rp.get(f.po).n : 0, last_reprint: rp.get(f.po) ? rp.get(f.po).last_at : null })) };
       });
@@ -826,7 +925,7 @@ module.exports = function mountUidLabels(deps) {
                                        FROM uid_label l JOIN uid_label_run r ON r.id = l.run_id
                                       WHERE l.client_id = ? AND l.week_start = ? AND l.moved_from IS NOT NULL AND r.week_start <> ?
                                       GROUP BY l.run_id, l.po_number`).all(client, ws, ws);
-      res.json({ ok: true, week_start: ws, label: isoWeek(ws), has_plan: planRowsFor(ws, client) != null,
+      res.json({ ok: true, week_start: ws, label: isoWeek(ws), has_plan: planRowsFor(ws, client) != null, digest: digestStatus(client),
                  pos: [...pos.values()].sort((a, b) => a.po.localeCompare(b.po)), runs, moved_files: movedFiles,
                  totals: { planned: [...lines.values()].reduce((a, l) => a + l.planned, 0), issued: [...lines.values()].reduce((a, l) => a + l.issued, 0) } });
     } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
@@ -904,7 +1003,7 @@ module.exports = function mountUidLabels(deps) {
       if (!po || !sku) return res.status(400).json({ ok: false, error: 'PO and SKU are required' });
       if (qty < 1 || qty > 5000) return res.status(400).json({ ok: false, error: 'qty must be between 1 and 5000' });
       const runId = issueExtra(client, ws, po, sku, qty, who(req), b.reason);
-      emailRun(runId).catch(() => {});
+      queueEmail(runId);
       res.json({ ok: true, run_id: runId, labels: qty });
     } catch (e) { res.status(400).json({ ok: false, error: String(e.message || e) }); }
   });
@@ -919,7 +1018,7 @@ module.exports = function mountUidLabels(deps) {
       const rows = planRowsFor(ws, client);
       if (rows == null) return res.status(404).json({ ok: false, error: `No plan stored for ${isoWeek(ws)}.` });
       const out = reconcile(client, ws, rows, `Check plan now · ${who(req)}`);
-      if (out.run_id) emailRun(out.run_id).catch(() => {});
+      if (out.run_id) queueEmail(out.run_id);
       res.json(out);
     } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
   });
@@ -966,7 +1065,13 @@ module.exports = function mountUidLabels(deps) {
     } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
   });
 
-  // Send (or resend) the notification for a run.
+  // The digest: status, and send what is waiting for this client now.
+  router.get('/digest', ...guard, (req, res) => { try { res.json({ ok: true, ...digestStatus(curClient()) }); } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); } });
+  router.post('/digest/send', ...guard, requireRole(['admin', 'member', 'api']), limiter, auditLog('send_uid_labels_digest'), async (req, res) => {
+    try { res.json(await sendDigest(curClient())); } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
+  });
+
+  // Send (or resend) the notification for a run on its own.
   router.post('/run/:id/email', ...guard, requireRole(['admin', 'member', 'api']), limiter, auditLog('email_uid_labels'), async (req, res) => {
     try {
       const client = curClient();
@@ -991,5 +1096,5 @@ module.exports = function mountUidLabels(deps) {
     } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
   });
 
-  return Object.assign(router, { onPlanSaved, reconcile, issueExtra, renderPdf, emailRun, _internal: { mintOne, scannedTokens, UID_RE, mondayOf, isoWeek } });
+  return Object.assign(router, { onPlanSaved, reconcile, issueExtra, renderPdf, emailRun, sendDigest, digestTick, _internal: { mintOne, scannedTokens, UID_RE, mondayOf, isoWeek } });
 };
