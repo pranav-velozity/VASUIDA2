@@ -31,6 +31,7 @@
 module.exports = function install(deps) {
   const { app, db, authenticateRequest, requireRole, requireInternalOrg, curClient, tenancyResolve, log = console } = deps;
   const WEEKS = Number(process.env.SIGNALS_WINDOW_WEEKS || 26);
+  const DEFS_VERSION = '2026-11-25b';   // bump when a definition changes: the boot run recomputes on a new version
   const MIN_SUPPLIER_WEEKS = 4, MIN_LANE_N = 5, LATE_GRACE_DAYS = 21, MATURE_DAYS = 21;
 
   db.exec(`
@@ -278,7 +279,7 @@ module.exports = function install(deps) {
         insP.run(client, ws, 'Air', units || null, r2(sell), null, null, units ? r2(sell / units) : null, null, r2(kg), kg ? r2(sell / kg) : null, cost ? r2(cost) : null, cost && sell ? r1((sell - cost) / sell * 100) : null, 'quotes');
       }
     }
-    db.prepare('UPDATE signal_run SET finished_at = ?, notes = ? WHERE id = ?').run(iso(), JSON.stringify({ suppliers: perSupplier.size, lanes: groups.size, moves: moves.length, plans: plans.length, notes }), runId);
+    db.prepare('UPDATE signal_run SET finished_at = ?, notes = ? WHERE id = ?').run(iso(), JSON.stringify({ defs: DEFS_VERSION, suppliers: perSupplier.size, lanes: groups.size, moves: moves.length, plans: plans.length, notes }), runId);
     log.log(`[signals] ${client}: ${perSupplier.size} suppliers, ${groups.size} lane groups, ${moves.length} movements over ${weeks} weeks`);
     return { client, suppliers: perSupplier.size, lanes: groups.size, moves: moves.length };
   }
@@ -300,8 +301,10 @@ module.exports = function install(deps) {
     const byMode = {}; for (const v of volume) { const o = byMode[v.mode] = byMode[v.mode] || { weeks: new Set(), units: 0, units8: 0, weeks8: new Set() }; o.weeks.add(v.week_start); o.units += v.units; if (recent.includes(v.week_start)) { o.units8 += v.units; o.weeks8.add(v.week_start); } }
     const volumeBaseline = Object.entries(byMode).map(([mode, o]) => ({ mode, weeks: o.weeks.size, avg_units_26w: o.weeks.size ? Math.round(o.units / o.weeks.size) : null, avg_units_8w: o.weeks8.size ? Math.round(o.units8 / o.weeks8.size) : null, blended: o.weeks.size ? Math.round((o.units + 2 * o.units8) / (o.weeks.size + 2 * o.weeks8.size)) : null }));
     let price = db.prepare('SELECT * FROM signal_price_week WHERE client_id = ? ORDER BY week_start').all(client).map(p => ({ ...p, client_id: undefined }));
-    if (!internal) price = price.map(p => ({ ...p, cost: undefined, margin_pct: undefined }));
-    return { ok: true, window_weeks: weeks, computed_at: run ? run.finished_at : null, definitions_version: '2026-11-25', minimums: { supplier_weeks: MIN_SUPPLIER_WEEKS, lane_movements: MIN_LANE_N }, settings: { accuracy_tolerance_pct: toleranceFor(client) }, suppliers, lanes, volume, volume_baseline: volumeBaseline, price };
+    // Cost and margin stay in the table for internal analysis but never leave through this route —
+    // the Performance page is a client page and Pulse replays what it reads.
+    price = price.map(p => ({ ...p, cost: undefined, margin_pct: undefined }));
+    return { ok: true, window_weeks: weeks, computed_at: run ? run.finished_at : null, definitions_version: DEFS_VERSION, minimums: { supplier_weeks: MIN_SUPPLIER_WEEKS, lane_movements: MIN_LANE_N }, settings: { accuracy_tolerance_pct: toleranceFor(client) }, suppliers, lanes, volume, volume_baseline: volumeBaseline, price };
   }
 
   // ── routes ──
@@ -344,7 +347,7 @@ module.exports = function install(deps) {
   if (process.env.SIGNALS_SCHEDULE !== 'off') {
     setInterval(tick, 10 * 60 * 1000).unref();
     // A stale or empty store at boot gets one run straight away (deploys happen at all hours).
-    setTimeout(() => { try { const r = db.prepare('SELECT finished_at FROM signal_run WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1').get(); if (!r || Date.now() - new Date(r.finished_at).getTime() > 26 * 3600 * 1000) runAll(); } catch (e) { log.warn('[signals] boot run: ' + e.message); } }, 15000).unref();
+    setTimeout(() => { try { const r = db.prepare('SELECT finished_at, notes FROM signal_run WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1').get(); if (!r || Date.now() - new Date(r.finished_at).getTime() > 26 * 3600 * 1000 || (() => { try { return JSON.parse(r.notes || '{}').defs !== DEFS_VERSION; } catch (_) { return true; } })()) runAll(); } catch (e) { log.warn('[signals] boot run: ' + e.message); } }, 15000).unref();
   }
 
   return { compute, runAll, overview, windowWeeks };
