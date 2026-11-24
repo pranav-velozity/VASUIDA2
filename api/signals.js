@@ -70,6 +70,14 @@ module.exports = function install(deps) {
   const quantile = (xs, q) => { if (!xs.length) return null; const s = xs.slice().sort((a, b) => a - b); const pos = (s.length - 1) * q, lo = Math.floor(pos), hi = Math.ceil(pos); return lo === hi ? s[lo] : s[lo] + (s[hi] - s[lo]) * (pos - lo); };
   const median = (xs) => quantile(xs, 0.5);
   const hasCol = (table, col) => { try { return db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === col); } catch (_) { return false; } };
+  // v2 (2026-11-25): delivery accuracy (over / under against plan) and compliance from the
+  // Exception log. The signal tables are rebuilt every run, so missing columns are simply added.
+  const addCols = (table, cols) => { for (const [c, t] of cols) if (!hasCol(table, c)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${c} ${t}`); };
+  addCols('signal_supplier_week', [['over_units', 'INTEGER'], ['under_units', 'INTEGER'], ['accuracy_n', 'INTEGER'], ['within_pos', 'INTEGER'], ['nc_incidents', 'INTEGER'], ['nc_pos', 'INTEGER'], ['nc_units', 'INTEGER'], ['nc_cartons', 'INTEGER'], ['cartons_received', 'INTEGER']]);
+  addCols('signal_supplier', [['over_pct', 'REAL'], ['under_pct', 'REAL'], ['accuracy_rate', 'REAL'], ['accuracy_n', 'INTEGER'], ['tolerance_pct', 'REAL'], ['nc_incidents', 'INTEGER'], ['nc_rate', 'REAL'], ['nc_units_per_1000', 'REAL'], ['nc_cartons_per_100', 'REAL'], ['nc_top_category', 'TEXT'], ['nc_top_count', 'INTEGER'], ['nc_chargeable_rate', 'REAL'], ['nc_open', 'INTEGER']]);
+  db.exec(`CREATE TABLE IF NOT EXISTS signal_setting (client_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT, updated_at TEXT, updated_by TEXT, PRIMARY KEY (client_id, key))`);
+  const setting = (client, key, dflt) => { const r = db.prepare('SELECT value FROM signal_setting WHERE client_id = ? AND key = ?').get(client, key); return r && r.value != null ? r.value : dflt; };
+  const toleranceFor = (client) => { const v = Number(setting(client, 'accuracy_tolerance_pct', 2)); return isFinite(v) && v >= 0 ? v : 2; };
   const modeOf = (v) => /air/i.test(String(v || '')) ? 'Air' : 'Sea';
   const supplierOf = (v) => String(v || '').trim().replace(/\s+/g, ' ');
   const todayYmd = () => ymd(new Date());
@@ -107,6 +115,12 @@ module.exports = function install(deps) {
     const recvByWeekPo = new Map(); for (const r of recv) recvByWeekPo.set(r.week_start + '|' + String(r.po_number).trim(), r);
     const applied = db.prepare(`SELECT po_number, COUNT(*) n FROM records WHERE ${recHasClient ? 'client_id = ? AND ' : ''}status = 'complete' AND date_local >= ? GROUP BY po_number`).all(...(recHasClient ? [client] : []), first);
     const appliedByPo = new Map(); for (const a of applied) appliedByPo.set(String(a.po_number || '').trim(), a.n);
+    const tolerance = toleranceFor(client);
+
+    // Exception log: incidents are keyed on week + PO (no client column), so they are joined
+    // through this client's plan — a PO in the plan is this client's PO.
+    let ncRows = []; try { ncRows = db.prepare(`SELECT i.week_start, i.po_number, i.grain, i.qty, i.status, i.chargeable, i.category_id, COALESCE(c.label, i.category_id) label FROM nc_incident i LEFT JOIN nc_category c ON c.id = i.category_id WHERE i.week_start >= ? AND i.week_start <= ?`).all(first, last); } catch (_) {}
+    const ncByWeekPo = new Map(); for (const n of ncRows) { const k = n.week_start + '|' + String(n.po_number || '').trim(); (ncByWeekPo.get(k) || ncByWeekPo.set(k, []).get(k)).push(n); }
 
     // Readiness: consignment milestones via lane keys, and the legacy lane dates
     const laneLinks = db.prepare('SELECT cl.lane_key, cl.week_start, cl.consignment_uid FROM consignment_lane cl WHERE cl.client_id = ? AND cl.week_start >= ? AND cl.week_start <= ?').all(client, first, last);
@@ -129,7 +143,7 @@ module.exports = function install(deps) {
     // Supplier × week
     db.prepare('DELETE FROM signal_supplier_week WHERE client_id = ?').run(client);
     db.prepare('DELETE FROM signal_volume_week WHERE client_id = ?').run(client);
-    const insSW = db.prepare(`INSERT INTO signal_supplier_week (client_id, supplier, week_start, planned_units, applied_units, fill_rate, mature, pos, received_pos, on_time_pos, late_pos, short_pos, pending_pos, ready_n, ready_on_time, ready_late_days_p50, computed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    const insSW = db.prepare(`INSERT INTO signal_supplier_week (client_id, supplier, week_start, planned_units, applied_units, fill_rate, mature, pos, received_pos, on_time_pos, late_pos, short_pos, pending_pos, ready_n, ready_on_time, ready_late_days_p50, computed_at, over_units, under_units, accuracy_n, within_pos, nc_incidents, nc_pos, nc_units, nc_cartons, cartons_received) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     const insVW = db.prepare(`INSERT INTO signal_volume_week (client_id, week_start, supplier, mode, units, pos, cartons) VALUES (?,?,?,?,?,?,?)`);
     const perSupplier = new Map();        // supplier → aggregates
     for (const ws of wks) {
@@ -139,12 +153,21 @@ module.exports = function install(deps) {
       const bySup = new Map();
       const byVol = new Map();
       for (const po of pos.values()) {
-        const s = bySup.get(po.supplier) || { planned: 0, applied: 0, pos: 0, received: 0, onTime: 0, late: 0, short: 0, pending: 0, readyLate: [], readyN: 0, readyOnTime: 0, recvLate: [] };
+        const s = bySup.get(po.supplier) || { planned: 0, applied: 0, pos: 0, received: 0, onTime: 0, late: 0, short: 0, pending: 0, readyLate: [], readyN: 0, readyOnTime: 0, recvLate: [], over: 0, under: 0, accN: 0, within: 0, nc: 0, ncPos: 0, ncUnits: 0, ncCartons: 0, ncOpen: 0, ncChargeable: 0, ncCats: new Map(), cartons: 0 };
         s.planned += po.units; s.pos++;
-        const ap = Math.min(appliedByPo.get(po.po) || 0, po.units || Infinity); s.applied += ap;
+        const rawAp = appliedByPo.get(po.po) || 0, ap = Math.min(rawAp, po.units || Infinity); s.applied += ap;
         const r = recvByWeekPo.get(ws + '|' + po.po); const rAt = r && (r.received_at_local || r.received_at_utc) ? String(r.received_at_local || r.received_at_utc).slice(0, 10) : null;
         if (rAt) { s.received++; if (!po.due || rAt <= po.due) s.onTime++; else { s.late++; s.recvLate.push(daysBetween(po.due, rAt)); } }
         else if (daysBetween(fcDate, today) > LATE_GRACE_DAYS) s.short++; else s.pending++;
+        s.cartons += r ? (Number(r.cartons_received) || 0) : 0;
+        // Accuracy: a received PO in a mature week, applied against planned, both directions.
+        if (rAt && mature && po.units > 0) { s.accN++; const diff = rawAp - po.units; if (diff > 0) s.over += diff; else s.under += -diff; if (Math.abs(diff) / po.units * 100 <= tolerance) s.within++; }
+        for (const n of (ncByWeekPo.get(ws + '|' + po.po) || [])) {
+          if (!s._ncPo) s._ncPo = new Set(); if (!s._ncPo.has(po.po)) { s._ncPo.add(po.po); s.ncPos++; }
+          s.nc++; if (n.grain === 'carton') s.ncCartons += Number(n.qty) || 0; else s.ncUnits += Number(n.qty) || 0;
+          if (n.status !== 'resolved') s.ncOpen++; if (n.chargeable) s.ncChargeable++;
+          s.ncCats.set(n.label, (s.ncCats.get(n.label) || 0) + 1);
+        }
         const rd = readinessFor(ws, po);
         if (rd) { s.readyN++; const d = daysBetween(rd.planned, rd.actual); if (d != null) { s.readyLate.push(Math.max(0, d)); if (d <= 0) s.readyOnTime++; } }
         bySup.set(po.supplier, s);
@@ -152,9 +175,12 @@ module.exports = function install(deps) {
         v.units += po.units; v.pos++; v.cartons += r ? (Number(r.cartons_received) || 0) : 0; byVol.set(vk, v);
       }
       for (const [sup, s] of bySup) {
-        insSW.run(client, sup, ws, s.planned, s.applied, mature && s.planned > 0 ? r1(Math.min(100, s.applied / s.planned * 100)) : null, mature ? 1 : 0, s.pos, s.received, s.onTime, s.late, s.short, s.pending, s.readyN, s.readyOnTime, s.readyLate.length ? r1(median(s.readyLate)) : null, iso());
-        const a = perSupplier.get(sup) || { weeks: 0, pos: 0, planned: 0, applied: 0, planned_m: 0, applied_m: 0, received: 0, onTime: 0, late: 0, short: 0, decided: 0, readyN: 0, readyOnTime: 0, readyLate: [], recvLate: [], recent: [], fills: [] };
+        insSW.run(client, sup, ws, s.planned, s.applied, mature && s.planned > 0 ? r1(Math.min(100, s.applied / s.planned * 100)) : null, mature ? 1 : 0, s.pos, s.received, s.onTime, s.late, s.short, s.pending, s.readyN, s.readyOnTime, s.readyLate.length ? r1(median(s.readyLate)) : null, iso(),
+          s.over, s.under, s.accN, s.within, s.nc, s.ncPos, s.ncUnits, s.ncCartons, s.cartons);
+        const a = perSupplier.get(sup) || { weeks: 0, pos: 0, planned: 0, applied: 0, planned_m: 0, applied_m: 0, received: 0, onTime: 0, late: 0, short: 0, decided: 0, readyN: 0, readyOnTime: 0, readyLate: [], recvLate: [], recent: [], fills: [], over: 0, under: 0, accN: 0, within: 0, accPlanned: 0, nc: 0, ncPos: 0, ncUnits: 0, ncCartons: 0, ncOpen: 0, ncChargeable: 0, ncCats: new Map(), cartons: 0 };
         a.weeks++; a.pos += s.pos; a.planned += s.planned; a.applied += s.applied; a.received += s.received; a.onTime += s.onTime; a.late += s.late; a.short += s.short; a.decided += s.received + s.short;
+        a.over += s.over; a.under += s.under; a.accN += s.accN; a.within += s.within; if (mature) a.accPlanned += s.planned;
+        a.nc += s.nc; a.ncPos += s.ncPos; a.ncUnits += s.ncUnits; a.ncCartons += s.ncCartons; a.ncOpen += s.ncOpen; a.ncChargeable += s.ncChargeable; a.cartons += s.cartons; for (const [k, v] of s.ncCats) a.ncCats.set(k, (a.ncCats.get(k) || 0) + v);
         if (mature && s.planned > 0) { a.planned_m += s.planned; a.applied_m += s.applied; a.fills.push({ ws, f: Math.min(1, s.applied / s.planned) }); }
         a.readyN += s.readyN; a.readyOnTime += s.readyOnTime; a.readyLate.push(...s.readyLate); a.recvLate.push(...s.recvLate);
         perSupplier.set(sup, a);
@@ -162,7 +188,8 @@ module.exports = function install(deps) {
       for (const v of byVol.values()) insVW.run(client, ws, v.supplier, v.mode, v.units, v.pos, v.cartons);
     }
     db.prepare('DELETE FROM signal_supplier WHERE client_id = ?').run(client);
-    const insS = db.prepare(`INSERT INTO signal_supplier (client_id, supplier, weeks, pos, planned_units, applied_units, fill_rate, fill_rate_recent, received_rate, on_time_rate, late_days_p50, late_days_p90, short_rate, ready_n, ready_on_time_rate, ready_late_p50, ready_late_p90, trend, confidence, computed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    const insS = db.prepare(`INSERT INTO signal_supplier (client_id, supplier, weeks, pos, planned_units, applied_units, fill_rate, fill_rate_recent, received_rate, on_time_rate, late_days_p50, late_days_p90, short_rate, ready_n, ready_on_time_rate, ready_late_p50, ready_late_p90, trend, confidence, computed_at,
+      over_pct, under_pct, accuracy_rate, accuracy_n, tolerance_pct, nc_incidents, nc_rate, nc_units_per_1000, nc_cartons_per_100, nc_top_category, nc_top_count, nc_chargeable_rate, nc_open) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     for (const [sup, a] of perSupplier) {
       const fill = a.planned_m > 0 ? r1(Math.min(100, a.applied_m / a.planned_m * 100)) : null;
       // Trend: the last 4 mature weeks with data against the earlier ones.
@@ -172,7 +199,12 @@ module.exports = function install(deps) {
       let trend = 'stable'; if (fillRecent != null && fillPrior != null) { if (fillRecent - fillPrior >= 5) trend = 'improving'; else if (fillPrior - fillRecent >= 5) trend = 'worsening'; } else if (!rec.length || !prior.length) trend = null;
       const confidence = a.weeks >= MIN_SUPPLIER_WEEKS ? (a.weeks >= 8 ? 'ok' : 'thin') : 'none';
       insS.run(client, sup, a.weeks, a.pos, a.planned, a.applied, fill, fillRecent, pct(a.received, a.pos), a.received ? pct(a.onTime, a.received) : null, a.recvLate.length ? r1(median(a.recvLate)) : null, a.recvLate.length ? r1(quantile(a.recvLate, 0.9)) : null, a.decided ? pct(a.short, a.decided) : null,
-        a.readyN, a.readyLate.length ? pct(a.readyOnTime, a.readyLate.length) : null, a.readyLate.length ? r1(median(a.readyLate)) : null, a.readyLate.length ? r1(quantile(a.readyLate, 0.9)) : null, trend, confidence, iso());
+        a.readyN, a.readyLate.length ? pct(a.readyOnTime, a.readyLate.length) : null, a.readyLate.length ? r1(median(a.readyLate)) : null, a.readyLate.length ? r1(quantile(a.readyLate, 0.9)) : null, trend, confidence, iso(),
+        // Over / under: units above or below plan across received POs in mature weeks, as a share of those POs' plan.
+        a.accPlanned > 0 ? pct(a.over, a.accPlanned) : null, a.accPlanned > 0 ? pct(a.under, a.accPlanned) : null, a.accN ? pct(a.within, a.accN) : null, a.accN, tolerance,
+        // Compliance: incidents per received PO; units reworked per 1,000 applied; carton failures per 100 cartons received.
+        a.nc, a.received ? pct(a.ncPos, a.received) : null, a.applied > 0 ? r1(a.ncUnits / a.applied * 1000) : null, a.cartons > 0 ? r1(a.ncCartons / a.cartons * 100) : null,
+        ...(a.ncCats.size ? [...a.ncCats.entries()].sort((x, y) => y[1] - x[1])[0] : [null, null]), a.nc ? pct(a.ncChargeable, a.nc) : null, a.ncOpen);
     }
 
     // Lanes: consignments with actuals (+ legacy lane dates)
@@ -258,7 +290,8 @@ module.exports = function install(deps) {
   function overview(client, internal, weeks = WEEKS) {
     const run = db.prepare('SELECT * FROM signal_run WHERE client_id = ? AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1').get(client);
     const suppliers = db.prepare('SELECT * FROM signal_supplier WHERE client_id = ? ORDER BY planned_units DESC').all(client).map(s => ({ ...s, client_id: undefined }));
-    const weeksRows = db.prepare('SELECT supplier, week_start, planned_units, applied_units, fill_rate, mature, pos, received_pos, on_time_pos, late_pos, short_pos, pending_pos, ready_n, ready_on_time, ready_late_days_p50 FROM signal_supplier_week WHERE client_id = ? ORDER BY week_start').all(client);
+    const weeksRows = db.prepare('SELECT supplier, week_start, planned_units, applied_units, fill_rate, mature, pos, received_pos, on_time_pos, late_pos, short_pos, pending_pos, ready_n, ready_on_time, ready_late_days_p50, over_units, under_units, accuracy_n, within_pos, nc_incidents, nc_pos, nc_units, nc_cartons FROM signal_supplier_week WHERE client_id = ? ORDER BY week_start').all(client);
+    if (!internal) for (const s of suppliers) delete s.nc_chargeable_rate;
     const history = {}; for (const w of weeksRows) (history[w.supplier] = history[w.supplier] || []).push(w);
     for (const s of suppliers) s.history = history[s.supplier] || [];
     const lanes = db.prepare('SELECT * FROM signal_lane WHERE client_id = ? ORDER BY grain, n DESC').all(client).map(l => ({ ...l, client_id: undefined, stage: JSON.parse(l.stage_json || '{}'), stage_json: undefined }));
@@ -268,7 +301,7 @@ module.exports = function install(deps) {
     const volumeBaseline = Object.entries(byMode).map(([mode, o]) => ({ mode, weeks: o.weeks.size, avg_units_26w: o.weeks.size ? Math.round(o.units / o.weeks.size) : null, avg_units_8w: o.weeks8.size ? Math.round(o.units8 / o.weeks8.size) : null, blended: o.weeks.size ? Math.round((o.units + 2 * o.units8) / (o.weeks.size + 2 * o.weeks8.size)) : null }));
     let price = db.prepare('SELECT * FROM signal_price_week WHERE client_id = ? ORDER BY week_start').all(client).map(p => ({ ...p, client_id: undefined }));
     if (!internal) price = price.map(p => ({ ...p, cost: undefined, margin_pct: undefined }));
-    return { ok: true, window_weeks: weeks, computed_at: run ? run.finished_at : null, definitions_version: '2026-11-24', minimums: { supplier_weeks: MIN_SUPPLIER_WEEKS, lane_movements: MIN_LANE_N }, suppliers, lanes, volume, volume_baseline: volumeBaseline, price };
+    return { ok: true, window_weeks: weeks, computed_at: run ? run.finished_at : null, definitions_version: '2026-11-25', minimums: { supplier_weeks: MIN_SUPPLIER_WEEKS, lane_movements: MIN_LANE_N }, settings: { accuracy_tolerance_pct: toleranceFor(client) }, suppliers, lanes, volume, volume_baseline: volumeBaseline, price };
   }
 
   // ── routes ──
@@ -282,6 +315,16 @@ module.exports = function install(deps) {
     if (!s) return res.status(404).json({ ok: false, error: 'no history for that supplier' });
     const history = db.prepare('SELECT * FROM signal_supplier_week WHERE client_id = ? AND supplier = ? ORDER BY week_start').all(c, name);
     res.json({ ok: true, supplier: { ...s, client_id: undefined }, history });
+  });
+  // Settings (admin): the accuracy tolerance, per client. Recomputes straight away so the page agrees.
+  app.put('/signals/settings', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
+    try {
+      const c = curClient(); const b = req.body || {};
+      if (b.accuracy_tolerance_pct != null) { const v = Number(b.accuracy_tolerance_pct); if (!isFinite(v) || v < 0 || v > 50) return res.status(400).json({ ok: false, error: 'tolerance must be 0–50 %' });
+        db.prepare('INSERT INTO signal_setting (client_id, key, value, updated_at, updated_by) VALUES (?,?,?,?,?) ON CONFLICT(client_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by').run(c, 'accuracy_tolerance_pct', String(v), iso(), String((req.auth && req.auth.userId) || 'admin')); }
+      compute(c, WEEKS);
+      res.json({ ok: true, settings: { accuracy_tolerance_pct: toleranceFor(c) } });
+    } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
   });
   app.post('/signals/run', authenticateRequest, requireRole(['admin']), requireInternalOrg, (req, res) => {
     try { const c = (req.body && req.body.all) ? null : curClient(); const out = c ? [compute(c, Number(req.body && req.body.weeks) || WEEKS)] : runAll(); res.json({ ok: true, runs: out }); }
