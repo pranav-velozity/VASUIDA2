@@ -427,9 +427,15 @@ module.exports = function pulseMeetings(deps) {
     return ok ? { ok: true } : { ok: false, error: 'bad signature' };
   }
   const STATUS = { 'bot.joining_call': 'joining', 'bot.in_waiting_room': 'waiting', 'bot.in_call_not_recording': 'live', 'bot.recording_permission_allowed': 'live', 'bot.in_call_recording': 'live', 'bot.call_ended': 'ended', 'bot.done': 'ended', 'bot.fatal': 'failed', 'bot.recording_permission_denied': 'failed' };
+  // Probe for the Recall dashboard / a browser: confirms the path is right and whether the
+  // signing secret is configured, without revealing it. A wrong URL shows as a 404 here too.
+  app.get('/pulse/meeting/events', (req, res) => {
+    const secret = String(process.env.RECALL_WEBHOOK_SECRET || '');
+    res.json({ ok: true, endpoint: '/pulse/meeting/events', method: 'POST', secret_set: !!secret, secret_prefix_ok: !secret || /^whsec_/.test(secret), region: process.env.RECALL_REGION || null, public_base: process.env.PULSE_PUBLIC_BASE || null });
+  });
   app.post('/pulse/meeting/events', async (req, res) => {
     const v = verifySvix(req);
-    if (!v.ok) { log.warn('[pulse meeting] webhook refused: ' + v.error); return res.status(v.error.includes('not set') ? 503 : 401).json({ ok: false, error: v.error }); }
+    if (!v.ok) { log.warn('[pulse meeting] webhook refused: ' + v.error + ' (svix-id ' + (req.get('svix-id') || '-') + ', event ' + ((req.body || {}).event || '?') + ')'); return res.status(v.error.includes('not set') ? 503 : 401).json({ ok: false, error: v.error, hint: v.error.includes('not set') ? 'set RECALL_WEBHOOK_SECRET on Render to the endpoint\'s signing secret (whsec_…)' : 'RECALL_WEBHOOK_SECRET does not match this endpoint\'s signing secret — each endpoint and each Recall region has its own' }); }
     res.json({ ok: true });
     const ev = req.body || {}; const botId = ev.data && ev.data.bot && ev.data.bot.id; if (!botId) return;
     const m = db.prepare('SELECT * FROM pulse_meeting WHERE bot_id = ?').get(botId); if (!m) return;
