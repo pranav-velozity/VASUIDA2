@@ -25,7 +25,7 @@
     .pm-row{padding:8px 12px;border-bottom:.5px solid rgba(0,0,0,.05);} .pm-row:last-child{border-bottom:0;}
     .pm-t{display:flex;align-items:center;gap:8px;font-size:12.5px;} .pm-t .pm-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
     .pm-chip{display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;font-weight:500;border:.5px solid rgba(0,0,0,.08);background:#F5F5F7;color:${MID};flex:none;}
-    .pm-chip.live{color:${OK};background:#F0FAF4;border-color:rgba(31,122,77,.3);} .pm-chip.joining,.pm-chip.waiting{color:${AMBER};background:#FFFBF2;} .pm-chip.failed{color:${BAD};background:#FDF2F1;}
+    .pm-chip.live{color:${OK};background:#F0FAF4;border-color:rgba(31,122,77,.3);} .pm-chip.joining,.pm-chip.waiting{color:${AMBER};background:#FFFBF2;} .pm-chip.failed,.pm-chip.needs_time{color:${BAD};background:#FDF2F1;}
     .pm-meta{font-size:11px;color:${MID};margin-top:2px;display:flex;flex-wrap:wrap;gap:4px 10px;}
     .pm-meta a{color:${MID};cursor:pointer;text-decoration:underline;} .pm-meta a:hover{color:${BRAND};}
     .pm-lines{margin-top:5px;padding:6px 9px;border-left:2px solid rgba(0,0,0,.08);background:#FAFAFA;font-size:11.5px;color:${DARK};}
@@ -49,7 +49,7 @@
   }
   const me = () => { try { const u = window.Clerk && window.Clerk.user; return { name: u && u.fullName || null, email: u && u.primaryEmailAddress && u.primaryEmailAddress.emailAddress || null }; } catch (_) { return { name: null, email: null }; } };
   const when = (s) => { if (!s) return ''; const d = new Date(s); return isNaN(d) ? '' : d.toLocaleString('en-AU', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }); };
-  const LABEL = { scheduled: 'scheduled', joining: 'joining', waiting: 'in lobby', live: 'live', ended: 'ended', failed: 'failed', cancelled: 'cancelled' };
+  const LABEL = { scheduled: 'scheduled', needs_time: 'needs time', joining: 'joining', waiting: 'in lobby', live: 'live', ended: 'ended', failed: 'failed', cancelled: 'cancelled' };
 
   const M = window._pulseMeetings = { allowed: null, enabled: true, meetings: [], el: null, expanded: false, open: {} };
   function mount() {
@@ -102,7 +102,7 @@
       return `<div class="pm-row" data-id="${m.id}">
         <div class="pm-t"><span class="pm-chip ${m.status}">${esc(LABEL[m.status] || m.status)}</span><span class="pm-title">${esc(m.title || m.meeting_url)}</span>${m.proposed ? `<span class="pm-chip" style="color:${BRAND}">${m.proposed} to confirm</span>` : ''}</div>
         <div class="pm-meta">${m.scheduled_at ? `<span>${esc(when(m.scheduled_at))}</span>` : ''}<span>${esc(m.platform || '')}</span>${m.lines ? `<span>${m.lines} exchanges</span>` : ''}${m.last_error ? `<span style="color:${BAD}">${esc(m.last_error)}</span>` : ''}
-          ${(m.status === 'scheduled' && !m.bot_id) || m.status === 'failed' ? `<a data-join>${m.status === 'failed' ? 'retry' : 'join now'}</a>` : ''}${['scheduled', 'joining', 'waiting', 'live'].includes(m.status) ? `<a data-mode title="${m.open_mode ? 'Open mode: Pulse answers any operations question. Click for name only.' : 'Name only: say Pulse (follow-ups count for a while). Click for open mode.'}">${m.open_mode ? 'open mode' : 'name only'}</a>` : ''}${['joining', 'waiting', 'live'].includes(m.status) ? `<a data-answer title="Pulse answers what was just said, no wake word needed">answer that</a>` : ''}${['scheduled', 'joining', 'waiting', 'live'].includes(m.status) ? `<a data-leave title="${m.status === 'scheduled' ? 'Pulse will not join' : 'Pulse leaves now; notes, tasks and anything queued follow straight away'}">${m.status === 'scheduled' ? 'cancel' : 'end'}</a>` : ''}${m.summary ? `<a data-toggle>${open ? 'hide notes' : 'notes'}</a>` : ''}</div>
+          ${['scheduled', 'needs_time', 'failed'].includes(m.status) ? `<a data-when title="${m.status === 'needs_time' ? 'The invitation had no readable time — set when Pulse should join' : 'Change when Pulse joins'}">${m.status === 'needs_time' ? 'set time' : 'change time'}</a>` : ''}${(m.status === 'scheduled' && !m.bot_id) || m.status === 'failed' || m.status === 'needs_time' ? `<a data-join>${m.status === 'failed' ? 'retry' : 'join now'}</a>` : ''}${['scheduled', 'joining', 'waiting', 'live'].includes(m.status) ? `<a data-mode title="${m.open_mode ? 'Open mode: Pulse answers any operations question. Click for name only.' : 'Name only: say Pulse (follow-ups count for a while). Click for open mode.'}">${m.open_mode ? 'open mode' : 'name only'}</a>` : ''}${['joining', 'waiting', 'live'].includes(m.status) ? `<a data-answer title="Pulse answers what was just said, no wake word needed">answer that</a>` : ''}${['scheduled', 'needs_time', 'joining', 'waiting', 'live'].includes(m.status) ? `<a data-leave title="${['scheduled', 'needs_time'].includes(m.status) ? 'Pulse will not join' : 'Pulse leaves now; notes, tasks and anything queued follow straight away'}">${['scheduled', 'needs_time'].includes(m.status) ? 'cancel' : 'end'}</a>` : ''}${m.summary ? `<a data-toggle>${open ? 'hide notes' : 'notes'}</a>` : ''}</div>
         ${['live', 'joining', 'waiting'].includes(m.status) && lines ? `<div class="pm-lines">${lines}</div>` : ''}
         ${open && m.summary ? `<div class="pm-sum">${esc(m.summary)}</div>` : ''}
         ${acts}</div>`;
@@ -117,6 +117,15 @@
       setTimeout(refresh, 4000);
     }; });
     list.querySelectorAll('[data-leave]').forEach(a => { a.onclick = async () => { const id = a.closest('.pm-row').dataset.id; try { await call(`/pulse/meetings/${id}/leave`, { method: 'POST', body: '{}' }); } catch (e) { console.warn('[Pulse meetings]', e.message); } refresh(); }; });
+    // Set / change the start: a small date-time picker in place of the link, local time.
+    list.querySelectorAll('[data-when]').forEach(a => { a.onclick = () => {
+      if (a.parentNode.querySelector('input[type=datetime-local]')) return;
+      const inp = document.createElement('input'); inp.type = 'datetime-local'; inp.style.cssText = 'font:inherit;font-size:11px;margin-left:6px;padding:1px 4px;border:.5px solid rgba(0,0,0,.2);border-radius:6px';
+      const d = new Date(Date.now() + 3600000); d.setMinutes(0, 0, 0); const pad = (n) => String(n).padStart(2, '0'); inp.value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      const go = document.createElement('a'); go.textContent = 'save'; go.style.marginLeft = '6px';
+      a.after(inp, go);
+      go.onclick = async () => { const id = a.closest('.pm-row').dataset.id; const at = new Date(inp.value); if (isNaN(at)) return; go.textContent = '…'; try { await call(`/pulse/meetings/${id}/schedule`, { method: 'POST', body: JSON.stringify({ at: at.toISOString() }) }); } catch (e) { alert(e.message || 'Could not set the time'); } refresh(); };
+    }; });
     list.querySelectorAll('[data-join]').forEach(a => { a.onclick = async () => { const id = a.closest('.pm-row').dataset.id; a.textContent = 'joining…'; try { await call(`/pulse/meetings/${id}/join`, { method: 'POST', body: '{}' }); } catch (e) { alert(e.message || 'Could not join'); } refresh(); }; });
     list.querySelectorAll('[data-toggle]').forEach(a => { a.onclick = () => { const id = a.closest('.pm-row').dataset.id; M.open[id] = !M.open[id]; paint(); }; });
     list.querySelectorAll('.pm-act [data-ok], .pm-act [data-no]').forEach(b => {
