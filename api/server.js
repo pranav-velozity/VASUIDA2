@@ -12286,6 +12286,7 @@ const _pulseTasks = require('./pulse_tasks')({ app, db, authenticateRequest, req
 // Vendor keys stay on the server; the browser only ever sees text and audio. See pulse_voice.js.
 _pulseUsage = require('./pulse_usage')({ app, db, authenticateRequest, requireRole, requireInternalOrg, log: console });
 require('./air_quote_intel')({ app, db, authenticateRequest, requireRole, requireInternalOrg, curClient, aqMarkupDefault });
+const _signals = require('./signals')({ app, db, authenticateRequest, requireRole, requireInternalOrg, curClient, tenancyResolve, log: console });
 if (_anthropic) _pulseUsage.wrap(_anthropic);
 const _pulseVoice = require('./pulse_voice')({ app, db, authenticateRequest, aiLimiter, aiAllowed, audit: _pulseAudit, log: console });
 

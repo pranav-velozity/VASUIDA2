@@ -143,6 +143,23 @@ module.exports = function makePulseTools(deps) {
       },
     },
     {
+      name: 'get_signals',
+      description: 'Measured performance over the last 26 weeks, computed nightly from Pinpoint records (never estimated): per supplier — fill rate (units applied vs planned), PO received/on-time/late/short rates, readiness lateness (packing list vs plan, median and P90), trend and confidence; per lane (by mode, carrier, supplier) — achieved transit P50/P90 vs quoted, door-to-door P50/P90, slip per stage and the slowest stage; weekly volume baseline per mode; price per unit/kg/container per week. Use it for "how reliable is X", "how long does Y really take", "what should we expect", or anything predictive. Quote the figures with their sample size; say "not enough history" when confidence is none. Never do the arithmetic yourself.',
+      input_schema: { type: 'object', properties: { supplier: { type: 'string', description: 'optional: one supplier to focus on (partial name ok)' }, mode: { type: 'string', enum: ['Sea', 'Air'], description: 'optional: lanes of one mode' } } },
+      tier: 'read', roles: ['admin', 'ops', 'client', 'partner'],
+      async run(a, ctx) {
+        const r = await callRoute(ctx, 'GET', '/signals/overview');
+        if (!r.ok) return { error: r.error };
+        const o = r.data; const q = String(a.supplier || '').trim().toLowerCase();
+        const pick = (s) => ({ supplier: s.supplier, weeks: s.weeks, pos: s.pos, fill_rate: s.fill_rate, fill_rate_recent: s.fill_rate_recent, received_rate: s.received_rate, on_time_rate: s.on_time_rate, late_days_p50: s.late_days_p50, late_days_p90: s.late_days_p90, short_rate: s.short_rate, ready_on_time_rate: s.ready_on_time_rate, ready_late_p50: s.ready_late_p50, ready_late_p90: s.ready_late_p90, trend: s.trend, confidence: s.confidence });
+        const suppliers = (o.suppliers || []).filter(s => !q || s.supplier.toLowerCase().includes(q)).slice(0, q ? 5 : 12).map(pick);
+        const lanes = (o.lanes || []).filter(l => !a.mode || l.mode === a.mode).filter(l => !q || l.grain !== 'supplier' || String(l.supplier || '').toLowerCase().includes(q)).slice(0, 20)
+          .map(l => ({ grain: l.grain, mode: l.mode, carrier: l.carrier, supplier: l.supplier, movements: l.n, transit_p50: l.transit_p50, transit_p90: l.transit_p90, quoted_p50: l.quoted_p50, slip_vs_quote_p50: l.slip_p50, d2d_p50: l.d2d_p50, d2d_p90: l.d2d_p90, slowest_stage: l.slowest_stage, stage_slip: l.stage, confidence: l.confidence }));
+        const price = (o.price || []).slice(-8);
+        return { computed_at: o.computed_at, window_weeks: o.window_weeks, minimums: o.minimums, suppliers, lanes, volume_baseline: o.volume_baseline, price_recent_weeks: price };
+      },
+    },
+    {
       name: 'get_quote_intel',
       description: 'Pricing intelligence for one air quote (internal only): partner cost against the vendor\'s history, the client\'s usual sell per kg and per unit, the win curve by price position, the ceiling (lowest price the client has declined), and priced options — rate card, hold the average, best expected margin — each with sell, markup, gross margin, /kg and win likelihood. Use it for "what should we charge", "is this a margin opportunity", "what if we go 20%". Never do the arithmetic yourself; quote these figures. Sell and margin figures are never for the client or the partner.',
       input_schema: { type: 'object', properties: { ref: { type: 'string', description: 'quote reference like AQ-2611-003, or the quote id' } }, required: ['ref'] },
