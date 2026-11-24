@@ -1951,9 +1951,14 @@ app.post('/pulse/chat',
     };
     const toolDefs = pulseTools.anthropicTools(toolCtx);
     const guideText = [staticBlock, _style === 'spoken' ? pulseTools.SPOKEN_GUIDE : '', _emailMode ? pulseTools.EMAIL_GUIDE(_persona) : '', _meetingMode ? pulseTools.MEETING_GUIDE(_persona) : ''].filter(Boolean).join('\n\n');
+    // Two cache marks: the guide prefix (identical for weeks) and the data picture (identical
+    // until a milestone, tracking event or plan changes it — so every tool round of a question,
+    // and every question in the same few minutes, reads the transit block from cache instead of
+    // paying full price for it; the meter showed it as ~15k uncached tokens on every call).
+    // The per-request user context stays last and uncached.
     const sysBlocks = [
       ...(guideText ? [{ type: 'text', text: guideText, cache_control: { type: 'ephemeral' } }] : []),
-      ...(dataBlock ? [{ type: 'text', text: dataBlock }] : []),
+      ...(dataBlock ? [{ type: 'text', text: dataBlock, cache_control: { type: 'ephemeral' } }] : []),
       ...(dynamicBlock ? [{ type: 'text', text: dynamicBlock }] : []),
     ];
     // Which job this is: picks the model and labels the usage record.
