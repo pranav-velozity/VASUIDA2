@@ -1,4 +1,5 @@
-/* ── VelOzity Pinpoint — Pulse rail v5 ──
+/* ── VelOzity Pinpoint — Pulse rail v6 ──
+   v6: Performance page — its own eyebrow, verbs that go through get_signals, and a supplier pin.
    Pulse moves from the bottom bar to a right-hand rail and speaks first: a briefing surface at
    the top (built from the Week Hub insights already fetched — no extra model call), four verb
    tiles for the page you are on, then the conversation, then the composer.
@@ -168,10 +169,10 @@
   // ── where are we ──
   function pageKey() {
     const a = document.querySelector('.pn-nav-item.active'); const id = a ? a.id : '';
-    if (id === 'nav-receiving') return 'receiving'; if (id === 'nav-map') return 'transit';
+    if (id === 'nav-receiving') return 'receiving'; if (id === 'nav-map') return 'transit'; if (id === 'nav-performance') return 'performance';
     if (id === 'nav-weekhub' || !id) return 'weekhub'; return 'other';
   }
-  const PAGE_LABEL = { weekhub: 'Week Hub', receiving: 'Receiving', transit: 'Transit', other: 'Pinpoint' };
+  const PAGE_LABEL = { weekhub: 'Week Hub', receiving: 'Receiving', transit: 'Transit', performance: 'Performance', other: 'Pinpoint' };
   const weekLabel = () => { const ws = window.state && window.state.weekStart; if (!ws) return ''; const d = new Date(ws + 'T00:00:00Z'); if (isNaN(d)) return ''; const x = new Date(d); x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7) + 3); const f = new Date(Date.UTC(x.getUTCFullYear(), 0, 4)); return 'W' + (1 + Math.round(((x - f) / 86400000 - 3 + ((f.getUTCDay() + 6) % 7)) / 7)); };
 
   // ── ask Pulse (same path as typing) ──
@@ -192,6 +193,10 @@
       head = pin.ids.length + (pin.ids.length === 1 ? ' PO pinned.' : ' POs pinned.'); sub = (pin.supplier ? pin.supplier + ' · ' : '') + 'Ask about them, chase, or move them.'; eyebrow = 'Pulse · Receiving · ' + (pin.supplier || wk);
     } else if (pin && pin.page === 'transit') {
       head = pin.label + '.'; sub = 'Ask why, confirm a milestone, or note something on it.'; eyebrow = 'Pulse · Transit · ' + (pin.week || wk);
+    } else if (pin && pin.page === 'performance') {
+      head = pin.label + '.'; sub = 'Measured history — ask how reliable, how late, or what to expect.'; eyebrow = 'Pulse · Performance';
+    } else if (page === 'performance') {
+      head = 'Measured, not estimated.'; sub = 'Suppliers, lanes, volume and price over the last 26 weeks. Click a supplier to pin it.';
     } else if (page === 'receiving') {
       const plan = Array.isArray(window.state && window.state.plan) ? window.state.plan : [], rec = Array.isArray(window.state && window.state.receiving) ? window.state.receiving : [];
       const pos = new Set(plan.map(p => String(p.po_number || '').trim()).filter(Boolean)), got = new Set(rec.map(r => String(r.po_number || '').trim()).filter(Boolean));
@@ -231,6 +236,19 @@
         V('list', 'Not received yet', 'this week', () => fire('Which POs have not been received yet this week?')),
         V('mail', 'Chase a supplier', 'type the name', () => prefill('Email ')),
         V('chart', 'Receiving summary', 'two lines', () => fire('Summarise receiving for this week in two lines.'))];
+    }
+    if (pin && pin.page === 'performance') {
+      const who = pin.supplier || pin.label;
+      return [V('chart', `How reliable is ${who}?`, 'fill, on time, trend', () => fire(`How reliable is ${who} — fill rate, on time, how late, and is it getting better or worse?`)),
+        V('clock', 'What to expect', 'next week from them', () => fire(`Based on measured history, what should we expect from ${who} next week — volume against plan and lateness?`)),
+        V('warning', 'Where it slips', 'packing list or receipt', () => fire(`Where does ${who} slip — the packing list date, the receipt date, or short deliveries? Use measured figures with sample sizes.`)),
+        V('mail', 'Note for the client', 'two lines', () => fire(`Write two lines for the client on ${who}'s measured performance — fill rate and lateness, with the sample.`))];
+    }
+    if (page === 'performance') {
+      return [V('chart', 'Least reliable', 'suppliers, measured', () => fire('Which suppliers are least reliable on measured history — fill rate and lateness — and by how much?')),
+        V('truck', 'Sea vs quoted', 'achieved transit', () => fire('How long does sea really take against what was quoted, door to door, and which stage slips most?')),
+        V('clock', 'Air vs quoted', 'achieved transit', () => fire('How long does air really take against what was quoted, and how reliable is landed to FC?')),
+        V('list', 'Next week outlook', 'volume and lateness', () => fire('Based on measured supplier and lane history, what should we expect next week on volume, lateness and transit?'))];
     }
     if (page === 'transit') {
       return [V('hold', "What's late", 'and how late', () => fire('Which movements are late or at risk, and by how much?')),
@@ -467,7 +485,7 @@
     layout(); paint(); compactHeader();
     spend(); setInterval(spend, 5 * 60 * 1000);
     const chat = document.getElementById('pulse-chat'); if (chat) new MutationObserver(scheduleSpend).observe(chat, { childList: true });
-    console.log('[pulse-rail] v5 on');
+    console.log('[pulse-rail] v6 on');
   }
   function disable() { if (!R.state.on) return; release(); R.state.on = false; document.body.classList.remove('pr-on', 'pr-overlay', 'pr-hdr', 'pr-focus'); if (R.el) R.el.classList.add('hidden'); }
 
