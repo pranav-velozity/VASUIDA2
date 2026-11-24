@@ -1,4 +1,5 @@
-/* ── VelOzity Pinpoint — UID labels: the print queue (VAS Ops) v6 ──
+/* ── VelOzity Pinpoint — UID labels: the print queue (VAS Ops) v7 ──
+   v7: runs wait for the daily digest email; the queue says so and can send it now.
    #page-uid-labels, route #uid-labels, reached from VAS Ops ▾ → UID labels. Internal only.
 
    What the page is for: the warehouse opens it, picks the week, and downloads one PDF per PO —
@@ -244,7 +245,12 @@
     let latest = stat('Latest run', '—', d.has_plan ? 'nothing issued yet' : 'no plan stored for this week', 't');
     if (r) {
       const t = trigger(r);
-      const mail = r.emailed_at ? `<span style="color:#4A6A00;font-weight:600">Warehouse emailed</span>` : r.email_error ? `<span style="color:${BRAND};font-weight:600" title="${esc(r.email_error)}">Email not sent</span>` : `<span style="color:${MUTED}">Emailing…</span>`;
+      const dg = d.digest || {};
+      const hourTxt = (h) => (h % 12 || 12) + (h < 12 ? ' AM' : ' PM');
+      const mail = r.emailed_at ? `<span style="color:#4A6A00;font-weight:600">Warehouse emailed${r.emailed_via === 'digest' ? ' · digest' : ''}</span>`
+        : r.email_error ? `<span style="color:${BRAND};font-weight:600" title="${esc(r.email_error)}">Email not sent</span>`
+        : r.digest_pending ? `<span style="color:${MUTED}">In today's ${hourTxt(dg.hour == null ? 16 : dg.hour)} digest${dg.pending_runs > 1 ? ` with ${dg.pending_runs - 1} more` : ''}</span> <button class="ul-btn sm ghost" data-act="digest" style="height:22px;margin-left:4px">Send now</button>`
+        : `<span style="color:${MUTED}">Emailing…</span>`;
       latest = stat('Latest run', `#${r.id} · ${whenShort(r.at)}`, `${[t.how, t.who ? esc(t.who) : null].filter(Boolean).join(' · ')}<br>${mail}`, 't');
     }
     return `<div class="ul-stats">
@@ -486,6 +492,7 @@
         S.busy = null; await loadWeeks().catch(() => {}); loadWeek(true); break;
       }
       case 'email': try { const r = await req('POST', `/uid-labels/run/${v}/email`); toast(r.sent ? 'Email sent' : 'Not sent: ' + (r.reason || '')); loadWeek(true); } catch (e) { toast(e.message || String(e)); } break;
+      case 'digest': try { const r = await req('POST', '/uid-labels/digest/send'); const x = (r.sent || [])[0]; toast(!x ? 'Nothing waiting' : x.sent ? `Digest sent · ${x.runs} run${x.runs === 1 ? '' : 's'}, ${x.labels} labels` : 'Not sent: ' + (x.reason || '')); loadWeek(true); } catch (e) { toast(e.message || String(e)); } break;
       case 'extra-open': {
         const po = el.getAttribute('data-po'); S.menu = null;
         if (S.extra && S.extra.po === po) { S.extra = null; render(); break; }
