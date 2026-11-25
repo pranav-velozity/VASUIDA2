@@ -1,4 +1,5 @@
 /* ── VelOzity Pinpoint — Air Quote Review (internal) v2 ──
+   v2.1: third tab, Requests — door-to-door request review lives here (rq_review_additive.js), never on the client page.
    The one surface in Pinpoint where partner cost and margin are visible.
 
    Admin only, and it fails closed: /air-quotes/internal returns 403 for anyone else, at
@@ -930,6 +931,7 @@
           <div class="aqi-tabs">
             <button data-qtab="air" class="on">Air</button>
             <button data-qtab="sea">Sea</button>
+            <button data-qtab="requests">Requests</button>
           </div>
           <button class="aqi-x" id="aqi-close">&times;</button>
         </div>
@@ -946,7 +948,8 @@
       o.querySelectorAll('[data-qtab]').forEach(x => x.classList.toggle('on', x.getAttribute('data-qtab') === v));
       // Air is a priced quote with a client decision behind it; sea is weekly cost capture
       // with no client in it at all. Same screen, different question.
-      if (v === 'sea') loadSea(); else load();
+      // Requests: door-to-door requests (sea + air options) — review module, internal only.
+      if (v === 'sea') loadSea(); else if (v === 'requests') { const b = el('aqi-body'); if (window._rqReview) window._rqReview.load(b); else if (b) b.innerHTML = '<div class="aqi-none">Request review module not loaded — hard-refresh.</div>'; } else load();
     }));
     document.addEventListener('keydown', function k(ev) {
       if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', k); }

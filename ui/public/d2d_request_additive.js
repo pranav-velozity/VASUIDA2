@@ -1,17 +1,18 @@
-/* ── VelOzity Pinpoint — Simulator · requests v1 (Phase 5b) ──
+/* ── VelOzity Pinpoint — Simulator · requests v2 (Phase 5b.1) ──
+   v2: the mock's dark canvas (the one dark surface in Pinpoint), options as cards, and no
+   internal review on this page at all — that moved to Quote Review › Requests.
    The client side of door-to-door options: raise a request (where from, where to, when, how
    much), see the options VelOzity releases, pick, and approve once the price is firm. The
    simulation boards (5d) replace the options table on this page; the request and the states
    stay as they are here.
 
-   Internal admins see, on the same page, the review panel for each request: partner cost,
-   margin, pricing by markup or by price, release, confirm by hand, partner links. That panel
-   reads /rq/internal/* only — the client endpoints never carry cost or partner.
+   This page reads client endpoints only (/rq/requests, /rq/prefill): nothing on it can carry
+   cost, margin or a partner's name, whoever is logged in.
 
    Wording on client surfaces: Price, Ask VelOzity. Never sell, never partner. */
 (function () {
   if (window.__d2dReqLoaded) return; window.__d2dReqLoaded = true;
-  const BUILD = 'd2dreq-1';
+  const BUILD = 'd2dreq-2';
   const el = id => document.getElementById(id);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const nf = n => n == null ? '—' : Number(n).toLocaleString();
@@ -28,48 +29,52 @@
     const r = await fetch(apiBase() + path, { ...o, headers }); const txt = await r.text(); let d = null; try { d = txt ? JSON.parse(txt) : null; } catch (e) { d = txt; }
     if (!r.ok) { const e = new Error((d && (d.message || d.error)) || ('HTTP ' + r.status)); e.status = r.status; e.body = d; throw e; } return d;
   }
-  const C = { text: '#1C1C1E', mute: '#6E6E73', dim: '#8E8E93', faint: '#AEAEB2', wine: '#990033', mint: '#2E7D4F', sky: '#2F6FED', amber: '#C77A00', good: '#4A6A00', goodBg: '#EEF6D6', warnBg: '#FFF4D6', badBg: '#FBE9EE', tint: '#F2F2F0', line: 'rgba(0,0,0,.08)' };
-  const STATE = { requested: ['Asked', C.tint, C.mute], with_velozity: ['With VelOzity', C.warnBg, C.amber], options_ready: ['Options ready', '#E6F0FF', C.sky], picked: ['Picked · confirming', C.warnBg, C.amber], firm: ['Firm · approve', C.goodBg, C.good], approved: ['Approved', C.goodBg, C.good], declined: ['Declined', C.tint, C.mute], expired: ['Expired', C.badBg, C.wine] };
-  const ISTATE = { requested: 'Requested', options_offered: 'Options in · price & release', released: 'Released to client', picked: 'Picked · confirm cost', cost_confirmed: 'Cost confirmed · release firm', firm_released: 'Firm · awaiting approval', approved: 'Approved', declined: 'Declined', expired: 'Expired' };
-  const OSTATE = { approximate: ['approximate', C.tint, C.mute], picked: ['picked', C.warnBg, C.amber], confirmed: ['confirmed', C.warnBg, C.amber], firm: ['firm', C.goodBg, C.good], approved: ['approved', C.goodBg, C.good], expired: ['expired', C.badBg, C.wine], withdrawn: ['withdrawn', C.tint, C.faint] };
+  // The simulator's own palette — the dark ground from the mock. Nothing else in Pinpoint uses it.
+  const C = { ground: '#010B13', card: '#121A21', card2: '#0F171E', raised: '#1A232B', line: 'rgba(255,255,255,.09)', line2: 'rgba(255,255,255,.16)', text: '#E8ECEF', mute: '#9AA4AD', dim: '#7E8891', faint: '#5F6973', wine: '#990033', rose: '#FF6B9A', rose2: '#FF9BBB', mint: '#5FD39A', sky: '#7FD1FF', amber: '#F5B85B', mintBg: '#0F2E22', skyBg: '#0F2A3C', amberBg: '#3A2A10', roseBg: '#2A1620', tint: '#1A232B' };
+  const STATE = { requested: ['Asked', C.tint, C.mute], with_velozity: ['With VelOzity', C.amberBg, C.amber], options_ready: ['Options ready', C.skyBg, C.sky], picked: ['Picked · confirming', C.amberBg, C.amber], firm: ['Firm · approve', C.mintBg, C.mint], approved: ['Approved', C.mintBg, C.mint], declined: ['Declined', C.tint, C.mute], expired: ['Expired', C.roseBg, C.rose] };
+  const OSTATE = { approximate: ['approximate', C.tint, C.mute], picked: ['picked', C.amberBg, C.amber], confirmed: ['confirmed', C.amberBg, C.amber], firm: ['firm', C.mintBg, C.mint], approved: ['approved', C.mintBg, C.mint], expired: ['expired', C.roseBg, C.rose], withdrawn: ['withdrawn', C.tint, C.faint] };
 
-  let _list = null, _open = null, _detail = null, _internal = null, _pf = null, _form = null, _isOpen = false, _err = null, _isAdmin = false, _showForm = false;
+  let _list = null, _open = null, _detail = null, _pf = null, _form = null, _isOpen = false, _err = null, _showForm = false, _picks = new Set();
 
   function styles() {
     if (el('d2r-css')) return; const s = document.createElement('style'); s.id = 'd2r-css';
+    if (!el('d2r-fonts')) { const l = document.createElement('link'); l.id = 'd2r-fonts'; l.rel = 'stylesheet'; l.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap'; document.head.appendChild(l); }
     s.textContent = `
-      #page-simulator{padding:0;} .d2r{color:${C.text};padding:4px 0 28px;} .d2r *{box-sizing:border-box;}
-      .d2r-eyebrow{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:${C.mute};font-weight:600;}
-      .d2r-h1{font-size:24px;font-weight:700;letter-spacing:-.02em;margin:4px 0 0;} .d2r-sub{font-size:12.5px;color:${C.mute};margin-top:6px;max-width:760px;}
-      .d2r-head{display:flex;gap:18px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px;}
-      .d2r-btn{border:0;border-radius:999px;padding:9px 16px;font:600 12.5px inherit;cursor:pointer;background:${C.wine};color:#fff;} .d2r-btn.sec{background:#fff;color:${C.text};border:0.5px solid rgba(0,0,0,.18);} .d2r-btn.sm{padding:6px 12px;font-size:11.5px;} .d2r-btn[disabled]{opacity:.5;cursor:default;}
-      .d2r-pill{display:inline-block;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;font-weight:700;border-radius:999px;padding:2px 8px;}
-      .d2r-card{background:#fff;border:0.5px solid ${C.line};border-radius:14px;padding:14px 16px;} .d2r-card + .d2r-card{margin-top:10px;}
+      #page-simulator{padding:0;}
+      .d2r{background:${C.ground};color:${C.text};border-radius:18px;padding:26px 28px 34px;min-height:78vh;font-family:Inter,-apple-system,"Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased;} .d2r *{box-sizing:border-box;}
+      .d2r-eyebrow{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:${C.dim};font-weight:600;}
+      .d2r-h1{font-family:"Instrument Serif",Georgia,serif;font-weight:400;font-size:38px;line-height:1.1;letter-spacing:-.01em;margin:6px 0 0;} .d2r-h1 em{font-style:italic;color:${C.rose2};}
+      .d2r-sub{font-size:13px;color:${C.mute};margin-top:8px;max-width:720px;line-height:1.5;}
+      .d2r-head{display:flex;gap:18px;align-items:flex-end;flex-wrap:wrap;margin-bottom:22px;}
+      .d2r-btn{border:0;border-radius:999px;padding:10px 18px;font:600 12.5px inherit;cursor:pointer;background:${C.wine};color:#fff;} .d2r-btn:hover{background:#B0003B;} .d2r-btn.sec{background:${C.card};color:${C.text};border:0.5px solid ${C.line2};} .d2r-btn.sec:hover{border-color:${C.rose};background:${C.card};} .d2r-btn.sm{padding:7px 13px;font-size:11.5px;} .d2r-btn[disabled]{opacity:.45;cursor:default;}
+      .d2r-pill{display:inline-block;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;font-weight:700;border-radius:999px;padding:3px 8px;}
+      .d2r-card{background:${C.card};border:0.5px solid ${C.line};border-radius:16px;padding:16px 18px;}
       .d2r-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:10px;}
-      .d2r-rq{cursor:pointer;transition:border-color .15s,box-shadow .15s;} .d2r-rq:hover{border-color:rgba(153,0,51,.45);box-shadow:0 2px 10px rgba(0,0,0,.05);} .d2r-rq.on{border:1.5px solid ${C.wine};padding:13px 15px;}
-      .d2r-rq .t{display:flex;gap:8px;align-items:center;font-size:13px;font-weight:700;} .d2r-rq .m{font-size:11.5px;color:${C.mute};margin-top:6px;line-height:1.5;}
-      .d2r-sec{display:flex;align-items:baseline;gap:12px;margin:22px 0 10px;flex-wrap:wrap;} .d2r-sec h2{font-size:14px;font-weight:700;margin:0;} .d2r-sec span{font-size:11.5px;color:${C.mute};}
-      .d2r-form{display:grid;grid-template-columns:1fr 1fr;gap:12px;} @media (max-width:900px){.d2r-form{grid-template-columns:1fr;}}
-      .d2r-f label{display:block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:${C.mute};font-weight:600;margin-bottom:5px;}
-      .d2r-f .in{min-height:42px;border:0.5px solid rgba(0,0,0,.16);border-radius:11px;background:#fff;display:flex;align-items:center;padding:0 12px;font-size:13.5px;gap:8px;flex-wrap:wrap;}
-      .d2r-f .in input,.d2r-f .in select{border:0;background:none;font:inherit;font-size:13.5px;outline:none;min-width:0;flex:1;} .d2r-f .in input[type=number]{text-align:right;max-width:110px;}
-      .d2r-f .in .m{color:${C.dim};font-size:11.5px;margin-left:auto;}
-      .d2r-seg{display:inline-flex;border:0.5px solid rgba(0,0,0,.14);border-radius:999px;padding:2px;background:#fff;} .d2r-seg button{background:none;border:0;color:${C.mute};font-size:11px;padding:4px 12px;border-radius:999px;cursor:pointer;font-family:inherit;} .d2r-seg button.on{background:${C.wine};color:#fff;}
-      .d2r-chip{display:inline-flex;align-items:center;gap:6px;border:0.5px solid rgba(0,0,0,.14);border-radius:999px;padding:4px 10px;font-size:12px;background:#fff;cursor:pointer;} .d2r-chip.on{border-color:${C.wine};background:#FBE9EE;color:${C.wine};}
-      .d2r-way{border:0.5px solid rgba(0,0,0,.12);border-radius:16px;padding:16px 18px;background:#fff;cursor:pointer;position:relative;} .d2r-way:hover{border-color:rgba(153,0,51,.5);} .d2r-way.on{border:1.5px solid ${C.wine};background:#FFF8FA;}
-      .d2r-way h3{margin:0;font-size:14px;font-weight:700;} .d2r-way p{margin:6px 0 0;font-size:12px;color:${C.mute};line-height:1.5;} .d2r-way .when{font-size:11px;color:${C.dim};margin-top:8px;}
-      .d2r-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;} @media (max-width:1100px){.d2r-kpis{grid-template-columns:repeat(2,minmax(0,1fr));}}
-      .d2r-kpi{background:#fff;border:0.5px solid ${C.line};border-radius:14px;padding:12px 14px;} .d2r-kpi small{display:block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:${C.mute};font-weight:600;} .d2r-kpi b{display:block;font-size:20px;font-weight:700;margin-top:3px;letter-spacing:-.02em;} .d2r-kpi i{display:block;font-style:normal;font-size:11px;color:${C.mute};margin-top:2px;}
-      .d2r-opts{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px;background:#fff;border:0.5px solid ${C.line};border-radius:14px;overflow:hidden;font-variant-numeric:tabular-nums;}
-      .d2r-opts th{font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:${C.mute};font-weight:600;text-align:left;padding:9px 11px;border-bottom:0.5px solid ${C.line};background:#FAFAF8;white-space:nowrap;}
-      .d2r-opts td{padding:9px 11px;border-bottom:0.5px solid rgba(0,0,0,.05);vertical-align:middle;} .d2r-opts tr.dead td{color:${C.faint};} .d2r-opts .r{text-align:right;} .d2r-opts tr.pick td{background:#FFF8FA;}
-      .d2r-mode{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;border-radius:6px;padding:2px 7px;} .d2r-mode.sea{background:#E3F2EA;color:${C.mint};} .d2r-mode.air{background:#E6F0FF;color:${C.sky};}
-      .d2r-opts input{width:84px;border:0.5px solid rgba(0,0,0,.18);border-radius:7px;padding:4px 6px;font:inherit;font-size:12px;text-align:right;} .d2r-opts input[type=date]{width:130px;text-align:left;}
-      .d2r-int{margin-top:12px;border:1px dashed rgba(153,0,51,.35);border-radius:14px;padding:12px 14px;background:#FFFBFC;} .d2r-int .t{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:${C.wine};font-weight:700;display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
-      .d2r-ev{font-size:11px;color:${C.mute};line-height:1.6;max-height:160px;overflow:auto;margin-top:8px;}
-      .d2r-note{font-size:11px;color:${C.dim};margin-top:8px;line-height:1.5;}
-      .d2r-empty{background:#fff;border:0.5px solid ${C.line};border-radius:14px;padding:26px;text-align:center;color:${C.mute};font-size:13px;}
-      .d2r-toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:${C.text};color:#fff;padding:10px 16px;border-radius:999px;font-size:12.5px;z-index:9999;opacity:0;transition:opacity .2s;pointer-events:none;} .d2r-toast.on{opacity:1;}
+      .d2r-rq{cursor:pointer;transition:border-color .15s;} .d2r-rq:hover{border-color:rgba(255,107,154,.5);} .d2r-rq.on{border:1.5px solid ${C.rose};padding:15px 17px;background:#1A121A;}
+      .d2r-rq .t{display:flex;gap:8px;align-items:center;font-size:13.5px;font-weight:600;} .d2r-rq .m{font-size:11.5px;color:${C.mute};margin-top:7px;line-height:1.55;}
+      .d2r-sec{display:flex;align-items:baseline;gap:12px;margin:26px 0 12px;flex-wrap:wrap;} .d2r-sec h2{font-size:15px;font-weight:600;margin:0;letter-spacing:-.01em;} .d2r-sec span{font-size:11.5px;color:${C.dim};}
+      .d2r-form{display:grid;grid-template-columns:1fr 1fr;gap:14px;} @media (max-width:900px){.d2r-form{grid-template-columns:1fr;}}
+      .d2r-f label{display:block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:${C.dim};font-weight:600;margin-bottom:6px;}
+      .d2r-f .in{min-height:46px;border:0.5px solid ${C.line2};border-radius:12px;background:${C.card2};display:flex;align-items:center;padding:0 14px;font-size:14px;gap:10px;flex-wrap:wrap;color:${C.text};}
+      .d2r-f .in input,.d2r-f .in select{border:0;background:none;font:inherit;font-size:14px;outline:none;min-width:0;flex:1;color:${C.text};color-scheme:dark;} .d2r-f .in input[type=number]{text-align:right;max-width:110px;} .d2r-f .in input::placeholder{color:${C.faint};}
+      .d2r-f .in .m{color:${C.faint};font-size:12px;margin-left:auto;}
+      .d2r-seg{display:inline-flex;border:0.5px solid ${C.line2};border-radius:999px;padding:2px;background:${C.card};} .d2r-seg button{background:none;border:0;color:${C.mute};font-size:11px;padding:4px 12px;border-radius:999px;cursor:pointer;font-family:inherit;} .d2r-seg button.on{background:${C.wine};color:#fff;}
+      .d2r-chip{display:inline-flex;align-items:center;gap:6px;border:0.5px solid ${C.line2};border-radius:999px;padding:5px 11px;font-size:12px;background:${C.card};cursor:pointer;color:${C.mute};} .d2r-chip.on{border-color:${C.rose};background:#2A1620;color:${C.rose2};}
+      .d2r-way{flex:1;border:0.5px solid ${C.line};border-radius:18px;padding:20px 22px;background:${C.card};cursor:pointer;position:relative;display:flex;flex-direction:column;gap:10px;} .d2r-way:hover{border-color:rgba(255,107,154,.5);} .d2r-way.on{border:1.5px solid ${C.rose};background:#1A121A;}
+      .d2r-way h3{margin:0;font-size:16px;font-weight:600;} .d2r-way p{margin:0;font-size:12.5px;color:${C.mute};line-height:1.5;} .d2r-way .when{font-size:11px;color:${C.dim};margin-top:auto;}
+      .d2r-ogrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;}
+      .d2r-opt{background:${C.card};border:0.5px solid ${C.line};border-radius:16px;padding:16px 18px;position:relative;display:flex;flex-direction:column;gap:8px;transition:border-color .15s;} .d2r-opt.dead{opacity:.45;} .d2r-opt.pk{border:1.5px solid ${C.rose};background:#1A121A;padding:15px 17px;} .d2r-opt.can{cursor:pointer;} .d2r-opt.can:hover{border-color:rgba(255,107,154,.5);}
+      .d2r-opt .top{display:flex;gap:10px;align-items:center;padding-right:28px;} .d2r-opt .nm{font-size:14px;font-weight:600;letter-spacing:-.01em;} .d2r-opt .nm small{display:block;font-size:11px;color:${C.dim};font-weight:400;margin-top:1px;}
+      .d2r-opt .price{font-size:26px;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1;margin-top:4px;} .d2r-opt .price small{display:block;font-size:11px;color:${C.dim};font-weight:400;letter-spacing:0;margin-top:5px;}
+      .d2r-opt .facts{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:${C.mute};font-variant-numeric:tabular-nums;} .d2r-opt .facts b{color:${C.text};font-weight:600;}
+      .d2r-opt .pickmark{position:absolute;top:14px;right:14px;width:22px;height:22px;border-radius:50%;border:1.5px solid ${C.line2};display:flex;align-items:center;justify-content:center;font-size:12px;color:#fff;} .d2r-opt.pk .pickmark{background:${C.wine};border-color:${C.wine};}
+      .d2r-g{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:9.5px;font-weight:700;letter-spacing:.06em;flex:none;} .d2r-g.sea{background:${C.mintBg};color:${C.mint};} .d2r-g.air{background:${C.skyBg};color:${C.sky};}
+      .d2r-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:12px;} @media (max-width:1100px){.d2r-kpis{grid-template-columns:repeat(2,minmax(0,1fr));}}
+      .d2r-kpi{background:${C.card};border:0.5px solid ${C.line};border-radius:14px;padding:13px 15px;} .d2r-kpi small{display:block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:${C.dim};font-weight:600;} .d2r-kpi b{display:block;font-size:22px;font-weight:600;margin-top:4px;letter-spacing:-.02em;font-variant-numeric:tabular-nums;} .d2r-kpi i{display:block;font-style:normal;font-size:11px;color:${C.mute};margin-top:2px;}
+      .d2r-note{font-size:11px;color:${C.faint};margin-top:10px;line-height:1.5;}
+      .d2r-empty{background:${C.card};border:0.5px solid ${C.line};border-radius:16px;padding:28px;text-align:center;color:${C.mute};font-size:13px;}
+      .d2r-toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#fff;color:#1C1C1E;padding:10px 16px;border-radius:999px;font-size:12.5px;z-index:9999;opacity:0;transition:opacity .2s;pointer-events:none;box-shadow:0 6px 24px rgba(0,0,0,.35);} .d2r-toast.on{opacity:1;}
+      body.pr-on #page-simulator .d2r-ogrid,body.pr-on #page-simulator .d2r-grid{grid-template-columns:repeat(auto-fill,minmax(250px,1fr));}
     `; document.head.appendChild(s);
   }
   let _toastT; function toast(m) { let t = el('d2r-toast'); if (!t) { t = document.createElement('div'); t.id = 'd2r-toast'; t.className = 'd2r-toast'; document.body.appendChild(t); } t.textContent = m; t.classList.add('on'); clearTimeout(_toastT); _toastT = setTimeout(() => t.classList.remove('on'), 2600); }
@@ -94,7 +99,7 @@
 
   // ── data ──
   async function open(force, ref) {
-    styles(); _err = null; _isAdmin = (window._pnRoleKey || '') === 'org:admin_auth';
+    styles(); _err = null;
     if (!_list || force) { render(); try { _list = (await req('/rq/requests')).requests || []; } catch (e) { _err = e; _list = []; } }
     if (ref) { const x = _list.find(r => r.ref === ref); if (x) _open = x.id; }
     if (_open) await loadDetail(_open);
@@ -102,7 +107,7 @@
   }
   async function loadDetail(id) {
     try { _detail = await req('/rq/requests/' + encodeURIComponent(id)); } catch (e) { _detail = null; }
-    _internal = null; if (_isAdmin) { try { _internal = await req('/rq/internal/requests/' + encodeURIComponent(id)); } catch (e) { _internal = null; } }
+    _picks = new Set((_detail && _detail.options || []).filter(o => ['picked', 'confirmed', 'firm', 'approved'].includes(o.state)).map(o => o.id));
   }
   async function refreshAll() { try { _list = (await req('/rq/requests')).requests || []; } catch (_) {} if (_open) await loadDetail(_open); render(); }
   async function loadPrefill() {
@@ -117,8 +122,8 @@
     const live = (_list || []).filter(r => !['approved', 'declined', 'expired'].includes(r.state));
     const ready = live.filter(r => r.client_state === 'options_ready' || r.client_state === 'firm');
     let html = `<div class="d2r" data-build="${BUILD}">
-      <div class="d2r-head"><div><div class="d2r-eyebrow">Door to door · simulator</div><h1 class="d2r-h1">Simulator</h1>
-        <div class="d2r-sub">Ask for options for a week or a month, compare them on price and days against the date you need stock in the Sydney FC, pick, and approve once the price is firm. Simulation boards land here next; the options table does the comparing for now.</div></div>
+      <div class="d2r-head"><div><div class="d2r-eyebrow">Door-to-door simulator</div><h1 class="d2r-h1">Where from, <em>where to,</em> and when.</h1>
+        <div class="d2r-sub">Ask for options for a week or a month, compare them on price and days against the date you need stock in the Sydney FC, pick, and approve once the price is firm.</div></div>
         <div style="margin-left:auto;display:flex;gap:8px;align-items:center;"><button class="d2r-btn" id="d2r-new">${_showForm ? 'Close' : 'New request'}</button></div></div>`;
     if (_showForm) html += formHtml();
     if (!_list) html += `<div class="d2r-empty">Loading…</div>`;
@@ -136,61 +141,53 @@
   function formHtml() {
     const f = _form; const pf = _pf || {};
     const originList = pf.origin_list || []; const unmapped = pf.unmapped || [];
-    return `<div class="d2r-card" style="margin-bottom:16px;padding:18px 20px;">
-      <div style="font-size:15px;font-weight:700;letter-spacing:-.01em;">Where from, where to, and when.</div><div class="d2r-note" style="margin-top:2px;">Everything else is pre-filled from your plan and can be changed.</div>
-      <div class="d2r-form" style="margin-top:14px;">
+    return `<div class="d2r-card" style="margin-bottom:18px;padding:20px 22px;">
+      <div class="d2r-note" style="margin:0 0 12px;color:${C.mute}">Everything else is pre-filled from your plan and can be changed later.</div>
+      <div class="d2r-form">
         <div class="d2r-f"><label>Period</label><div class="in"><span class="d2r-seg"><button data-pt="week" class="${f.period_type === 'week' ? 'on' : ''}">Week</button><button data-pt="month" class="${f.period_type === 'month' ? 'on' : ''}">Month</button></span>
           ${f.period_type === 'week' ? `<input type="date" id="d2r-ps" value="${esc(f.period_start)}">` : `<input type="month" id="d2r-ps" value="${esc(f.period_start.slice(0, 7))}">`}<span class="m">${pf.period_label ? esc(pf.period_label) + ' · ' + nf(pf.pos) + ' POs in plan' : ''}</span></div></div>
         <div class="d2r-f"><label>In Sydney FC by</label><div class="in"><input type="date" id="d2r-nb" value="${esc(f.need_by || '')}"><span class="m">the date every option is judged against</span></div></div>
         <div class="d2r-f"><label>From</label><div class="in" style="padding:6px 12px;">${originList.length ? originList.map(o => `<span class="d2r-chip${f.origins.includes(o.name) ? ' on' : ''}" data-origin="${esc(o.name)}">${esc(o.name)}</span>`).join('') : `<span style="color:${C.dim};font-size:12px">No origins set up yet — ask VelOzity to add your origin ports.</span>`}${pf.origins && pf.origins.length ? `<span class="m">${esc(pf.origins.length)} from the plan</span>` : ''}</div>
-          ${unmapped.length && originList.length ? `<div class="d2r-note">Suppliers without an origin: ${unmapped.map(u => `<span style="white-space:nowrap">${esc(u)} → <select data-map="${esc(u)}" style="font:inherit;font-size:11px;border:0.5px solid rgba(0,0,0,.18);border-radius:6px;padding:2px 4px;"><option value="">pick</option>${originList.map(o => `<option value="${esc(o.id)}">${esc(o.name)}</option>`).join('')}</select></span>`).join(' · ')}</div>` : ''}</div>
+          ${unmapped.length && originList.length ? `<div class="d2r-note">Suppliers without an origin: ${unmapped.map(u => `<span style="white-space:nowrap">${esc(u)} → <select data-map="${esc(u)}" style="font:inherit;font-size:11px;border:0.5px solid ${C.line2};border-radius:6px;padding:2px 4px;background:${C.card};color:${C.text}"><option value="">pick</option>${originList.map(o => `<option value="${esc(o.id)}">${esc(o.name)}</option>`).join('')}</select></span>`).join(' · ')}</div>` : ''}</div>
         <div class="d2r-f"><label>To</label><div class="in"><input id="d2r-dest" value="${esc(f.destination || '')}" placeholder="Sydney · VOZ_KY"><span class="m">facility</span></div></div>
         <div class="d2r-f" style="grid-column:1 / -1;"><label>Volume</label><div class="in"><b>${nf(pf.units)} units</b><span style="color:${C.dim};font-size:12px">${pf.expected_units != null && pf.expected_units !== pf.units ? `expected ${nf(pf.expected_units)} after supplier history` : ''}</span>
           <span style="margin-left:auto;display:flex;gap:10px;align-items:center;font-size:12px;color:${C.mute}">cartons <input type="number" id="d2r-ctn" min="0" value="${esc(f.cartons || '')}" placeholder="—"> CBM <input type="number" id="d2r-cbm" min="0" step="0.1" value="${esc(f.cbm || '')}" placeholder="—"> kg <input type="number" id="d2r-kg" min="0" value="${esc(f.kg || '')}" placeholder="—"></span></div>
-          ${(pf.suppliers || []).length ? `<div class="d2r-note">${pf.suppliers.slice(0, 6).map(s => `${esc(s.supplier)} ${nf(s.units)}${s.signal && s.signal.late_days_p50 ? ` <span style="color:${C.wine}">${esc(s.signal.late_days_p50)} d late, ${Math.round(s.signal.fill_rate)}% of plan</span>` : ''}`).join(' · ')}${pf.suppliers.length > 6 ? ` · +${pf.suppliers.length - 6} more` : ''}</div>` : ''}</div>
+          ${(pf.suppliers || []).length ? `<div class="d2r-note">${pf.suppliers.slice(0, 6).map(s => `${esc(s.supplier)} ${nf(s.units)}${s.signal && s.signal.late_days_p50 ? ` <span style="color:${C.rose2}">${esc(s.signal.late_days_p50)} d late, ${Math.round(s.signal.fill_rate)}% of plan</span>` : ''}`).join(' · ')}${pf.suppliers.length > 6 ? ` · +${pf.suppliers.length - 6} more` : ''}</div>` : ''}</div>
       </div>
-      <div style="display:flex;gap:12px;margin-top:14px;">
-        <div class="d2r-way${f.source === 'history' ? ' on' : ''}" data-src="history"><span class="d2r-pill" style="position:absolute;top:12px;right:12px;background:${C.tint};color:${C.mute}">instant</span><h3>Use what we know</h3><p>Options we've shipped or quoted on these lanes in the last six months, priced at the average approved rate and timed on what the lanes actually achieved.</p><div class="when">Ready now · labelled <i>from history</i></div></div>
+      <div style="display:flex;gap:14px;margin-top:16px;">
+        <div class="d2r-way${f.source === 'history' ? ' on' : ''}" data-src="history"><span class="d2r-pill" style="position:absolute;top:14px;right:14px;background:${C.tint};color:${C.mute}">instant</span><h3>Use what we know</h3><p>Options we've shipped or quoted on these lanes in the last six months, priced at the average approved rate and timed on what the lanes actually achieved.</p><div class="when">Ready now · labelled <i>from history</i></div></div>
         <div class="d2r-way${f.source === 'ask' ? ' on' : ''}" data-src="ask"><h3>Ask VelOzity</h3><p>Fresh carrier options for this period — sailings, flights, transit and price — checked by VelOzity before you see them. Upgrade a history run to this any time.</p><div class="when">Usually within a business day · labelled <i>approximate</i>, with a validity date</div></div>
       </div>
-      <div style="display:flex;gap:12px;align-items:center;margin-top:14px;"><button class="d2r-btn" id="d2r-go" ${pf.units == null ? 'disabled' : ''}>${f.source === 'history' ? 'Build the options' : 'Ask VelOzity'}</button>
-        <input id="d2r-note" placeholder="Note for VelOzity (optional)" style="flex:1;border:0.5px solid rgba(0,0,0,.16);border-radius:999px;padding:8px 14px;font:inherit;font-size:12.5px;" value="${esc(f.note || '')}">
+      <div style="display:flex;gap:12px;align-items:center;margin-top:16px;"><button class="d2r-btn" id="d2r-go" style="height:44px;padding:0 22px;font-size:13px" ${pf.units == null ? 'disabled' : ''}>${f.source === 'history' ? 'Build the options' : 'Ask VelOzity'}</button>
+        <input id="d2r-note" placeholder="Note for VelOzity (optional)" style="flex:1;border:0.5px solid ${C.line2};border-radius:999px;padding:10px 14px;font:inherit;font-size:12.5px;background:${C.card2};color:${C.text}" value="${esc(f.note || '')}">
         ${(pf.supplier_notes || []).length ? `<span class="d2r-note" style="margin:0">Accounting for: ${esc(pf.supplier_notes.join(' · '))}</span>` : ''}</div></div>`;
   }
   function detailHtml(r) {
     const st = STATE[r.client_state] || STATE.requested; const vol = r.volume || {}; const opts = (r.options || []).filter(o => o.state !== 'withdrawn');
-    const pickable = r.client_state === 'options_ready' || (r.client_state === 'picked'); const firm = r.client_state === 'firm';
+    const pickable = r.client_state === 'options_ready' || r.client_state === 'picked'; const firm = r.client_state === 'firm';
     const canPick = pickable && opts.some(o => o.state === 'approximate');
-    const row = o => { const os = OSTATE[o.state] || OSTATE.approximate; const dead = ['expired', 'withdrawn'].includes(o.state); const pk = ['picked', 'confirmed', 'firm', 'approved'].includes(o.state);
-      return `<tr class="${dead ? 'dead' : ''}${pk ? ' pick' : ''}"><td>${canPick && !dead ? `<input type="checkbox" data-pick="${esc(o.id)}" ${pk ? 'checked' : ''} style="width:auto">` : ''}</td><td><span class="d2r-mode ${o.mode.toLowerCase()}">${esc(o.mode)}</span></td><td>${esc([o.carrier, o.service].filter(Boolean).join(' · ') || (o.kind === 'history' ? 'From history' : 'Option'))}${o.kind === 'history' ? `<div style="font-size:10.5px;color:${C.dim}">from history</div>` : ''}</td><td>${o.container_size ? esc(o.container_size) + "'" : '—'}</td><td>${esc(dmy(o.departs))}${o.cutoff ? `<div style="font-size:10.5px;color:${C.dim}">cut-off ${esc(dmy(o.cutoff))}</div>` : ''}</td><td class="r">${o.transit_days != null ? esc(o.transit_days) + ' d' : '—'}</td><td>${esc(dmy(o.valid_until))}</td>
-        <td class="r"><b>${o.price != null ? esc(money(o.price, o.currency)) : (r.client_state === 'with_velozity' || r.client_state === 'requested' ? '<span style="color:' + C.dim + ';font-weight:400">pricing</span>' : '—')}</b>${o.price != null ? `<div style="font-size:10.5px;color:${C.dim}">${o.price_basis === 'per_container' ? 'per container' : o.price_basis === 'per_kg' ? 'per kg' : 'total'}${o.firm ? '' : ' · approximate'}</div>` : ''}</td><td><span class="d2r-pill" style="background:${os[1]};color:${os[2]}">${esc(os[0])}</span></td></tr>`; };
-    let html = `<div class="d2r-sec"><h2>${esc(r.period_label)} · ${esc(r.ref)}</h2><span class="d2r-pill" style="background:${st[1]};color:${st[2]}">${esc(st[0])}</span><span>${esc((r.origins || []).join(' · ') || '—')} → ${esc(r.destination || 'Sydney')}${r.need_by ? ` · in FC by ${esc(dmy(r.need_by))}` : ''} · ${nf(vol.units)} units</span>
-      <span style="margin-left:auto;display:flex;gap:8px;">${firm ? `<button class="d2r-btn sm" data-act="approve">Approve</button><button class="d2r-btn sm sec" data-act="decline">Decline</button>` : ''}${canPick ? `<button class="d2r-btn sm" data-act="pick">Pick & ask VelOzity to confirm</button>` : ''}${r.client_state === 'expired' || (r.client_state === 'requested' && r.source === 'history') ? `<button class="d2r-btn sm" data-act="refresh">Ask VelOzity${r.client_state === 'expired' ? ' to refresh' : ''}</button>` : ''}${!['approved', 'declined'].includes(r.client_state) && !firm ? `<button class="d2r-btn sm sec" data-act="decline">Withdraw</button>` : ''}</span></div>`;
-    if ((vol.supplier_notes || []).length) html += `<div class="d2r-note" style="margin:-4px 0 8px">Accounting for supplier history: ${esc(vol.supplier_notes.join(' · '))}</div>`;
+    const live = opts.filter(o => !['expired', 'withdrawn'].includes(o.state)); const sea = live.filter(o => o.mode === 'Sea'), air = live.filter(o => o.mode === 'Air');
+    const card = o => { const os = OSTATE[o.state] || OSTATE.approximate; const dead = ['expired', 'withdrawn'].includes(o.state); const pk = _picks.has(o.id) || ['picked', 'confirmed', 'firm', 'approved'].includes(o.state); const can = canPick && !dead && ['approximate', 'picked'].includes(o.state);
+      const basis = o.price_basis === 'per_container' ? 'per container' : o.price_basis === 'per_kg' ? 'per chargeable kg' : 'total';
+      return `<div class="d2r-opt${dead ? ' dead' : ''}${pk ? ' pk' : ''}${can ? ' can' : ''}" ${can ? `data-pick="${esc(o.id)}"` : ''}>
+        ${can || pk ? `<div class="pickmark">${pk ? '✓' : ''}</div>` : ''}
+        <div class="top"><span class="d2r-g ${o.mode.toLowerCase()}">${esc(o.mode.toUpperCase())}</span><div class="nm">${esc([o.carrier, o.service].filter(Boolean).join(' · ') || (o.kind === 'history' ? 'From history' : 'Option'))}<small>${o.kind === 'history' ? 'from what we know' : (o.firm ? 'firm' : 'approximate')}${o.container_size ? ` · ${esc(o.container_size)}'` : ''}${o.origin ? ' · ' + esc(o.origin) : ''}</small></div></div>
+        <div class="price">${o.price != null ? esc(money(o.price, o.currency)) : `<span style="font-size:14px;color:${C.dim};font-weight:400">${r.client_state === 'with_velozity' || r.client_state === 'requested' ? 'pricing with VelOzity' : '—'}</span>`}<small>${o.price != null ? basis + ' · ex GST' : ''}</small></div>
+        <div class="facts"><span>departs <b>${esc(dmy(o.departs))}</b></span><span>transit <b>${o.transit_days != null ? esc(o.transit_days) + ' d' : '—'}</b> <span style="color:${C.faint}">port to port</span></span><span>valid to <b>${esc(dmy(o.valid_until))}</b></span>${o.cutoff ? `<span>cut-off <b>${esc(dmy(o.cutoff))}</b></span>` : ''}</div>
+        <div><span class="d2r-pill" style="background:${os[1]};color:${os[2]}">${esc(os[0])}</span></div></div>`; };
+    let html = `<div class="d2r-sec"><h2>${esc(r.period_label)} · ${esc(r.ref)}</h2><span class="d2r-pill" style="background:${st[1]};color:${st[2]}">${esc(st[0])}</span><span>${esc((r.origins || []).join(' · ') || '—')} → ${esc(r.destination || 'Sydney')}${r.need_by ? ` · in FC by <b style="color:${C.text}">${esc(dmy(r.need_by))}</b>` : ''} · ${nf(vol.units)} units${vol.expected_units && vol.expected_units !== vol.units ? ` · expected ${nf(vol.expected_units)}` : ''}</span>
+      <span style="margin-left:auto;display:flex;gap:8px;">${firm ? `<button class="d2r-btn sm" data-act="approve">Approve</button><button class="d2r-btn sm sec" data-act="decline">Decline</button>` : ''}${canPick ? `<button class="d2r-btn sm" data-act="pick" ${_picks.size ? '' : 'disabled'}>Pick ${_picks.size || ''} &amp; ask VelOzity to confirm</button>` : ''}${r.client_state === 'expired' || (r.client_state === 'requested' && r.source === 'history') ? `<button class="d2r-btn sm" data-act="refresh">Ask VelOzity${r.client_state === 'expired' ? ' to refresh' : ''}</button>` : ''}${!['approved', 'declined'].includes(r.client_state) && !firm ? `<button class="d2r-btn sm sec" data-act="decline">Withdraw</button>` : ''}</span></div>`;
+    if ((vol.supplier_notes || []).length) html += `<div class="d2r-note" style="margin:-4px 0 10px;color:${C.mute}">Accounting for supplier history: ${esc(vol.supplier_notes.join(' · '))}</div>`;
     if (!opts.length) html += `<div class="d2r-empty">${r.client_state === 'requested' ? (r.source === 'history' ? 'Nothing on these lanes in the last six months — Ask VelOzity for fresh options.' : 'VelOzity has asked the carriers. You\'ll get an email when the options are ready.') : 'No options on this request.'}</div>`;
-    else html += `<table class="d2r-opts"><tr><th></th><th>Mode</th><th>Option</th><th>Container</th><th>Departs</th><th class="r">Transit</th><th>Valid to</th><th class="r">Price</th><th>State</th></tr>${opts.map(row).join('')}</table>
-      <div class="d2r-note">${firm ? 'Firm prices carry a validity date. Approving saves these as the period\'s approved quotes and VelOzity instructs the carrier.' : r.client_state === 'picked' ? 'VelOzity is confirming the price for your pick. Approval opens once it is firm.' : 'Prices are ex GST. Approximate prices become firm when VelOzity confirms them for your pick. Pick two options to split the period across them.'}</div>`;
-    if (_internal && _internal.id === r.id) html += internalHtml(_internal);
+    else {
+      html += `<div class="d2r-kpis"><div class="d2r-kpi"><small>Options</small><b>${live.length}</b><i>${sea.length} sea · ${air.length} air</i></div>
+        <div class="d2r-kpi"><small>Fastest</small><b>${live.some(o => o.transit_days != null) ? Math.min(...live.filter(o => o.transit_days != null).map(o => o.transit_days)) + ' d' : '—'}</b><i>port to port · our stages are added in the simulation</i></div>
+        <div class="d2r-kpi"><small>Lowest sea price</small><b>${sea.some(o => o.price != null) ? esc(money(Math.min(...sea.filter(o => o.price != null).map(o => o.price)), sea.find(o => o.price != null).currency)) : '—'}</b><i>per container</i></div>
+        <div class="d2r-kpi"><small>In Sydney FC by</small><b>${esc(dmy(r.need_by))}</b><i>${r.need_by ? 'every option is judged against this date' : 'no date set'}</i></div></div>`;
+      html += `<div class="d2r-ogrid">${opts.map(card).join('')}</div>
+      <div class="d2r-note">${firm ? 'Firm prices carry a validity date. Approving saves these as the period\'s approved quotes and VelOzity instructs the carrier.' : r.client_state === 'picked' ? 'VelOzity is confirming the price for your pick. Approval opens once it is firm.' : 'Prices are ex GST. Approximate prices become firm when VelOzity confirms them for your pick. Pick two options to split the period across them. Simulation boards — days to FC, the chance of making your date, splits — arrive next.'}</div>`;
+    }
     return html;
-  }
-  function internalHtml(x) {
-    const opts = x.options || []; const mk = x.markup || {}; const can = { release: ['requested', 'options_offered', 'released'].includes(x.state) && opts.some(o => o.state === 'approximate'), firm: ['picked', 'cost_confirmed'].includes(x.state) };
-    const row = o => { const dead = ['expired', 'withdrawn', 'approved'].includes(o.state); const cost = o.confirmed_cost != null ? o.confirmed_cost : o.cost;
-      return `<tr class="${dead ? 'dead' : ''}"><td><span class="d2r-mode ${o.mode.toLowerCase()}">${esc(o.mode)}</span></td><td>${esc([o.carrier, o.service].filter(Boolean).join(' · ') || (o.kind === 'history' ? 'From history' : '—'))}<div style="font-size:10.5px;color:${C.dim}">${esc(o.partner_name || (o.kind === 'history' ? 'no partner yet' : '—'))}${o.validity_days != null && o.validity_days < 3 && !dead ? ` · <span style="color:${C.amber};font-weight:700">valid ${o.validity_days} d</span>` : ''}</div></td>
-        <td class="r">${cost != null ? esc(money(cost, o.cost_currency)) : '—'}${o.confirmed_cost != null ? `<div style="font-size:10.5px;color:${C.good}">confirmed${o.confirmed_cost !== o.cost ? ' · was ' + esc(money(o.cost, o.cost_currency)) : ''}</div>` : (o.local_charges ? `<div style="font-size:10.5px;color:${C.dim}">incl. ${esc(money(o.local_charges, o.cost_currency))} local</div>` : '')}</td>
-        <td class="r">${dead ? (o.markup_pct != null ? esc(o.markup_pct) + '%' : '—') : `<input type="number" step="0.5" min="0" data-mk="${esc(o.id)}" value="${o.markup_pct != null ? esc(o.markup_pct) : ''}" placeholder="${esc(mk[o.mode] != null ? mk[o.mode] : '')}">%`}</td>
-        <td class="r">${dead ? (o.price != null ? esc(money(o.price, o.currency)) : '—') : `<input type="number" step="1" min="0" data-px="${esc(o.id)}" value="${o.price != null ? esc(o.price) : ''}" placeholder="price">`}</td>
-        <td class="r" style="color:${o.margin != null && o.margin < 0 ? C.wine : C.text}">${o.margin != null ? esc(money(o.margin, o.currency)) + ` <span style="color:${C.dim}">${esc(o.margin_pct)}%</span>` : '—'}</td>
-        <td><span class="d2r-pill" style="background:${(OSTATE[o.state] || OSTATE.approximate)[1]};color:${(OSTATE[o.state] || OSTATE.approximate)[2]}">${esc(o.state)}</span></td>
-        <td style="white-space:nowrap">${o.state === 'picked' ? `<button class="d2r-btn sm sec" data-iact="confirm" data-oid="${esc(o.id)}">Confirm cost</button> ` : ''}${!dead ? `<button class="d2r-btn sm sec" data-iact="withdraw" data-oid="${esc(o.id)}">Withdraw</button>` : ''}</td></tr>`; };
-    const links = (x.links || []).slice(0, 6).map(l => `${esc(l.partner_name || 'partner')} · ${l.purpose === 'partner_options' ? 'options' : 'confirm'} link ${l.used_at ? 'used ' + esc(dmy(l.used_at)) : 'sent ' + esc(dmy(l.created_at))}`).join(' · ');
-    return `<div class="d2r-int"><div class="t">Internal · ${esc(ISTATE[x.state] || x.state)}<span style="margin-left:auto;display:flex;gap:6px;font-weight:400;text-transform:none;letter-spacing:0;">
-        <button class="d2r-btn sm sec" data-iact="rfq">Re-send carrier links</button><button class="d2r-btn sm sec" data-iact="add">Add option by hand</button>
-        ${can.release ? `<button class="d2r-btn sm" data-iact="release">Release to client</button>` : ''}${can.firm ? `<button class="d2r-btn sm" data-iact="release">Release firm price</button>` : ''}</span></div>
-      <div class="d2r-note" style="margin-top:4px">Partner cost and margin — never shown to the client. Markup defaults: Air ${esc(mk.Air)}% · Sea ${esc(mk.Sea)}% (Finance › Rates). Type a markup or a price; the other follows. ${x.state === 'picked' ? 'Confirm by hand if the carrier phoned it in.' : ''}</div>
-      ${opts.length ? `<table class="d2r-opts" style="margin-top:8px"><tr><th>Mode</th><th>Option · partner</th><th class="r">Cost</th><th class="r">Markup</th><th class="r">Price</th><th class="r">Margin</th><th>State</th><th></th></tr>${opts.map(row).join('')}</table>` : `<div class="d2r-note">No options yet. ${links ? '' : 'No carrier partner is configured for this client — add one under Finance › Quotes.'}</div>`}
-      ${links ? `<div class="d2r-note">${links}</div>` : ''}
-      <div class="d2r-ev">${(x.events || []).slice(-12).reverse().map(e => `${esc(String(e.created_at).slice(0, 16).replace('T', ' '))} · ${esc(e.actor || 'system')} · ${esc(e.to_state ? '→ ' + e.to_state + (e.detail ? ' · ' + e.detail : '') : e.detail || '')}`).join('<br>')}</div></div>`;
   }
 
   // ── events ──
@@ -212,30 +209,15 @@
     s.querySelectorAll('[data-act]').forEach(b => b.onclick = async () => {
       const act = b.dataset.act, id = _open; if (!id) return;
       try {
-        if (act === 'pick') { const ids = [...s.querySelectorAll('[data-pick]:checked')].map(i => i.dataset.pick); if (!ids.length) { toast('Tick the option(s) to pick'); return; } b.disabled = true; const r = await req(`/rq/requests/${encodeURIComponent(id)}/pick`, { method: 'POST', body: JSON.stringify({ option_ids: ids }) }); toast(`Picked · VelOzity is confirming the price${r.confirm_links_sent ? '' : ' by hand'}`); }
+        if (act === 'pick') { const ids = [..._picks]; if (!ids.length) { toast('Choose the option(s) to pick'); return; } b.disabled = true; const r = await req(`/rq/requests/${encodeURIComponent(id)}/pick`, { method: 'POST', body: JSON.stringify({ option_ids: ids }) }); toast(`Picked · VelOzity is confirming the price${r.confirm_links_sent ? '' : ' by hand'}`); }
         else if (act === 'approve') { if (!confirm('Approve the firm option(s)? This becomes the period\'s approved quote and VelOzity instructs the carrier.')) return; b.disabled = true; await req(`/rq/requests/${encodeURIComponent(id)}/approve`, { method: 'POST', body: '{}' }); toast('Approved'); }
         else if (act === 'decline') { const note = prompt('Decline or withdraw this request — a note for VelOzity (optional):'); if (note === null) return; b.disabled = true; await req(`/rq/requests/${encodeURIComponent(id)}/decline`, { method: 'POST', body: JSON.stringify({ note }) }); toast('Declined'); }
         else if (act === 'refresh') { b.disabled = true; const r = await req(`/rq/requests/${encodeURIComponent(id)}/refresh`, { method: 'POST', body: '{}' }); toast(r.partner_links_sent ? 'VelOzity asked for fresh options' : 'Request re-opened — no carrier link could be sent'); }
         await refreshAll();
       } catch (e) { toast(e.message); b.disabled = false; }
     });
-    // internal
-    s.querySelectorAll('[data-mk]').forEach(i => i.onchange = () => price(i.dataset.mk, { markup_pct: Number(i.value) }));
-    s.querySelectorAll('[data-px]').forEach(i => i.onchange = () => price(i.dataset.px, { price: Number(i.value) }));
-    s.querySelectorAll('[data-iact]').forEach(b => b.onclick = async () => {
-      const act = b.dataset.iact, id = _open, oid = b.dataset.oid;
-      try {
-        if (act === 'release') { if (!confirm('Release to the client? They get an email with the options.')) return; b.disabled = true; await req(`/rq/internal/requests/${encodeURIComponent(id)}/release`, { method: 'POST', body: '{}' }); toast('Released'); }
-        else if (act === 'rfq') { const note = prompt('Note to the carrier partners (optional):'); if (note === null) return; const r = await req(`/rq/internal/requests/${encodeURIComponent(id)}/rfq`, { method: 'POST', body: JSON.stringify({ note }) }); toast(r.sent.length ? `Links sent to ${r.sent.map(x => x.partner).join(', ')}` : 'No carrier partner configured — Finance › Quotes'); }
-        else if (act === 'withdraw') { if (!confirm('Withdraw this option?')) return; await req(`/rq/internal/requests/${encodeURIComponent(id)}/options/${encodeURIComponent(oid)}/withdraw`, { method: 'POST', body: '{}' }); toast('Withdrawn'); }
-        else if (act === 'confirm') { const c = prompt('Confirmed freight cost (partner currency):'); if (c === null || c === '') return; const l = prompt('Local charges (0 if none):', '0'); if (l === null) return; await req(`/rq/internal/requests/${encodeURIComponent(id)}/options/${encodeURIComponent(oid)}/confirm`, { method: 'POST', body: JSON.stringify({ cost_amount: Number(c), local_charges: Number(l) || 0, note: 'confirmed by hand' }) }); toast('Cost confirmed'); }
-        else if (act === 'add') { const mode = prompt('Mode: Sea or Air', 'Sea'); if (!mode) return; const carrier = prompt('Carrier'); if (carrier === null) return; const service = prompt('Service / loop'); if (service === null) return; const cs = /air/i.test(mode) ? null : prompt("Container size: 20, 40 or 40HC", '40'); const dep = prompt('Departs (YYYY-MM-DD)', ''); const tr = prompt('Transit days', ''); const cost = prompt(/air/i.test(mode) ? 'Cost per chargeable kg' : 'Cost per container (freight)', ''); if (cost === null) return; const loc = prompt('Local charges', '0'); const vu = prompt('Valid to (YYYY-MM-DD)', addDays(todayYmd(), 7));
-          await req(`/rq/internal/requests/${encodeURIComponent(id)}/options`, { method: 'POST', body: JSON.stringify({ mode, carrier, service, container_size: cs, departs: dep || null, transit_days: tr === '' ? null : Number(tr), cost_amount: Number(cost), local_charges: Number(loc) || 0, valid_until: vu || null }) }); toast('Option added'); }
-        await refreshAll();
-      } catch (e) { toast(e.message); b.disabled = false; }
-    });
+    s.querySelectorAll('.d2r-opt[data-pick]').forEach(c => c.onclick = () => { const id = c.dataset.pick; if (_picks.has(id)) _picks.delete(id); else _picks.add(id); render(); });
   }
-  async function price(oid, body) { try { await req(`/rq/internal/requests/${encodeURIComponent(_open)}/options/${encodeURIComponent(oid)}/price`, { method: 'POST', body: JSON.stringify(body) }); await refreshAll(); } catch (e) { toast(e.message); } }
   function pin() { const r = _open && (_list || []).find(x => x.id === _open); if (window._pulseRail && typeof window._pulseRail.setPin === 'function') window._pulseRail.setPin(r ? { page: 'simulator', label: `${r.ref} · ${r.period_label}`, ids: [], ref: r.ref } : null); }
 
   // ── boot ──
