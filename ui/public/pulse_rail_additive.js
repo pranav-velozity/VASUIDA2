@@ -1,4 +1,5 @@
-/* ── VelOzity Pinpoint — Pulse rail v8 ──
+/* ── VelOzity Pinpoint — Pulse rail v9 ──
+   v9: page detection for Supplier performance and Simulator by hash (they left the top nav).
    v8: Simulator page — request verbs through get_requests / request_options / pick_option, and a request pin.
    v6: Performance page — its own eyebrow, verbs that go through get_signals, and a supplier pin.
    Pulse moves from the bottom bar to a right-hand rail and speaks first: a briefing surface at
@@ -170,10 +171,10 @@
   // ── where are we ──
   function pageKey() {
     const a = document.querySelector('.pn-nav-item.active'); const id = a ? a.id : '';
-    if (id === 'nav-receiving') return 'receiving'; if (id === 'nav-map') return 'transit'; if (id === 'nav-performance') return 'performance'; if (id === 'nav-simulator') return 'simulator';
+    if (id === 'nav-receiving') return 'receiving'; if (id === 'nav-map') return 'transit'; if (location.hash === '#performance') return 'performance'; if (/^#simulator/.test(location.hash)) return 'simulator';
     if (id === 'nav-weekhub' || !id) return 'weekhub'; return 'other';
   }
-  const PAGE_LABEL = { weekhub: 'Week Hub', receiving: 'Receiving', transit: 'Transit', performance: 'Performance', simulator: 'Simulator', other: 'Pinpoint' };
+  const PAGE_LABEL = { weekhub: 'Week Hub', receiving: 'Receiving', transit: 'Transit', performance: 'Supplier performance', simulator: 'Simulator', other: 'Pinpoint' };
   const weekLabel = () => { const ws = window.state && window.state.weekStart; if (!ws) return ''; const d = new Date(ws + 'T00:00:00Z'); if (isNaN(d)) return ''; const x = new Date(d); x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7) + 3); const f = new Date(Date.UTC(x.getUTCFullYear(), 0, 4)); return 'W' + (1 + Math.round(((x - f) / 86400000 - 3 + ((f.getUTCDay() + 6) % 7)) / 7)); };
 
   // ── ask Pulse (same path as typing) ──
@@ -503,7 +504,7 @@
     layout(); paint(); compactHeader();
     spend(); setInterval(spend, 5 * 60 * 1000);
     const chat = document.getElementById('pulse-chat'); if (chat) new MutationObserver(scheduleSpend).observe(chat, { childList: true });
-    console.log('[pulse-rail] v8 on');
+    console.log('[pulse-rail] v9 on');
   }
   function disable() { if (!R.state.on) return; release(); R.state.on = false; document.body.classList.remove('pr-on', 'pr-overlay', 'pr-hdr', 'pr-focus'); if (R.el) R.el.classList.add('hidden'); }
 
