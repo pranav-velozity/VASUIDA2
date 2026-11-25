@@ -1,4 +1,5 @@
-/* ── VelOzity Pinpoint — Performance v3 ──
+/* ── VelOzity Pinpoint — Performance v4 ──
+   v4: 'Supplier performance', opened from Reports & Downloads rather than the top nav.
    v3: no volume & price block — this page is for clients too, and nothing here touches cost or margin.
    v2: Pinpoint's own light look (only the simulator is dark); delivery accuracy (over / under
    against plan, tolerance per client) and compliance from the Exception log on every card.
@@ -15,7 +16,7 @@
    same question a person would type, so answers come through get_signals, never arithmetic. */
 (function () {
   if (window.__perfLoaded) return; window.__perfLoaded = true;
-  const BUILD = 'perf-3';
+  const BUILD = 'perf-4';
   const el = id => document.getElementById(id);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const nf = n => n == null ? '—' : Number(n).toLocaleString();
@@ -121,12 +122,21 @@
   }
 
   // ── nav + route ──
+  // v4: no top-nav item. Supplier performance lives under Reports & Downloads as its own section card.
   function injectNav() {
-    if (el('nav-performance')) return;
-    const nav = el('pn-nav-items'), after = el('nav-map'); if (!nav || !after) return;
-    const a = document.createElement('a'); a.className = 'pn-nav-item'; a.id = 'nav-performance'; a.href = '#performance'; a.textContent = 'Performance';
-    a.onclick = (e) => { e.preventDefault(); window.show('#performance'); };
-    after.insertAdjacentElement('afterend', a);
+    const stale = el('nav-performance'); if (stale) stale.remove();
+    const page = el('page-reports'); if (!page || el('rp-supplier-performance')) return;
+    const anchor = page.querySelector('#rp-week-header'); if (!anchor) return;
+    const card = document.createElement('div'); card.id = 'rp-supplier-performance';
+    card.style.cssText = 'background:#fff;border:0.5px solid rgba(0,0,0,0.08);border-radius:12px;overflow:hidden;margin-bottom:14px;';
+    card.innerHTML = `<div style="padding:12px 18px;border-bottom:0.5px solid rgba(0,0,0,0.06);display:flex;align-items:center;justify-content:space-between;">
+        <div style="font-size:12px;font-weight:500;color:#1C1C1E;display:flex;align-items:center;gap:8px;"><span>Supplier performance</span><span style="font-size:9px;background:#F5F5F7;color:#AEAEB2;padding:2px 8px;border-radius:10px;">live page</span></div>
+        <span style="font-size:10px;color:#AEAEB2;">measured from Pinpoint records · last 26 weeks</span></div>
+      <div style="padding:14px 18px;display:flex;align-items:center;gap:14px;">
+        <div style="flex-shrink:0;width:36px;height:36px;border-radius:9px;background:#F5F5F7;display:flex;align-items:center;justify-content:center;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#990033" stroke-width="1.6" stroke-linecap="round"><path d="M3 3v18h18"/><polyline points="18 9 12 15 8 11 3 16"/></svg></div>
+        <div style="flex:1;min-width:0;"><div style="font-size:12px;font-weight:500;color:#1C1C1E;">Fill rate, on-time, accuracy and Exception-log compliance per supplier; achieved transit per lane against the quote.</div><div style="font-size:10px;color:#6E6E73;margin-top:3px;">Computed nightly from plans, receiving, transit milestones and the Exception log. Click a supplier on the page for its week-by-week table.</div></div>
+        <button id="rp-open-performance" style="flex-shrink:0;background:#1C1C1E;color:#fff;border:none;border-radius:9px;padding:9px 16px;font-size:11.5px;font-weight:500;cursor:pointer;font-family:inherit;">Open</button></div>`;
+    anchor.insertAdjacentElement('afterend', card); el('rp-open-performance').onclick = () => window.show('#performance');
   }
   function section() {
     let s = el('page-performance');
@@ -144,7 +154,7 @@
         if (typeof window.hideReceivingPage === 'function') { try { window.hideReceivingPage(); } catch (_) {} }
         if (location.hash !== '#performance') history.replaceState(null, '', '#performance');
         const s = section(); s.classList.remove('hidden'); s.style.display = 'block';
-        document.querySelectorAll('.pn-nav-item').forEach(x => x.classList.remove('active')); const n = el('nav-performance'); if (n) n.classList.add('active');
+        document.querySelectorAll('.pn-nav-item').forEach(x => x.classList.remove('active')); const n = el('nav-reports'); if (n) n.classList.add('active');
         _isOpen = true; open().catch(e => console.error('[performance] open failed', e));
         return;
       }
@@ -194,7 +204,7 @@
     const d = _data, sup = d.suppliers || [], lanes = d.lanes || [];
     const isAdmin = (window._pnRoleKey || '') === 'org:admin_auth';
     if (!d.computed_at && !sup.length) {
-      s.innerHTML = `<div class="perf"><div class="perf-eyebrow">Performance</div><h1 class="perf-h1">Nothing measured yet</h1><div class="perf-empty" style="margin-top:16px">The signals job runs nightly over the last ${d.window_weeks} weeks of plans, receiving and transit. ${isAdmin ? 'You can run it now for this client.' : 'Check back after the next run.'}${isAdmin ? '<br><button class="perf-btn" id="perf-run">Compute now</button>' : ''}</div></div>`;
+      s.innerHTML = `<div class="perf"><div class="perf-eyebrow">Supplier performance</div><h1 class="perf-h1">Nothing measured yet</h1><div class="perf-empty" style="margin-top:16px">The signals job runs nightly over the last ${d.window_weeks} weeks of plans, receiving and transit. ${isAdmin ? 'You can run it now for this client.' : 'Check back after the next run.'}${isAdmin ? '<br><button class="perf-btn" id="perf-run">Compute now</button>' : ''}</div></div>`;
       const b = el('perf-run'); if (b) b.onclick = async () => { b.disabled = true; b.textContent = 'Computing…'; try { await req('/signals/run', { method: 'POST', body: '{}' }); await open(true); } catch (e) { b.disabled = false; b.textContent = 'Compute now'; alert('Run failed: ' + e.message); } };
       return;
     }
@@ -213,8 +223,8 @@
       ['Who over- or under-delivers?', 'Which suppliers deliver over or under plan beyond the tolerance, and which have the most Exception log incidents? Use measured figures with sample sizes.']].filter(Boolean);
 
     let html = `<div class="perf" data-build="${BUILD}">
-      <div class="perf-head"><div><div class="perf-eyebrow">Performance · last ${d.window_weeks} weeks</div>
-        <h1 class="perf-h1">Performance</h1>
+      <div class="perf-head"><div><div class="perf-eyebrow"><a href="#reports" data-back style="color:${C.dim};text-decoration:none">← Reports &amp; Downloads</a> &nbsp;·&nbsp; last ${d.window_weeks} weeks</div>
+        <h1 class="perf-h1">Supplier performance</h1>
         <div class="perf-sub">Suppliers and lanes from Pinpoint's own records — computed ${d.computed_at ? dmy(d.computed_at) : '—'}, never estimated. Every figure carries its sample; thin samples say so.</div></div>
         <div class="perf-chips">${chips.map(c => `<button class="perf-chip" data-q="${esc(c[1])}"><i></i>${esc(c[0])}</button>`).join('')}</div></div>
       <div class="perf-kpis">
@@ -274,6 +284,7 @@
     s.innerHTML = html;
 
     s.querySelectorAll('[data-q]').forEach(b => b.onclick = (e) => { e.stopPropagation(); ask(b.dataset.q); });
+    const back = s.querySelector('[data-back]'); if (back) back.onclick = (e) => { e.preventDefault(); window.show('#reports'); };
     s.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => { _mode = b.dataset.mode; render(); });
     s.querySelectorAll('.perf-card[data-sup]').forEach(c => c.onclick = () => { _sel = _sel === c.dataset.sup ? null : c.dataset.sup; pinSupplier(_sel); render(); });
     const tb = el('perf-tol-save'); if (tb) tb.onclick = async () => { const v = Number(el('perf-tol').value); if (!isFinite(v) || v < 0 || v > 50) return alert('Tolerance must be between 0 and 50 %.'); tb.disabled = true; tb.textContent = 'Saving…'; try { await req('/signals/settings', { method: 'PUT', body: JSON.stringify({ accuracy_tolerance_pct: v }) }); await open(true); } catch (e) { tb.disabled = false; tb.textContent = 'Save'; alert('Could not save: ' + e.message); } };

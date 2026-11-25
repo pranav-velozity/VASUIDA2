@@ -174,6 +174,33 @@ module.exports = function makePulseTools(deps) {
       },
     },
     {
+      name: 'simulate',
+      description: 'Run the door-to-door simulation on a request: every released option and every sea/air split, each with Price, days to the Sydney FC (P50–P90, built from lane rules plus measured slip), and the chance of being in FC by the need-by date. Supplier adjustments (fill rate, packing-list lateness) are on by default; switch one off with adjust. Returns the recommended point (cheapest that clears 80% on time), the cheapest and the fastest. Use for "which option should we pick", "will option B make the date", "what if we send NIR\'s POs by air".',
+      input_schema: { type: 'object', properties: { ref: { type: 'string', description: 'request reference, e.g. RQ-2611-07' }, need_by: { type: 'string', description: 'optional YYYY-MM-DD to test a different date' }, adjust_off: { type: 'array', items: { type: 'string' }, description: 'supplier names whose history adjustment to switch off' }, overrides: { type: 'object', description: 'PO number → option id to force a PO onto a leg' } }, required: ['ref'] },
+      tier: 'read', roles: ['admin', 'ops', 'client', 'partner'],
+      async run(a, ctx) {
+        const r = await callRoute(ctx, 'GET', '/rq/requests'); if (!r.ok) return { error: r.error }; const x = (r.data.requests || []).find(q => String(q.ref).toLowerCase() === String(a.ref || '').toLowerCase()); if (!x) return { error: `no request ${a.ref}` };
+        const adjust = {}; for (const s of (a.adjust_off || [])) adjust[String(s).trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()] = false;
+        const sres = await callRoute(ctx, 'POST', `/rq/requests/${encodeURIComponent(x.id)}/simulate`, { adjust, overrides: a.overrides || {}, need_by: a.need_by || null }); if (!sres.ok) return { error: sres.error };
+        const o = sres.data; const pt = (p) => ({ id: p.id, label: p.label, kind: p.kind, price: p.price, currency: p.currency, price_per_unit: p.price_per_unit, in_fc_p50: p.fc_p50, in_fc_p90: p.fc_p90, days_p50: p.days_p50, days_p90: p.days_p90, on_time_pct: p.prob, frontier: p.frontier, legs: p.legs.map(l => ({ mode: l.mode, carrier: l.carrier, pos: l.po_count, units: l.units, price: l.price, departs: l.departs, in_fc_p50: l.fc_p50, rolled_to_next_departure: l.rolled, transit_quoted: l.transit_quoted, lane_sample: l.sample && l.sample.lane })), split: p.split ? { air_pos: p.split.air_pos, sea_pos: p.split.sea_pos } : undefined });
+        return { ref: o.ref, period: o.period_label, need_by: o.need_by, units: o.total_units, expected_units: o.expected_units, suppliers: o.suppliers.map(s => ({ supplier: s.supplier, fill_rate: s.fill_rate, packing_list_late_p50: s.ready_late_p50, adjust: s.adjust, confidence: s.confidence })), assumptions: o.assumptions, recommendation: o.recommendation, recommended: o.recommended, cheapest: o.cheapest, fastest: o.fastest, points: o.points.slice(0, 10).map(pt) };
+      },
+    },
+    {
+      name: 'explain_option',
+      description: 'Explain one simulated point on a request (an option id or a split id from simulate): the stage-by-stage dates for the latest PO, which POs roll to a later departure and why, the lane sample behind the transit, and the chance of making the date. Use for "why does option C make the date and B not", "what is holding the sea leg back".',
+      input_schema: { type: 'object', properties: { ref: { type: 'string' }, point_id: { type: 'string', description: 'option id, or sea+air split id, from simulate' } }, required: ['ref', 'point_id'] },
+      tier: 'read', roles: ['admin', 'ops', 'client', 'partner'],
+      async run(a, ctx) {
+        const r = await callRoute(ctx, 'GET', '/rq/requests'); if (!r.ok) return { error: r.error }; const x = (r.data.requests || []).find(q => String(q.ref).toLowerCase() === String(a.ref || '').toLowerCase()); if (!x) return { error: `no request ${a.ref}` };
+        const sres = await callRoute(ctx, 'POST', `/rq/requests/${encodeURIComponent(x.id)}/simulate`, {}); if (!sres.ok) return { error: sres.error };
+        const p = (sres.data.points || []).find(q => q.id === a.point_id); if (!p) return { error: `no point ${a.point_id} on ${a.ref}; ids: ${(sres.data.points || []).map(q => q.id).join(', ')}` };
+        return { ref: x.ref, point: p.label, price: p.price, currency: p.currency, in_fc_p50: p.fc_p50, in_fc_p90: p.fc_p90, on_time_pct: p.prob, need_by: sres.data.need_by,
+          legs: p.legs.map(l => { const latest = l.pos.slice().sort((u, v) => (v.p50.fc > u.p50.fc ? 1 : -1))[0]; return { mode: l.mode, carrier: l.carrier, service: l.service, pos: l.po_count, units: l.units, price: l.price, basis: l.basis, explain: l.explain, lane_sample: l.sample, rolled_pos: l.pos.filter(q => q.p50.rolled > 0).map(q => ({ po: q.po, supplier: q.supplier, departures_missed: q.p50.rolled })),
+            latest_po: latest ? { po: latest.po, supplier: latest.supplier, due: latest.due, on_time_pct: latest.prob == null ? null : Math.round(latest.prob * 100), p50: latest.p50, p90: latest.p90 } : null, at_risk_pos: l.pos.filter(q => q.prob != null && q.prob < 0.5).map(q => q.po) }; }) };
+      },
+    },
+    {
       name: 'pick_option',
       description: 'Pick one or more released options on a door-to-door request (a split is two picks). Picking asks VelOzity to confirm the price; the client approves once it is firm. Option ids come from get_requests.',
       input_schema: { type: 'object', properties: { ref: { type: 'string', description: 'request reference, e.g. RQ-2611-07' }, option_ids: { type: 'array', items: { type: 'string' } } }, required: ['ref', 'option_ids'] },

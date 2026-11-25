@@ -23,7 +23,7 @@
         PUBLIC_API_URL / PUBLIC_APP_URL as for air quotes, D2D_EXPIRY=off to stop the ticker. */
 const crypto = require('crypto');
 
-module.exports = function ({ app, db, authenticateRequest, requireRole, requireInternalOrg, requireClientOrInternal, curClient, tenancyResolve, writeOpLimiter, auditLog, sendViaResend, parseEmailList, escHtml, rateFor, aqNewId, aqChargeableKg, log }) {
+module.exports = function ({ app, db, authenticateRequest, requireRole, requireInternalOrg, requireClientOrInternal, curClient, tenancyResolve, rulesFor, writeOpLimiter, auditLog, sendViaResend, parseEmailList, escHtml, rateFor, aqNewId, aqChargeableKg, log }) {
   const L = log || console;
   const noop = (req, res, next) => next();
   writeOpLimiter = writeOpLimiter || noop; auditLog = auditLog || (() => noop);
@@ -45,6 +45,7 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
   const MARKUP_DEFAULT = { Air: 40, Sea: 20 };
   const markupFor = (client, mode) => rateFor ? rateFor(client, mode === 'Air' ? 'air_quote_markup' : 'sea_quote_markup', MARKUP_DEFAULT[mode]) : MARKUP_DEFAULT[mode];
   const LINK_DAYS = Math.max(1, parseInt(process.env.D2D_PARTNER_LINK_DAYS, 10) || 7);
+  const sim = require('./rq_simulate')({ db, rulesFor, log: L });
   const CONTAINER = ['20', '40', '40HC'];
 
   // ── Schema ──
@@ -168,14 +169,14 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
     for (const r of rows) { const name = String(r.supplier_name || r.supplier || 'Unknown').trim(); const k = supplierKey(name); const units = Number(r.target_qty || r.units || 0) || 0; const mode = modeOf(r.freight_type || r.freight || r.mode);
       const s = bySup.get(k) || { supplier: name, key: k, units: 0, pos: 0, sea_units: 0, air_units: 0, origin: so.get(k) ? so.get(k).origin_name : null, origin_id: so.get(k) ? so.get(k).origin_id : null, signal: sig.get(k) || null };
       s.units += units; s.pos++; if (mode === 'Air') s.air_units += units; else s.sea_units += units; bySup.set(k, s);
-      pos.push({ po: String(r.po_number || '').trim(), supplier: name, units, mode, due: r.due_date || null, week_start: r.week_start }); }
+      pos.push({ po: String(r.po_number || '').trim(), supplier: name, units, mode, due: r.due_date || null, week_start: r.week_start, facility: r.facility_name || r.facility || null }); }
     const suppliers = [...bySup.values()].sort((a, b) => b.units - a.units);
     const expected = suppliers.reduce((a, s) => a + Math.round(s.units * ((s.signal && (s.signal.fill_rate_recent != null ? s.signal.fill_rate_recent : s.signal.fill_rate) || 100) / 100)), 0);
     const notes = suppliers.filter(s => s.signal && ((s.signal.late_days_p50 || 0) > 0 || (s.signal.fill_rate || 100) < 95)).map(s => `${s.supplier}: ${s.signal.late_days_p50 ? s.signal.late_days_p50 + ' d late' : 'on time'}, ${Math.round(s.signal.fill_rate)}% of plan`);
     const originNames = [...new Set(suppliers.map(s => s.origin).filter(Boolean))];
     return { period_type: periodType, period_start: periodType === 'month' ? start.slice(0, 7) + '-01' : mondayOf(start), period_label: periodLabel(periodType, periodType === 'month' ? start.slice(0, 7) + '-01' : mondayOf(start)), weeks,
       units: suppliers.reduce((a, s) => a + s.units, 0), expected_units: expected, pos: pos.length, suppliers, origins: originNames, unmapped: suppliers.filter(s => !s.origin).map(s => s.supplier),
-      origin_list: originsFor(client), destination: setting(client, 'destination', 'Sydney · VOZ_KY'), supplier_notes: notes, po_list: pos };
+      origin_list: originsFor(client), destination: setting(client, 'destination', 'Sydney · VOZ_KY'), facility: (pos.find(x => x.facility) || {}).facility || null, supplier_notes: notes, po_list: pos };
   }
 
   // ── Options from history ("Use what we know") ──
@@ -362,7 +363,7 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
       const source = b.source === 'history' ? 'history' : 'ask';
       const pf = prefill(c, type, start);
       const origins = Array.isArray(b.origins) && b.origins.length ? b.origins.map(String) : pf.origins;
-      const vol = { units: Number(b.units) || pf.units, expected_units: pf.expected_units, cartons: Number(b.cartons) || null, cbm: Number(b.cbm) || null, kg: Number(b.kg) || null, pos: pf.po_list, suppliers: pf.suppliers.map(s => ({ supplier: s.supplier, units: s.units, origin: s.origin, sea_units: s.sea_units, air_units: s.air_units })), supplier_notes: pf.supplier_notes };
+      const vol = { units: Number(b.units) || pf.units, expected_units: pf.expected_units, facility: pf.facility, cartons: Number(b.cartons) || null, cbm: Number(b.cbm) || null, kg: Number(b.kg) || null, pos: pf.po_list, suppliers: pf.suppliers.map(s => ({ supplier: s.supplier, units: s.units, origin: s.origin, sea_units: s.sea_units, air_units: s.air_units })), supplier_notes: pf.supplier_notes };
       const id = newId('rq'); const ref = nextRef(c);
       db.prepare('INSERT INTO rq_request (id, client_id, ref, period_type, period_start, period_label, need_by, destination, origins_json, volume_json, source, state, client_note, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
         .run(id, c, ref, type, start, periodLabel(type, start), b.need_by ? String(b.need_by).slice(0, 10) : null, b.destination || pf.destination, JSON.stringify(origins), JSON.stringify(vol), source, 'requested', b.note ? String(b.note).slice(0, 1000) : null, actorOf(req));
@@ -416,6 +417,15 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
     try { const c = curClient(); const rq = rqRow(req.params.id, c); if (!rq) return res.status(404).json({ error: 'not_found' }); if (['approved', 'declined'].includes(rq.state)) return res.status(409).json({ error: 'already_decided' });
       const actor = actorOf(req); db.prepare("UPDATE rq_request SET decided_at = datetime('now'), decided_by = ?, decision_note = ? WHERE id = ?").run(actor, (req.body || {}).note || null, rq.id); setState(rq, 'declined', actor, 'client', (req.body || {}).note || null);
       notifyInternal(rq, 'Client declined', [`${rq.ref} · ${(req.body || {}).note || 'no note'}`]).catch(() => {}); res.json(rqPublic(rqRow(rq.id))); } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
+  // Simulate: every live option and every sea × air split, priced and timed against the need-by date.
+  // Body: { adjust: { "<supplier>": false }, overrides: { "<po>": "<option_id>" }, need_by }. Client-safe output — prices only.
+  app.post('/rq/requests/:id/simulate', ...guard, (req, res) => {
+    try { const c = curClient(); const rq = rqRow(req.params.id, c); if (!rq) return res.status(404).json({ error: 'not_found' });
+      const released = ['released', 'picked', 'cost_confirmed', 'firm_released', 'approved'].includes(rq.state); if (!released) return res.status(409).json({ error: 'no_options', message: 'Options are not released yet.' });
+      const b = req.body || {}; const opts = optRows(rq.id).filter(o => ['approximate', 'picked', 'confirmed', 'firm', 'approved'].includes(o.state));
+      const out = sim.simulate(c, rq, opts, { adjust: b.adjust || {}, overrides: b.overrides || {}, need_by: b.need_by ? String(b.need_by).slice(0, 10) : null });
+      res.json(out); } catch (e) { L.error('[rq:simulate] ' + (e.stack || e)); res.status(500).json({ error: String(e.message || e) }); }
   });
   // Delete a request that never materialised. Approved requests are the period's record: they are hidden from the
   // lists but their approved quotes and sea rate stay. Options still live are withdrawn so no partner link can act.
