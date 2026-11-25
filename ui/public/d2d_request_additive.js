@@ -1,4 +1,5 @@
-/* ── VelOzity Pinpoint — Simulator · requests v2 (Phase 5b.1) ──
+/* ── VelOzity Pinpoint — Simulator · requests v3 (Phase 5b.2) ──
+   v3: units can be typed when the period has no plan yet (and overridden when it does).
    v2: the mock's dark canvas (the one dark surface in Pinpoint), options as cards, and no
    internal review on this page at all — that moved to Quote Review › Requests.
    The client side of door-to-door options: raise a request (where from, where to, when, how
@@ -12,7 +13,7 @@
    Wording on client surfaces: Price, Ask VelOzity. Never sell, never partner. */
 (function () {
   if (window.__d2dReqLoaded) return; window.__d2dReqLoaded = true;
-  const BUILD = 'd2dreq-2';
+  const BUILD = 'd2dreq-3';
   const el = id => document.getElementById(id);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const nf = n => n == null ? '—' : Number(n).toLocaleString();
@@ -150,7 +151,7 @@
         <div class="d2r-f"><label>From</label><div class="in" style="padding:6px 12px;">${originList.length ? originList.map(o => `<span class="d2r-chip${f.origins.includes(o.name) ? ' on' : ''}" data-origin="${esc(o.name)}">${esc(o.name)}</span>`).join('') : `<span style="color:${C.dim};font-size:12px">No origins set up yet — ask VelOzity to add your origin ports.</span>`}${pf.origins && pf.origins.length ? `<span class="m">${esc(pf.origins.length)} from the plan</span>` : ''}</div>
           ${unmapped.length && originList.length ? `<div class="d2r-note">Suppliers without an origin: ${unmapped.map(u => `<span style="white-space:nowrap">${esc(u)} → <select data-map="${esc(u)}" style="font:inherit;font-size:11px;border:0.5px solid ${C.line2};border-radius:6px;padding:2px 4px;background:${C.card};color:${C.text}"><option value="">pick</option>${originList.map(o => `<option value="${esc(o.id)}">${esc(o.name)}</option>`).join('')}</select></span>`).join(' · ')}</div>` : ''}</div>
         <div class="d2r-f"><label>To</label><div class="in"><input id="d2r-dest" value="${esc(f.destination || '')}" placeholder="Sydney · VOZ_KY"><span class="m">facility</span></div></div>
-        <div class="d2r-f" style="grid-column:1 / -1;"><label>Volume</label><div class="in"><b>${nf(pf.units)} units</b><span style="color:${C.dim};font-size:12px">${pf.expected_units != null && pf.expected_units !== pf.units ? `expected ${nf(pf.expected_units)} after supplier history` : ''}</span>
+        <div class="d2r-f" style="grid-column:1 / -1;"><label>Volume</label><div class="in"><input type="number" id="d2r-units" min="0" style="max-width:120px;font-weight:600;font-size:15px" value="${esc(f.units != null && f.units !== '' ? f.units : (pf.units || ''))}" placeholder="units"><span style="color:${C.dim};font-size:12px">${pf.units ? (pf.expected_units != null && pf.expected_units !== pf.units ? `units · from the ${esc(pf.period_label || '')} plan · expected ${nf(pf.expected_units)} after supplier history` : `units · from the ${esc(pf.period_label || '')} plan`) : (pf.error ? 'plan could not be read — enter units' : `no plan in Pinpoint for ${esc(pf.period_label || 'this period')} yet — enter units`)}</span>
           <span style="margin-left:auto;display:flex;gap:10px;align-items:center;font-size:12px;color:${C.mute}">cartons <input type="number" id="d2r-ctn" min="0" value="${esc(f.cartons || '')}" placeholder="—"> CBM <input type="number" id="d2r-cbm" min="0" step="0.1" value="${esc(f.cbm || '')}" placeholder="—"> kg <input type="number" id="d2r-kg" min="0" value="${esc(f.kg || '')}" placeholder="—"></span></div>
           ${(pf.suppliers || []).length ? `<div class="d2r-note">${pf.suppliers.slice(0, 6).map(s => `${esc(s.supplier)} ${nf(s.units)}${s.signal && s.signal.late_days_p50 ? ` <span style="color:${C.rose2}">${esc(s.signal.late_days_p50)} d late, ${Math.round(s.signal.fill_rate)}% of plan</span>` : ''}`).join(' · ')}${pf.suppliers.length > 6 ? ` · +${pf.suppliers.length - 6} more` : ''}</div>` : ''}</div>
       </div>
@@ -158,7 +159,7 @@
         <div class="d2r-way${f.source === 'history' ? ' on' : ''}" data-src="history"><span class="d2r-pill" style="position:absolute;top:14px;right:14px;background:${C.tint};color:${C.mute}">instant</span><h3>Use what we know</h3><p>Options we've shipped or quoted on these lanes in the last six months, priced at the average approved rate and timed on what the lanes actually achieved.</p><div class="when">Ready now · labelled <i>from history</i></div></div>
         <div class="d2r-way${f.source === 'ask' ? ' on' : ''}" data-src="ask"><h3>Ask VelOzity</h3><p>Fresh carrier options for this period — sailings, flights, transit and price — checked by VelOzity before you see them. Upgrade a history run to this any time.</p><div class="when">Usually within a business day · labelled <i>approximate</i>, with a validity date</div></div>
       </div>
-      <div style="display:flex;gap:12px;align-items:center;margin-top:16px;"><button class="d2r-btn" id="d2r-go" style="height:44px;padding:0 22px;font-size:13px" ${pf.units == null ? 'disabled' : ''}>${f.source === 'history' ? 'Build the options' : 'Ask VelOzity'}</button>
+      <div style="display:flex;gap:12px;align-items:center;margin-top:16px;"><button class="d2r-btn" id="d2r-go" style="height:44px;padding:0 22px;font-size:13px" ${!_pf ? 'disabled' : ''}>${f.source === 'history' ? 'Build the options' : 'Ask VelOzity'}</button>
         <input id="d2r-note" placeholder="Note for VelOzity (optional)" style="flex:1;border:0.5px solid ${C.line2};border-radius:999px;padding:10px 14px;font:inherit;font-size:12.5px;background:${C.card2};color:${C.text}" value="${esc(f.note || '')}">
         ${(pf.supplier_notes || []).length ? `<span class="d2r-note" style="margin:0">Accounting for: ${esc(pf.supplier_notes.join(' · '))}</span>` : ''}</div></div>`;
   }
@@ -192,17 +193,18 @@
 
   // ── events ──
   function bind(s) {
-    const nb = el('d2r-new'); if (nb) nb.onclick = () => { _showForm = !_showForm; if (_showForm && !_form) { _form = { period_type: 'week', period_start: addDays(mondayOf(todayYmd()), 14), origins: [], origins_set: false, source: 'ask', need_by: '', destination: '', cartons: '', cbm: '', kg: '', note: '' }; render(); loadPrefill(); } else render(); };
-    s.querySelectorAll('[data-pt]').forEach(b => b.onclick = () => { _form.period_type = b.dataset.pt; _form.period_start = _form.period_type === 'month' ? _form.period_start.slice(0, 7) + '-01' : mondayOf(_form.period_start); _form.need_by = ''; loadPrefill(); });
-    const ps = el('d2r-ps'); if (ps) ps.onchange = () => { const v = ps.value; _form.period_start = _form.period_type === 'month' ? v + '-01' : (mondayOf(v) || _form.period_start); _form.need_by = ''; loadPrefill(); };
+    const nb = el('d2r-new'); if (nb) nb.onclick = () => { _showForm = !_showForm; if (_showForm && !_form) { _form = { period_type: 'week', period_start: addDays(mondayOf(todayYmd()), 14), origins: [], origins_set: false, source: 'ask', units: '', need_by: '', destination: '', cartons: '', cbm: '', kg: '', note: '' }; render(); loadPrefill(); } else render(); };
+    s.querySelectorAll('[data-pt]').forEach(b => b.onclick = () => { _form.period_type = b.dataset.pt; _form.period_start = _form.period_type === 'month' ? _form.period_start.slice(0, 7) + '-01' : mondayOf(_form.period_start); _form.need_by = ''; _form.units = ''; loadPrefill(); });
+    const ps = el('d2r-ps'); if (ps) ps.onchange = () => { const v = ps.value; _form.period_start = _form.period_type === 'month' ? v + '-01' : (mondayOf(v) || _form.period_start); _form.need_by = ''; _form.units = ''; loadPrefill(); };
     const nbb = el('d2r-nb'); if (nbb) nbb.onchange = () => { _form.need_by = nbb.value; };
     const dest = el('d2r-dest'); if (dest) dest.onchange = () => { _form.destination = dest.value; };
-    ['ctn', 'cbm', 'kg', 'note'].forEach(k => { const i = el('d2r-' + k); if (i) i.onchange = () => { _form[k === 'ctn' ? 'cartons' : k] = i.value; }; });
+    ['ctn', 'cbm', 'kg', 'note', 'units'].forEach(k => { const i = el('d2r-' + k); if (i) i.onchange = () => { _form[k === 'ctn' ? 'cartons' : k] = i.value; }; });
     s.querySelectorAll('[data-origin]').forEach(c => c.onclick = () => { const n = c.dataset.origin; _form.origins_set = true; _form.origins = _form.origins.includes(n) ? _form.origins.filter(x => x !== n) : _form.origins.concat([n]); render(); });
     s.querySelectorAll('[data-map]').forEach(sel => sel.onchange = async () => { if (!sel.value) return; try { await req('/rq/supplier-origin', { method: 'PUT', body: JSON.stringify({ supplier: sel.dataset.map, origin_id: sel.value }) }); toast('Origin saved'); _form.origins_set = false; loadPrefill(); } catch (e) { toast(e.message); } });
     s.querySelectorAll('[data-src]').forEach(w => w.onclick = () => { _form.source = w.dataset.src; render(); });
     const go = el('d2r-go'); if (go) go.onclick = async () => { const f = _form; if (!f.need_by) { toast('Set the date you need it in the Sydney FC'); return; } go.disabled = true; go.textContent = 'Sending…';
-      try { const r = await req('/rq/requests', { method: 'POST', body: JSON.stringify({ period_type: f.period_type, period_start: f.period_start, need_by: f.need_by, origins: f.origins, destination: f.destination, cartons: f.cartons || null, cbm: f.cbm || null, kg: f.kg || null, source: f.source, note: (el('d2r-note') || {}).value || null }) });
+      if (!(Number(f.units) || (_pf && _pf.units))) { toast('Enter the units for the period'); return; }
+      try { const r = await req('/rq/requests', { method: 'POST', body: JSON.stringify({ period_type: f.period_type, period_start: f.period_start, need_by: f.need_by, origins: f.origins, destination: f.destination, units: f.units || null, cartons: f.cartons || null, cbm: f.cbm || null, kg: f.kg || null, source: f.source, note: (el('d2r-note') || {}).value || null }) });
         toast(r.no_history ? `${r.ref} created — no history on these lanes, ask VelOzity` : (f.source === 'history' ? `${r.ref} · ${r.options_count} option(s) ready` : `${r.ref} sent to VelOzity`)); _showForm = false; _form = null; _pf = null; _open = r.id; await refreshAll(); }
       catch (e) { toast(e.message); go.disabled = false; go.textContent = 'Try again'; } };
     s.querySelectorAll('[data-open]').forEach(c => c.onclick = async () => { _open = _open === c.dataset.open ? null : c.dataset.open; if (_open) { history.replaceState(null, '', '#simulator/' + encodeURIComponent((_list.find(r => r.id === _open) || {}).ref || '')); await loadDetail(_open); pin(); } else { history.replaceState(null, '', '#simulator'); pin(); } render(); });
