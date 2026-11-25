@@ -1,5 +1,6 @@
 /* ── VelOzity Pinpoint — Simulator · requests v3 (Phase 5b.2) ──
    v3: units can be typed when the period has no plan yet (and overridden when it does).
+   v4: Delete a request (Hide for an approved one — its quotes stay).
    v2: the mock's dark canvas (the one dark surface in Pinpoint), options as cards, and no
    internal review on this page at all — that moved to Quote Review › Requests.
    The client side of door-to-door options: raise a request (where from, where to, when, how
@@ -13,7 +14,7 @@
    Wording on client surfaces: Price, Ask VelOzity. Never sell, never partner. */
 (function () {
   if (window.__d2dReqLoaded) return; window.__d2dReqLoaded = true;
-  const BUILD = 'd2dreq-3';
+  const BUILD = 'd2dreq-4';
   const el = id => document.getElementById(id);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const nf = n => n == null ? '—' : Number(n).toLocaleString();
@@ -177,7 +178,7 @@
         <div class="facts"><span>departs <b>${esc(dmy(o.departs))}</b></span><span>transit <b>${o.transit_days != null ? esc(o.transit_days) + ' d' : '—'}</b> <span style="color:${C.faint}">port to port</span></span><span>valid to <b>${esc(dmy(o.valid_until))}</b></span>${o.cutoff ? `<span>cut-off <b>${esc(dmy(o.cutoff))}</b></span>` : ''}</div>
         <div><span class="d2r-pill" style="background:${os[1]};color:${os[2]}">${esc(os[0])}</span></div></div>`; };
     let html = `<div class="d2r-sec"><h2>${esc(r.period_label)} · ${esc(r.ref)}</h2><span class="d2r-pill" style="background:${st[1]};color:${st[2]}">${esc(st[0])}</span><span>${esc((r.origins || []).join(' · ') || '—')} → ${esc(r.destination || 'Sydney')}${r.need_by ? ` · in FC by <b style="color:${C.text}">${esc(dmy(r.need_by))}</b>` : ''} · ${nf(vol.units)} units${vol.expected_units && vol.expected_units !== vol.units ? ` · expected ${nf(vol.expected_units)}` : ''}</span>
-      <span style="margin-left:auto;display:flex;gap:8px;">${firm ? `<button class="d2r-btn sm" data-act="approve">Approve</button><button class="d2r-btn sm sec" data-act="decline">Decline</button>` : ''}${canPick ? `<button class="d2r-btn sm" data-act="pick" ${_picks.size ? '' : 'disabled'}>Pick ${_picks.size || ''} &amp; ask VelOzity to confirm</button>` : ''}${r.client_state === 'expired' || (r.client_state === 'requested' && r.source === 'history') ? `<button class="d2r-btn sm" data-act="refresh">Ask VelOzity${r.client_state === 'expired' ? ' to refresh' : ''}</button>` : ''}${!['approved', 'declined'].includes(r.client_state) && !firm ? `<button class="d2r-btn sm sec" data-act="decline">Withdraw</button>` : ''}</span></div>`;
+      <span style="margin-left:auto;display:flex;gap:8px;">${firm ? `<button class="d2r-btn sm" data-act="approve">Approve</button><button class="d2r-btn sm sec" data-act="decline">Decline</button>` : ''}${canPick ? `<button class="d2r-btn sm" data-act="pick" ${_picks.size ? '' : 'disabled'}>Pick ${_picks.size || ''} &amp; ask VelOzity to confirm</button>` : ''}${r.client_state === 'expired' || (r.client_state === 'requested' && r.source === 'history') ? `<button class="d2r-btn sm" data-act="refresh">Ask VelOzity${r.client_state === 'expired' ? ' to refresh' : ''}</button>` : ''}${!['approved', 'declined'].includes(r.client_state) && !firm ? `<button class="d2r-btn sm sec" data-act="decline">Withdraw</button>` : ''}<button class="d2r-btn sm sec" data-act="delete" title="${r.client_state === 'approved' ? 'Hide from the list — the approved quotes stay' : 'Delete this request'}">${r.client_state === 'approved' ? 'Hide' : 'Delete'}</button></span></div>`;
     if ((vol.supplier_notes || []).length) html += `<div class="d2r-note" style="margin:-4px 0 10px;color:${C.mute}">Accounting for supplier history: ${esc(vol.supplier_notes.join(' · '))}</div>`;
     if (!opts.length) html += `<div class="d2r-empty">${r.client_state === 'requested' ? (r.source === 'history' ? 'Nothing on these lanes in the last six months — Ask VelOzity for fresh options.' : 'VelOzity has asked the carriers. You\'ll get an email when the options are ready.') : 'No options on this request.'}</div>`;
     else {
@@ -214,6 +215,7 @@
         if (act === 'pick') { const ids = [..._picks]; if (!ids.length) { toast('Choose the option(s) to pick'); return; } b.disabled = true; const r = await req(`/rq/requests/${encodeURIComponent(id)}/pick`, { method: 'POST', body: JSON.stringify({ option_ids: ids }) }); toast(`Picked · VelOzity is confirming the price${r.confirm_links_sent ? '' : ' by hand'}`); }
         else if (act === 'approve') { if (!confirm('Approve the firm option(s)? This becomes the period\'s approved quote and VelOzity instructs the carrier.')) return; b.disabled = true; await req(`/rq/requests/${encodeURIComponent(id)}/approve`, { method: 'POST', body: '{}' }); toast('Approved'); }
         else if (act === 'decline') { const note = prompt('Decline or withdraw this request — a note for VelOzity (optional):'); if (note === null) return; b.disabled = true; await req(`/rq/requests/${encodeURIComponent(id)}/decline`, { method: 'POST', body: JSON.stringify({ note }) }); toast('Declined'); }
+        else if (act === 'delete') { const r0 = _list.find(x => x.id === id) || {}; if (!confirm(r0.client_state === 'approved' ? `Hide ${r0.ref} from the list? Its approved quotes stay on record.` : `Delete ${r0.ref}? Any open options are withdrawn. This cannot be undone.`)) return; b.disabled = true; await req(`/rq/requests/${encodeURIComponent(id)}`, { method: 'DELETE' }); toast(r0.client_state === 'approved' ? 'Hidden' : 'Deleted'); _open = null; history.replaceState(null, '', '#simulator'); pin(); }
         else if (act === 'refresh') { b.disabled = true; const r = await req(`/rq/requests/${encodeURIComponent(id)}/refresh`, { method: 'POST', body: '{}' }); toast(r.partner_links_sent ? 'VelOzity asked for fresh options' : 'Request re-opened — no carrier link could be sent'); }
         await refreshAll();
       } catch (e) { toast(e.message); b.disabled = false; }

@@ -87,6 +87,9 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
     CREATE INDEX IF NOT EXISTS idx_rq_sea_rate_client ON rq_sea_rate(client_id, week_start);
   `);
 
+  // Deleted requests stay in the table (their events and options with them) but leave every list.
+  try { if (!db.prepare('PRAGMA table_info(rq_request)').all().some(c => c.name === 'archived_at')) db.exec('ALTER TABLE rq_request ADD COLUMN archived_at TEXT'); } catch (e) { L.warn('[d2d] migration: ' + e.message); }
+
   // ── Settings, partners, origins ──
   const setting = (client, key, dflt) => { const r = db.prepare('SELECT value FROM rq_setting WHERE client_id = ? AND key = ?').get(client, key); return r && r.value != null ? r.value : dflt; };
   const setSetting = (client, key, value, by) => db.prepare('INSERT INTO rq_setting (client_id, key, value, updated_at, updated_by) VALUES (?,?,?,?,?) ON CONFLICT(client_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by').run(client, key, value == null ? null : String(value), iso(), by || null);
@@ -347,7 +350,7 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
   });
 
   app.get('/rq/requests', ...guard, (req, res) => {
-    try { const c = curClient(); const rows = db.prepare('SELECT * FROM rq_request WHERE client_id = ? ORDER BY period_start DESC, created_at DESC LIMIT 60').all(c); res.json({ requests: rows.map(r => rqPublic(r)) }); }
+    try { const c = curClient(); const rows = db.prepare('SELECT * FROM rq_request WHERE client_id = ? AND archived_at IS NULL ORDER BY period_start DESC, created_at DESC LIMIT 60').all(c); res.json({ requests: rows.map(r => rqPublic(r)) }); }
     catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
   app.get('/rq/requests/:id', ...guard, (req, res) => { try { const rq = rqRow(req.params.id, curClient()); if (!rq) return res.status(404).json({ error: 'not_found' }); res.json(rqPublic(rq)); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
@@ -414,6 +417,15 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
       const actor = actorOf(req); db.prepare("UPDATE rq_request SET decided_at = datetime('now'), decided_by = ?, decision_note = ? WHERE id = ?").run(actor, (req.body || {}).note || null, rq.id); setState(rq, 'declined', actor, 'client', (req.body || {}).note || null);
       notifyInternal(rq, 'Client declined', [`${rq.ref} · ${(req.body || {}).note || 'no note'}`]).catch(() => {}); res.json(rqPublic(rqRow(rq.id))); } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
+  // Delete a request that never materialised. Approved requests are the period's record: they are hidden from the
+  // lists but their approved quotes and sea rate stay. Options still live are withdrawn so no partner link can act.
+  app.delete('/rq/requests/:id', ...guard, writeOpLimiter, auditLog('delete_d2d_request'), (req, res) => {
+    try { const c = curClient(); const rq = rqRow(req.params.id, c); if (!rq) return res.status(404).json({ error: 'not_found' }); if (rq.archived_at) return res.json({ ok: true, already: true });
+      const actor = actorOf(req);
+      for (const o of optRows(rq.id)) if (['approximate', 'picked', 'confirmed', 'firm'].includes(o.state)) setOptState(o, 'withdrawn', actor, isInternalReq(req) ? 'internal' : 'client', 'request deleted');
+      db.prepare("UPDATE rq_request SET archived_at = datetime('now'), updated_at = datetime('now') WHERE id = ?").run(rq.id); event(rq.id, null, rq.state, rq.state === 'approved' ? 'approved' : 'deleted', actor, isInternalReq(req) ? 'internal' : 'client', rq.state === 'approved' ? 'hidden from lists (approved quotes kept)' : 'deleted');
+      res.json({ ok: true, hidden: rq.state === 'approved' }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
   // After an expiry (or any time before approval): Ask VelOzity for fresh options on the same request.
   app.post('/rq/requests/:id/refresh', ...guard, writeOpLimiter, auditLog('refresh_d2d_request'), async (req, res) => {
     try { const c = curClient(); const rq = rqRow(req.params.id, c); if (!rq) return res.status(404).json({ error: 'not_found' }); if (['approved', 'declined'].includes(rq.state)) return res.status(409).json({ error: 'already_decided' });
@@ -426,7 +438,7 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
 
   // ══════════════ Internal: review, pricing, release ══════════════
   const admin = [authenticateRequest, requireRole(['admin']), requireInternalOrg];
-  app.get('/rq/internal/requests', ...admin, (req, res) => { try { const c = curClient(); const rows = db.prepare('SELECT * FROM rq_request WHERE client_id = ? ORDER BY CASE WHEN state IN (\'approved\',\'declined\',\'expired\') THEN 1 ELSE 0 END, period_start DESC, created_at DESC LIMIT 80').all(c); res.json({ requests: rows.map(rqInternal), partners: partnersFor(c), markup: { Air: markupFor(c, 'Air'), Sea: markupFor(c, 'Sea') } }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
+  app.get('/rq/internal/requests', ...admin, (req, res) => { try { const c = curClient(); const rows = db.prepare('SELECT * FROM rq_request WHERE client_id = ? AND archived_at IS NULL ORDER BY CASE WHEN state IN (\'approved\',\'declined\',\'expired\') THEN 1 ELSE 0 END, period_start DESC, created_at DESC LIMIT 80').all(c); res.json({ requests: rows.map(rqInternal), partners: partnersFor(c), markup: { Air: markupFor(c, 'Air'), Sea: markupFor(c, 'Sea') } }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
   app.get('/rq/internal/requests/:id', ...admin, (req, res) => { try { const rq = rqRow(req.params.id, curClient()); if (!rq) return res.status(404).json({ error: 'not_found' }); res.json({ ...rqInternal(rq), markup: { Air: markupFor(rq.client_id, 'Air'), Sea: markupFor(rq.client_id, 'Sea') } }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
   // Re-send or add partner links; `note` goes to the partner.
   app.post('/rq/internal/requests/:id/rfq', ...admin, writeOpLimiter, auditLog('d2d_rfq'), async (req, res) => {
