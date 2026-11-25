@@ -185,8 +185,12 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
     if (sea.length) for (const s of sea) { if (origins.length && s.origin && !origins.includes(s.origin)) continue; out.push({ mode: 'Sea', kind: 'history', origin: s.origin, container_size: s.container_size, price: r2(s.price), currency: s.currency, price_basis: 'per_container', transit_days: s.transit || (lanes.get('Sea') || {}).transit_p50 || null, service: `From history · ${s.n} approved`, carrier: null }); }
     else { try { const p = db.prepare("SELECT AVG(price_per_container) p, COUNT(*) n FROM signal_price_week WHERE client_id = ? AND mode = 'Sea' AND price_per_container IS NOT NULL").get(client); if (p && p.p) out.push({ mode: 'Sea', kind: 'history', origin: origins[0] || null, container_size: '40', price: r2(p.p), currency: 'AUD', price_basis: 'per_container', transit_days: (lanes.get('Sea') || {}).transit_p50 || null, service: `From history · ${p.n} invoiced weeks`, carrier: null }); } catch (_) {} }
     // Air: approved air quotes, price per chargeable kg.
-    const air = db.prepare("SELECT AVG(sell_amount / NULLIF(chargeable_kg, 0)) pk, AVG(sell_amount) avg_total, currency, COUNT(*) n, origin FROM air_quote WHERE client_id = ? AND state = 'approved' AND decided_at >= ? AND chargeable_kg > 0 GROUP BY currency, origin").all(client, since);
-    for (const a of air) { if (!a.pk) continue; if (origins.length && a.origin && !origins.includes(a.origin)) continue; out.push({ mode: 'Air', kind: 'history', origin: a.origin || origins[0] || null, price: r2(a.pk), currency: a.currency || 'USD', price_basis: 'per_kg', transit_days: (lanes.get('Air') || {}).transit_p50 || null, service: `From history · ${a.n} approved`, carrier: null }); }
+    // Air: approved air quotes on the request's origins (quotes with no origin recorded count too), one weighted
+    // figure per currency — total sell over total chargeable kg, the number the team quotes.
+    const aq = db.prepare("SELECT sell_amount, chargeable_kg, currency, origin FROM air_quote WHERE client_id = ? AND state = 'approved' AND decided_at >= ? AND chargeable_kg > 0 AND sell_amount > 0").all(client, since)
+      .filter(a => !origins.length || !a.origin || origins.includes(a.origin));
+    const byCur = new Map(); for (const a of aq) { const c = a.currency || 'USD'; const e = byCur.get(c) || { sell: 0, kg: 0, n: 0 }; e.sell += Number(a.sell_amount); e.kg += Number(a.chargeable_kg); e.n++; byCur.set(c, e); }
+    for (const [cur, e] of byCur) { if (!e.kg) continue; out.push({ mode: 'Air', kind: 'history', origin: origins[0] || null, price: r2(e.sell / e.kg), currency: cur, price_basis: 'per_kg', transit_days: (lanes.get('Air') || {}).transit_p50 || null, service: `From history · ${e.n} approved`, carrier: null }); }
     return out;
   }
 

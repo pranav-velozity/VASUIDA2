@@ -31,7 +31,7 @@
 module.exports = function install(deps) {
   const { app, db, authenticateRequest, requireRole, requireInternalOrg, curClient, tenancyResolve, log = console } = deps;
   const WEEKS = Number(process.env.SIGNALS_WINDOW_WEEKS || 26);
-  const DEFS_VERSION = '2026-11-25b';   // bump when a definition changes: the boot run recomputes on a new version
+  const DEFS_VERSION = '2026-11-25c';   // bump when a definition changes: the boot run recomputes on a new version
   const MIN_SUPPLIER_WEEKS = 4, MIN_LANE_N = 5, LATE_GRACE_DAYS = 21, MATURE_DAYS = 21;
 
   db.exec(`
@@ -215,15 +215,24 @@ module.exports = function install(deps) {
     const act = (ms, st) => { const m = ms && ms[st]; return m && m.actual_at && m.state !== 'assumed' ? String(m.actual_at).slice(0, 10) : null; };
     const plan = (ms, st) => { const m = ms && ms[st]; return m && m.planned_at ? String(m.planned_at).slice(0, 10) : null; };
     const cgSuppliers = new Map(); for (const l of laneLinks) { const sup = supplierOf(String(l.lane_key).split('||')[0]); const s = cgSuppliers.get(l.consignment_uid) || new Set(); s.add(sup); cgSuppliers.set(l.consignment_uid, s); }
+    // Carrier as a name: some consignments hold an object ({name, code…}) or a vessel/voyage string
+    // ("BRIGHTON 0028S") in the carrier field — neither is a carrier. Couriers are air whatever the lane says.
+    const COURIER = /^(dhl|fedex|ups|tnt|aramex|startrack|toll)\b/i;
+    const carrierName = (v) => { if (v == null) return null; if (typeof v === 'object') v = v.name || v.carrier || v.code || v.label || ''; let t = String(v).trim(); if (!t || t === '[object Object]') return null; try { if (/^\{/.test(t)) { const o = JSON.parse(t); t = String(o.name || o.carrier || o.code || '').trim(); } } catch (_) {} if (/\b\d{3,4}[A-Z]?$/.test(t) && /\s/.test(t)) return null; return t || null; };
     for (const c of cgs) {
       const ms = msByCg.get(c.consignment_uid) || {};
-      moves.push({ mode: c.mode, carrier: String(c.carrier || '').trim() || null, suppliers: [...(cgSuppliers.get(c.consignment_uid) || [])], week: c.week_start, quoted: c.transit_confirmed ? Number(c.transit_days) || null : null, legacy: false,
+      const carrier = carrierName(c.carrier); const mode = COURIER.test(carrier || '') ? 'Air' : c.mode;
+      moves.push({ mode, carrier, suppliers: [...(cgSuppliers.get(c.consignment_uid) || [])], week: c.week_start, quoted: c.transit_confirmed ? Number(c.transit_days) || null : null, legacy: false,
         a: { packing: act(ms, 'packing_list_ready'), cleared: act(ms, 'origin_cleared'), departed: act(ms, 'departed'), arrived: act(ms, 'arrived'), dcleared: act(ms, 'dest_cleared'), fc: act(ms, 'fc_receipt') },
         p: { packing: plan(ms, 'packing_list_ready'), cleared: plan(ms, 'origin_cleared'), departed: plan(ms, 'departed'), arrived: plan(ms, 'arrived'), dcleared: plan(ms, 'dest_cleared'), fc: plan(ms, 'fc_receipt') } });
     }
     for (const [k, lg] of legacyByLane) {
       const [ws, laneKey] = k.split('|'); if (laneToCg.has(k)) continue;           // already a movement
-      const parts = laneKey.split('||'); const mode = modeOf(parts[2]);
+      const parts = laneKey.split('||');
+      // Mode from the lane key's freight type; when that is blank, from the plan's POs on the same supplier + ticket. Still unknown → not a lane.
+      let mode = String(parts[2] || '').trim() ? modeOf(parts[2]) : null;
+      if (!mode) { const wk = posByWeek.get(ws); if (wk) for (const po of wk.values()) if (po.supplier === supplierOf(parts[0]) && (!parts[1] || po.zendesk === String(parts[1] || '').trim())) { mode = po.mode; break; } }
+      if (!mode) continue;
       moves.push({ mode, carrier: null, suppliers: [supplierOf(parts[0])], week: ws, quoted: null, legacy: true,
         a: { packing: lg.packing_list_ready || null, cleared: lg.origin_cleared || null, departed: lg.departed || null, arrived: lg.arrived || null, dcleared: lg.dest_cleared || null, fc: lg.fc_receipt || null },
         p: { packing: addDays(ws, packingOffset(mode)), cleared: null, departed: null, arrived: null, dcleared: null, fc: null } });
@@ -251,10 +260,11 @@ module.exports = function install(deps) {
     const add = (grain, key, mode, carrier, supplier, m) => { const k = grain + '|' + key; const g = groups.get(k) || { grain, key, mode, carrier, supplier, items: [] }; g.items.push(m); groups.set(k, g); };
     for (const m of moves) {
       add('mode', m.mode, m.mode, null, null, m);
-      if (m.carrier) add('carrier', m.mode + '|' + m.carrier, m.mode, m.carrier, null, m);
+      if (m.carrier) add('carrier', m.mode + '|' + m.carrier, m.mode, m.carrier, null, m);   // thin carrier groups are dropped below
       for (const s of m.suppliers) if (s) add('supplier', m.mode + '|' + s, m.mode, null, s, m);
     }
     for (const g of groups.values()) {
+      if (g.grain === 'carrier' && g.items.length < MIN_LANE_N) continue;          // one sailing is not a lane
       const st = laneStats(g.items); if (!st) continue;
       insL.run(client, g.grain, g.key, g.mode, g.carrier, g.supplier, st.n, st.transit_n, st.transit_p50, st.transit_p90, st.quoted_p50, st.slip_p50, st.outliers, st.d2d_n, st.d2d_p50, st.d2d_p90, JSON.stringify(st.stage), st.slowest, st.legacy_n, st.confidence, iso());
     }
