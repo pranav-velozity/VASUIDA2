@@ -1,6 +1,8 @@
 /* ── VelOzity Pinpoint — Simulator · requests v3 (Phase 5b.2) ──
    v3: units can be typed when the period has no plan yet (and overridden when it does).
    v4: Delete a request (Hide for an approved one — its quotes stay).
+   v7 (5c.2): graph capped in size; each leg drawn as one dated timeline, ex-factory → FC, with the
+   latest-to-make-it markers and the need-by date on the same axis.
    v6 (5c.1): graph axis from day 0 with a five-week minimum span; ship-by / cargo-ready / ex-factory dates per leg.
    v5 (5c): the simulation — price × days frontier against the need-by date, supplier adjustments,
    per-PO split toggles — on every released request; the page now opens from Week Hub, not the nav.
@@ -17,7 +19,7 @@
    Wording on client surfaces: Price, Ask VelOzity. Never sell, never partner. */
 (function () {
   if (window.__d2dReqLoaded) return; window.__d2dReqLoaded = true;
-  const BUILD = 'd2dreq-6';
+  const BUILD = 'd2dreq-7';
   const el = id => document.getElementById(id);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const nf = n => n == null ? '—' : Number(n).toLocaleString();
@@ -231,6 +233,36 @@
       out += `<text x="${x + 11}" y="${y - 9}" font-size="10" fill="${on ? C.text : C.mute}">${esc(p.kind === 'split' ? 'Split' : (p.legs[0].carrier || p.legs[0].mode))}${p.prob != null ? ` · ${p.prob}%` : ''}</text>`; }
     return out + '</svg>';
   }
+  // One leg as a dated axis, left to right: ex-factory → packing list → departs → arrives → cleared → FC (this
+  // departure, P50 filled; P90 FC as a faint marker), with the latest-to-make-it dates (ship by, cargo ready by,
+  // ex-factory by) as hollow rose markers below the axis and the need-by date as the dashed line.
+  function legTimeline(l, st, st9, needBy) {
+    if (!st) return '';
+    const d = l.dates || {}; const td = d.this_departure || {}; const latest = d.p50 || null;
+    const pts = [['Ex-factory', td.ex_factory, 'plan'], ['Packing list', st.packing, 'plan'], [l.mode === 'Sea' ? 'Departs' : 'Flight', st.departs, 'plan'], ['Arrives', st.arrived, 'plan'], ['Cleared', st.dcleared, 'plan'], ['FC', st.fc, 'plan']].filter(x => x[1]);
+    const marks = latest ? [['ex-factory by', latest.ex_factory_by], ['cargo ready by', latest.cargo_ready_by], ['ship by', latest.ship_by]] : [];
+    const all = [...pts.map(x => x[1]), ...marks.map(x => x[1]), st9 && st9.fc, needBy].filter(Boolean).sort();
+    const t0 = new Date(all[0] + 'T00:00:00Z'), t1 = new Date(all[all.length - 1] + 'T00:00:00Z'); const span = Math.max(14, (t1 - t0) / 86400000);
+    const W = 900, H = 118, L = 24, R = 24, AX = 46; const X = (s) => L + ((new Date(s + 'T00:00:00Z') - t0) / 86400000) / span * (W - L - R);
+    const short = (s) => { const dd = new Date(s + 'T00:00:00Z'); return dd.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' }); };
+    let out = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;overflow:visible;margin-top:12px">`;
+    // week ticks
+    for (let k = 0; k <= span; k += 7) { const x = L + k / span * (W - L - R); out += `<line x1="${x}" x2="${x}" y1="${AX - 18}" y2="${AX + 30}" stroke="rgba(255,255,255,.05)"/>`; }
+    out += `<line x1="${L}" x2="${W - R}" y1="${AX}" y2="${AX}" stroke="rgba(255,255,255,.18)" stroke-width="1.5"/>`;
+    // the stretch in transit (departs → arrives) drawn as a bar
+    if (st.departs && st.arrived) out += `<rect x="${X(st.departs)}" y="${AX - 3}" width="${Math.max(2, X(st.arrived) - X(st.departs))}" height="6" rx="3" fill="${l.mode === 'Sea' ? C.mint : C.sky}" opacity=".55"/>`;
+    if (needBy) out += `<line x1="${X(needBy)}" x2="${X(needBy)}" y1="${AX - 30}" y2="${AX + 42}" stroke="${C.rose}" stroke-dasharray="3 4"/><text x="${X(needBy)}" y="${AX - 34}" font-size="10" fill="${C.rose2}" text-anchor="middle">need by ${esc(short(needBy))}</text>`;
+    if (st9 && st9.fc) out += `<circle cx="${X(st9.fc)}" cy="${AX}" r="4" fill="none" stroke="${C.dim}" stroke-dasharray="2 2"/><text x="${X(st9.fc) + 8}" y="${AX + 4}" font-size="9" fill="${C.dim}">P90 ${esc(short(st9.fc))}</text>`;
+    // plan milestones above the axis, alternating label rows to avoid collisions
+    pts.forEach((p, i) => { const x = X(p[1]); const up = i % 2 === 0; const ly = up ? AX - 14 : AX + 26;
+      out += `<circle cx="${x}" cy="${AX}" r="5" fill="${i <= 2 ? C.text : C.card}" stroke="${C.text}" stroke-width="1.5"/>`;
+      out += `<text x="${x}" y="${ly - 10 * (up ? 1 : -1) + (up ? 0 : 0)}" font-size="9.5" fill="${C.dim}" text-anchor="middle">${esc(p[0])}</text><text x="${x}" y="${ly}" font-size="10.5" font-weight="600" fill="${C.text}" text-anchor="middle">${esc(short(p[1]))}</text>`; });
+    // latest-to-make-it markers below
+    marks.forEach((m, i) => { const x = X(m[1]); out += `<path d="M${x} ${AX + 6} l-4 7 h8 z" fill="none" stroke="${C.rose}" stroke-width="1.2"/><text x="${x}" y="${AX + 48 + (i % 2) * 11}" font-size="9" fill="${C.rose2}" text-anchor="middle">${esc(m[0])} ${esc(short(m[1]))}</text>`; });
+    out += '</svg>';
+    const safe = d.p90 ? `ship by ${dmy(d.p90.ship_by)} to be safe (P90)` : '';
+    return out + `<div class="d2r-note" style="margin-top:2px;color:${C.mute}">Filled dots: this departure (${esc(dmy(st.departs))}) — it needs cargo ready <b style="color:${C.text}">${esc(dmy(td.cargo_ready))}</b>, ex-factory <b style="color:${C.text}">${esc(dmy(td.ex_factory))}</b> (${d.vas_days} d of VAS). Rose triangles: the latest dates that still make ${needBy ? esc(dmy(needBy)) : 'the date'}${latest && latest.makes_it === false ? ` — <span style="color:${C.rose}">this departure is later than the ship-by date</span>` : ''}. ${esc(safe)}</div>`;
+  }
   function simHtml(r) {
     const o = _sim;
     let html = `<div class="d2r-sec" style="margin-top:30px"><h2>Simulation</h2><span>price against days to the Sydney FC, with the chance of making your date — built from the lane rules and measured history, never the carrier's promise alone</span>${o && !o.error ? `<span style="margin-left:auto;color:${C.faint}">computed ${esc(new Date(o.computed_at).toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' }))}</span>` : ''}</div>`;
@@ -240,7 +272,7 @@
     const rec = o.points.find(p => p.id === o.recommended), cheap = o.points.find(p => p.id === o.cheapest), fast = o.points.find(p => p.id === o.fastest); const focus = o.points.find(p => p.id === _simFocus) || rec || o.points[0];
     const kpi = (lbl, p, note) => `<div class="d2r-kpi" data-pt="${p ? esc(p.id) : ''}" style="cursor:pointer;${p && p.id === _simFocus ? `border-color:${C.rose}` : ''}"><small>${lbl}</small><b>${p ? esc(money(p.price, p.currency)) : '—'}</b><i>${p ? `${esc(p.kind === 'split' ? p.label : p.legs[0].carrier || p.legs[0].mode)} · FC ${esc(dmy(p.fc_p50))}${p.prob != null ? ` · ${p.prob}%` : ''}` : note}</i></div>`;
     html += `<div class="d2r-kpis">${kpi('Recommended', rec, o.need_by ? 'nothing clears 80% by your date' : 'set a need-by date')}${kpi('Cheapest', cheap, '')}${kpi('Fastest', fast, '')}<div class="d2r-kpi"><small>Volume simulated</small><b>${nf(o.expected_units)}</b><i>of ${nf(o.total_units)} planned, after supplier history</i></div></div>`;
-    html += `<div class="d2r-card" style="padding:14px 16px 10px">${frontierSvg(o)}</div>`;
+    html += `<div class="d2r-card" style="padding:14px 16px 10px;max-width:760px">${frontierSvg(o)}</div>`;
     html += `<div class="d2r-note" style="margin-top:8px;color:${C.mute}">${esc(o.recommendation)}${o.assumptions.length ? ` <span style="color:${C.amber}">${esc(o.assumptions.join(' '))}</span>` : ''}</div>`;
     // focus point: legs with stage dates and, for a split, per-PO toggles
     if (focus) {
@@ -248,12 +280,7 @@
       html += `<div style="display:grid;grid-template-columns:repeat(${Math.min(2, focus.legs.length)},minmax(0,1fr));gap:10px">` + focus.legs.map(l => { const latest = l.pos.slice().sort((u, v) => (v.p50.fc > u.p50.fc ? 1 : -1))[0]; const st = latest ? latest.p50 : null; const st9 = latest ? latest.p90 : null;
         const tl = st ? [['Packing list', st.packing], [l.mode === 'Sea' ? 'Departs' : 'Flight', st.departs], ['Arrives', st.arrived], ['Cleared', st.dcleared], ['FC', st.fc]] : [];
         return `<div class="d2r-card"><div class="top" style="display:flex;gap:10px;align-items:center"><span class="d2r-g ${l.mode.toLowerCase()}">${esc(l.mode.toUpperCase())}</span><div class="nm" style="font-size:13.5px;font-weight:600">${esc([l.carrier, l.service].filter(Boolean).join(' · ') || (l.kind === 'history' ? 'From history' : 'Option'))}<small style="display:block;font-size:11px;color:${C.dim};font-weight:400">${l.po_count} PO${l.po_count === 1 ? '' : 's'} · ${nf(l.units)} units · ${esc(l.basis)}</small></div><b style="margin-left:auto;font-size:16px">${esc(money(l.price, l.currency))}</b></div>
-          <div style="display:flex;gap:0;margin-top:12px;position:relative;height:46px"><div style="position:absolute;left:4%;right:4%;top:9px;height:1px;background:rgba(255,255,255,.14)"></div>${tl.map((x, i) => `<div style="flex:1;text-align:center;position:relative"><div style="width:9px;height:9px;border-radius:50%;background:${i >= 2 ? C.card : C.text};border:1.5px solid ${C.text};margin:5px auto 0"></div><div style="font-size:10px;color:${C.dim};margin-top:4px">${esc(x[0])}</div><div style="font-size:11px;color:${C.text};font-weight:600">${esc(dmy(x[1]))}</div></div>`).join('')}</div>
-          ${l.dates && l.dates.p50 ? `<div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:${C.card2};border:0.5px solid ${C.line};display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;font-size:11px;color:${C.mute}">
-            <div><div style="font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:${C.dim};font-weight:600">Ship by</div><b style="color:${l.dates.p50.makes_it === false ? C.rose : C.text};font-size:13px">${esc(dmy(l.dates.p50.ship_by))}</b><div style="color:${C.faint}">${esc(dmy(l.dates.p90.ship_by))} to be safe</div></div>
-            <div><div style="font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:${C.dim};font-weight:600">Cargo ready by</div><b style="color:${C.text};font-size:13px">${esc(dmy(l.dates.p50.cargo_ready_by))}</b><div style="color:${C.faint}">packing list done</div></div>
-            <div><div style="font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:${C.dim};font-weight:600">Ex-factory by</div><b style="color:${C.text};font-size:13px">${esc(dmy(l.dates.p50.ex_factory_by))}</b><div style="color:${C.faint}">${l.dates.vas_days} d of VAS before packing</div></div>
-            <div style="grid-column:1 / -1;color:${C.dim}">This departure ${esc(dmy(l.dates.this_departure.departs))} needs cargo ready <b style="color:${C.text}">${esc(dmy(l.dates.this_departure.cargo_ready))}</b>, ex-factory <b style="color:${C.text}">${esc(dmy(l.dates.this_departure.ex_factory))}</b>${l.dates.p50.makes_it === false ? ` · <span style="color:${C.rose}">later than the ship-by date</span>` : ''}.</div></div>` : ''}
+          ${legTimeline(l, st, st9, o.need_by)}
           <div class="d2r-note" style="margin-top:6px">${st9 ? `P90: FC ${esc(dmy(st9.fc))} · ` : ''}port to port ${esc(l.transit_quoted)} d quoted${l.sample ? `, lane runs ${esc(l.sample.achieved_p50)}–${esc(l.sample.achieved_p90)} d (${esc(l.sample.lane)})` : ', no measured history yet'}${l.rolled ? ` · <span style="color:${C.amber}">${l.rolled} PO${l.rolled === 1 ? '' : 's'} roll to a later departure on packing-list history</span>` : ''}</div>
           ${l.explain.slice(0, 1).map(e => `<div class="d2r-note" style="margin-top:4px;color:${C.mute}">${esc(e)}</div>`).join('')}</div>`; }).join('') + '</div>';
       // PO allocation (split) — toggles write overrides
