@@ -23,7 +23,7 @@
    Splits: for each sea × air pair, POs whose sea leg misses the need-by date at P50 go air,
    the rest sea; the client can flip any PO. When no PO misses, or every PO does, the split
    collapses into the single option and is not listed twice. */
-module.exports = function ({ db, rulesFor, vasDaysFor, log }) {
+module.exports = function ({ db, rulesFor, vasDaysFor, vasRateFor, log }) {
   const L = log || console;
   const J = (s, d) => { try { return s ? JSON.parse(s) : d; } catch (_) { return d; } };
   const r1 = (n) => Math.round(Number(n) * 10) / 10, r2 = (n) => Math.round(Number(n) * 100) / 100;
@@ -57,14 +57,23 @@ module.exports = function ({ db, rulesFor, vasDaysFor, log }) {
   }
 
   // One PO on one option: dates at P50 and P90, whether it rolled to a later departure.
+  // Forward chain: ex-factory (goods land at the origin facility — the period Monday unless typed) → VAS at the client's daily rate
+  // → cargo ready / packing list → origin cleared → the first departure that clears the cut-off → lane → FC.
+  // opt.__ex is the ex-factory date, opt.__vas the VAS days for the leg (set by leg()).
   function legForPo(po, opt, rule, lane, sigSup, adjustOn, q) {
-    const ws = po.week_start || opt.__week; const sup = sigSup.get(supplierKey(po.supplier));
+    const ws = po.week_start || opt.__week; const ex = opt.__ex || ws; const vas = opt.__vas || 0; const sup = sigSup.get(supplierKey(po.supplier));
     const readySlip = adjustOn && sup ? Math.max(0, Number(q === 90 ? (sup.ready_late_p90 != null ? sup.ready_late_p90 : sup.ready_late_p50) : sup.ready_late_p50) || 0) : 0;
-    let departs = opt.departs || (rule.mode === 'Sea' ? addDays(ws, rule.departed) : addDays(ws, 9));
-    let packing, cleared, rolled = 0;
-    if (rule.mode === 'Sea') { packing = addDays(ws, rule.packing + readySlip); cleared = addDays(ws, rule.cleared + readySlip); const gap = opt.cutoff ? Math.max(0, daysBetween(opt.cutoff, departs)) : 2;   // cut-off this many days before each sailing
-      while (cleared > addDays(departs, -gap) && rolled < 8) { departs = addDays(departs, 7); rolled++; } }
-    else { packing = addDays(departs, -rule.packingBefore + readySlip); cleared = addDays(departs, -rule.clearedBefore + readySlip); while (cleared > departs && rolled < 14) { departs = addDays(departs, 1); rolled++; } }
+    const packing = addDays(ex, vas + readySlip);                                   // cargo ready = packing list
+    let departs, cleared, rolled = 0;
+    if (rule.mode === 'Sea') { cleared = addDays(packing, Math.max(0, rule.cleared - rule.packing));
+      const gap = opt.cutoff && opt.departs ? Math.max(0, daysBetween(opt.cutoff, opt.departs)) : 2;   // cut-off this many days before each sailing
+      const earliest = addDays(cleared, gap);
+      if (opt.departs && opt.departs >= earliest) departs = opt.departs;            // the quoted sailing works
+      else { // weekly sailings on the lane's rhythm: the rule's departure day in the week, from the first week that clears the cut-off
+        departs = addDays(mondayOf(earliest), rule.departed % 7); while (departs < earliest) departs = addDays(departs, 7);
+        if (opt.departs) { rolled = Math.max(1, Math.ceil(daysBetween(opt.departs, departs) / 7)); } else if (departs > addDays(mondayOf(ws), rule.departed)) rolled = Math.ceil(daysBetween(addDays(mondayOf(ws), rule.departed), departs) / 7); } }
+    else { cleared = addDays(packing, Math.max(0, rule.packingBefore - rule.clearedBefore)); const earliest = addDays(cleared, rule.clearedBefore);
+      if (opt.departs && opt.departs >= earliest) departs = opt.departs; else { departs = earliest; if (opt.departs) rolled = daysBetween(opt.departs, departs); } }
     const quoted = opt.transit_days != null ? Number(opt.transit_days) : (lane && lane.transit_p50 != null ? Number(lane.transit_p50) : rule.transit);
     // Transit slip against quoted: measured achieved vs quoted on this lane; without a quoted history, achieved P90−P50 at the 90th.
     let tr = quoted;
@@ -78,7 +87,12 @@ module.exports = function ({ db, rulesFor, vasDaysFor, log }) {
   function simulate(client, rq, options, params) {
     const p = params || {}; const vol = J(rq.volume_json, {}); const origins = J(rq.origins_json, []);
     const needBy = p.need_by || rq.need_by || null; const sig = signals(client);
-    const vasDays = Math.max(0, Number(vasDaysFor ? vasDaysFor(client) : 4) || 0);   // days of VAS before the packing list — client setting
+    const exFactory = p.ex_factory || rq.ex_factory || mondayOf(rq.period_start);        // goods land at the origin facility; the period Monday unless typed
+    const exTyped = !!(p.ex_factory || rq.ex_factory);
+    const vasFloor = Math.max(0, Number(vasDaysFor ? vasDaysFor(client) : 4) || 0);      // minimum VAS days — client setting
+    const vasRate = Math.max(1, Number(vasRateFor ? vasRateFor(client) : 25000) || 25000); // units a day the VAS line clears for this client
+    const vasFor = (units) => Math.max(vasFloor, Math.ceil((units || 0) / vasRate));
+    let vasDays = vasFloor;
     const facility = p.facility || vol.facility || null;
     const pos = (vol.pos && vol.pos.length ? vol.pos : [{ po: 'ALL', supplier: (vol.suppliers && vol.suppliers[0] && vol.suppliers[0].supplier) || 'Plan', units: Number(vol.units) || 0, mode: 'Sea', due: null, week_start: mondayOf(rq.period_start) }])
       .map(x => ({ ...x, units: Number(x.units) || 0, week_start: x.week_start || mondayOf(rq.period_start) }));
@@ -86,6 +100,7 @@ module.exports = function ({ db, rulesFor, vasDaysFor, log }) {
     const adjust = Object.assign({}, p.adjust || {});                       // supplierKey → false to switch off
     const adjOn = (s) => adjust[supplierKey(s)] !== false;
     const assumptions = [];
+    assumptions.push(`Ex-factory ${dmy(exFactory)}${exTyped ? ' (as typed)' : ' — the Monday of the period'}; VAS at ${vasRate.toLocaleString()} units a day (${vasFloor} d minimum), cargo ready after it.`);
     // Unit profile from the client's own history beats a typed figure that is wildly off it (a CBM typed where cartons were meant),
     // and fills in whatever the request did not carry. Typed figures within 2× of history stand.
     const prof = p.profile || { sea: {}, air: {} }; const profSea = prof.sea || {}, profAir = prof.air || {};
@@ -103,13 +118,14 @@ module.exports = function ({ db, rulesFor, vasDaysFor, log }) {
     const kgOf = (units) => { const kg = units * kgPer; const vk = cbmOf(units) * 166.67; return Math.max(kg, vk); };
     const expectedUnits = (po) => { const s = sig.sup.get(supplierKey(po.supplier)); const f = s && adjOn(po.supplier) ? Number(s.fill_rate_recent != null ? s.fill_rate_recent : s.fill_rate) : null; return f != null ? Math.round(po.units * Math.min(1, f / 100)) : po.units; };
     const live = (options || []).filter(o => ['approximate', 'picked', 'confirmed', 'firm', 'approved'].includes(o.state) && o.price != null);
-    if (!totalUnits) return { request_id: rq.id, ref: rq.ref, period_label: rq.period_label, period_start: rq.period_start, need_by: needBy, total_units: 0, expected_units: 0, suppliers: [], assumptions, computed_at: new Date().toISOString(), points: [], recommended: null, cheapest: null, fastest: null, recommendation: 'This request has no units — there is nothing to price or time. Raise it again with the units for the period.' };
+    if (!totalUnits) return { request_id: rq.id, ref: rq.ref, period_label: rq.period_label, period_start: rq.period_start, need_by: needBy, ex_factory: exFactory, mode: 'period', total_units: 0, expected_units: 0, suppliers: [], assumptions, computed_at: new Date().toISOString(), points: [], recommended: null, cheapest: null, fastest: null, recommendation: 'This request has no units — there is nothing to price or time. Raise it again with the units for the period.' };
     const suppliers = [...new Map(pos.map(x => [supplierKey(x.supplier), x.supplier])).entries()].map(([k, name]) => { const s = sig.sup.get(k); return { supplier: name, key: k, units: pos.filter(x => supplierKey(x.supplier) === k).reduce((a, x) => a + x.units, 0), fill_rate: s ? (s.fill_rate_recent != null ? s.fill_rate_recent : s.fill_rate) : null, ready_late_p50: s ? s.ready_late_p50 : null, ready_late_p90: s ? s.ready_late_p90 : null, late_days_p50: s ? s.late_days_p50 : null, confidence: s ? s.confidence : 'none', adjust: adjOn(name) }; });
 
     // A leg = one option carrying a set of POs.
     function leg(opt, legPos) {
-      const rule = rulesOf(client, facility, opt.mode); const lane = laneFor(sig, opt.mode, opt.carrier); opt.__week = mondayOf(rq.period_start);
+      const rule = rulesOf(client, facility, opt.mode); const lane = laneFor(sig, opt.mode, opt.carrier); opt.__week = mondayOf(rq.period_start); opt.__ex = exFactory;
       const units = legPos.reduce((a, x) => a + expectedUnits(x), 0); const plannedUnits = legPos.reduce((a, x) => a + x.units, 0);
+      const vasDays = vasFor(units); opt.__vas = vasDays;
       const perPo = legPos.map(po => { const a = legForPo(po, opt, rule, lane, sig.sup, adjOn(po.supplier), 50), b = legForPo(po, opt, rule, lane, sig.sup, adjOn(po.supplier), 90);
         const target = needBy || po.due || null; let prob = null;
         if (target) { const mu = daysBetween(a.packing, a.fc), sg = Math.max(0.75, (daysBetween(b.packing, b.fc) - mu) / 1.2816); prob = Phi((daysBetween(a.packing, target) - mu) / sg); }
@@ -126,21 +142,22 @@ module.exports = function ({ db, rulesFor, vasDaysFor, log }) {
       else { const kg = kgOf(units); qty = { chargeable_kg: Math.round(kg), kg_per_unit: Math.round(kg / (units || 1) * 100) / 100 }; price = opt.price_basis === 'per_kg' ? r2(kg * opt.price) : r2(opt.price * units / (totalUnits || units || 1)); basis = opt.price_basis === 'per_kg' ? `${Math.round(kg)} kg × ${opt.price}/kg` : 'total'; qty.price_per_kg = opt.price_basis === 'per_kg' ? opt.price : r2(price / (kg || 1)); }
       // Working back from the need-by date: the latest departure that still makes it (P50 and the safer P90),
       // the packing list that departure needs, and the ex-factory date before VAS. Also what THIS departure needs.
+      const first = perPo[0];
       const tail = (q) => { const l = legPos[0] ? legForPo(legPos[0], opt, rule, lane, sig.sup, false, q) : null; return l ? daysBetween(l.departs, l.fc) : null; };   // departed → FC on this lane at q
       const prep = opt.mode === 'Sea' ? Math.max(0, rule.departed - rule.packing) : rule.packingBefore;                                   // packing list → departure
       const back = (q) => { const t = tail(q); if (!needBy || t == null) return null; const ship = addDays(needBy, -t); const ready = addDays(ship, -prep); return { ship_by: ship, cargo_ready_by: ready, ex_factory_by: addDays(ready, -vasDays), makes_it: departs ? departs <= ship : null }; };
-      const dates = { p50: back(50), p90: back(90), this_departure: departs ? { departs, cargo_ready: addDays(departs, -prep), ex_factory: addDays(departs, -prep - vasDays) } : null, vas_days: vasDays, packing_to_departure_days: prep };
+      const dates = { p50: back(50), p90: back(90), this_departure: departs ? { departs, cargo_ready: first ? first.p50.packing : addDays(departs, -prep), ex_factory: exFactory } : null, vas_days: vasDays, vas_rate: vasRate, ex_factory: exFactory, packing_to_departure_days: prep };
       const sample = lane ? { lane: lane.grain === 'carrier' ? `${opt.carrier} · ${lane.n} movements` : `all ${opt.mode.toLowerCase()} · ${lane.n} movements`, achieved_p50: lane.transit_p50, achieved_p90: lane.transit_p90, quoted_history: lane.quoted_p50 } : null;
-      const first = perPo[0];
       const explain = [];
       if (first) {
         const late = perPo.filter(x => x.p50.rolled > 0);
+        explain.push(`Ex-factory ${dmy(exFactory)} → ${vasDays} d of VAS → cargo ready ${dmy(first.p50.packing)}.`);
         explain.push(`${opt.mode} · ${[opt.carrier, opt.service].filter(Boolean).join(' ') || (opt.kind === 'history' ? 'from history' : 'option')}: departs ${dmy(first.p50.departs)}${late.length ? ` — ${late.length} PO${late.length === 1 ? '' : 's'} (${[...new Set(late.map(x => x.supplier))].join(', ')}) miss the cut-off on their packing-list history and roll to the next departure` : ''}.`);
         explain.push(`Port to port ${first.p50.quoted} d quoted${sample ? `, this lane runs ${sample.achieved_p50}–${sample.achieved_p90} d (${sample.lane})` : ', no measured history on this lane yet'}; arrival → cleared → FC from the lane rules plus measured slip.`);
         explain.push(`In the Sydney FC ${dmy(fc50)} (P50) – ${dmy(fc90)} (P90)${needBy ? ` against your ${dmy(needBy)}: ${prob}% of units on time` : ''}.`);
-        if (dates.p50) explain.push(`To make ${dmy(needBy)}: ship by ${dmy(dates.p50.ship_by)} (${dmy(dates.p90.ship_by)} to be safe) → cargo ready by ${dmy(dates.p50.cargo_ready_by)} → ex-factory by ${dmy(dates.p50.ex_factory_by)} with ${vasDays} d of VAS. This departure (${dmy(departs)}) needs cargo ready ${dmy(dates.this_departure.cargo_ready)}, ex-factory ${dmy(dates.this_departure.ex_factory)}.`);
+        if (dates.p50) explain.push(`To make ${dmy(needBy)}: ship by ${dmy(dates.p50.ship_by)} (${dmy(dates.p90.ship_by)} to be safe) → cargo ready by ${dmy(dates.p50.cargo_ready_by)} → ex-factory by ${dmy(dates.p50.ex_factory_by)} with ${vasDays} d of VAS. ${dates.p50.ex_factory_by < exFactory ? ` That is ${daysBetween(dates.p50.ex_factory_by, exFactory)} d before your ex-factory — this option cannot make it.` : ''}`);
       }
-      return { option_id: opt.id, mode: opt.mode, carrier: opt.carrier, service: opt.service, kind: opt.kind, container_size: opt.container_size, pos: perPo, po_count: perPo.length, units, planned_units: plannedUnits, qty, price, currency: opt.currency, basis, departs, dates, fc_p50: fc50, fc_p90: fc90, price_per_unit: r2(price / (units || 1)), days_p50: fc50 ? daysBetween(mondayOf(rq.period_start), fc50) : null, days_p90: fc90 ? daysBetween(mondayOf(rq.period_start), fc90) : null, prob, rolled, transit_quoted: first ? first.p50.quoted : null, transit_p50: first ? first.p50.transit : null, transit_p90: first ? first.p90.transit : null, sample, explain };
+      return { option_id: opt.id, mode: opt.mode, carrier: opt.carrier, service: opt.service, kind: opt.kind, container_size: opt.container_size, short: `${opt.carrier || opt.mode}${opt.mode === 'Sea' && opt.container_size ? ` ${opt.container_size}'` : ''}`, cargo_ready: first ? first.p50.packing : null, vas_days: vasDays, pos: perPo, po_count: perPo.length, units, planned_units: plannedUnits, qty, price, currency: opt.currency, basis, departs, dates, fc_p50: fc50, fc_p90: fc90, price_per_unit: r2(price / (units || 1)), days_p50: fc50 ? daysBetween(exFactory, fc50) : null, days_p90: fc90 ? daysBetween(exFactory, fc90) : null, prob, rolled, transit_quoted: first ? first.p50.quoted : null, transit_p50: first ? first.p50.transit : null, transit_p90: first ? first.p90.transit : null, sample, explain };
     }
     // Totals in one currency: AUD when the legs mix, converted at the finance FX rate (USD→AUD).
     const fx = (() => { try { const r = db.prepare("SELECT rate FROM fin_fx_rates WHERE from_curr = 'USD' AND to_curr = 'AUD'").get(); return r && Number(r.rate) > 0 ? Number(r.rate) : null; } catch (_) { return null; } })();
@@ -150,8 +167,13 @@ module.exports = function ({ db, rulesFor, vasDaysFor, log }) {
       else price = r2(legs.reduce((a, l) => a + l.price, 0));
       const units = legs.reduce((a, l) => a + l.units, 0) || 1;
       const cont = legs.filter(l => l.mode === 'Sea').reduce((a, l) => a + ((l.qty || {}).containers || 0), 0), kg = legs.filter(l => l.mode === 'Air').reduce((a, l) => a + ((l.qty || {}).chargeable_kg || 0), 0);
-      return { id, label, kind, legs, price, currency: cur, price_aud: r2(cur === 'AUD' ? price : price * (fx || 1)), price_per_unit: r2(price / units), containers: cont || 0, air_kg: kg || 0, air_units: legs.filter(l => l.mode === 'Air').reduce((a, l) => a + l.units, 0), fc_p50: legs.map(l => l.fc_p50).filter(Boolean).sort().slice(-1)[0] || null, fc_p90: legs.map(l => l.fc_p90).filter(Boolean).sort().slice(-1)[0] || null,
-        days_p50: Math.max(...legs.map(l => l.days_p50 || 0)), days_p90: Math.max(...legs.map(l => l.days_p90 || 0)), prob: legs.some(l => l.prob != null) ? Math.round(legs.reduce((a, l) => a + (l.prob == null ? 100 : l.prob) * l.units, 0) / units) : null, units, option_ids: legs.map(l => l.option_id) }; };
+      const fc50 = legs.map(l => l.fc_p50).filter(Boolean).sort().slice(-1)[0] || null, fcFirst = legs.map(l => l.fc_p50).filter(Boolean).sort()[0] || null;
+      const onTime = needBy ? legs.reduce((a, l) => a + (l.fc_p50 && l.fc_p50 <= needBy ? l.units : 0), 0) : null;
+      const air = legs.find(l => l.mode === 'Air'), sea = legs.find(l => l.mode === 'Sea');
+      const short = kind === 'mix' ? `${legs.filter(l => l.mode === 'Air').length ? Math.round(air.units / units * 100) : 0}% air${sea ? ` · ${sea.short}` : ''}` : kind === 'split' ? `Split${sea ? ` · ${sea.short}` : ''}` : legs[0].short;
+      return { id, label, short, kind, legs, price, currency: cur, price_aud: r2(cur === 'AUD' ? price : price * (fx || 1)), price_per_unit: r2(price / units), containers: cont || 0, air_kg: kg || 0, air_units: legs.filter(l => l.mode === 'Air').reduce((a, l) => a + l.units, 0), fc_p50: fc50, fc_first: fcFirst, fc_p90: legs.map(l => l.fc_p90).filter(Boolean).sort().slice(-1)[0] || null,
+        days_p50: Math.max(...legs.map(l => l.days_p50 || 0)), days_p90: Math.max(...legs.map(l => l.days_p90 || 0)), prob: legs.some(l => l.prob != null) ? Math.round(legs.reduce((a, l) => a + (l.prob == null ? 100 : l.prob) * l.units, 0) / units) : null,
+        makes_it: needBy ? (fc50 != null && fc50 <= needBy) : null, on_time_units: onTime, on_time_share: onTime != null ? Math.round(onTime / units * 100) : null, units, option_ids: legs.map(l => l.option_id) }; };
 
     const points = [];
     for (const o of live) { const lg = leg(o, pos); points.push(point(o.id, `${o.mode} · ${[o.carrier, o.service].filter(Boolean).join(' ') || (o.kind === 'history' ? 'from history' : 'option')}`, 'single', [lg])); }
@@ -184,11 +206,19 @@ module.exports = function ({ db, rulesFor, vasDaysFor, log }) {
     // Pareto flag: no other point is both cheaper and sooner (P50) with at least the same chance.
     for (const x of points) x.frontier = !points.some(y => y !== x && y.price_aud <= x.price_aud && y.days_p50 <= x.days_p50 && (y.prob == null || x.prob == null || y.prob >= x.prob) && (y.price_aud < x.price_aud || y.days_p50 < x.days_p50 || (y.prob || 0) > (x.prob || 0)));
     points.sort((a, b) => a.price_aud - b.price_aud);
-    const best = needBy ? points.filter(x => (x.prob || 0) >= 80).sort((a, b) => a.price_aud - b.price_aud)[0] || null : null;
+    // With a need-by date only the points that make it (P50) at 80%+ can be recommended; the rest stay on the chart, flagged.
+    const best = needBy ? points.filter(x => x.makes_it && (x.prob || 0) >= 80).sort((a, b) => a.price_aud - b.price_aud)[0] || null : (exTyped ? points[0] || null : null);
     const cheapest = points[0] || null, fastest = points.slice().sort((a, b) => a.days_p50 - b.days_p50)[0] || null;
+    const mode = needBy && exTyped ? 'both' : needBy ? 'need_by' : exTyped ? 'ex_factory' : 'period';
+    let recommendation;
+    if (best && needBy) recommendation = `${best.label} — ${best.currency} ${best.price.toLocaleString()} (${best.currency} ${best.price_per_unit}/unit) · in FC ${dmy(best.fc_p50)} (P50) · ${best.prob}% on time. Cheapest that makes ${dmy(needBy)} at 80%+.`;
+    else if (best) recommendation = `${best.label} — ${best.currency} ${best.price.toLocaleString()} (${best.currency} ${best.price_per_unit}/unit) · in FC ${dmy(best.fc_p50)} (P50) – ${dmy(best.fc_p90)} (P90) from ex-factory ${dmy(exFactory)}. Cheapest; set a need-by date to judge the options against it.`;
+    else if (needBy && points.length) { const fl = fastest.legs[0]; const need = fl && fl.dates && fl.dates.p50 ? fl.dates.p50.ex_factory_by : null;
+      recommendation = `Nothing makes ${dmy(needBy)} from ex-factory ${dmy(exFactory)}. Earliest is ${fastest.label} in FC ${dmy(fastest.fc_p50)}${need ? `; to make ${dmy(needBy)} that way the goods would need to be ex-factory by ${dmy(need)}` : ''}. Move the date, bring the goods forward, or pick the share you can fly.`; }
+    else recommendation = points.length ? 'Set the date you need stock in the FC, or the ex-factory date, to get a recommendation.' : 'No priced options to simulate yet.';
     return { request_id: rq.id, ref: rq.ref, period_label: rq.period_label, period_start: rq.period_start, need_by: needBy, total_units: totalUnits, expected_units: pos.reduce((a, x) => a + expectedUnits(x), 0), suppliers, assumptions, computed_at: new Date().toISOString(),
-      points, recommended: best ? best.id : null, cheapest: cheapest ? cheapest.id : null, fastest: fastest ? fastest.id : null,
-      recommendation: best ? `${best.label} — ${best.currency} ${best.price.toLocaleString()} · in FC ${dmy(best.fc_p50)} (P50) · ${best.prob}% on time. Cheapest that clears 80%.` : (needBy ? (points.length ? 'Nothing clears 80% on time by your date — the fastest option is shown; consider moving the date or splitting.' : 'No priced options to simulate yet.') : 'Set the date you need stock in the FC to get a recommendation.') };
+      ex_factory: exFactory, ex_factory_typed: exTyped, mode, vas_rate: vasRate, vas_days_min: vasFloor,
+      points, recommended: best ? best.id : null, cheapest: cheapest ? cheapest.id : null, fastest: fastest ? fastest.id : null, recommendation };
   }
   return { simulate, _internal: { legForPo, rulesOf, Phi } };
 };
