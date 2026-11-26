@@ -23,7 +23,7 @@
    Splits: for each sea × air pair, POs whose sea leg misses the need-by date at P50 go air,
    the rest sea; the client can flip any PO. When no PO misses, or every PO does, the split
    collapses into the single option and is not listed twice. */
-module.exports = function ({ db, rulesFor, log }) {
+module.exports = function ({ db, rulesFor, vasDaysFor, log }) {
   const L = log || console;
   const J = (s, d) => { try { return s ? JSON.parse(s) : d; } catch (_) { return d; } };
   const r1 = (n) => Math.round(Number(n) * 10) / 10, r2 = (n) => Math.round(Number(n) * 100) / 100;
@@ -78,6 +78,7 @@ module.exports = function ({ db, rulesFor, log }) {
   function simulate(client, rq, options, params) {
     const p = params || {}; const vol = J(rq.volume_json, {}); const origins = J(rq.origins_json, []);
     const needBy = p.need_by || rq.need_by || null; const sig = signals(client);
+    const vasDays = Math.max(0, Number(vasDaysFor ? vasDaysFor(client) : 4) || 0);   // days of VAS before the packing list — client setting
     const facility = p.facility || vol.facility || null;
     const pos = (vol.pos && vol.pos.length ? vol.pos : [{ po: 'ALL', supplier: (vol.suppliers && vol.suppliers[0] && vol.suppliers[0].supplier) || 'Plan', units: Number(vol.units) || 0, mode: 'Sea', due: null, week_start: mondayOf(rq.period_start) }])
       .map(x => ({ ...x, units: Number(x.units) || 0, week_start: x.week_start || mondayOf(rq.period_start) }));
@@ -110,6 +111,12 @@ module.exports = function ({ db, rulesFor, log }) {
       let qty, price, basis;
       if (opt.mode === 'Sea') { const cap = CAP_CBM[opt.container_size] || CAP_CBM['40']; const cbm = cbmOf(units); qty = { containers: Math.max(1, Math.ceil(cbm / cap)), cbm: r1(cbm), size: opt.container_size || '40' }; price = opt.price_basis === 'per_container' ? r2(qty.containers * opt.price) : r2(opt.price * units / (totalUnits || units || 1)); basis = opt.price_basis === 'per_container' ? `${qty.containers} × ${opt.container_size || '40'}'` : 'total'; }
       else { const kg = kgOf(units); qty = { chargeable_kg: Math.round(kg) }; price = opt.price_basis === 'per_kg' ? r2(kg * opt.price) : r2(opt.price * units / (totalUnits || units || 1)); basis = opt.price_basis === 'per_kg' ? `${Math.round(kg)} kg × ${opt.price}/kg` : 'total'; }
+      // Working back from the need-by date: the latest departure that still makes it (P50 and the safer P90),
+      // the packing list that departure needs, and the ex-factory date before VAS. Also what THIS departure needs.
+      const tail = (q) => { const l = legPos[0] ? legForPo(legPos[0], opt, rule, lane, sig.sup, false, q) : null; return l ? daysBetween(l.departs, l.fc) : null; };   // departed → FC on this lane at q
+      const prep = opt.mode === 'Sea' ? Math.max(0, rule.departed - rule.packing) : rule.packingBefore;                                   // packing list → departure
+      const back = (q) => { const t = tail(q); if (!needBy || t == null) return null; const ship = addDays(needBy, -t); const ready = addDays(ship, -prep); return { ship_by: ship, cargo_ready_by: ready, ex_factory_by: addDays(ready, -vasDays), makes_it: departs ? departs <= ship : null }; };
+      const dates = { p50: back(50), p90: back(90), this_departure: departs ? { departs, cargo_ready: addDays(departs, -prep), ex_factory: addDays(departs, -prep - vasDays) } : null, vas_days: vasDays, packing_to_departure_days: prep };
       const sample = lane ? { lane: lane.grain === 'carrier' ? `${opt.carrier} · ${lane.n} movements` : `all ${opt.mode.toLowerCase()} · ${lane.n} movements`, achieved_p50: lane.transit_p50, achieved_p90: lane.transit_p90, quoted_history: lane.quoted_p50 } : null;
       const first = perPo[0];
       const explain = [];
@@ -118,8 +125,9 @@ module.exports = function ({ db, rulesFor, log }) {
         explain.push(`${opt.mode} · ${[opt.carrier, opt.service].filter(Boolean).join(' ') || (opt.kind === 'history' ? 'from history' : 'option')}: departs ${dmy(first.p50.departs)}${late.length ? ` — ${late.length} PO${late.length === 1 ? '' : 's'} (${[...new Set(late.map(x => x.supplier))].join(', ')}) miss the cut-off on their packing-list history and roll to the next departure` : ''}.`);
         explain.push(`Port to port ${first.p50.quoted} d quoted${sample ? `, this lane runs ${sample.achieved_p50}–${sample.achieved_p90} d (${sample.lane})` : ', no measured history on this lane yet'}; arrival → cleared → FC from the lane rules plus measured slip.`);
         explain.push(`In the Sydney FC ${dmy(fc50)} (P50) – ${dmy(fc90)} (P90)${needBy ? ` against your ${dmy(needBy)}: ${prob}% of units on time` : ''}.`);
+        if (dates.p50) explain.push(`To make ${dmy(needBy)}: ship by ${dmy(dates.p50.ship_by)} (${dmy(dates.p90.ship_by)} to be safe) → cargo ready by ${dmy(dates.p50.cargo_ready_by)} → ex-factory by ${dmy(dates.p50.ex_factory_by)} with ${vasDays} d of VAS. This departure (${dmy(departs)}) needs cargo ready ${dmy(dates.this_departure.cargo_ready)}, ex-factory ${dmy(dates.this_departure.ex_factory)}.`);
       }
-      return { option_id: opt.id, mode: opt.mode, carrier: opt.carrier, service: opt.service, kind: opt.kind, container_size: opt.container_size, pos: perPo, po_count: perPo.length, units, planned_units: plannedUnits, qty, price, currency: opt.currency, basis, departs, fc_p50: fc50, fc_p90: fc90, days_p50: fc50 ? daysBetween(mondayOf(rq.period_start), fc50) : null, days_p90: fc90 ? daysBetween(mondayOf(rq.period_start), fc90) : null, prob, rolled, transit_quoted: first ? first.p50.quoted : null, transit_p50: first ? first.p50.transit : null, transit_p90: first ? first.p90.transit : null, sample, explain };
+      return { option_id: opt.id, mode: opt.mode, carrier: opt.carrier, service: opt.service, kind: opt.kind, container_size: opt.container_size, pos: perPo, po_count: perPo.length, units, planned_units: plannedUnits, qty, price, currency: opt.currency, basis, departs, dates, fc_p50: fc50, fc_p90: fc90, days_p50: fc50 ? daysBetween(mondayOf(rq.period_start), fc50) : null, days_p90: fc90 ? daysBetween(mondayOf(rq.period_start), fc90) : null, prob, rolled, transit_quoted: first ? first.p50.quoted : null, transit_p50: first ? first.p50.transit : null, transit_p90: first ? first.p90.transit : null, sample, explain };
     }
     const point = (id, label, kind, legs) => { const price = r2(legs.reduce((a, l) => a + l.price, 0)); const cur = legs[0] ? legs[0].currency : 'USD'; const units = legs.reduce((a, l) => a + l.units, 0) || 1;
       return { id, label, kind, legs, price, currency: cur, price_per_unit: r2(price / units), fc_p50: legs.map(l => l.fc_p50).filter(Boolean).sort().slice(-1)[0] || null, fc_p90: legs.map(l => l.fc_p90).filter(Boolean).sort().slice(-1)[0] || null,
