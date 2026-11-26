@@ -45,7 +45,8 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
   const MARKUP_DEFAULT = { Air: 40, Sea: 20 };
   const markupFor = (client, mode) => rateFor ? rateFor(client, mode === 'Air' ? 'air_quote_markup' : 'sea_quote_markup', MARKUP_DEFAULT[mode]) : MARKUP_DEFAULT[mode];
   const LINK_DAYS = Math.max(1, parseInt(process.env.D2D_PARTNER_LINK_DAYS, 10) || 7);
-  const sim = require('./rq_simulate')({ db, rulesFor, log: L });
+  const vasDaysFor = (client) => { const v = Number(setting(client, 'vas_days', 4)); return isFinite(v) && v >= 0 ? v : 4; };
+  const sim = require('./rq_simulate')({ db, rulesFor, vasDaysFor, log: L });
   const CONTAINER = ['20', '40', '40HC'];
 
   // ── Schema ──
@@ -184,17 +185,34 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
     const since = addDays(today(), -182); const out = [];
     const lanes = new Map(); try { db.prepare("SELECT mode, transit_p50, transit_p90, quoted_p50 FROM signal_lane WHERE client_id = ? AND grain = 'mode'").all(client).forEach(l => lanes.set(l.mode, l)); } catch (_) {}
     const origins = J(rq.origins_json, []);
-    // Sea: approved sea rates first; failing that the priced weeks the signals job found in invoices.
-    const sea = db.prepare('SELECT origin, container_size, AVG(price) price, currency, AVG(transit_days) transit, COUNT(*) n FROM rq_sea_rate WHERE client_id = ? AND approved_at >= ? GROUP BY origin, container_size, currency').all(client, since);
-    if (sea.length) for (const s of sea) { if (origins.length && s.origin && !origins.includes(s.origin)) continue; out.push({ mode: 'Sea', kind: 'history', origin: s.origin, container_size: s.container_size, price: r2(s.price), currency: s.currency, price_basis: 'per_container', transit_days: s.transit || (lanes.get('Sea') || {}).transit_p50 || null, service: `From history · ${s.n} approved`, carrier: null }); }
-    else { try { const p = db.prepare("SELECT AVG(price_per_container) p, COUNT(*) n FROM signal_price_week WHERE client_id = ? AND mode = 'Sea' AND price_per_container IS NOT NULL").get(client); if (p && p.p) out.push({ mode: 'Sea', kind: 'history', origin: origins[0] || null, container_size: '40', price: r2(p.p), currency: 'AUD', price_basis: 'per_container', transit_days: (lanes.get('Sea') || {}).transit_p50 || null, service: `From history · ${p.n} invoiced weeks`, carrier: null }); } catch (_) {} }
-    // Air: approved air quotes, price per chargeable kg.
-    // Air: approved air quotes on the request's origins (quotes with no origin recorded count too), one weighted
-    // figure per currency — total sell over total chargeable kg, the number the team quotes.
-    const aq = db.prepare("SELECT sell_amount, chargeable_kg, currency, origin FROM air_quote WHERE client_id = ? AND state = 'approved' AND decided_at >= ? AND chargeable_kg > 0 AND sell_amount > 0").all(client, since)
+    // History pricing rule — the number that drives VelOzity's business, not the kindest one in the window:
+    // weighted over the window (total price ÷ total containers or kg), and the HIGHER of the 26-week figure
+    // and the last-8-week figure, so a recent rise is in the price and an old dip never is.
+    const recent = addDays(today(), -56);
+    const pick = (w26, w8) => { const v = Math.max(w26 || 0, w8 || 0); return v > 0 ? { price: r2(v), used: (w8 || 0) >= (w26 || 0) ? 'last 8 weeks' : '26 weeks' } : null; };
+    // Sea: approved sea rates (this flow's own history) first; failing that the invoiced weeks the signals job priced.
+    const rates = db.prepare('SELECT origin, container_size, price, currency, transit_days, approved_at FROM rq_sea_rate WHERE client_id = ? AND approved_at >= ?').all(client, since).filter(x => !origins.length || !x.origin || origins.includes(x.origin));
+    if (rates.length) {
+      const groups = new Map(); for (const x of rates) { const k = (x.container_size || '40') + '|' + (x.currency || 'USD'); const g = groups.get(k) || { size: x.container_size || '40', cur: x.currency || 'USD', all: [], rec: [], transit: [] }; g.all.push(Number(x.price)); if (String(x.approved_at).slice(0, 10) >= recent) g.rec.push(Number(x.price)); if (x.transit_days != null) g.transit.push(Number(x.transit_days)); groups.set(k, g); }
+      for (const g of groups.values()) { const avg = (arr) => arr.length ? arr.reduce((a, v) => a + v, 0) / arr.length : null; const p = pick(avg(g.all), avg(g.rec)); if (!p) continue;
+        out.push({ mode: 'Sea', kind: 'history', origin: origins[0] || null, container_size: g.size, price: p.price, currency: g.cur, price_basis: 'per_container', transit_days: g.transit.length ? r2(g.transit.reduce((a, v) => a + v, 0) / g.transit.length) : ((lanes.get('Sea') || {}).transit_p50 || null), service: `From history · ${g.all.length} approved`, carrier: null,
+          basis: `approved sea rates · ${g.all.length} in 26 weeks${g.rec.length ? `, ${g.rec.length} in the last 8` : ''} · 26-wk avg ${r2(avg(g.all))}${g.rec.length ? ` · 8-wk avg ${r2(avg(g.rec))}` : ''} · using ${p.used}` }); }
+    } else {
+      try {
+        const wk = db.prepare("SELECT week_start, price, containers FROM signal_price_week WHERE client_id = ? AND mode = 'Sea' AND containers > 0 AND price > 0").all(client);
+        const sum = (rows) => { const pr = rows.reduce((a, r) => a + Number(r.price), 0), c = rows.reduce((a, r) => a + Number(r.containers), 0); return c ? pr / c : null; };
+        const w26 = sum(wk), w8 = sum(wk.filter(r => r.week_start >= recent)); const p = pick(w26, w8);
+        if (p) out.push({ mode: 'Sea', kind: 'history', origin: origins[0] || null, container_size: '40', price: p.price, currency: 'AUD', price_basis: 'per_container', transit_days: (lanes.get('Sea') || {}).transit_p50 || null, service: `From history · ${wk.length} invoiced weeks`, carrier: null,
+          basis: `sea invoices · ${wk.length} weeks, ${wk.reduce((a, r) => a + Number(r.containers), 0)} containers · 26-wk weighted ${r2(w26)}${w8 ? ` · 8-wk weighted ${r2(w8)}` : ''} · using ${p.used}` });
+      } catch (_) {}
+    }
+    // Air: approved air quotes on the request's origins (quotes with no origin recorded count too), weighted per currency.
+    const aq = db.prepare("SELECT sell_amount, chargeable_kg, currency, origin, decided_at FROM air_quote WHERE client_id = ? AND state = 'approved' AND decided_at >= ? AND chargeable_kg > 0 AND sell_amount > 0").all(client, since)
       .filter(a => !origins.length || !a.origin || origins.includes(a.origin));
-    const byCur = new Map(); for (const a of aq) { const c = a.currency || 'USD'; const e = byCur.get(c) || { sell: 0, kg: 0, n: 0 }; e.sell += Number(a.sell_amount); e.kg += Number(a.chargeable_kg); e.n++; byCur.set(c, e); }
-    for (const [cur, e] of byCur) { if (!e.kg) continue; out.push({ mode: 'Air', kind: 'history', origin: origins[0] || null, price: r2(e.sell / e.kg), currency: cur, price_basis: 'per_kg', transit_days: (lanes.get('Air') || {}).transit_p50 || null, service: `From history · ${e.n} approved`, carrier: null }); }
+    const byCur = new Map(); for (const a of aq) { const c = a.currency || 'USD'; const e = byCur.get(c) || { sell: 0, kg: 0, n: 0, rsell: 0, rkg: 0, rn: 0 }; e.sell += Number(a.sell_amount); e.kg += Number(a.chargeable_kg); e.n++; if (String(a.decided_at).slice(0, 10) >= recent) { e.rsell += Number(a.sell_amount); e.rkg += Number(a.chargeable_kg); e.rn++; } byCur.set(c, e); }
+    for (const [cur, e] of byCur) { const w26 = e.kg ? e.sell / e.kg : null, w8 = e.rkg ? e.rsell / e.rkg : null; const p = pick(w26, w8); if (!p) continue;
+      out.push({ mode: 'Air', kind: 'history', origin: origins[0] || null, price: p.price, currency: cur, price_basis: 'per_kg', transit_days: (lanes.get('Air') || {}).transit_p50 || null, service: `From history · ${e.n} approved`, carrier: null,
+        basis: `approved air quotes · ${e.n} in 26 weeks${e.rn ? `, ${e.rn} in the last 8` : ''} · 26-wk weighted ${r2(w26)}/kg${w8 ? ` · 8-wk weighted ${r2(w8)}/kg` : ''} · using ${p.used}` }); }
     return out;
   }
 
@@ -371,8 +389,9 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
       let links = [];
       if (source === 'history') {
         const hist = historyOptions(c, rq);
-        hist.forEach((h, i) => db.prepare('INSERT INTO rq_option (id, request_id, client_id, mode, kind, carrier, service, origin, container_size, transit_days, valid_until, price, currency, price_basis, state, sort) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-          .run(newId('op'), id, c, h.mode, 'history', h.carrier, h.service, h.origin, h.container_size || null, h.transit_days, addDays(today(), 14), h.price, h.currency, h.price_basis, 'approximate', i));
+        hist.forEach((h, i) => { const oid = newId('op'); db.prepare('INSERT INTO rq_option (id, request_id, client_id, mode, kind, carrier, service, origin, container_size, transit_days, valid_until, price, currency, price_basis, state, sort) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+          .run(oid, id, c, h.mode, 'history', h.carrier, h.service, h.origin, h.container_size || null, h.transit_days, addDays(today(), 14), h.price, h.currency, h.price_basis, 'approximate', i);
+          if (h.basis) db.prepare('INSERT INTO rq_option_cost (option_id, cost_note) VALUES (?, ?)').run(oid, h.basis); });
         if (hist.length) { db.prepare("UPDATE rq_request SET released_at = datetime('now') WHERE id = ?").run(id); setState(rq, 'released', 'system', 'system', `${hist.length} option(s) from history`); }
         else event(id, null, null, null, 'system', 'system', 'No history on these lanes yet — Ask VelOzity for options');
       } else {
@@ -516,7 +535,7 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
   app.post('/rq/internal/expire', ...admin, async (req, res) => { try { res.json(await expire()); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
 
   // ── Partners + settings (Finance › Quotes) ──
-  app.get('/rq/partners', ...admin, (req, res) => { try { const c = curClient(); res.json({ client_id: c, partners: db.prepare('SELECT * FROM quote_partner WHERE client_id = ? ORDER BY active DESC, name').all(c), settings: { client_notify_to: setting(c, 'client_notify_to', ''), destination: setting(c, 'destination', 'Sydney · VOZ_KY'), markup: { Air: markupFor(c, 'Air'), Sea: markupFor(c, 'Sea') } }, origins: db.prepare('SELECT * FROM rq_origin WHERE client_id = ? ORDER BY active DESC, sort, name').all(c), supplier_origins: supplierOrigins(c) }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
+  app.get('/rq/partners', ...admin, (req, res) => { try { const c = curClient(); res.json({ client_id: c, partners: db.prepare('SELECT * FROM quote_partner WHERE client_id = ? ORDER BY active DESC, name').all(c), settings: { client_notify_to: setting(c, 'client_notify_to', ''), destination: setting(c, 'destination', 'Sydney · VOZ_KY'), vas_days: Number(setting(c, 'vas_days', 4)), markup: { Air: markupFor(c, 'Air'), Sea: markupFor(c, 'Sea') } }, origins: db.prepare('SELECT * FROM rq_origin WHERE client_id = ? ORDER BY active DESC, sort, name').all(c), supplier_origins: supplierOrigins(c) }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
   app.post('/rq/partners', ...admin, writeOpLimiter, auditLog('edit_quote_partner'), (req, res) => {
     try { const c = curClient(); const b = req.body || {}; const email = String(b.email || '').trim(); const name = String(b.name || '').trim(); if (!name || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: 'name and a valid email required' });
       const id = b.id ? String(b.id) : newId('qp'); const air = b.air == null ? 1 : (b.air ? 1 : 0), sea = b.sea == null ? 1 : (b.sea ? 1 : 0), active = b.active == null ? 1 : (b.active ? 1 : 0);
@@ -525,8 +544,8 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
   });
   app.delete('/rq/partners/:id', ...admin, writeOpLimiter, auditLog('delete_quote_partner'), (req, res) => { try { db.prepare("UPDATE quote_partner SET active = 0, updated_at = datetime('now') WHERE id = ? AND client_id = ?").run(req.params.id, curClient()); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
   app.put('/rq/settings', ...admin, writeOpLimiter, auditLog('edit_d2d_settings'), (req, res) => {
-    try { const c = curClient(); const b = req.body || {}; if (b.client_notify_to != null) setSetting(c, 'client_notify_to', String(b.client_notify_to).trim(), actorOf(req)); if (b.destination != null) setSetting(c, 'destination', String(b.destination).trim(), actorOf(req));
-      res.json({ ok: true, settings: { client_notify_to: setting(c, 'client_notify_to', ''), destination: setting(c, 'destination', 'Sydney · VOZ_KY') } }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+    try { const c = curClient(); const b = req.body || {}; if (b.client_notify_to != null) setSetting(c, 'client_notify_to', String(b.client_notify_to).trim(), actorOf(req)); if (b.destination != null) setSetting(c, 'destination', String(b.destination).trim(), actorOf(req)); if (b.vas_days != null) { const v = Number(b.vas_days); if (!isFinite(v) || v < 0 || v > 30) return res.status(400).json({ error: 'vas_days must be 0–30' }); setSetting(c, 'vas_days', String(v), actorOf(req)); }
+      res.json({ ok: true, settings: { client_notify_to: setting(c, 'client_notify_to', ''), destination: setting(c, 'destination', 'Sydney · VOZ_KY'), vas_days: Number(setting(c, 'vas_days', 4)) } }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
   app.post('/rq/origins', ...admin, writeOpLimiter, auditLog('edit_d2d_origin'), (req, res) => {
     try { const c = curClient(); const b = req.body || {}; const name = String(b.name || '').trim(); if (!name) return res.status(400).json({ error: 'name required' }); const id = b.id ? String(b.id) : newId('or');

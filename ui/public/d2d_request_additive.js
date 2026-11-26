@@ -1,6 +1,7 @@
 /* ── VelOzity Pinpoint — Simulator · requests v3 (Phase 5b.2) ──
    v3: units can be typed when the period has no plan yet (and overridden when it does).
    v4: Delete a request (Hide for an approved one — its quotes stay).
+   v6 (5c.1): graph axis from day 0 with a five-week minimum span; ship-by / cargo-ready / ex-factory dates per leg.
    v5 (5c): the simulation — price × days frontier against the need-by date, supplier adjustments,
    per-PO split toggles — on every released request; the page now opens from Week Hub, not the nav.
    v2: the mock's dark canvas (the one dark surface in Pinpoint), options as cards, and no
@@ -16,7 +17,7 @@
    Wording on client surfaces: Price, Ask VelOzity. Never sell, never partner. */
 (function () {
   if (window.__d2dReqLoaded) return; window.__d2dReqLoaded = true;
-  const BUILD = 'd2dreq-5';
+  const BUILD = 'd2dreq-6';
   const el = id => document.getElementById(id);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const nf = n => n == null ? '—' : Number(n).toLocaleString();
@@ -215,7 +216,7 @@
     // x: days from the period Monday to FC (P50), y: price. Need-by as a vertical line. Frontier points filled, others hollow; chance as the fill tone.
     const W = 640, H = 240, L = 58, R = 16, T = 14, B = 34; const pts = o.points; if (!pts.length) return '';
     const dmin = Math.min(...pts.map(p => p.days_p50)), dmax = Math.max(...pts.map(p => p.days_p90)); const nb = o.need_by ? Math.round((new Date(o.need_by + 'T00:00:00Z') - new Date(o.period_start + 'T00:00:00Z')) / 86400000) : null;
-    const x0 = Math.max(0, Math.min(dmin, nb == null ? dmin : nb) - 4), x1 = Math.max(dmax, nb == null ? dmax : nb) + 4; const pmin = 0, pmax = Math.max(...pts.map(p => p.price)) * 1.12;
+    const x0 = 0, x1 = Math.max(35, Math.max(dmax, nb == null ? dmax : nb) + 7); const pmin = 0, pmax = Math.max(...pts.map(p => p.price)) * 1.15;
     const X = d => L + (d - x0) / (x1 - x0 || 1) * (W - L - R), Y = v => T + (1 - (v - pmin) / (pmax - pmin || 1)) * (H - T - B);
     const tone = p => p.prob == null ? C.sky : p.prob >= 80 ? C.mint : p.prob >= 50 ? C.amber : C.rose;
     let out = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;overflow:visible">`;
@@ -248,6 +249,11 @@
         const tl = st ? [['Packing list', st.packing], [l.mode === 'Sea' ? 'Departs' : 'Flight', st.departs], ['Arrives', st.arrived], ['Cleared', st.dcleared], ['FC', st.fc]] : [];
         return `<div class="d2r-card"><div class="top" style="display:flex;gap:10px;align-items:center"><span class="d2r-g ${l.mode.toLowerCase()}">${esc(l.mode.toUpperCase())}</span><div class="nm" style="font-size:13.5px;font-weight:600">${esc([l.carrier, l.service].filter(Boolean).join(' · ') || (l.kind === 'history' ? 'From history' : 'Option'))}<small style="display:block;font-size:11px;color:${C.dim};font-weight:400">${l.po_count} PO${l.po_count === 1 ? '' : 's'} · ${nf(l.units)} units · ${esc(l.basis)}</small></div><b style="margin-left:auto;font-size:16px">${esc(money(l.price, l.currency))}</b></div>
           <div style="display:flex;gap:0;margin-top:12px;position:relative;height:46px"><div style="position:absolute;left:4%;right:4%;top:9px;height:1px;background:rgba(255,255,255,.14)"></div>${tl.map((x, i) => `<div style="flex:1;text-align:center;position:relative"><div style="width:9px;height:9px;border-radius:50%;background:${i >= 2 ? C.card : C.text};border:1.5px solid ${C.text};margin:5px auto 0"></div><div style="font-size:10px;color:${C.dim};margin-top:4px">${esc(x[0])}</div><div style="font-size:11px;color:${C.text};font-weight:600">${esc(dmy(x[1]))}</div></div>`).join('')}</div>
+          ${l.dates && l.dates.p50 ? `<div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:${C.card2};border:0.5px solid ${C.line};display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;font-size:11px;color:${C.mute}">
+            <div><div style="font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:${C.dim};font-weight:600">Ship by</div><b style="color:${l.dates.p50.makes_it === false ? C.rose : C.text};font-size:13px">${esc(dmy(l.dates.p50.ship_by))}</b><div style="color:${C.faint}">${esc(dmy(l.dates.p90.ship_by))} to be safe</div></div>
+            <div><div style="font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:${C.dim};font-weight:600">Cargo ready by</div><b style="color:${C.text};font-size:13px">${esc(dmy(l.dates.p50.cargo_ready_by))}</b><div style="color:${C.faint}">packing list done</div></div>
+            <div><div style="font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:${C.dim};font-weight:600">Ex-factory by</div><b style="color:${C.text};font-size:13px">${esc(dmy(l.dates.p50.ex_factory_by))}</b><div style="color:${C.faint}">${l.dates.vas_days} d of VAS before packing</div></div>
+            <div style="grid-column:1 / -1;color:${C.dim}">This departure ${esc(dmy(l.dates.this_departure.departs))} needs cargo ready <b style="color:${C.text}">${esc(dmy(l.dates.this_departure.cargo_ready))}</b>, ex-factory <b style="color:${C.text}">${esc(dmy(l.dates.this_departure.ex_factory))}</b>${l.dates.p50.makes_it === false ? ` · <span style="color:${C.rose}">later than the ship-by date</span>` : ''}.</div></div>` : ''}
           <div class="d2r-note" style="margin-top:6px">${st9 ? `P90: FC ${esc(dmy(st9.fc))} · ` : ''}port to port ${esc(l.transit_quoted)} d quoted${l.sample ? `, lane runs ${esc(l.sample.achieved_p50)}–${esc(l.sample.achieved_p90)} d (${esc(l.sample.lane)})` : ', no measured history yet'}${l.rolled ? ` · <span style="color:${C.amber}">${l.rolled} PO${l.rolled === 1 ? '' : 's'} roll to a later departure on packing-list history</span>` : ''}</div>
           ${l.explain.slice(0, 1).map(e => `<div class="d2r-note" style="margin-top:4px;color:${C.mute}">${esc(e)}</div>`).join('')}</div>`; }).join('') + '</div>';
       // PO allocation (split) — toggles write overrides
