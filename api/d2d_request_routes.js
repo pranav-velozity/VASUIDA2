@@ -46,7 +46,8 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
   const markupFor = (client, mode) => rateFor ? rateFor(client, mode === 'Air' ? 'air_quote_markup' : 'sea_quote_markup', MARKUP_DEFAULT[mode]) : MARKUP_DEFAULT[mode];
   const LINK_DAYS = Math.max(1, parseInt(process.env.D2D_PARTNER_LINK_DAYS, 10) || 7);
   const vasDaysFor = (client) => { const v = Number(setting(client, 'vas_days', 4)); return isFinite(v) && v >= 0 ? v : 4; };
-  const sim = require('./rq_simulate')({ db, rulesFor, vasDaysFor, log: L });
+  const vasRateFor = (client) => { const v = Number(setting(client, 'vas_rate_per_day', 25000)); return isFinite(v) && v > 0 ? v : 25000; };   // units a day the VAS line clears for this client
+  const sim = require('./rq_simulate')({ db, rulesFor, vasDaysFor, vasRateFor, log: L });
   const CONTAINER = ['20', '40', '40HC'];
 
   // ── Schema ──
@@ -91,6 +92,7 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
 
   // Deleted requests stay in the table (their events and options with them) but leave every list.
   try { if (!db.prepare('PRAGMA table_info(rq_request)').all().some(c => c.name === 'archived_at')) db.exec('ALTER TABLE rq_request ADD COLUMN archived_at TEXT'); } catch (e) { L.warn('[d2d] migration: ' + e.message); }
+  try { if (!db.prepare('PRAGMA table_info(rq_request)').all().some(c => c.name === 'ex_factory')) db.exec('ALTER TABLE rq_request ADD COLUMN ex_factory TEXT'); } catch (e) { L.warn('[d2d] migration: ' + e.message); }
 
   // ── Settings, partners, origins ──
   const setting = (client, key, dflt) => { const r = db.prepare('SELECT value FROM rq_setting WHERE client_id = ? AND key = ?').get(client, key); return r && r.value != null ? r.value : dflt; };
@@ -140,7 +142,7 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
     const released = ['released', 'picked', 'cost_confirmed', 'firm_released', 'approved', 'declined', 'expired'].includes(rq.state);
     const list = (opts || optRows(rq.id)).map(o => optPublic({ ...o, __released: released && o.price != null }));
     const stateMap = { requested: 'requested', options_offered: 'with_velozity', released: 'options_ready', picked: 'picked', cost_confirmed: 'with_velozity', firm_released: 'firm', approved: 'approved', declined: 'declined', expired: 'expired' };
-    return { id: rq.id, ref: rq.ref, period_type: rq.period_type, period_start: rq.period_start, period_label: rq.period_label, need_by: rq.need_by, destination: rq.destination,
+    return { id: rq.id, ref: rq.ref, period_type: rq.period_type, period_start: rq.period_start, period_label: rq.period_label, need_by: rq.need_by, ex_factory: rq.ex_factory || null, destination: rq.destination,
       origins: J(rq.origins_json, []), volume: J(rq.volume_json, {}), source: rq.source, state: rq.state, client_state: stateMap[rq.state] || rq.state, client_note: rq.client_note,
       released_at: rq.released_at, picked_at: rq.picked_at, firm_released_at: rq.firm_released_at, decided_at: rq.decided_at, decision_note: rq.decision_note, created_at: rq.created_at,
       options: list, options_count: list.length, picked_count: list.filter(o => ['picked', 'confirmed', 'firm', 'approved'].includes(o.state)).length };
@@ -177,7 +179,7 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
     const originNames = [...new Set(suppliers.map(s => s.origin).filter(Boolean))];
     return { period_type: periodType, period_start: periodType === 'month' ? start.slice(0, 7) + '-01' : mondayOf(start), period_label: periodLabel(periodType, periodType === 'month' ? start.slice(0, 7) + '-01' : mondayOf(start)), weeks,
       units: suppliers.reduce((a, s) => a + s.units, 0), expected_units: expected, pos: pos.length, suppliers, origins: originNames, unmapped: suppliers.filter(s => !s.origin).map(s => s.supplier),
-      origin_list: originsFor(client), destination: setting(client, 'destination', 'Sydney · VOZ_KY'), facility: (pos.find(x => x.facility) || {}).facility || null, supplier_notes: notes, po_list: pos, profile: unitProfile(client) };
+      origin_list: originsFor(client), destination: setting(client, 'destination', 'Sydney · VOZ_KY'), facility: (pos.find(x => x.facility) || {}).facility || null, supplier_notes: notes, po_list: pos, profile: unitProfile(client), vas_days: vasDaysFor(client), vas_rate_per_day: vasRateFor(client) };
   }
 
   // ── Unit profile: what a unit weighs, measures and how many fill a container — from the client's own history ──
@@ -197,16 +199,18 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
       const fwClient = hasCol('flow_week', 'client_id'), recClient = hasCol('records', 'client_id');
       const rows = db.prepare(`SELECT week_start, data FROM flow_week WHERE week_start >= ? ${fwClient ? 'AND (client_id = ? OR client_id IS NULL)' : ''}`).all(...(fwClient ? [since, client] : [since]));
       const perSize = {};   // size → { all: [units…], rec: [units…] }
-      // One indexed lookup for every PO on every container (po_number index; raw values, keyed upper-case) — never a function on the column.
+      // Units on a container = that week's plan target_qty for the POs listed on it (the week report's rule); when the week has no
+      // plan rows for them, the units applied that week on those POs. Never all-time counts — POs repeat across weeks and containers.
       const conts = []; for (const r of rows) { const d = J(r.data, {}); const wc = d.intl_weekcontainers; const list = Array.isArray(wc) ? wc : (wc && Array.isArray(wc.containers) ? wc.containers : []); for (const c of list) conts.push({ week_start: r.week_start, c }); }
-      const rawPos = [...new Set(conts.flatMap(x => String(x.c.pos || '').split(',').map(v => v.trim()).filter(Boolean)))];
-      const applied = new Map();
-      for (let i = 0; i < rawPos.length; i += 400) { const chunk = rawPos.slice(i, i + 400);
-        for (const r of db.prepare(`SELECT po_number, COUNT(*) n FROM records WHERE ${recClient ? 'client_id = ? AND ' : ''}status = 'complete' AND po_number IN (${chunk.map(() => '?').join(',')}) GROUP BY po_number`).all(...(recClient ? [client] : []), ...chunk)) { const k = String(r.po_number || '').trim().toUpperCase(); applied.set(k, (applied.get(k) || 0) + r.n); } }
-      const planned = new Map(); try { for (const r of db.prepare(`SELECT data FROM plans WHERE week_start >= ? ${hasCol('plans', 'client_id') ? 'AND (client_id = ? OR client_id IS NULL)' : ''}`).all(...(hasCol('plans', 'client_id') ? [since, client] : [since]))) for (const x of J(r.data, [])) { const k = String(x.po_number || '').trim().toUpperCase(); if (k) planned.set(k, (planned.get(k) || 0) + (Number(x.target_qty) || 0)); } } catch (_) {}
+      const weeks = [...new Set(conts.map(x => x.week_start))];
+      const planByWeek = new Map(); try { const plClient = hasCol('plans', 'client_id'); for (const w of weeks) { const m = new Map(); for (const r of db.prepare(`SELECT data FROM plans WHERE week_start = ? ${plClient ? 'AND (client_id = ? OR client_id IS NULL)' : ''}`).all(...(plClient ? [w, client] : [w]))) for (const x of J(r.data, [])) { const k = String(x.po_number || '').trim().toUpperCase(); if (k) m.set(k, (m.get(k) || 0) + (Number(x.target_qty) || 0)); } planByWeek.set(w, m); } } catch (_) {}
+      const appliedByWeek = new Map(); const dateCol = hasCol('records', 'date_local') ? 'date_local' : null;
+      if (dateCol) for (const w of weeks) { const m = new Map(); const end = addDays(w, 7);
+        for (const r of db.prepare(`SELECT po_number, COUNT(*) n FROM records WHERE ${recClient ? 'client_id = ? AND ' : ''}status = 'complete' AND ${dateCol} >= ? AND ${dateCol} < ? GROUP BY po_number`).all(...(recClient ? [client] : []), w, end)) m.set(String(r.po_number || '').trim().toUpperCase(), r.n); appliedByWeek.set(w, m); }
       for (const { week_start, c } of conts) { const sz = String(c.size_ft || '40').trim(); if (/air/i.test(sz)) continue; const size = /20/.test(sz) ? '20' : '40';
         const pos = String(c.pos || '').split(',').map(x => x.trim().toUpperCase()).filter(Boolean); if (!pos.length) continue;
-        let units = 0; for (const po of pos) units += applied.get(po) || planned.get(po) || 0;
+        const pl = planByWeek.get(week_start) || new Map(), ap = appliedByWeek.get(week_start) || new Map();
+        let units = 0; for (const po of pos) units += pl.get(po) || 0; if (!units) for (const po of pos) units += ap.get(po) || 0;
         if (!units) continue; const e = perSize[size] || (perSize[size] = { all: [], rec: [] }); e.all.push(units); if (week_start >= recent) e.rec.push(units); }
       const avg = (a) => a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null;
       for (const [size, e] of Object.entries(perSize)) { const a26 = avg(e.all), a8 = avg(e.rec); out.sea[size] = { units_per_container: e.rec.length >= 3 ? a8 : a26, units_26w: a26, units_8w: a8, containers_26w: e.all.length, containers_8w: e.rec.length, basis: e.rec.length >= 3 ? 'last 8 weeks' : '26 weeks' }; }
@@ -438,8 +442,8 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
       const origins = Array.isArray(b.origins) && b.origins.length ? b.origins.map(String) : pf.origins;
       const vol = { units: Number(b.units) || pf.units, expected_units: pf.expected_units, facility: pf.facility, cartons: Number(b.cartons) || null, cbm: Number(b.cbm) || null, kg: Number(b.kg) || null, pos: pf.po_list, suppliers: pf.suppliers.map(s => ({ supplier: s.supplier, units: s.units, origin: s.origin, sea_units: s.sea_units, air_units: s.air_units })), supplier_notes: pf.supplier_notes };
       const id = newId('rq'); const ref = nextRef(c);
-      db.prepare('INSERT INTO rq_request (id, client_id, ref, period_type, period_start, period_label, need_by, destination, origins_json, volume_json, source, state, client_note, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-        .run(id, c, ref, type, start, periodLabel(type, start), b.need_by ? String(b.need_by).slice(0, 10) : null, b.destination || pf.destination, JSON.stringify(origins), JSON.stringify(vol), source, 'requested', b.note ? String(b.note).slice(0, 1000) : null, actorOf(req));
+      db.prepare('INSERT INTO rq_request (id, client_id, ref, period_type, period_start, period_label, need_by, ex_factory, destination, origins_json, volume_json, source, state, client_note, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id, c, ref, type, start, periodLabel(type, start), b.need_by ? String(b.need_by).slice(0, 10) : null, b.ex_factory ? String(b.ex_factory).slice(0, 10) : null, b.destination || pf.destination, JSON.stringify(origins), JSON.stringify(vol), source, 'requested', b.note ? String(b.note).slice(0, 1000) : null, actorOf(req));
       const rq = rqRow(id); event(id, null, null, 'requested', actorOf(req), isInternalReq(req) ? 'internal' : 'client', `${source === 'history' ? 'Use what we know' : 'Ask VelOzity'} · ${origins.join(', ') || 'no origin'} → ${rq.destination} · ${vol.units} units`);
       let links = [];
       if (source === 'history') {
@@ -509,7 +513,7 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
     try { const c = curClient(); const rq = rqRow(req.params.id, c); if (!rq) return res.status(404).json({ error: 'not_found' });
       const released = ['released', 'picked', 'cost_confirmed', 'firm_released', 'approved'].includes(rq.state); if (!released) return res.status(409).json({ error: 'no_options', message: 'Options are not released yet.' });
       const b = req.body || {}; const opts = optRows(rq.id).filter(o => ['approximate', 'picked', 'confirmed', 'firm', 'approved'].includes(o.state));
-      const out = sim.simulate(c, rq, opts, { adjust: b.adjust || {}, overrides: b.overrides || {}, need_by: b.need_by ? String(b.need_by).slice(0, 10) : null, profile: unitProfile(c), air_share: b.air_share });
+      const out = sim.simulate(c, rq, opts, { adjust: b.adjust || {}, overrides: b.overrides || {}, need_by: b.need_by ? String(b.need_by).slice(0, 10) : null, ex_factory: b.ex_factory ? String(b.ex_factory).slice(0, 10) : null, profile: unitProfile(c), air_share: b.air_share });
       res.json(out); } catch (e) { L.error('[rq:simulate] ' + (e.stack || e)); res.status(500).json({ error: String(e.message || e) }); }
   });
   // Delete a request that never materialised. Approved requests are the period's record: they are hidden from the
@@ -601,7 +605,7 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
   app.post('/rq/internal/expire', ...admin, async (req, res) => { try { res.json(await expire()); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
 
   // ── Partners + settings (Finance › Quotes) ──
-  app.get('/rq/partners', ...admin, (req, res) => { try { const c = curClient(); res.json({ client_id: c, partners: db.prepare('SELECT * FROM quote_partner WHERE client_id = ? ORDER BY active DESC, name').all(c), settings: { client_notify_to: setting(c, 'client_notify_to', ''), destination: setting(c, 'destination', 'Sydney · VOZ_KY'), vas_days: Number(setting(c, 'vas_days', 4)), markup: { Air: markupFor(c, 'Air'), Sea: markupFor(c, 'Sea') } }, origins: db.prepare('SELECT * FROM rq_origin WHERE client_id = ? ORDER BY active DESC, sort, name').all(c), supplier_origins: supplierOrigins(c) }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
+  app.get('/rq/partners', ...admin, (req, res) => { try { const c = curClient(); res.json({ client_id: c, partners: db.prepare('SELECT * FROM quote_partner WHERE client_id = ? ORDER BY active DESC, name').all(c), settings: { client_notify_to: setting(c, 'client_notify_to', ''), destination: setting(c, 'destination', 'Sydney · VOZ_KY'), vas_days: Number(setting(c, 'vas_days', 4)), vas_rate_per_day: vasRateFor(c), markup: { Air: markupFor(c, 'Air'), Sea: markupFor(c, 'Sea') } }, origins: db.prepare('SELECT * FROM rq_origin WHERE client_id = ? ORDER BY active DESC, sort, name').all(c), supplier_origins: supplierOrigins(c) }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
   app.post('/rq/partners', ...admin, writeOpLimiter, auditLog('edit_quote_partner'), (req, res) => {
     try { const c = curClient(); const b = req.body || {}; const email = String(b.email || '').trim(); const name = String(b.name || '').trim(); if (!name || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: 'name and a valid email required' });
       const id = b.id ? String(b.id) : newId('qp'); const air = b.air == null ? 1 : (b.air ? 1 : 0), sea = b.sea == null ? 1 : (b.sea ? 1 : 0), active = b.active == null ? 1 : (b.active ? 1 : 0);
@@ -611,7 +615,8 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
   app.delete('/rq/partners/:id', ...admin, writeOpLimiter, auditLog('delete_quote_partner'), (req, res) => { try { db.prepare("UPDATE quote_partner SET active = 0, updated_at = datetime('now') WHERE id = ? AND client_id = ?").run(req.params.id, curClient()); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
   app.put('/rq/settings', ...admin, writeOpLimiter, auditLog('edit_d2d_settings'), (req, res) => {
     try { const c = curClient(); const b = req.body || {}; if (b.client_notify_to != null) setSetting(c, 'client_notify_to', String(b.client_notify_to).trim(), actorOf(req)); if (b.destination != null) setSetting(c, 'destination', String(b.destination).trim(), actorOf(req)); if (b.vas_days != null) { const v = Number(b.vas_days); if (!isFinite(v) || v < 0 || v > 30) return res.status(400).json({ error: 'vas_days must be 0–30' }); setSetting(c, 'vas_days', String(v), actorOf(req)); }
-      res.json({ ok: true, settings: { client_notify_to: setting(c, 'client_notify_to', ''), destination: setting(c, 'destination', 'Sydney · VOZ_KY'), vas_days: Number(setting(c, 'vas_days', 4)) } }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+      if (b.vas_rate_per_day != null) { const v = Number(b.vas_rate_per_day); if (!isFinite(v) || v < 100 || v > 1000000) return res.status(400).json({ error: 'vas_rate_per_day must be 100–1,000,000 units a day' }); setSetting(c, 'vas_rate_per_day', String(Math.round(v)), actorOf(req)); }
+      res.json({ ok: true, settings: { client_notify_to: setting(c, 'client_notify_to', ''), destination: setting(c, 'destination', 'Sydney · VOZ_KY'), vas_days: Number(setting(c, 'vas_days', 4)), vas_rate_per_day: vasRateFor(c) } }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
   app.post('/rq/origins', ...admin, writeOpLimiter, auditLog('edit_d2d_origin'), (req, res) => {
     try { const c = curClient(); const b = req.body || {}; const name = String(b.name || '').trim(); if (!name) return res.status(400).json({ error: 'name required' }); const id = b.id ? String(b.id) : newId('or');
