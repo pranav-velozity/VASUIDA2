@@ -185,19 +185,29 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
   // the invoice lines (container rate + customs). Air: chargeable kg and CBM per unit from approved quotes.
   // Units per container swing with the season, so the last 8 weeks lead when they have enough containers.
   const hasCol = (t, c) => { try { return db.prepare(`PRAGMA table_info(${t})`).all().some(x => x.name === c); } catch (_) { return false; } };
+  // Cached per client for 10 minutes: better-sqlite3 is synchronous, so anything slow here stalls every request on the box.
+  const _profCache = new Map(); const PROF_TTL_MS = 10 * 60 * 1000;
   function unitProfile(client) {
+    const hit = _profCache.get(client); if (hit && Date.now() - hit.at < PROF_TTL_MS) return hit.v;
+    const t0 = Date.now(); const v = unitProfileRaw(client); _profCache.set(client, { at: Date.now(), v }); const ms = Date.now() - t0; if (ms > 500) log.warn(`[rq] unit profile for ${client} took ${ms} ms`); return v;
+  }
+  function unitProfileRaw(client) {
     const since = addDays(today(), -182), recent = addDays(today(), -56); const out = { sea: {}, air: {}, source: {} };
     try {
       const fwClient = hasCol('flow_week', 'client_id'), recClient = hasCol('records', 'client_id');
       const rows = db.prepare(`SELECT week_start, data FROM flow_week WHERE week_start >= ? ${fwClient ? 'AND (client_id = ? OR client_id IS NULL)' : ''}`).all(...(fwClient ? [since, client] : [since]));
       const perSize = {};   // size → { all: [units…], rec: [units…] }
-      const appliedFor = db.prepare(`SELECT COUNT(*) n FROM records WHERE ${recClient ? 'client_id = ? AND ' : ''}status = 'complete' AND UPPER(TRIM(po_number)) = ?`);
+      // One indexed lookup for every PO on every container (po_number index; raw values, keyed upper-case) — never a function on the column.
+      const conts = []; for (const r of rows) { const d = J(r.data, {}); const wc = d.intl_weekcontainers; const list = Array.isArray(wc) ? wc : (wc && Array.isArray(wc.containers) ? wc.containers : []); for (const c of list) conts.push({ week_start: r.week_start, c }); }
+      const rawPos = [...new Set(conts.flatMap(x => String(x.c.pos || '').split(',').map(v => v.trim()).filter(Boolean)))];
+      const applied = new Map();
+      for (let i = 0; i < rawPos.length; i += 400) { const chunk = rawPos.slice(i, i + 400);
+        for (const r of db.prepare(`SELECT po_number, COUNT(*) n FROM records WHERE ${recClient ? 'client_id = ? AND ' : ''}status = 'complete' AND po_number IN (${chunk.map(() => '?').join(',')}) GROUP BY po_number`).all(...(recClient ? [client] : []), ...chunk)) { const k = String(r.po_number || '').trim().toUpperCase(); applied.set(k, (applied.get(k) || 0) + r.n); } }
       const planned = new Map(); try { for (const r of db.prepare(`SELECT data FROM plans WHERE week_start >= ? ${hasCol('plans', 'client_id') ? 'AND (client_id = ? OR client_id IS NULL)' : ''}`).all(...(hasCol('plans', 'client_id') ? [since, client] : [since]))) for (const x of J(r.data, [])) { const k = String(x.po_number || '').trim().toUpperCase(); if (k) planned.set(k, (planned.get(k) || 0) + (Number(x.target_qty) || 0)); } } catch (_) {}
-      for (const r of rows) { const d = J(r.data, {}); const wc = d.intl_weekcontainers; const list = Array.isArray(wc) ? wc : (wc && Array.isArray(wc.containers) ? wc.containers : []);
-        for (const c of list) { const sz = String(c.size_ft || '40').trim(); if (/air/i.test(sz)) continue; const size = /20/.test(sz) ? '20' : '40';
-          const pos = String(c.pos || '').split(',').map(x => x.trim().toUpperCase()).filter(Boolean); if (!pos.length) continue;
-          let units = 0; for (const po of pos) { const a = appliedFor.get(...(recClient ? [client, po] : [po])); units += (a && a.n) || planned.get(po) || 0; }
-          if (!units) continue; const e = perSize[size] || (perSize[size] = { all: [], rec: [] }); e.all.push(units); if (r.week_start >= recent) e.rec.push(units); } }
+      for (const { week_start, c } of conts) { const sz = String(c.size_ft || '40').trim(); if (/air/i.test(sz)) continue; const size = /20/.test(sz) ? '20' : '40';
+        const pos = String(c.pos || '').split(',').map(x => x.trim().toUpperCase()).filter(Boolean); if (!pos.length) continue;
+        let units = 0; for (const po of pos) units += applied.get(po) || planned.get(po) || 0;
+        if (!units) continue; const e = perSize[size] || (perSize[size] = { all: [], rec: [] }); e.all.push(units); if (week_start >= recent) e.rec.push(units); }
       const avg = (a) => a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null;
       for (const [size, e] of Object.entries(perSize)) { const a26 = avg(e.all), a8 = avg(e.rec); out.sea[size] = { units_per_container: e.rec.length >= 3 ? a8 : a26, units_26w: a26, units_8w: a8, containers_26w: e.all.length, containers_8w: e.rec.length, basis: e.rec.length >= 3 ? 'last 8 weeks' : '26 weeks' }; }
       // price per container from invoice lines: container rate + customs per container, by size
@@ -218,7 +228,7 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
     } catch (e) { out.source.air_error = String(e.message || e); }
     return out;
   }
-  app.get('/rq/profile', ...[authenticateRequest, requireClientOrInternal], (req, res) => { try { res.json(unitProfile(curClient())); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
+  app.get('/rq/profile', ...[authenticateRequest, requireClientOrInternal], (req, res) => { try { if (req.query.fresh) _profCache.delete(curClient()); res.json(unitProfile(curClient())); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
 
   // ── Options from history ("Use what we know") ──
   function historyOptions(client, rq) {
@@ -487,7 +497,7 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
     try { const c = curClient(); const rq = rqRow(req.params.id, c); if (!rq) return res.status(404).json({ error: 'not_found' });
       if (rq.source !== 'history' || !['requested', 'released'].includes(rq.state)) return res.status(409).json({ error: 'not_rebuildable', message: 'Only an unpicked "Use what we know" request can be rebuilt.' });
       for (const o of optRows(rq.id)) if (['approximate'].includes(o.state)) setOptState(o, 'withdrawn', actorOf(req), 'client', 'rebuilt from history');
-      const hist = historyOptions(c, rq); let n = 0;
+      _profCache.delete(c); const hist = historyOptions(c, rq); let n = 0;
       hist.forEach((h, i) => { const oid = newId('op'); db.prepare('INSERT INTO rq_option (id, request_id, client_id, mode, kind, carrier, service, origin, container_size, transit_days, valid_until, price, currency, price_basis, state, sort) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
         .run(oid, rq.id, c, h.mode, 'history', h.carrier, h.service, h.origin, h.container_size || null, h.transit_days, addDays(today(), 14), h.price, h.currency, h.price_basis, 'approximate', i); if (h.basis) db.prepare('INSERT INTO rq_option_cost (option_id, cost_note) VALUES (?, ?)').run(oid, h.basis); n++; });
       if (n) { db.prepare("UPDATE rq_request SET released_at = datetime('now') WHERE id = ?").run(rq.id); setState(rq, 'released', actorOf(req), 'client', `rebuilt · ${n} option(s) from history`); } else setState(rq, 'requested', actorOf(req), 'client', 'rebuilt · no history');
