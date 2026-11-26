@@ -43,6 +43,12 @@
 
   let _list = null, _open = null, _detail = null, _pf = null, _form = null, _isOpen = false, _err = null, _showForm = false, _picks = new Set();
   let _sim = null, _simBusy = false, _simParams = { adjust: {}, overrides: {}, need_by: null }, _simFocus = null;
+  // SVGs are drawn at the pixel width of their box (fixed font sizes), and redrawn on resize — never scaled through a viewBox.
+  const _svgs = {}; let _fitT = null;
+  function fitSvgs(root) { const host = root || document.getElementById('page-simulator'); if (!host) return;
+    host.querySelectorAll('[data-svg]').forEach(box => { const f = _svgs[box.dataset.svg]; if (!f) return; const w = Math.max(320, Math.floor(box.clientWidth || box.getBoundingClientRect().width || 640)); if (box.dataset.w === String(w)) return; box.dataset.w = String(w); box.innerHTML = f(w);
+      box.querySelectorAll('[data-pt]').forEach(x => x.onclick = (e) => { e.stopPropagation(); if (x.dataset.pt) { _simFocus = x.dataset.pt; render(); } }); }); }
+  window.addEventListener('resize', () => { clearTimeout(_fitT); _fitT = setTimeout(() => fitSvgs(), 120); });
 
   function styles() {
     if (el('d2r-css')) return; const s = document.createElement('style'); s.id = 'd2r-css';
@@ -168,6 +174,7 @@
         <div class="d2r-f"><label>To</label><div class="in"><input id="d2r-dest" value="${esc(f.destination || '')}" placeholder="Sydney · VOZ_KY"><span class="m">facility</span></div></div>
         <div class="d2r-f" style="grid-column:1 / -1;"><label>Volume</label><div class="in"><input type="number" id="d2r-units" min="0" style="max-width:120px;font-weight:600;font-size:15px" value="${esc(f.units != null && f.units !== '' ? f.units : (pf.units || ''))}" placeholder="units"><span style="color:${C.dim};font-size:12px">${pf.units ? (pf.expected_units != null && pf.expected_units !== pf.units ? `units · from the ${esc(pf.period_label || '')} plan · expected ${nf(pf.expected_units)} after supplier history` : `units · from the ${esc(pf.period_label || '')} plan`) : (pf.error ? 'plan could not be read — enter units' : `no plan in Pinpoint for ${esc(pf.period_label || 'this period')} yet — enter units`)}</span>
           <span style="margin-left:auto;display:flex;gap:10px;align-items:center;font-size:12px;color:${C.mute}">cartons <input type="number" id="d2r-ctn" min="0" value="${esc(f.cartons || '')}" placeholder="—"> CBM <input type="number" id="d2r-cbm" min="0" step="0.1" value="${esc(f.cbm || '')}" placeholder="—"> kg <input type="number" id="d2r-kg" min="0" value="${esc(f.kg || '')}" placeholder="—"></span></div>
+          <div id="d2r-prof">${profileNote(pf, f)}</div>
           ${(pf.suppliers || []).length ? `<div class="d2r-note">${pf.suppliers.slice(0, 6).map(s => `${esc(s.supplier)} ${nf(s.units)}${s.signal && s.signal.late_days_p50 ? ` <span style="color:${C.rose2}">${esc(s.signal.late_days_p50)} d late, ${Math.round(s.signal.fill_rate)}% of plan</span>` : ''}`).join(' · ')}${pf.suppliers.length > 6 ? ` · +${pf.suppliers.length - 6} more` : ''}</div>` : ''}</div>
       </div>
       <div style="display:flex;gap:14px;margin-top:16px;">
@@ -177,6 +184,18 @@
       <div style="display:flex;gap:12px;align-items:center;margin-top:16px;"><button class="d2r-btn" id="d2r-go" style="height:44px;padding:0 22px;font-size:13px" ${!_pf ? 'disabled' : ''}>${f.source === 'history' ? 'Build the options' : 'Ask VelOzity'}</button>
         <input id="d2r-note" placeholder="Note for VelOzity (optional)" style="flex:1;border:0.5px solid ${C.line2};border-radius:999px;padding:10px 14px;font:inherit;font-size:12.5px;background:${C.card2};color:${C.text}" value="${esc(f.note || '')}">
         ${(pf.supplier_notes || []).length ? `<span class="d2r-note" style="margin:0">Accounting for: ${esc(pf.supplier_notes.join(' · '))}</span>` : ''}</div></div>`;
+  }
+  // What the client's own history says a unit is — shown under the volume line; typed CBM / kg far off it get an amber flag.
+  function profileNote(pf, f) {
+    const pr = pf.profile; if (!pr) return ''; const s40 = pr.sea && pr.sea['40'], s20 = pr.sea && pr.sea['20'], a = pr.air || {};
+    const bits = []; if (s40 && s40.units_per_container) bits.push(`${nf(s40.units_per_container)} units per 40' (${s40.basis}${s40.units_8w && s40.units_26w && s40.units_8w !== s40.units_26w ? ` · 26-wk ${nf(s40.units_26w)}` : ''})`); if (s20 && s20.units_per_container) bits.push(`${nf(s20.units_per_container)} per 20'`);
+    if (a.kg_per_unit) bits.push(`${a.kg_per_unit} kg chargeable per unit`); if (a.cbm_per_unit) bits.push(`${a.cbm_per_unit} CBM per unit`);
+    if (!bits.length) return `<div class="d2r-note">No shipped history to size a unit from yet — CBM and kg help, otherwise the simulation assumes typical apparel.</div>`;
+    const units = Number(f.units) || Number(pf.units) || 0; const warn = [];
+    const off = (typed, hist) => typed && hist && units && (typed / units / hist > 2 || hist / (typed / units) > 2);
+    if (off(Number(f.cbm), a.cbm_per_unit)) warn.push(`${f.cbm} CBM for ${nf(units)} units is ${(Number(f.cbm) / units).toFixed(4)} CBM a unit — your history runs ${a.cbm_per_unit}. Check the figure (cartons?); the simulation will use history.`);
+    if (off(Number(f.kg), a.kg_per_unit)) warn.push(`${f.kg} kg for ${nf(units)} units is ${(Number(f.kg) / units).toFixed(2)} kg a unit — your history runs ${a.kg_per_unit}. The simulation will use history.`);
+    return `<div class="d2r-note">From your history: ${esc(bits.join(' · '))}. The mix changes with the season, so the last 8 weeks lead when there is enough of it.</div>${warn.map(w => `<div class="d2r-note" style="color:${C.amber}">${esc(w)}</div>`).join('')}`;
   }
   function detailHtml(r) {
     const st = STATE[r.client_state] || STATE.requested; const vol = r.volume || {}; const opts = (r.options || []).filter(o => o.state !== 'withdrawn');
@@ -192,7 +211,7 @@
         <div class="facts"><span>departs <b>${esc(dmy(o.departs))}</b></span><span>transit <b>${o.transit_days != null ? esc(o.transit_days) + ' d' : '—'}</b> <span style="color:${C.faint}">port to port</span></span><span>valid to <b>${esc(dmy(o.valid_until))}</b></span>${o.cutoff ? `<span>cut-off <b>${esc(dmy(o.cutoff))}</b></span>` : ''}</div>
         <div><span class="d2r-pill" style="background:${os[1]};color:${os[2]}">${esc(os[0])}</span></div></div>`; };
     let html = `<div class="d2r-sec"><h2>${esc(r.period_label)} · ${esc(r.ref)}</h2><span class="d2r-pill" style="background:${st[1]};color:${st[2]}">${esc(st[0])}</span><span>${esc((r.origins || []).join(' · ') || '—')} → ${esc(r.destination || 'Sydney')}${r.need_by ? ` · in FC by <b style="color:${C.text}">${esc(dmy(r.need_by))}</b>` : ''} · ${nf(vol.units)} units${vol.expected_units && vol.expected_units !== vol.units ? ` · expected ${nf(vol.expected_units)}` : ''}</span>
-      <span style="margin-left:auto;display:flex;gap:8px;">${firm ? `<button class="d2r-btn sm" data-act="approve">Approve</button><button class="d2r-btn sm sec" data-act="decline">Decline</button>` : ''}${canPick ? `<button class="d2r-btn sm" data-act="pick" ${_picks.size ? '' : 'disabled'}>Pick ${_picks.size || ''} &amp; ask VelOzity to confirm</button>` : ''}${r.client_state === 'expired' || (r.client_state === 'requested' && r.source === 'history') ? `<button class="d2r-btn sm" data-act="refresh">Ask VelOzity${r.client_state === 'expired' ? ' to refresh' : ''}</button>` : ''}${!['approved', 'declined'].includes(r.client_state) && !firm ? `<button class="d2r-btn sm sec" data-act="decline">Withdraw</button>` : ''}<button class="d2r-btn sm sec" data-act="delete" title="${r.client_state === 'approved' ? 'Hide from the list — the approved quotes stay' : 'Delete this request'}">${r.client_state === 'approved' ? 'Hide' : 'Delete'}</button></span></div>`;
+      <span style="margin-left:auto;display:flex;gap:8px;">${firm ? `<button class="d2r-btn sm" data-act="approve">Approve</button><button class="d2r-btn sm sec" data-act="decline">Decline</button>` : ''}${canPick ? `<button class="d2r-btn sm" data-act="pick" ${_picks.size ? '' : 'disabled'}>Pick ${_picks.size || ''} &amp; ask VelOzity to confirm</button>` : ''}${r.source === 'history' && ['requested', 'options_ready'].includes(r.client_state) ? `<button class="d2r-btn sm sec" data-act="rebuild" title="Prices and unit history move — rebuild the options from today's history">Rebuild from history</button>` : ''}${r.client_state === 'expired' || (r.client_state === 'requested' && r.source === 'history') ? `<button class="d2r-btn sm" data-act="refresh">Ask VelOzity${r.client_state === 'expired' ? ' to refresh' : ''}</button>` : ''}${!['approved', 'declined'].includes(r.client_state) && !firm ? `<button class="d2r-btn sm sec" data-act="decline">Withdraw</button>` : ''}<button class="d2r-btn sm sec" data-act="delete" title="${r.client_state === 'approved' ? 'Hide from the list — the approved quotes stay' : 'Delete this request'}">${r.client_state === 'approved' ? 'Hide' : 'Delete'}</button></span></div>`;
     if ((vol.supplier_notes || []).length) html += `<div class="d2r-note" style="margin:-4px 0 10px;color:${C.mute}">Accounting for supplier history: ${esc(vol.supplier_notes.join(' · '))}</div>`;
     if (!opts.length) html += `<div class="d2r-empty">${r.client_state === 'requested' ? (r.source === 'history' ? 'Nothing on these lanes in the last six months — Ask VelOzity for fresh options.' : 'VelOzity has asked the carriers. You\'ll get an email when the options are ready.') : 'No options on this request.'}</div>`;
     else {
@@ -214,38 +233,41 @@
     catch (e) { _sim = { error: e.message }; }
     _simBusy = false; render();
   }
-  function frontierSvg(o) {
-    // x: days from the period Monday to FC (P50), y: price. Need-by as a vertical line. Frontier points filled, others hollow; chance as the fill tone.
-    const W = 640, H = 240, L = 58, R = 16, T = 14, B = 34; const pts = o.points; if (!pts.length) return '';
+  function frontierSvg(o, W) {
+    // x: days from the period Monday to FC (P50), y: price (AUD, so sea, air and mixes sit on one axis). Need-by as a vertical line. Frontier points filled, others hollow; chance as the fill tone.
+    W = W || 640; const H = 260, L = 58, R = 16, T = 16, B = 36; const pts = o.points; if (!pts.length) return '';
     const dmin = Math.min(...pts.map(p => p.days_p50)), dmax = Math.max(...pts.map(p => p.days_p90)); const nb = o.need_by ? Math.round((new Date(o.need_by + 'T00:00:00Z') - new Date(o.period_start + 'T00:00:00Z')) / 86400000) : null;
-    const x0 = 0, x1 = Math.max(35, Math.max(dmax, nb == null ? dmax : nb) + 7); const pmin = 0, pmax = Math.max(...pts.map(p => p.price)) * 1.15;
+    const pv = p => p.price_aud != null ? p.price_aud : p.price; const mixed = new Set(pts.map(p => p.currency)).size > 1;
+    const x0 = 0, x1 = Math.max(35, Math.max(dmax, nb == null ? dmax : nb) + 7); const pmin = 0, pmax = Math.max(...pts.map(pv)) * 1.15;
     const X = d => L + (d - x0) / (x1 - x0 || 1) * (W - L - R), Y = v => T + (1 - (v - pmin) / (pmax - pmin || 1)) * (H - T - B);
     const tone = p => p.prob == null ? C.sky : p.prob >= 80 ? C.mint : p.prob >= 50 ? C.amber : C.rose;
-    let out = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;overflow:visible">`;
-    for (let i = 0; i <= 4; i++) { const v = pmin + (pmax - pmin) * i / 4; out += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(255,255,255,.07)"/><text x="${L - 8}" y="${Y(v) + 3}" font-size="9.5" fill="${C.dim}" text-anchor="end">${v >= 1000 ? Math.round(v / 1000) + 'k' : Math.round(v)}</text>`; }
-    for (let d = Math.ceil(x0 / 7) * 7; d <= x1; d += 7) out += `<line x1="${X(d)}" x2="${X(d)}" y1="${T}" y2="${H - B}" stroke="rgba(255,255,255,.05)"/><text x="${X(d)}" y="${H - B + 14}" font-size="9.5" fill="${C.dim}" text-anchor="middle">${d} d</text>`;
-    out += `<text x="${W - R}" y="${H - 4}" font-size="9.5" fill="${C.faint}" text-anchor="end">days from the plan week to the Sydney FC · P50 marker, P90 whisker</text><text x="${L}" y="${T - 4}" font-size="9.5" fill="${C.faint}">price · ${esc(pts[0].currency)} ex GST</text>`;
+    let out = `<svg width="${W}" height="${H}" style="display:block;overflow:visible;font-family:inherit">`;
+    for (let i = 0; i <= 4; i++) { const v = pmin + (pmax - pmin) * i / 4; out += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(255,255,255,.07)"/><text x="${L - 8}" y="${Y(v) + 3}" font-size="10" fill="${C.dim}" text-anchor="end">${v >= 1000 ? Math.round(v / 1000) + 'k' : Math.round(v)}</text>`; }
+    const step = x1 > 120 ? 28 : x1 > 70 ? 14 : 7;
+    for (let d = Math.ceil(x0 / step) * step; d <= x1; d += step) out += `<line x1="${X(d)}" x2="${X(d)}" y1="${T}" y2="${H - B}" stroke="rgba(255,255,255,.05)"/><text x="${X(d)}" y="${H - B + 14}" font-size="10" fill="${C.dim}" text-anchor="middle">${d} d</text>`;
+    out += `<text x="${W - R}" y="${H - 5}" font-size="10" fill="${C.faint}" text-anchor="end">days from the plan week to the Sydney FC · P50 marker, P90 whisker</text><text x="${L}" y="${T - 5}" font-size="10" fill="${C.faint}">price · ${mixed ? 'AUD, converted' : esc(pts[0].currency)} ex GST</text>`;
     if (nb != null) out += `<line x1="${X(nb)}" x2="${X(nb)}" y1="${T}" y2="${H - B}" stroke="${C.rose}" stroke-dasharray="3 4"/><text x="${X(nb) + 5}" y="${T + 10}" font-size="10" fill="${C.rose2}">in FC by ${esc(dmy(o.need_by))}</text>`;
-    const fr = pts.filter(p => p.frontier).sort((a, b) => a.days_p50 - b.days_p50); if (fr.length > 1) out += `<polyline fill="none" stroke="rgba(255,255,255,.25)" stroke-width="1.2" points="${fr.map(p => X(p.days_p50) + ',' + Y(p.price)).join(' ')}"/>`;
-    for (const p of pts) { const x = X(p.days_p50), y = Y(p.price), on = p.id === _simFocus, rec = p.id === o.recommended;
+    const fr = pts.filter(p => p.frontier).sort((a, b) => a.days_p50 - b.days_p50); if (fr.length > 1) out += `<polyline fill="none" stroke="rgba(255,255,255,.25)" stroke-width="1.2" points="${fr.map(p => X(p.days_p50) + ',' + Y(pv(p))).join(' ')}"/>`;
+    const tag = p => p.kind === 'mix' ? `${p.split.air_share}% air` : p.kind === 'split' ? 'Split' : (p.legs[0].carrier || p.legs[0].mode);
+    for (const p of pts) { const x = X(p.days_p50), y = Y(pv(p)), on = p.id === _simFocus, rec = p.id === o.recommended;
       out += `<line x1="${x}" x2="${X(p.days_p90)}" y1="${y}" y2="${y}" stroke="${tone(p)}" stroke-width="2" opacity=".55"/>`;
       out += `<g data-pt="${esc(p.id)}" style="cursor:pointer"><circle cx="${x}" cy="${y}" r="${on ? 9 : 6.5}" fill="${p.frontier ? tone(p) : C.card}" stroke="${tone(p)}" stroke-width="${on ? 2.5 : 1.5}"/>${rec ? `<circle cx="${x}" cy="${y}" r="13" fill="none" stroke="#fff" stroke-width="1" stroke-dasharray="2 2"/>` : ''}<title>${esc(p.label)} · ${esc(money(p.price, p.currency))} · FC ${esc(dmy(p.fc_p50))} · ${p.prob == null ? '—' : p.prob + '% on time'}</title></g>`;
-      out += `<text x="${x + 11}" y="${y - 9}" font-size="10" fill="${on ? C.text : C.mute}">${esc(p.kind === 'split' ? 'Split' : (p.legs[0].carrier || p.legs[0].mode))}${p.prob != null ? ` · ${p.prob}%` : ''}</text>`; }
+      out += `<text x="${x + 11}" y="${y - 9}" font-size="10.5" fill="${on ? C.text : C.mute}">${esc(tag(p))}${p.prob != null ? ` · ${p.prob}%` : ''}</text>`; }
     return out + '</svg>';
   }
   // One leg as a dated axis, left to right: ex-factory → packing list → departs → arrives → cleared → FC (this
   // departure, P50 filled; P90 FC as a faint marker), with the latest-to-make-it dates (ship by, cargo ready by,
   // ex-factory by) as hollow rose markers below the axis and the need-by date as the dashed line.
-  function legTimeline(l, st, st9, needBy) {
-    if (!st) return '';
+  function legTimeline(l, st, st9, needBy, W) {
+    if (!st) return ''; W = W || 900;
     const d = l.dates || {}; const td = d.this_departure || {}; const latest = d.p50 || null;
     const pts = [['Ex-factory', td.ex_factory, 'plan'], ['Packing list', st.packing, 'plan'], [l.mode === 'Sea' ? 'Departs' : 'Flight', st.departs, 'plan'], ['Arrives', st.arrived, 'plan'], ['Cleared', st.dcleared, 'plan'], ['FC', st.fc, 'plan']].filter(x => x[1]);
     const marks = latest ? [['ex-factory by', latest.ex_factory_by], ['cargo ready by', latest.cargo_ready_by], ['ship by', latest.ship_by]] : [];
     const all = [...pts.map(x => x[1]), ...marks.map(x => x[1]), st9 && st9.fc, needBy].filter(Boolean).sort();
     const t0 = new Date(all[0] + 'T00:00:00Z'), t1 = new Date(all[all.length - 1] + 'T00:00:00Z'); const span = Math.max(14, (t1 - t0) / 86400000);
-    const W = 900, H = 118, L = 24, R = 24, AX = 46; const X = (s) => L + ((new Date(s + 'T00:00:00Z') - t0) / 86400000) / span * (W - L - R);
+    const H = 124, L = 28, R = 28, AX = 48; const X = (s) => L + ((new Date(s + 'T00:00:00Z') - t0) / 86400000) / span * (W - L - R);
     const short = (s) => { const dd = new Date(s + 'T00:00:00Z'); return dd.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' }); };
-    let out = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;overflow:visible;margin-top:12px">`;
+    let out = `<svg width="${W}" height="${H}" style="display:block;overflow:visible;margin-top:12px;font-family:inherit">`;
     // week ticks
     for (let k = 0; k <= span; k += 7) { const x = L + k / span * (W - L - R); out += `<line x1="${x}" x2="${x}" y1="${AX - 18}" y2="${AX + 30}" stroke="rgba(255,255,255,.05)"/>`; }
     out += `<line x1="${L}" x2="${W - R}" y1="${AX}" y2="${AX}" stroke="rgba(255,255,255,.18)" stroke-width="1.5"/>`;
@@ -259,9 +281,11 @@
       out += `<text x="${x}" y="${ly - 10 * (up ? 1 : -1) + (up ? 0 : 0)}" font-size="9.5" fill="${C.dim}" text-anchor="middle">${esc(p[0])}</text><text x="${x}" y="${ly}" font-size="10.5" font-weight="600" fill="${C.text}" text-anchor="middle">${esc(short(p[1]))}</text>`; });
     // latest-to-make-it markers below
     marks.forEach((m, i) => { const x = X(m[1]); out += `<path d="M${x} ${AX + 6} l-4 7 h8 z" fill="none" stroke="${C.rose}" stroke-width="1.2"/><text x="${x}" y="${AX + 48 + (i % 2) * 11}" font-size="9" fill="${C.rose2}" text-anchor="middle">${esc(m[0])} ${esc(short(m[1]))}</text>`; });
-    out += '</svg>';
-    const safe = d.p90 ? `ship by ${dmy(d.p90.ship_by)} to be safe (P90)` : '';
-    return out + `<div class="d2r-note" style="margin-top:2px;color:${C.mute}">Filled dots: this departure (${esc(dmy(st.departs))}) — it needs cargo ready <b style="color:${C.text}">${esc(dmy(td.cargo_ready))}</b>, ex-factory <b style="color:${C.text}">${esc(dmy(td.ex_factory))}</b> (${d.vas_days} d of VAS). Rose triangles: the latest dates that still make ${needBy ? esc(dmy(needBy)) : 'the date'}${latest && latest.makes_it === false ? ` — <span style="color:${C.rose}">this departure is later than the ship-by date</span>` : ''}. ${esc(safe)}</div>`;
+    return out + '</svg>';
+  }
+  function legNote(l, st, needBy) {
+    const d = l.dates || {}; const td = d.this_departure || {}; const latest = d.p50 || null; const safe = d.p90 ? `ship by ${dmy(d.p90.ship_by)} to be safe (P90)` : '';
+    return `<div class="d2r-note" style="margin-top:2px;color:${C.mute}">Filled dots: this departure (${esc(dmy(st.departs))}) — it needs cargo ready <b style="color:${C.text}">${esc(dmy(td.cargo_ready))}</b>, ex-factory <b style="color:${C.text}">${esc(dmy(td.ex_factory))}</b> (${d.vas_days} d of VAS). Rose triangles: the latest dates that still make ${needBy ? esc(dmy(needBy)) : 'the date'}${latest && latest.makes_it === false ? ` — <span style="color:${C.rose}">this departure is later than the ship-by date</span>` : ''}. ${esc(safe)}</div>`;
   }
   function simHtml(r) {
     const o = _sim;
@@ -270,19 +294,29 @@
     if (o.error) return html + `<div class="d2r-empty">Could not simulate: ${esc(o.error)} <button class="d2r-btn sm sec" data-sim="run" style="margin-left:10px">Try again</button></div>`;
     if (!o.points.length) return html + `<div class="d2r-empty">${esc(o.recommendation)}</div>`;
     const rec = o.points.find(p => p.id === o.recommended), cheap = o.points.find(p => p.id === o.cheapest), fast = o.points.find(p => p.id === o.fastest); const focus = o.points.find(p => p.id === _simFocus) || rec || o.points[0];
-    const kpi = (lbl, p, note) => `<div class="d2r-kpi" data-pt="${p ? esc(p.id) : ''}" style="cursor:pointer;${p && p.id === _simFocus ? `border-color:${C.rose}` : ''}"><small>${lbl}</small><b>${p ? esc(money(p.price, p.currency)) : '—'}</b><i>${p ? `${esc(p.kind === 'split' ? p.label : p.legs[0].carrier || p.legs[0].mode)} · FC ${esc(dmy(p.fc_p50))}${p.prob != null ? ` · ${p.prob}%` : ''}` : note}</i></div>`;
+    const short = p => p.kind === 'mix' ? `${p.split.air_share}% by air` : p.kind === 'split' ? p.label : (p.legs[0].carrier || p.legs[0].mode);
+    const kpi = (lbl, p, note) => `<div class="d2r-kpi" data-pt="${p ? esc(p.id) : ''}" style="cursor:pointer;${p && p.id === _simFocus ? `border-color:${C.rose}` : ''}"><small>${lbl}</small><b>${p ? esc(money(p.price_per_unit, p.currency)) + '<span style="font-size:11px;font-weight:500;color:' + C.dim + '"> /unit</span>' : '—'}</b><i>${p ? `${esc(money(p.price, p.currency))} all in · ${esc(short(p))} · FC ${esc(dmy(p.fc_p50))}${p.prob != null ? ` · ${p.prob}%` : ''}` : note}</i></div>`;
     html += `<div class="d2r-kpis">${kpi('Recommended', rec, o.need_by ? 'nothing clears 80% by your date' : 'set a need-by date')}${kpi('Cheapest', cheap, '')}${kpi('Fastest', fast, '')}<div class="d2r-kpi"><small>Volume simulated</small><b>${nf(o.expected_units)}</b><i>of ${nf(o.total_units)} planned, after supplier history</i></div></div>`;
-    html += `<div class="d2r-card" style="padding:14px 16px 10px;max-width:760px">${frontierSvg(o)}</div>`;
+    _svgs.frontier = (w) => frontierSvg(o, w);
+    html += `<div class="d2r-card" style="padding:14px 16px 10px;max-width:900px"><div data-svg="frontier"></div></div>`;
     html += `<div class="d2r-note" style="margin-top:8px;color:${C.mute}">${esc(o.recommendation)}${o.assumptions.length ? ` <span style="color:${C.amber}">${esc(o.assumptions.join(' '))}</span>` : ''}</div>`;
     // focus point: legs with stage dates and, for a split, per-PO toggles
     if (focus) {
       html += `<div class="d2r-sec" style="margin-top:18px"><h2>${esc(focus.label)}</h2><span class="d2r-pill" style="background:${focus.prob == null ? C.skyBg : focus.prob >= 80 ? C.mintBg : focus.prob >= 50 ? C.amberBg : C.roseBg};color:${focus.prob == null ? C.sky : focus.prob >= 80 ? C.mint : focus.prob >= 50 ? C.amber : C.rose}">${focus.prob == null ? 'no date' : focus.prob + '% on time'}</span><span>${esc(money(focus.price, focus.currency))} · ${esc(money(focus.price_per_unit, focus.currency))}/unit · in FC ${esc(dmy(focus.fc_p50))} (P50) – ${esc(dmy(focus.fc_p90))} (P90)</span>${focus.frontier ? `<span class="d2r-pill" style="background:${C.tint};color:${C.mute}">on the frontier</span>` : ''}</div>`;
-      html += `<div style="display:grid;grid-template-columns:repeat(${Math.min(2, focus.legs.length)},minmax(0,1fr));gap:10px">` + focus.legs.map(l => { const latest = l.pos.slice().sort((u, v) => (v.p50.fc > u.p50.fc ? 1 : -1))[0]; const st = latest ? latest.p50 : null; const st9 = latest ? latest.p90 : null;
-        const tl = st ? [['Packing list', st.packing], [l.mode === 'Sea' ? 'Departs' : 'Flight', st.departs], ['Arrives', st.arrived], ['Cleared', st.dcleared], ['FC', st.fc]] : [];
-        return `<div class="d2r-card"><div class="top" style="display:flex;gap:10px;align-items:center"><span class="d2r-g ${l.mode.toLowerCase()}">${esc(l.mode.toUpperCase())}</span><div class="nm" style="font-size:13.5px;font-weight:600">${esc([l.carrier, l.service].filter(Boolean).join(' · ') || (l.kind === 'history' ? 'From history' : 'Option'))}<small style="display:block;font-size:11px;color:${C.dim};font-weight:400">${l.po_count} PO${l.po_count === 1 ? '' : 's'} · ${nf(l.units)} units · ${esc(l.basis)}</small></div><b style="margin-left:auto;font-size:16px">${esc(money(l.price, l.currency))}</b></div>
-          ${legTimeline(l, st, st9, o.need_by)}
+      // Legs stack (one under the other) so each timeline gets the full width.
+      html += `<div style="display:grid;grid-template-columns:minmax(0,1fr);gap:10px">` + focus.legs.map((l, li) => { const latest = l.pos.slice().sort((u, v) => (v.p50.fc > u.p50.fc ? 1 : -1))[0]; const st = latest ? latest.p50 : null; const st9 = latest ? latest.p90 : null;
+        const q = l.qty || {}; const qty = l.mode === 'Sea' ? `${q.containers} × ${esc(q.size)}' at ${esc(money(q.price_per_container, l.currency))} · ${q.utilisation != null ? q.utilisation + '% full' : ''}${q.units_per_container ? ` · ${nf(q.units_per_container)} units per box on your history` : ` · ${q.cbm} CBM`}` : `${nf(q.chargeable_kg)} kg chargeable${q.kg_per_unit ? ` · ${q.kg_per_unit} kg/unit` : ''}${q.price_per_kg ? ` · ${esc(money(q.price_per_kg, l.currency))}/kg` : ''}`;
+        _svgs['tl' + li] = (w) => legTimeline(l, st, st9, o.need_by, w);
+        return `<div class="d2r-card"><div class="top" style="display:flex;gap:10px;align-items:center"><span class="d2r-g ${l.mode.toLowerCase()}">${esc(l.mode.toUpperCase())}</span><div class="nm" style="font-size:13.5px;font-weight:600">${esc([l.carrier, l.service].filter(Boolean).join(' · ') || (l.kind === 'history' ? 'From history' : 'Option'))}<small style="display:block;font-size:11px;color:${C.dim};font-weight:400">${l.po_count} PO${l.po_count === 1 ? '' : 's'} · ${nf(l.units)} units · ${qty}</small></div><b style="margin-left:auto;font-size:16px;text-align:right">${esc(money(l.price, l.currency))}<small style="display:block;font-size:11px;font-weight:500;color:${C.dim}">${esc(money(l.price_per_unit, l.currency))}/unit</small></b></div>
+          <div data-svg="tl${li}"></div>${legNote(l, st, o.need_by)}
           <div class="d2r-note" style="margin-top:6px">${st9 ? `P90: FC ${esc(dmy(st9.fc))} · ` : ''}port to port ${esc(l.transit_quoted)} d quoted${l.sample ? `, lane runs ${esc(l.sample.achieved_p50)}–${esc(l.sample.achieved_p90)} d (${esc(l.sample.lane)})` : ', no measured history yet'}${l.rolled ? ` · <span style="color:${C.amber}">${l.rolled} PO${l.rolled === 1 ? '' : 's'} roll to a later departure on packing-list history</span>` : ''}</div>
           ${l.explain.slice(0, 1).map(e => `<div class="d2r-note" style="margin-top:4px;color:${C.mute}">${esc(e)}</div>`).join('')}</div>`; }).join('') + '</div>';
+      // Mix by share — chips pick how much goes by air; the matching point comes into focus
+      if (focus.kind === 'mix' || o.points.some(p => p.kind === 'mix')) {
+        const mixes = o.points.filter(p => p.kind === 'mix'); const cur = focus.kind === 'mix' ? focus.split.air_share : null; const shares = [...new Set([10, 25, 50, 75].concat(mixes.map(p => p.split.air_share)))].sort((a, b) => a - b);
+        html += `<div class="d2r-sec" style="margin-top:16px"><h2>Mix sea and air</h2><span>how much of the volume to fly — the rest sails; every PO is split by the same share</span></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">${shares.map(sh => { const p = mixes.find(x => x.split.air_share === sh); return `<span class="d2r-chip${cur === sh ? ' on' : ''}" data-share="${sh}" title="${p ? esc(money(p.price, p.currency)) + ' · FC ' + esc(dmy(p.fc_p50)) : 'simulate this share'}">${sh}% air <small style="color:${C.faint}">${p ? esc(money(p.price_per_unit, p.currency)) + '/unit' : ''}</small></span>`; }).join('')}</div>`;
+      }
       // PO allocation (split) — toggles write overrides
       if (focus.kind === 'split') {
         const allPos = [...focus.legs[0].pos.map(x => ({ ...x, leg: focus.legs[0] })), ...focus.legs[1].pos.map(x => ({ ...x, leg: focus.legs[1] }))].sort((a, b) => String(a.po).localeCompare(String(b.po)));
@@ -295,7 +329,7 @@
     html += `<div class="d2r-sec" style="margin-top:18px"><h2>Supplier history in the numbers</h2><span>on by default — switch one off to see the plan as written</span></div><div style="display:flex;gap:8px;flex-wrap:wrap">${o.suppliers.map(s => `<span class="d2r-chip${s.adjust ? ' on' : ''}" data-adj="${esc(s.key)}" title="${s.confidence === 'none' ? 'no measured history' : ''}">${esc(s.supplier)} <small style="color:${C.faint}">${s.fill_rate != null ? Math.round(s.fill_rate) + '% of plan' : 'no history'}${s.ready_late_p50 ? ` · ${s.ready_late_p50} d late` : ''}</small></span>`).join('')}</div>
       <div class="d2r-note">Days are counted from the Monday of the plan week. P50 is the middle outcome on measured history, P90 the one-in-ten bad week. The chance of making your date treats the FC day as a spread around P50 sized by P90. Prices are the released client prices; nothing here is estimated by VelOzity on your behalf.</div>`;
     // all points table (compact)
-    html += `<div class="d2r-sec" style="margin-top:18px"><h2>Every point</h2><span>${o.points.length} — tap to focus</span></div><div class="d2r-grid">${o.points.map(p => `<div class="d2r-card d2r-rq${p.id === _simFocus ? ' on' : ''}" data-pt="${esc(p.id)}"><div class="t">${esc(p.label)}<span class="d2r-pill" style="margin-left:auto;background:${p.prob == null ? C.skyBg : p.prob >= 80 ? C.mintBg : p.prob >= 50 ? C.amberBg : C.roseBg};color:${p.prob == null ? C.sky : p.prob >= 80 ? C.mint : p.prob >= 50 ? C.amber : C.rose}">${p.prob == null ? '—' : p.prob + '%'}</span></div><div class="m"><b style="color:${C.text};font-size:15px">${esc(money(p.price, p.currency))}</b> · ${esc(money(p.price_per_unit, p.currency))}/unit<br>FC ${esc(dmy(p.fc_p50))} – ${esc(dmy(p.fc_p90))} · ${p.days_p50}–${p.days_p90} d${p.frontier ? ' · frontier' : ''}${p.id === o.recommended ? ' · <span style="color:' + C.mint + '">recommended</span>' : ''}</div></div>`).join('')}</div>`;
+    html += `<div class="d2r-sec" style="margin-top:18px"><h2>Every point</h2><span>${o.points.length} — tap to focus</span></div><div class="d2r-grid">${o.points.map(p => `<div class="d2r-card d2r-rq${p.id === _simFocus ? ' on' : ''}" data-pt="${esc(p.id)}"><div class="t">${esc(p.label)}<span class="d2r-pill" style="margin-left:auto;background:${p.prob == null ? C.skyBg : p.prob >= 80 ? C.mintBg : p.prob >= 50 ? C.amberBg : C.roseBg};color:${p.prob == null ? C.sky : p.prob >= 80 ? C.mint : p.prob >= 50 ? C.amber : C.rose}">${p.prob == null ? '—' : p.prob + '%'}</span></div><div class="m"><b style="color:${C.text};font-size:15px">${esc(money(p.price_per_unit, p.currency))}</b>/unit · ${esc(money(p.price, p.currency))} all in${p.containers ? ` · ${p.containers} box${p.containers === 1 ? '' : 'es'}` : ''}${p.air_kg ? ` · ${nf(p.air_kg)} kg air` : ''}<br>FC ${esc(dmy(p.fc_p50))} – ${esc(dmy(p.fc_p90))} · ${p.days_p50}–${p.days_p90} d${p.frontier ? ' · frontier' : ''}${p.id === o.recommended ? ' · <span style="color:' + C.mint + '">recommended</span>' : ''}</div></div>`).join('')}</div>`;
     return html;
   }
 
@@ -306,7 +340,7 @@
     const ps = el('d2r-ps'); if (ps) ps.onchange = () => { const v = ps.value; _form.period_start = _form.period_type === 'month' ? v + '-01' : (mondayOf(v) || _form.period_start); _form.need_by = ''; _form.units = ''; loadPrefill(); };
     const nbb = el('d2r-nb'); if (nbb) nbb.onchange = () => { _form.need_by = nbb.value; };
     const dest = el('d2r-dest'); if (dest) dest.onchange = () => { _form.destination = dest.value; };
-    ['ctn', 'cbm', 'kg', 'note', 'units'].forEach(k => { const i = el('d2r-' + k); if (i) i.onchange = () => { _form[k === 'ctn' ? 'cartons' : k] = i.value; }; });
+    ['ctn', 'cbm', 'kg', 'note', 'units'].forEach(k => { const i = el('d2r-' + k); if (i) i.onchange = () => { _form[k === 'ctn' ? 'cartons' : k] = i.value; if (['cbm', 'kg', 'units'].includes(k)) { const pr = el('d2r-prof'); if (pr) pr.innerHTML = profileNote(_pf || {}, _form); } }; });
     s.querySelectorAll('[data-origin]').forEach(c => c.onclick = () => { const n = c.dataset.origin; _form.origins_set = true; _form.origins = _form.origins.includes(n) ? _form.origins.filter(x => x !== n) : _form.origins.concat([n]); render(); });
     s.querySelectorAll('[data-map]').forEach(sel => sel.onchange = async () => { if (!sel.value) return; try { await req('/rq/supplier-origin', { method: 'PUT', body: JSON.stringify({ supplier: sel.dataset.map, origin_id: sel.value }) }); toast('Origin saved'); _form.origins_set = false; loadPrefill(); } catch (e) { toast(e.message); } });
     s.querySelectorAll('[data-src]').forEach(w => w.onclick = () => { _form.source = w.dataset.src; render(); });
@@ -323,6 +357,7 @@
         else if (act === 'approve') { if (!confirm('Approve the firm option(s)? This becomes the period\'s approved quote and VelOzity instructs the carrier.')) return; b.disabled = true; await req(`/rq/requests/${encodeURIComponent(id)}/approve`, { method: 'POST', body: '{}' }); toast('Approved'); }
         else if (act === 'decline') { const note = prompt('Decline or withdraw this request — a note for VelOzity (optional):'); if (note === null) return; b.disabled = true; await req(`/rq/requests/${encodeURIComponent(id)}/decline`, { method: 'POST', body: JSON.stringify({ note }) }); toast('Declined'); }
         else if (act === 'delete') { const r0 = _list.find(x => x.id === id) || {}; if (!confirm(r0.client_state === 'approved' ? `Hide ${r0.ref} from the list? Its approved quotes stay on record.` : `Delete ${r0.ref}? Any open options are withdrawn. This cannot be undone.`)) return; b.disabled = true; await req(`/rq/requests/${encodeURIComponent(id)}`, { method: 'DELETE' }); toast(r0.client_state === 'approved' ? 'Hidden' : 'Deleted'); _open = null; history.replaceState(null, '', '#simulator'); pin(); }
+        else if (act === 'rebuild') { b.disabled = true; const r = await req(`/rq/requests/${encodeURIComponent(id)}/rebuild`, { method: 'POST', body: '{}' }); toast(r.rebuilt ? `${r.rebuilt} option(s) rebuilt from today's history` : 'No history on these lanes'); _sim = null; _simFocus = null; }
         else if (act === 'refresh') { b.disabled = true; const r = await req(`/rq/requests/${encodeURIComponent(id)}/refresh`, { method: 'POST', body: '{}' }); toast(r.partner_links_sent ? 'VelOzity asked for fresh options' : 'Request re-opened — no carrier link could be sent'); }
         await refreshAll();
       } catch (e) { toast(e.message); b.disabled = false; }
@@ -334,6 +369,8 @@
     s.querySelectorAll('[data-pt]').forEach(x => x.onclick = (e) => { e.stopPropagation(); if (x.dataset.pt) { _simFocus = x.dataset.pt; render(); } });
     s.querySelectorAll('[data-adj]').forEach(c => c.onclick = () => { const k = c.dataset.adj; if (_simParams.adjust[k] === false) delete _simParams.adjust[k]; else _simParams.adjust[k] = false; runSim(); });
     s.querySelectorAll('[data-po]').forEach(c => c.onclick = () => { _simParams.overrides[c.dataset.po] = c.dataset.to; _simFocus = null; runSim(); });
+    s.querySelectorAll('[data-share]').forEach(c => c.onclick = () => { const sh = Number(c.dataset.share); const p = _sim && _sim.points.find(x => x.kind === 'mix' && x.split.air_share === sh); if (p) { _simFocus = p.id; render(); } else { _simParams.air_share = sh; _simFocus = null; runSim().then(() => { const q = _sim && _sim.points.find(x => x.kind === 'mix' && x.split.air_share === sh); if (q) { _simFocus = q.id; render(); } }); } });
+    fitSvgs(s);
     if (_open && !_sim && !_simBusy && _detail && (_detail.options || []).some(o => o.price != null && !['expired', 'withdrawn'].includes(o.state))) runSim();
   }
   function pin() { const r = _open && (_list || []).find(x => x.id === _open); if (window._pulseRail && typeof window._pulseRail.setPin === 'function') window._pulseRail.setPin(r ? { page: 'simulator', label: `${r.ref} · ${r.period_label}`, ids: [], ref: r.ref } : null); }

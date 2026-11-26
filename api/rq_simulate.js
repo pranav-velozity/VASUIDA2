@@ -86,11 +86,21 @@ module.exports = function ({ db, rulesFor, vasDaysFor, log }) {
     const adjust = Object.assign({}, p.adjust || {});                       // supplierKey → false to switch off
     const adjOn = (s) => adjust[supplierKey(s)] !== false;
     const assumptions = [];
-    const cbmTotal = Number(vol.cbm) || 0, kgTotal = Number(vol.kg) || 0;
-    if (!cbmTotal) assumptions.push(`No CBM on the request — containers assume ${ASSUME.cbm_per_unit} CBM per unit.`);
-    if (!kgTotal && !cbmTotal) assumptions.push(`No weight on the request — air assumes ${ASSUME.kg_per_unit} kg per unit.`);
-    const cbmOf = (units) => cbmTotal ? cbmTotal * units / (totalUnits || 1) : units * ASSUME.cbm_per_unit;
-    const kgOf = (units) => { const kg = kgTotal ? kgTotal * units / (totalUnits || 1) : units * ASSUME.kg_per_unit; const vk = cbmOf(units) * 166.67; return Math.max(kg, vk); };
+    // Unit profile from the client's own history beats a typed figure that is wildly off it (a CBM typed where cartons were meant),
+    // and fills in whatever the request did not carry. Typed figures within 2× of history stand.
+    const prof = p.profile || { sea: {}, air: {} }; const profSea = prof.sea || {}, profAir = prof.air || {};
+    let cbmTotal = Number(vol.cbm) || 0, kgTotal = Number(vol.kg) || 0;
+    const histKg = profAir.kg_per_unit || null, histCbm = profAir.cbm_per_unit || null;
+    const off = (typed, hist) => typed && hist && (typed / hist > 2 || hist / typed > 2);
+    if (totalUnits && off(cbmTotal / totalUnits, histCbm)) { assumptions.push(`The request says ${r1(cbmTotal)} CBM for ${totalUnits} units (${(cbmTotal / totalUnits).toFixed(4)} CBM/unit); your history runs ${histCbm} CBM/unit (${profAir.basis}) — history used.`); cbmTotal = 0; }
+    if (totalUnits && off(kgTotal / totalUnits, histKg)) { assumptions.push(`The request says ${r1(kgTotal)} kg for ${totalUnits} units (${(kgTotal / totalUnits).toFixed(2)} kg/unit); your history runs ${histKg} kg/unit (${profAir.basis}) — history used.`); kgTotal = 0; }
+    const cbmPer = cbmTotal ? cbmTotal / (totalUnits || 1) : (histCbm || ASSUME.cbm_per_unit), kgPer = kgTotal ? kgTotal / (totalUnits || 1) : (histKg || ASSUME.kg_per_unit);
+    if (!cbmTotal) assumptions.push(histCbm ? `CBM per unit ${histCbm} from your approved air quotes (${profAir.basis}).` : `No CBM on the request and no history — containers assume ${ASSUME.cbm_per_unit} CBM per unit.`);
+    if (!kgTotal) assumptions.push(histKg ? `Chargeable weight ${histKg} kg per unit from your approved air quotes (${profAir.quotes_8w || profAir.quotes_26w} quotes, ${profAir.basis}).` : `No weight on the request and no history — air assumes ${ASSUME.kg_per_unit} kg per unit.`);
+    const unitsPerBox = (size) => { const e = profSea[size] || profSea['40']; return e && e.units_per_container ? e : null; };
+    if (unitsPerBox('40')) { const e = unitsPerBox('40'); assumptions.push(`Containers sized on your history: ${e.units_per_container} units per 40' (${e.basis}, ${e.containers_8w || e.containers_26w} containers${e.units_26w && e.units_8w && e.units_26w !== e.units_8w ? ` · 26-wk ${e.units_26w}, 8-wk ${e.units_8w} — the mix changes with the season` : ''}).`); }
+    const cbmOf = (units) => units * cbmPer;
+    const kgOf = (units) => { const kg = units * kgPer; const vk = cbmOf(units) * 166.67; return Math.max(kg, vk); };
     const expectedUnits = (po) => { const s = sig.sup.get(supplierKey(po.supplier)); const f = s && adjOn(po.supplier) ? Number(s.fill_rate_recent != null ? s.fill_rate_recent : s.fill_rate) : null; return f != null ? Math.round(po.units * Math.min(1, f / 100)) : po.units; };
     const live = (options || []).filter(o => ['approximate', 'picked', 'confirmed', 'firm', 'approved'].includes(o.state) && o.price != null);
     if (!totalUnits) return { request_id: rq.id, ref: rq.ref, period_label: rq.period_label, period_start: rq.period_start, need_by: needBy, total_units: 0, expected_units: 0, suppliers: [], assumptions, computed_at: new Date().toISOString(), points: [], recommended: null, cheapest: null, fastest: null, recommendation: 'This request has no units — there is nothing to price or time. Raise it again with the units for the period.' };
@@ -109,8 +119,11 @@ module.exports = function ({ db, rulesFor, vasDaysFor, log }) {
       const wUnits = perPo.reduce((a, x) => a + x.units, 0) || 1;
       const prob = perPo.some(x => x.prob != null) ? Math.round(perPo.reduce((a, x) => a + (x.prob == null ? 1 : x.prob) * x.units, 0) / wUnits * 100) : null;
       let qty, price, basis;
-      if (opt.mode === 'Sea') { const cap = CAP_CBM[opt.container_size] || CAP_CBM['40']; const cbm = cbmOf(units); qty = { containers: Math.max(1, Math.ceil(cbm / cap)), cbm: r1(cbm), size: opt.container_size || '40' }; price = opt.price_basis === 'per_container' ? r2(qty.containers * opt.price) : r2(opt.price * units / (totalUnits || units || 1)); basis = opt.price_basis === 'per_container' ? `${qty.containers} × ${opt.container_size || '40'}'` : 'total'; }
-      else { const kg = kgOf(units); qty = { chargeable_kg: Math.round(kg) }; price = opt.price_basis === 'per_kg' ? r2(kg * opt.price) : r2(opt.price * units / (totalUnits || units || 1)); basis = opt.price_basis === 'per_kg' ? `${Math.round(kg)} kg × ${opt.price}/kg` : 'total'; }
+      if (opt.mode === 'Sea') { const size = opt.container_size || '40'; const hist = unitsPerBox(size); const cap = CAP_CBM[size] || CAP_CBM['40']; const cbm = cbmOf(units);
+        const containers = Math.max(1, hist ? Math.ceil(units / hist.units_per_container) : Math.ceil(cbm / cap));
+        qty = { containers, cbm: r1(cbm), size, units_per_container: hist ? hist.units_per_container : null, units_this_fill: Math.round(units / containers), utilisation: hist ? Math.round(units / (containers * hist.units_per_container) * 100) : Math.round(cbm / (containers * cap) * 100), sized_by: hist ? `history · ${hist.units_per_container} units per ${size}' (${hist.basis})` : `${cap} CBM per ${size}'` };
+        price = opt.price_basis === 'per_container' ? r2(containers * opt.price) : r2(opt.price * units / (totalUnits || units || 1)); basis = opt.price_basis === 'per_container' ? `${containers} × ${size}' @ ${opt.price}` : 'total'; qty.price_per_container = opt.price_basis === 'per_container' ? opt.price : r2(price / containers); }
+      else { const kg = kgOf(units); qty = { chargeable_kg: Math.round(kg), kg_per_unit: Math.round(kg / (units || 1) * 100) / 100 }; price = opt.price_basis === 'per_kg' ? r2(kg * opt.price) : r2(opt.price * units / (totalUnits || units || 1)); basis = opt.price_basis === 'per_kg' ? `${Math.round(kg)} kg × ${opt.price}/kg` : 'total'; qty.price_per_kg = opt.price_basis === 'per_kg' ? opt.price : r2(price / (kg || 1)); }
       // Working back from the need-by date: the latest departure that still makes it (P50 and the safer P90),
       // the packing list that departure needs, and the ex-factory date before VAS. Also what THIS departure needs.
       const tail = (q) => { const l = legPos[0] ? legForPo(legPos[0], opt, rule, lane, sig.sup, false, q) : null; return l ? daysBetween(l.departs, l.fc) : null; };   // departed → FC on this lane at q
@@ -127,10 +140,17 @@ module.exports = function ({ db, rulesFor, vasDaysFor, log }) {
         explain.push(`In the Sydney FC ${dmy(fc50)} (P50) – ${dmy(fc90)} (P90)${needBy ? ` against your ${dmy(needBy)}: ${prob}% of units on time` : ''}.`);
         if (dates.p50) explain.push(`To make ${dmy(needBy)}: ship by ${dmy(dates.p50.ship_by)} (${dmy(dates.p90.ship_by)} to be safe) → cargo ready by ${dmy(dates.p50.cargo_ready_by)} → ex-factory by ${dmy(dates.p50.ex_factory_by)} with ${vasDays} d of VAS. This departure (${dmy(departs)}) needs cargo ready ${dmy(dates.this_departure.cargo_ready)}, ex-factory ${dmy(dates.this_departure.ex_factory)}.`);
       }
-      return { option_id: opt.id, mode: opt.mode, carrier: opt.carrier, service: opt.service, kind: opt.kind, container_size: opt.container_size, pos: perPo, po_count: perPo.length, units, planned_units: plannedUnits, qty, price, currency: opt.currency, basis, departs, dates, fc_p50: fc50, fc_p90: fc90, days_p50: fc50 ? daysBetween(mondayOf(rq.period_start), fc50) : null, days_p90: fc90 ? daysBetween(mondayOf(rq.period_start), fc90) : null, prob, rolled, transit_quoted: first ? first.p50.quoted : null, transit_p50: first ? first.p50.transit : null, transit_p90: first ? first.p90.transit : null, sample, explain };
+      return { option_id: opt.id, mode: opt.mode, carrier: opt.carrier, service: opt.service, kind: opt.kind, container_size: opt.container_size, pos: perPo, po_count: perPo.length, units, planned_units: plannedUnits, qty, price, currency: opt.currency, basis, departs, dates, fc_p50: fc50, fc_p90: fc90, price_per_unit: r2(price / (units || 1)), days_p50: fc50 ? daysBetween(mondayOf(rq.period_start), fc50) : null, days_p90: fc90 ? daysBetween(mondayOf(rq.period_start), fc90) : null, prob, rolled, transit_quoted: first ? first.p50.quoted : null, transit_p50: first ? first.p50.transit : null, transit_p90: first ? first.p90.transit : null, sample, explain };
     }
-    const point = (id, label, kind, legs) => { const price = r2(legs.reduce((a, l) => a + l.price, 0)); const cur = legs[0] ? legs[0].currency : 'USD'; const units = legs.reduce((a, l) => a + l.units, 0) || 1;
-      return { id, label, kind, legs, price, currency: cur, price_per_unit: r2(price / units), fc_p50: legs.map(l => l.fc_p50).filter(Boolean).sort().slice(-1)[0] || null, fc_p90: legs.map(l => l.fc_p90).filter(Boolean).sort().slice(-1)[0] || null,
+    // Totals in one currency: AUD when the legs mix, converted at the finance FX rate (USD→AUD).
+    const fx = (() => { try { const r = db.prepare("SELECT rate FROM fin_fx_rates WHERE from_curr = 'USD' AND to_curr = 'AUD'").get(); return r && Number(r.rate) > 0 ? Number(r.rate) : null; } catch (_) { return null; } })();
+    let fxNoted = false;
+    const point = (id, label, kind, legs) => { const curs = [...new Set(legs.map(l => l.currency || 'USD'))]; let cur = curs[0] || 'USD', price;
+      if (curs.length > 1) { cur = 'AUD'; price = r2(legs.reduce((a, l) => a + ((l.currency || 'USD') === 'AUD' ? l.price : l.price * (fx || 1)), 0)); if (!fxNoted) { fxNoted = true; assumptions.push(fx ? `Mixes total in AUD at the finance FX rate (1 USD = ${fx} AUD).` : 'Mixes total in AUD — no USD→AUD rate is set in Finance, so USD legs are added at 1:1 until one is.'); } }
+      else price = r2(legs.reduce((a, l) => a + l.price, 0));
+      const units = legs.reduce((a, l) => a + l.units, 0) || 1;
+      const cont = legs.filter(l => l.mode === 'Sea').reduce((a, l) => a + ((l.qty || {}).containers || 0), 0), kg = legs.filter(l => l.mode === 'Air').reduce((a, l) => a + ((l.qty || {}).chargeable_kg || 0), 0);
+      return { id, label, kind, legs, price, currency: cur, price_aud: r2(cur === 'AUD' ? price : price * (fx || 1)), price_per_unit: r2(price / units), containers: cont || 0, air_kg: kg || 0, air_units: legs.filter(l => l.mode === 'Air').reduce((a, l) => a + l.units, 0), fc_p50: legs.map(l => l.fc_p50).filter(Boolean).sort().slice(-1)[0] || null, fc_p90: legs.map(l => l.fc_p90).filter(Boolean).sort().slice(-1)[0] || null,
         days_p50: Math.max(...legs.map(l => l.days_p50 || 0)), days_p90: Math.max(...legs.map(l => l.days_p90 || 0)), prob: legs.some(l => l.prob != null) ? Math.round(legs.reduce((a, l) => a + (l.prob == null ? 100 : l.prob) * l.units, 0) / units) : null, units, option_ids: legs.map(l => l.option_id) }; };
 
     const points = [];
@@ -151,10 +171,20 @@ module.exports = function ({ db, rulesFor, vasDaysFor, log }) {
       const legs = [leg(a, airPos), leg(s, seaPos)];
       const pt = point(`${s.id}+${a.id}`, `Split · ${airPos.length} PO${airPos.length === 1 ? '' : 's'} by air, ${seaPos.length} by sea`, 'split', legs); pt.split = { sea: s.id, air: a.id, air_pos: airPos.map(x => x.po), sea_pos: seaPos.map(x => x.po) }; points.push(pt);
     }
+    // Mix by share: a quarter, half, three quarters of the units by air (or the share asked for), spread across every PO.
+    // Always offered so the client sees what a partial airlift buys, PO list or not.
+    const shares = [...new Set([25, 50, 75].concat(p.air_share != null ? [Math.min(99, Math.max(1, Math.round(Number(p.air_share))))] : []))].filter(x => x > 0 && x < 100).sort((a, b) => a - b);
+    for (const s of seas) for (const a of airs) for (const sh of shares) {
+      const airPos = pos.map(po => ({ ...po, units: Math.round(po.units * sh / 100) })).filter(x => x.units > 0);
+      const seaPos = pos.map(po => ({ ...po, units: po.units - Math.round(po.units * sh / 100) })).filter(x => x.units > 0);
+      if (!airPos.length || !seaPos.length) continue;
+      const legs = [leg(a, airPos), leg(s, seaPos)];
+      const pt = point(`${s.id}+${a.id}@${sh}`, `Mix · ${sh}% of units by air, ${100 - sh}% by sea`, 'mix', legs); pt.split = { sea: s.id, air: a.id, air_share: sh, air_pos: airPos.map(x => x.po), sea_pos: seaPos.map(x => x.po) }; points.push(pt);
+    }
     // Pareto flag: no other point is both cheaper and sooner (P50) with at least the same chance.
-    for (const x of points) x.frontier = !points.some(y => y !== x && y.price <= x.price && y.days_p50 <= x.days_p50 && (y.prob == null || x.prob == null || y.prob >= x.prob) && (y.price < x.price || y.days_p50 < x.days_p50 || (y.prob || 0) > (x.prob || 0)));
-    points.sort((a, b) => a.price - b.price);
-    const best = needBy ? points.filter(x => (x.prob || 0) >= 80).sort((a, b) => a.price - b.price)[0] || null : null;
+    for (const x of points) x.frontier = !points.some(y => y !== x && y.price_aud <= x.price_aud && y.days_p50 <= x.days_p50 && (y.prob == null || x.prob == null || y.prob >= x.prob) && (y.price_aud < x.price_aud || y.days_p50 < x.days_p50 || (y.prob || 0) > (x.prob || 0)));
+    points.sort((a, b) => a.price_aud - b.price_aud);
+    const best = needBy ? points.filter(x => (x.prob || 0) >= 80).sort((a, b) => a.price_aud - b.price_aud)[0] || null : null;
     const cheapest = points[0] || null, fastest = points.slice().sort((a, b) => a.days_p50 - b.days_p50)[0] || null;
     return { request_id: rq.id, ref: rq.ref, period_label: rq.period_label, period_start: rq.period_start, need_by: needBy, total_units: totalUnits, expected_units: pos.reduce((a, x) => a + expectedUnits(x), 0), suppliers, assumptions, computed_at: new Date().toISOString(),
       points, recommended: best ? best.id : null, cheapest: cheapest ? cheapest.id : null, fastest: fastest ? fastest.id : null,

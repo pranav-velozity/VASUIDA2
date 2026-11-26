@@ -177,8 +177,48 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
     const originNames = [...new Set(suppliers.map(s => s.origin).filter(Boolean))];
     return { period_type: periodType, period_start: periodType === 'month' ? start.slice(0, 7) + '-01' : mondayOf(start), period_label: periodLabel(periodType, periodType === 'month' ? start.slice(0, 7) + '-01' : mondayOf(start)), weeks,
       units: suppliers.reduce((a, s) => a + s.units, 0), expected_units: expected, pos: pos.length, suppliers, origins: originNames, unmapped: suppliers.filter(s => !s.origin).map(s => s.supplier),
-      origin_list: originsFor(client), destination: setting(client, 'destination', 'Sydney · VOZ_KY'), facility: (pos.find(x => x.facility) || {}).facility || null, supplier_notes: notes, po_list: pos };
+      origin_list: originsFor(client), destination: setting(client, 'destination', 'Sydney · VOZ_KY'), facility: (pos.find(x => x.facility) || {}).facility || null, supplier_notes: notes, po_list: pos, profile: unitProfile(client) };
   }
+
+  // ── Unit profile: what a unit weighs, measures and how many fill a container — from the client's own history ──
+  // Sea: the week's container records (size, POs) against units applied on those POs; price per container from
+  // the invoice lines (container rate + customs). Air: chargeable kg and CBM per unit from approved quotes.
+  // Units per container swing with the season, so the last 8 weeks lead when they have enough containers.
+  const hasCol = (t, c) => { try { return db.prepare(`PRAGMA table_info(${t})`).all().some(x => x.name === c); } catch (_) { return false; } };
+  function unitProfile(client) {
+    const since = addDays(today(), -182), recent = addDays(today(), -56); const out = { sea: {}, air: {}, source: {} };
+    try {
+      const fwClient = hasCol('flow_week', 'client_id'), recClient = hasCol('records', 'client_id');
+      const rows = db.prepare(`SELECT week_start, data FROM flow_week WHERE week_start >= ? ${fwClient ? 'AND (client_id = ? OR client_id IS NULL)' : ''}`).all(...(fwClient ? [since, client] : [since]));
+      const perSize = {};   // size → { all: [units…], rec: [units…] }
+      const appliedFor = db.prepare(`SELECT COUNT(*) n FROM records WHERE ${recClient ? 'client_id = ? AND ' : ''}status = 'complete' AND UPPER(TRIM(po_number)) = ?`);
+      const planned = new Map(); try { for (const r of db.prepare(`SELECT data FROM plans WHERE week_start >= ? ${hasCol('plans', 'client_id') ? 'AND (client_id = ? OR client_id IS NULL)' : ''}`).all(...(hasCol('plans', 'client_id') ? [since, client] : [since]))) for (const x of J(r.data, [])) { const k = String(x.po_number || '').trim().toUpperCase(); if (k) planned.set(k, (planned.get(k) || 0) + (Number(x.target_qty) || 0)); } } catch (_) {}
+      for (const r of rows) { const d = J(r.data, {}); const wc = d.intl_weekcontainers; const list = Array.isArray(wc) ? wc : (wc && Array.isArray(wc.containers) ? wc.containers : []);
+        for (const c of list) { const sz = String(c.size_ft || '40').trim(); if (/air/i.test(sz)) continue; const size = /20/.test(sz) ? '20' : '40';
+          const pos = String(c.pos || '').split(',').map(x => x.trim().toUpperCase()).filter(Boolean); if (!pos.length) continue;
+          let units = 0; for (const po of pos) { const a = appliedFor.get(...(recClient ? [client, po] : [po])); units += (a && a.n) || planned.get(po) || 0; }
+          if (!units) continue; const e = perSize[size] || (perSize[size] = { all: [], rec: [] }); e.all.push(units); if (r.week_start >= recent) e.rec.push(units); } }
+      const avg = (a) => a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null;
+      for (const [size, e] of Object.entries(perSize)) { const a26 = avg(e.all), a8 = avg(e.rec); out.sea[size] = { units_per_container: e.rec.length >= 3 ? a8 : a26, units_26w: a26, units_8w: a8, containers_26w: e.all.length, containers_8w: e.rec.length, basis: e.rec.length >= 3 ? 'last 8 weeks' : '26 weeks' }; }
+      // price per container from invoice lines: container rate + customs per container, by size
+      const invClient = hasCol('fin_invoices', 'client_id');
+      const lines = db.prepare(`SELECT i.week_start, l.description, l.unit_label, l.rate FROM fin_invoice_lines l JOIN fin_invoices i ON i.id = l.invoice_id WHERE UPPER(i.type) = 'SEA' AND i.week_start >= ? ${invClient ? 'AND i.client_id = ?' : ''}`).all(...(invClient ? [since, client] : [since]));
+      const customs = new Map(); for (const l of lines) { const m = /^Customs Clearance - (.+)$/i.exec(String(l.description || '')); if (m) customs.set(l.week_start + '|' + m[1].trim(), Number(l.rate) || 0); }
+      const price = {};
+      for (const l of lines) { const m = /^Container (.+)$/i.exec(String(l.description || '')); if (!m) continue; const size = /20/.test(String(l.unit_label || '')) ? '20' : '40'; const total = (Number(l.rate) || 0) + (customs.get(l.week_start + '|' + m[1].trim()) || 0); if (!total) continue;
+        const e = price[size] || (price[size] = { all: [], rec: [] }); e.all.push(total); if (l.week_start >= recent) e.rec.push(total); }
+      const avg2 = (a) => a.length ? r2(a.reduce((x, y) => x + y, 0) / a.length) : null;
+      for (const [size, e] of Object.entries(price)) { const p26 = avg2(e.all), p8 = avg2(e.rec); const v = Math.max(p26 || 0, p8 || 0); out.sea[size] = { ...(out.sea[size] || {}), price_per_container: v || null, price_26w: p26, price_8w: p8, price_n: e.all.length, price_basis: (p8 || 0) >= (p26 || 0) ? 'last 8 weeks' : '26 weeks', currency: 'AUD' }; }
+    } catch (e) { out.source.sea_error = String(e.message || e); }
+    try {
+      const aq = db.prepare("SELECT chargeable_kg, gross_weight_kg, cbm, units, decided_at FROM air_quote WHERE client_id = ? AND state = 'approved' AND decided_at >= ? AND units > 0").all(client, since);
+      const sum = (rows, f) => rows.reduce((a, q) => a + (Number(q[f]) || 0), 0); const rec = aq.filter(q => String(q.decided_at).slice(0, 10) >= recent);
+      const kpu = (rows) => { const u = sum(rows, 'units'); return u ? r2(sum(rows, 'chargeable_kg') / u) : null; }; const cpu = (rows) => { const u = sum(rows, 'units'); const c = sum(rows, 'cbm'); return u && c ? Math.round(c / u * 10000) / 10000 : null; };
+      out.air = { kg_per_unit: (rec.length >= 3 ? kpu(rec) : kpu(aq)) || null, kg_26w: kpu(aq), kg_8w: kpu(rec), cbm_per_unit: (rec.length >= 3 ? cpu(rec) : cpu(aq)) || null, quotes_26w: aq.length, quotes_8w: rec.length, basis: rec.length >= 3 ? 'last 8 weeks' : '26 weeks' };
+    } catch (e) { out.source.air_error = String(e.message || e); }
+    return out;
+  }
+  app.get('/rq/profile', ...[authenticateRequest, requireClientOrInternal], (req, res) => { try { res.json(unitProfile(curClient())); } catch (e) { res.status(500).json({ error: String(e.message || e) }); } });
 
   // ── Options from history ("Use what we know") ──
   function historyOptions(client, rq) {
@@ -198,7 +238,12 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
         out.push({ mode: 'Sea', kind: 'history', origin: origins[0] || null, container_size: g.size, price: p.price, currency: g.cur, price_basis: 'per_container', transit_days: g.transit.length ? r2(g.transit.reduce((a, v) => a + v, 0) / g.transit.length) : ((lanes.get('Sea') || {}).transit_p50 || null), service: `From history · ${g.all.length} approved`, carrier: null,
           basis: `approved sea rates · ${g.all.length} in 26 weeks${g.rec.length ? `, ${g.rec.length} in the last 8` : ''} · 26-wk avg ${r2(avg(g.all))}${g.rec.length ? ` · 8-wk avg ${r2(avg(g.rec))}` : ''} · using ${p.used}` }); }
     } else {
-      try {
+      // Invoice lines first (container rate + customs, by size); the signals price-per-week table as the fallback.
+      const prof = unitProfile(client); let pushed = false;
+      for (const size of ['40', '20']) { const sp = prof.sea[size]; if (!sp || !sp.price_per_container) continue; pushed = true;
+        out.push({ mode: 'Sea', kind: 'history', origin: origins[0] || null, container_size: size, price: sp.price_per_container, currency: sp.currency || 'AUD', price_basis: 'per_container', transit_days: (lanes.get('Sea') || {}).transit_p50 || null, service: `From history · ${sp.price_n} invoiced ${size}'`, carrier: null,
+          basis: `sea invoice lines · ${sp.price_n} × ${size}' in 26 weeks · 26-wk avg ${sp.price_26w}${sp.price_8w ? ` · 8-wk avg ${sp.price_8w}` : ''} (container rate + customs) · using ${sp.price_basis}${sp.units_per_container ? ` · ${sp.units_per_container} units per ${size}' (${sp.basis})` : ''}` }); }
+      if (!pushed) try {
         const wk = db.prepare("SELECT week_start, price, containers FROM signal_price_week WHERE client_id = ? AND mode = 'Sea' AND containers > 0 AND price > 0").all(client);
         const sum = (rows) => { const pr = rows.reduce((a, r) => a + Number(r.price), 0), c = rows.reduce((a, r) => a + Number(r.containers), 0); return c ? pr / c : null; };
         const w26 = sum(wk), w8 = sum(wk.filter(r => r.week_start >= recent)); const p = pick(w26, w8);
@@ -437,13 +482,24 @@ module.exports = function ({ app, db, authenticateRequest, requireRole, requireI
       const actor = actorOf(req); db.prepare("UPDATE rq_request SET decided_at = datetime('now'), decided_by = ?, decision_note = ? WHERE id = ?").run(actor, (req.body || {}).note || null, rq.id); setState(rq, 'declined', actor, 'client', (req.body || {}).note || null);
       notifyInternal(rq, 'Client declined', [`${rq.ref} · ${(req.body || {}).note || 'no note'}`]).catch(() => {}); res.json(rqPublic(rqRow(rq.id))); } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
   });
+  // Rebuild a history request's options from today's history (prices and profile move; options are frozen at creation).
+  app.post('/rq/requests/:id/rebuild', ...guard, writeOpLimiter, auditLog('rebuild_d2d_request'), (req, res) => {
+    try { const c = curClient(); const rq = rqRow(req.params.id, c); if (!rq) return res.status(404).json({ error: 'not_found' });
+      if (rq.source !== 'history' || !['requested', 'released'].includes(rq.state)) return res.status(409).json({ error: 'not_rebuildable', message: 'Only an unpicked "Use what we know" request can be rebuilt.' });
+      for (const o of optRows(rq.id)) if (['approximate'].includes(o.state)) setOptState(o, 'withdrawn', actorOf(req), 'client', 'rebuilt from history');
+      const hist = historyOptions(c, rq); let n = 0;
+      hist.forEach((h, i) => { const oid = newId('op'); db.prepare('INSERT INTO rq_option (id, request_id, client_id, mode, kind, carrier, service, origin, container_size, transit_days, valid_until, price, currency, price_basis, state, sort) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(oid, rq.id, c, h.mode, 'history', h.carrier, h.service, h.origin, h.container_size || null, h.transit_days, addDays(today(), 14), h.price, h.currency, h.price_basis, 'approximate', i); if (h.basis) db.prepare('INSERT INTO rq_option_cost (option_id, cost_note) VALUES (?, ?)').run(oid, h.basis); n++; });
+      if (n) { db.prepare("UPDATE rq_request SET released_at = datetime('now') WHERE id = ?").run(rq.id); setState(rq, 'released', actorOf(req), 'client', `rebuilt · ${n} option(s) from history`); } else setState(rq, 'requested', actorOf(req), 'client', 'rebuilt · no history');
+      res.json({ ...rqPublic(rqRow(rq.id)), rebuilt: n }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+  });
   // Simulate: every live option and every sea × air split, priced and timed against the need-by date.
   // Body: { adjust: { "<supplier>": false }, overrides: { "<po>": "<option_id>" }, need_by }. Client-safe output — prices only.
   app.post('/rq/requests/:id/simulate', ...guard, (req, res) => {
     try { const c = curClient(); const rq = rqRow(req.params.id, c); if (!rq) return res.status(404).json({ error: 'not_found' });
       const released = ['released', 'picked', 'cost_confirmed', 'firm_released', 'approved'].includes(rq.state); if (!released) return res.status(409).json({ error: 'no_options', message: 'Options are not released yet.' });
       const b = req.body || {}; const opts = optRows(rq.id).filter(o => ['approximate', 'picked', 'confirmed', 'firm', 'approved'].includes(o.state));
-      const out = sim.simulate(c, rq, opts, { adjust: b.adjust || {}, overrides: b.overrides || {}, need_by: b.need_by ? String(b.need_by).slice(0, 10) : null });
+      const out = sim.simulate(c, rq, opts, { adjust: b.adjust || {}, overrides: b.overrides || {}, need_by: b.need_by ? String(b.need_by).slice(0, 10) : null, profile: unitProfile(c), air_share: b.air_share });
       res.json(out); } catch (e) { L.error('[rq:simulate] ' + (e.stack || e)); res.status(500).json({ error: String(e.message || e) }); }
   });
   // Delete a request that never materialised. Approved requests are the period's record: they are hidden from the
